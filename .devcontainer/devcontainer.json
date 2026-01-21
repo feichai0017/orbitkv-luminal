@@ -1,14 +1,9 @@
 {
     "name": "Luminal",
-    "build": {
-        "dockerfile": "Dockerfile",
-        "context": "."
-    },
+    "image":"ghcr.io/luminal-ai/luminal-docker:latest",
     "runArgs": [
-        "--gpus=all"
-    ],
-    "mounts": [
-        "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+        "--gpus=all",
+        "--pull=always"
     ],
     "customizations": {
         "vscode": {
@@ -24,10 +19,10 @@
                 "ms-vscode.makefile-tools",
                 "streetsidesoftware.code-spell-checker",
                 "hatookov.egglog-language",
-                "rust-lang.rust-analyzer"
+                "rust-lang.rust-analyzer",
+                "anthropic.claude-code",
+                "tamasfe.even-better-toml"
             ]
         }
-    },
-    "remoteUser": "root",
-    "workspaceFolder": "/luminal"
+    }
 }
