@@ -1,7 +1,11 @@
 /target
 /crates/**/target
 /examples/**/target
+
 .claude/*.local.*
+.env
+
+.gitconfig
 
 .DS_Store
 *.vscode
