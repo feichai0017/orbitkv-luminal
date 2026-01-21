@@ -1,6 +1,7 @@
 /target
 /crates/**/target
 /examples/**/target
+.claude/*.local.*
 
 .DS_Store
 *.vscode
