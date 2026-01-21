@@ -5,7 +5,6 @@
 .claude/*.local.*
 .env
 
-.gitconfig
 
 .DS_Store
 *.vscode
