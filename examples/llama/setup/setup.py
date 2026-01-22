@@ -19,7 +19,11 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 
-def download_model_files(repo_id: str, output_dir: Path):
+def download_model_files(repo_id: str) -> Path:
+    """Download model files and return the directory containing them.
+
+    Respects HF_HUB_CACHE or HF_HOME environment variables for cache location.
+    """
     print(f"Listing files in {repo_id}...")
     all_files = list_repo_files(repo_id)
 
@@ -33,16 +37,18 @@ def download_model_files(repo_id: str, output_dir: Path):
             files_to_download.append(file)
 
     print(f"Found {len(files_to_download)} files to download")
-    output_dir.mkdir(parents=True, exist_ok=True)
 
+    model_dir = None
     for filename in files_to_download:
         print(f"  Downloading {filename}...")
-        downloaded_path = hf_hub_download(
-            repo_id=repo_id, filename=filename, cache_dir=None, local_dir=output_dir
-        )
+        downloaded_path = hf_hub_download(repo_id=repo_id, filename=filename)
         print(f"    Saved to {downloaded_path}")
+        # All files from same repo end up in same snapshot directory
+        if model_dir is None:
+            model_dir = Path(downloaded_path).parent
 
     print("All files downloaded successfully!")
+    return model_dir
 
 
 def combine_and_convert_safetensors_to_fp32(model_dir: Path):
@@ -89,12 +95,11 @@ def combine_and_convert_safetensors_to_fp32(model_dir: Path):
 
 
 if __name__ == "__main__":
-    script_dir = Path(__file__).parent
     repo_id = "NousResearch/Meta-Llama-3-8B-Instruct"
 
-    download_model_files(repo_id, script_dir)
+    model_dir = download_model_files(repo_id)
 
     print("\nCombining + converting safetensors to FP32...")
-    combine_and_convert_safetensors_to_fp32(script_dir)
+    combine_and_convert_safetensors_to_fp32(model_dir)
 
     print("\nDone!")

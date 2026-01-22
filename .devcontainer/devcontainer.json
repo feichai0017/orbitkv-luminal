@@ -21,7 +21,8 @@
                 "hatookov.egglog-language",
                 "rust-lang.rust-analyzer",
                 "anthropic.claude-code",
-                "tamasfe.even-better-toml"
+                "tamasfe.even-better-toml",
+                "eamodio.gitlens"
             ]
         }
     }

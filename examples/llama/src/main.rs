@@ -3,9 +3,58 @@ mod model;
 use luminal::prelude::*;
 use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
 use model::*;
-use std::{io::Write, time::Duration};
+use std::{io::Write, path::PathBuf, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
+
+const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
+
+/// Get the model directory, respecting HF_HUB_CACHE or HF_HOME environment variables.
+/// Falls back to "setup/" for backward compatibility.
+fn get_model_dir() -> PathBuf {
+    // Check HF_HUB_CACHE first, then derive from HF_HOME, then use default
+    let cache_dir = std::env::var("HF_HUB_CACHE")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HF_HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join("hub"))
+        })
+        .unwrap_or_else(|| {
+            std::env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".cache/huggingface/hub"))
+                .unwrap_or_else(|_| PathBuf::from(".cache/huggingface/hub"))
+        });
+
+    // HF cache structure: models--<org>--<repo>/snapshots/<revision>/
+    let repo_dir = cache_dir.join(format!("models--{}", REPO_ID.replace('/', "--")));
+    let snapshots_dir = repo_dir.join("snapshots");
+
+    // Find the snapshot directory (use the first/only one, or latest modified)
+    if let Ok(entries) = std::fs::read_dir(&snapshots_dir) {
+        if let Some(snapshot) = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        {
+            let path = snapshot.path();
+            // Verify required files exist
+            if path.join("tokenizer.json").exists() && path.join("model_combined.safetensors").exists() {
+                return path;
+            }
+        }
+    }
+
+    // No valid model directory found
+    eprintln!("Error: Model files not found!");
+    eprintln!("Please run setup.py first to download the model:");
+    eprintln!("  cd examples/llama/setup && uv run setup.py");
+    eprintln!();
+    eprintln!("You can set HF_HUB_CACHE to control where files are stored:");
+    eprintln!("  export HF_HUB_CACHE=/path/to/cache");
+    std::process::exit(1);
+}
 
 // This example compiles and runs Llama 3 8B on CUDA.
 
@@ -17,7 +66,7 @@ fn main() {
 
     // Set up tracing to perfetto
     let trace_session = luminal_tracing::subscriber()
-        .perfetto("trace.pftrace")
+        // .perfetto("trace.pftrace")
         .env_filter(format!(
             "{}=trace,luminal=trace,luminal_cuda=trace",
             env!("CARGO_PKG_NAME")
@@ -28,8 +77,12 @@ fn main() {
     let ctx = CudaContext::new(0).unwrap();
     let stream = ctx.default_stream();
 
+    // Get model directory (respects HF_HUB_CACHE env var)
+    let model_dir = get_model_dir();
+    println!("Using model directory: {}", model_dir.display());
+
     // Tokenize prompt
-    let tokenizer = Tokenizer::from_file("setup/tokenizer.json").unwrap();
+    let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
     let mut sentence = tokenizer.encode(prompt, true).unwrap().get_ids().to_vec();
 
     // Allocate kv cache
@@ -49,7 +102,8 @@ fn main() {
     // Load model weights from safetensors file
     println!("Loading weights...");
     let mut runtime = CudaRuntime::initialize(stream);
-    runtime.load_safetensors(&cx, "setup/model_combined.safetensors");
+    let weights_path = model_dir.join("model_combined.safetensors");
+    runtime.load_safetensors(&cx, weights_path.to_str().unwrap());
 
     // Run search process
     println!("Compiling...");

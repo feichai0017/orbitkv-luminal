@@ -85,7 +85,7 @@ pub fn early_egglog(
     .join("\n")
 }
 
-pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
+pub fn full_egglog(program: &str, root: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
     [
         BASE.to_string(),
         op_defs_string(ops),
@@ -96,7 +96,11 @@ pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool)
             "".to_string()
         },
         BASE_CLEANUP.to_string(),
-        program.to_string(),
+        format!(
+"(constructor new_root () IR)
+
+{program}
+(union (new_root) {root})"),
         RUN_SCHEDULE.to_string(),
     ]
     .join("\n")

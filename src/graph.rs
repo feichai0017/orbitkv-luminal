@@ -7,14 +7,14 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::Context;
 use colored::Colorize;
-use egglog::{CommandOutput, prelude::RustSpan, var};
-use egglog_ast::span::Span;
+use egglog::{CommandOutput, var, prelude::{Span, RustSpan}};
 use egraph_serialize::{ClassId, NodeId};
 use itertools::Itertools;
 use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
 use rustc_hash::{FxHashMap, FxHashSet};
-use tracing::info;
+use tracing::{info, trace};
 
 pub type LLIRGraph = StableGraph<LLIROp, ()>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ShapeTracker>;
@@ -390,21 +390,24 @@ fn run_egglog(
     root: &str,
     ops: &[Arc<Box<dyn EgglogOp>>],
     cleanup: bool,
-) -> Result<SerializedEGraph, egglog::Error> {
+) -> anyhow::Result<SerializedEGraph> {
     let start = std::time::Instant::now();
     let code = egglog_utils::early_egglog(program, root, ops, cleanup);
+    println!("{}",&code);
     let mut egraph = egglog::EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, &code)?;
-    let outputs = egraph.run_program(commands)?;
+    let outputs = egraph.run_program(commands).context("running early egglog")?;
     let CommandOutput::ExtractBest(termdag, _cost, term) = outputs.last().unwrap() else {
         panic!();
     };
-    let (program, root) = termdag_to_egglog(termdag, termdag.lookup(term));
-    let code = egglog_utils::full_egglog(&program, ops, cleanup);
+    let (new_program, new_root) = termdag_to_egglog(termdag, termdag.lookup(term));
+    println!("new_program:\n{}", &new_program);
+    let new_code: String = egglog_utils::full_egglog(&new_program, &new_root, ops, cleanup);
+    println!("new_code:\n{}",&new_code);
     let mut egraph = egglog::EGraph::default();
-    let commands = egraph.parser.get_program_from_string(None, &code)?;
+    let new_commands = egraph.parser.get_program_from_string(None, &new_code)?;
     println!("{}", "Egglog running...".green());
-    let _outputs = egraph.run_program(commands)?;
+    let _outputs = egraph.run_program(new_commands).context("running full egglog")?;
     println!("{}", "---- Egglog Rule Matches ----".green());
     let run_report = egraph.get_overall_run_report();
     println!(
@@ -431,90 +434,10 @@ fn run_egglog(
         )
         .green()
     );
-
-    let (sort, value) = egraph.eval_expr(&var!(root))?;
-    let s = egraph.serialize(egglog::SerializeConfig {
-        root_eclasses: vec![(sort, value)],
-        max_functions: None,
-        include_temporary_functions: false,
-        max_calls_per_function: None,
-    });
-    // Convert to SerializedEGraph
-    let mut classes = FxHashMap::default();
-    for (node_id, node) in &s.egraph.nodes {
-        classes
-            .entry(node.eclass.clone())
-            .or_insert(vec![])
-            .push(node_id.clone())
-    }
-    let mut egraph = SerializedEGraph {
-        roots: s.egraph.root_eclasses,
-        node_to_class: s
-            .egraph
-            .nodes
-            .iter()
-            .map(|(n, enode)| (n.clone(), enode.eclass.clone()))
-            .collect(),
-        enodes: s
-            .egraph
-            .nodes
-            .iter()
-            .map(|(n, enode)| {
-                (
-                    n.clone(),
-                    (
-                        enode.op.clone(),
-                        enode
-                            .children
-                            .iter()
-                            .map(|n| s.egraph.nodes[n].eclass.clone())
-                            .collect(),
-                    ),
-                )
-            })
-            .collect(),
-        eclasses: s
-            .egraph
-            .class_data
-            .iter()
-            .map(|(c, eclass)| (c.clone(), (eclass.typ.clone().unwrap(), classes[c].clone())))
-            .collect(),
-    };
-    // Strip out all [...] enodes
-    egraph.enodes.retain(|_, (label, _)| label != "[...]");
-    loop {
-        let mut to_remove = vec![];
-        for (id, (_, children)) in &egraph.enodes {
-            if children.iter().any(|c| {
-                !egraph.eclasses[c]
-                    .1
-                    .iter()
-                    .any(|n| egraph.enodes.contains_key(n))
-            }) {
-                to_remove.push(id.clone());
-            }
-        }
-        for n in &to_remove {
-            egraph.enodes.remove(n);
-        }
-        if to_remove.is_empty() {
-            break;
-        }
-    }
-    // Correct the eclass mapping
-    for (_, enodes) in egraph.eclasses.values_mut() {
-        enodes.retain(|n| egraph.enodes.contains_key(n));
-    }
-    egraph.eclasses.retain(|_, (_, c)| !c.is_empty());
-    egraph
-        .node_to_class
-        .retain(|n, _| egraph.enodes.contains_key(n));
-    assert!(
-        egraph.roots.iter().all(|c| egraph.eclasses.contains_key(c)),
-        "No valid graphs present in the e-graph!"
-    );
-
-    Ok(egraph)
+    println!("new_root: {new_root}");
+    let (sort, value) = egraph.eval_expr(&var!(new_root)).context("Evaluating EGraph root")?;
+    let ser_egraph = SerializedEGraph::new(&egraph, vec![(sort, value)]);
+    Ok(ser_egraph)
 }
 
 pub fn extract_expr_list<'a>(
