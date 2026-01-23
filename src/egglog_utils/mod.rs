@@ -38,6 +38,11 @@ fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     format!(
         "
     {}
+(rule
+    ((= ?m (dtype ?x)))
+    ((delete (dtype ?x)))
+    :ruleset cleanup
+)
     ",
         ops.iter()
             .filter(|op| op.cleanup())
@@ -72,7 +77,17 @@ pub fn early_egglog(
             "".to_string()
         },
         BASE_CLEANUP.to_string(),
-        program.to_string(),
+        format!(
+    "
+(ruleset initial)
+(constructor new_root () IR :cost 1000000)
+
+(rule () (
+    {}
+
+) :ruleset initial)
+(union (new_root) {root})
+    ",program.to_string()),
         format!(
             "(run-schedule
                 (saturate expr)
@@ -97,10 +112,18 @@ pub fn full_egglog(program: &str, root: &str, ops: &[Arc<Box<dyn EgglogOp>>], cl
         },
         BASE_CLEANUP.to_string(),
         format!(
-"(constructor new_root () IR)
+"
+(ruleset initial)
+(constructor new_IR_node () IR :cost 10000000)
+(let new_root_instance_IR (new_IR_node)) 
 
+(rule () (
 {program}
-(union (new_root) {root})"),
+(union new_root_instance_IR {root})
+) :ruleset initial)"),
+        "(run-schedule 
+            (run initial)
+        )".to_string(),
         RUN_SCHEDULE.to_string(),
     ]
     .join("\n")
@@ -139,7 +162,7 @@ impl SerializedEGraph {
                 .or_insert(vec![])
                 .push(node_id.clone())
         }
-        let mut s_egraph = SerializedEGraph {
+        let mut s_egraph: SerializedEGraph = SerializedEGraph {
             roots: s.egraph.root_eclasses,
             node_to_class: s
                 .egraph
@@ -177,12 +200,14 @@ impl SerializedEGraph {
         loop {
             let mut to_remove = vec![];
             for (id, (_, children)) in &s_egraph.enodes {
+                // Remove this enode if any of it's children eclasses have no enodes left
                 if children.iter().any(|c| {
-                    !s_egraph.eclasses[c]
+                    s_egraph.eclasses[c]
                         .1
                         .iter()
-                        .any(|n| s_egraph.enodes.contains_key(n))
+                        .all(|n| !s_egraph.enodes.contains_key(n))
                 }) {
+                    println!("removing {:?}", id);
                     to_remove.push(id.clone());
                 }
             }
@@ -193,14 +218,17 @@ impl SerializedEGraph {
                 break;
             }
         }
+        println!("ROOTS B: {:?}", s_egraph.eclasses[&s_egraph.roots[0]].1);
         // Correct the eclass mapping
         for (_, enodes) in s_egraph.eclasses.values_mut() {
             enodes.retain(|n| s_egraph.enodes.contains_key(n));
         }
+        println!("ROOTS C: {:?}", s_egraph.eclasses[&s_egraph.roots[0]].1);
         s_egraph.eclasses.retain(|_, (_, c)| !c.is_empty());
         s_egraph
             .node_to_class
             .retain(|n, _| s_egraph.enodes.contains_key(n));
+        println!("ROOTS D: {:?}", s_egraph.eclasses[&s_egraph.roots[0]].1);
         s_egraph
     }
 }

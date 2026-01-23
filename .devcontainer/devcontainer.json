@@ -22,7 +22,9 @@
                 "rust-lang.rust-analyzer",
                 "anthropic.claude-code",
                 "tamasfe.even-better-toml",
-                "eamodio.gitlens"
+                "eamodio.gitlens",
+                "ms-vscode.live-server",
+                "tintinweb.graphviz-interactive-preview"
             ]
         }
     }

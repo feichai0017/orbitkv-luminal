@@ -12,7 +12,7 @@ use luminal_nn::LayerNorm;
 use std::{fmt::Debug, sync::Arc};
 
 // Llama 7b hyperparams
-pub const LAYERS: usize = 32;
+pub const LAYERS: usize = 1;
 pub const HIDDEN: usize = 4096;
 pub const INTERMEDIATE: usize = 14336;
 pub const HEAD_DIM: usize = 128;

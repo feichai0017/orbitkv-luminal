@@ -68,7 +68,7 @@ fn main() {
     let trace_session = luminal_tracing::subscriber()
         // .perfetto("trace.pftrace")
         .env_filter(format!(
-            "{}=trace,luminal=trace,luminal_cuda=trace",
+            "{}=trace,luminal=debug,luminal_cuda=debug",
             env!("CARGO_PKG_NAME")
         ))
         .init();

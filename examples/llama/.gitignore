@@ -18,3 +18,7 @@ setup/*.json
 *.safetensors
 tokenizer.json
 *.pftrace
+
+*.egg
+*.html
+*.dot

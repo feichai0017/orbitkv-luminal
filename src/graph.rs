@@ -1,15 +1,11 @@
-use crate::{egglog_utils, hlir::CustomOpHLIR, op::*, prelude::*};
+use crate::{egglog_utils, hlir::CustomOpHLIR, op::*, prelude::*, visualization::ToHtml, visualization::ToDot};
 use std::{
-    any::TypeId,
-    fmt::Debug,
-    io::Write,
-    ops::{Deref, DerefMut},
-    sync::Arc,
+    any::TypeId, fmt::Debug, fs, io::Write, ops::{Deref, DerefMut}, sync::Arc
 };
 
 use anyhow::Context;
 use colored::Colorize;
-use egglog::{CommandOutput, var, prelude::{Span, RustSpan}};
+use egglog::{CommandOutput, SerializeConfig, prelude::{RustSpan, Span}, var};
 use egraph_serialize::{ClassId, NodeId};
 use itertools::Itertools;
 use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
@@ -174,6 +170,16 @@ impl Graph {
             &self.custom_ops,
             limit,
         );
+
+        // Write all LLIR graphs to dot files when debug logging is enabled
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            for (i, llir_graph) in llir_graphs.iter().enumerate() {
+                if let Ok(dot) = llir_graph.to_dot() {
+                    fs::write(format!("llir_graph_{i}.dot"), dot).ok();
+                }
+            }
+        }
+
         let n_graphs = llir_graphs.len();
         let start = std::time::Instant::now();
         let mut best_graph = StableGraph::default();
@@ -392,22 +398,52 @@ fn run_egglog(
     cleanup: bool,
 ) -> anyhow::Result<SerializedEGraph> {
     let start = std::time::Instant::now();
-    let code = egglog_utils::early_egglog(program, root, ops, cleanup);
-    println!("{}",&code);
-    let mut egraph = egglog::EGraph::default();
-    let commands = egraph.parser.get_program_from_string(None, &code)?;
-    let outputs = egraph.run_program(commands).context("running early egglog")?;
-    let CommandOutput::ExtractBest(termdag, _cost, term) = outputs.last().unwrap() else {
-        panic!();
-    };
-    let (new_program, new_root) = termdag_to_egglog(termdag, termdag.lookup(term));
-    println!("new_program:\n{}", &new_program);
-    let new_code: String = egglog_utils::full_egglog(&new_program, &new_root, ops, cleanup);
-    println!("new_code:\n{}",&new_code);
+    // let code = egglog_utils::early_egglog(program, root, ops, cleanup);
+
+    // if tracing::enabled!(tracing::Level::DEBUG) {
+    //     std::fs::write("early_egglog.egg", &code).ok();
+    // }
+    // // trace!(code);
+
+    // let mut egraph = egglog::EGraph::default();
+    // let commands = egraph.parser.get_program_from_string(None, &code)?;
+
+    // let early_egglog_start = std::time::Instant::now();
+    // let outputs = egraph.run_program(commands).context("running early egglog")?;
+    // info!(target: "luminal::egglog", "early egglog outputs: {:?}", outputs);
+
+    // info!(
+    //     target: "luminal::egglog",
+    //     duration_ms = early_egglog_start.elapsed().as_millis() as u64,
+    //     "early egglog run_program completed"
+    // );
+    
+    // let CommandOutput::ExtractBest(termdag, _cost, term) = outputs.last().unwrap() else {
+    //     panic!();
+    // };
+    // let (new_program, new_root) = termdag_to_egglog(termdag, termdag.lookup(term));
+
+    // if tracing::enabled!(tracing::Level::DEBUG) {
+    //     std::fs::write("new_program.egg", &new_program).ok();
+    // }
+
+    let new_code: String = egglog_utils::full_egglog(&program, &root, ops, cleanup);
+
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        std::fs::write("full_egglog.egg", &new_code).ok();
+    }
+    // trace!(new_code);
+
     let mut egraph = egglog::EGraph::default();
     let new_commands = egraph.parser.get_program_from_string(None, &new_code)?;
     println!("{}", "Egglog running...".green());
+    let full_egglog_start = std::time::Instant::now();
     let _outputs = egraph.run_program(new_commands).context("running full egglog")?;
+    info!(
+        target: "luminal::egglog",
+        duration_ms = full_egglog_start.elapsed().as_millis() as u64,
+        "full egglog run_program completed"
+    );
     println!("{}", "---- Egglog Rule Matches ----".green());
     let run_report = egraph.get_overall_run_report();
     println!(
@@ -434,9 +470,41 @@ fn run_egglog(
         )
         .green()
     );
-    println!("new_root: {new_root}");
-    let (sort, value) = egraph.eval_expr(&var!(new_root)).context("Evaluating EGraph root")?;
+    fs::write("egraph.dot", egraph.to_dot()?)?;
+    let (sort, value) = egraph.eval_expr(&var!("new_root_instance_IR")).context("Evaluating EGraph root")?;
+    dbg!(&sort, &value);
+    
+    // Get the eclass ID for this value
+    let class_id = egraph.value_to_class_id(&sort, value);
+    dbg!(&class_id);
+
+    // Serialize the egraph to access class/node structure
+    let serialized = egraph.serialize(SerializeConfig::default());
+
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        serialized.egraph.to_json_file("egglog_serialized_egraph.json")?;
+    }
+
+
+    // Get the Class for this ClassId using index notation
+    let eclass = &serialized.egraph[&class_id];
+
+    
+    let mut true_root_id: Option<NodeId> = None;
+    // Print all nodes in the eclass
+    println!("Nodes in eclass {:?}:", class_id);
+    for node_id in &eclass.nodes {
+        let node = &serialized.egraph[node_id];
+        println!("  {:?}: op={}, children={:?}", node_id, node.op, node.children);
+        if node.op == "Output" {
+            true_root_id = Some(node_id.clone());
+        }
+    }   
+
+
+
     let ser_egraph = SerializedEGraph::new(&egraph, vec![(sort, value)]);
+    // dbg!(&ser_egraph);
     Ok(ser_egraph)
 }
 
@@ -658,10 +726,14 @@ pub fn egglog_to_llir(
                 // Skip IList
                 continue;
             }
+            if egraph.enodes[node].0.as_str() == "new_IR_node" {
+                // This is a hack to make "no-global-let" performance trick in egglog work
+                continue;
+            }
             let ch = egraph.enodes[node]
                 .1
                 .iter()
-                .map(|c| {
+                .map(|c: &ClassId| {
                     if egraph.eclasses[c].0.contains("IR") || egraph.eclasses[c].0.contains("IList")
                     {
                         choice[c]
