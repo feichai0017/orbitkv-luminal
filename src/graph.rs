@@ -479,7 +479,12 @@ fn run_egglog(
     dbg!(&class_id);
 
     // Serialize the egraph to access class/node structure
-    let serialized = egraph.serialize(SerializeConfig::default());
+    let serialized = egraph.serialize(egglog::SerializeConfig {
+            root_eclasses: vec![],
+            max_functions: None,
+            include_temporary_functions: false,
+            max_calls_per_function: None,
+        });
 
     if tracing::enabled!(tracing::Level::DEBUG) {
         serialized.egraph.to_json_file("egglog_serialized_egraph.json")?;
@@ -500,8 +505,6 @@ fn run_egglog(
             true_root_id = Some(node_id.clone());
         }
     }   
-
-
 
     let ser_egraph = SerializedEGraph::new(&egraph, vec![(sort, value)]);
     // dbg!(&ser_egraph);
