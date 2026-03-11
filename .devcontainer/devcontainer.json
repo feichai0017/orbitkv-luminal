@@ -2,15 +2,16 @@
     "name": "Luminal",
     "image": "ghcr.io/luminal-ai/luminal-docker:latest",
     "features": {
-    "ghcr.io/devcontainers/features/github-cli:1": {}
-},
-"remoteEnv": {
+        "ghcr.io/devcontainers/features/github-cli:1": {}
+    },
+    "remoteEnv": {
         "GH_TOKEN": "${localEnv:GH_TOKEN}"
-},
-    "runArgs": [
-        "--gpus=all"
-    ],
-    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}",
+    },
+    "hostRequirements": {
+        "gpu": "optional"
+    },
+    "shutdownAction": "stopContainer",
+    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && (nvidia-smi > /dev/null 2>&1 && echo 'GPU available' || echo 'WARNING: GPU not detected - rebuild container if GPU is expected')",
     "customizations": {
         "vscode": {
             "extensions": [
