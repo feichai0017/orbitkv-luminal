@@ -10,10 +10,32 @@ use protobuf::Message;
 use pyo3::prelude::*;
 use std::fs;
 use std::path::Path;
+use std::sync::Once;
+
+static TRACING_INIT: Once = Once::new();
+
+/// Initialize tracing subscriber. Respects RUST_LOG env var if set,
+/// otherwise defaults to `luminal=trace` (force-dump everything).
+fn init_tracing() {
+    TRACING_INIT.call_once(|| {
+        use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            // Default: show everything from luminal at trace level
+            EnvFilter::new("luminal=trace")
+        });
+
+        tracing_subscriber::registry()
+            .with(fmt::layer().with_writer(std::io::stderr))
+            .with(filter)
+            .init();
+    });
+}
 
 #[pyfunction]
 #[pyo3(signature = (path, backend="native"))]
 fn process_onnx(path: &str, backend: &str) -> PyResult<OnnxGraphResult> {
+    init_tracing();
     if backend != "native" && backend != "cuda" {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Invalid backend '{}'. Must be 'native' or 'cuda'",
