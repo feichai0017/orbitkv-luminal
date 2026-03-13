@@ -18,7 +18,8 @@ use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-use tracing;
+use tracing::{self, Level, enabled, trace};
+use crate::visualization::{ToDot, display_graph_to_file};
 
 pub type LLIRGraph = StableGraph<LLIROp, ()>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ()>;
@@ -172,8 +173,26 @@ impl Graph {
 
         let subgraphs = split_at_graph_breaks(self);
 
+        // Dump HLIR graph artifact (technically gated by tracing, but always true for now)
+        if true || enabled!(Level::TRACE) {
+            let log_dir = std::path::Path::new("luminal_artifacts");
+            let _ = std::fs::create_dir_all(log_dir);
+            display_graph_to_file(&self.graph, None, log_dir.join("HLIR.dot").to_str().unwrap());
+            trace!("Dumped HLIR graph to luminal_artifacts/HLIR.dot");
+        }
+
         if subgraphs.len() <= 1 {
             let (program, root) = hlir_to_egglog(self);
+
+            // Dump egglog program artifact
+            if true || enabled!(Level::TRACE) {
+                let log_dir = std::path::Path::new("luminal_artifacts");
+                let _ = std::fs::create_dir_all(log_dir);
+                let _ = std::fs::write(log_dir.join("hlir_program.egg"), &program);
+                let _ = std::fs::write(log_dir.join("hlir_root.txt"), &root);
+                trace!("Dumped egglog program to luminal_artifacts/hlir_program.egg");
+            }
+
             self.egraphs = vec![run_egglog(&program, &root, &ops, cleanup_hlir).unwrap()];
             self.chunk_groups = vec![ChunkGroup {
                 representative: 0,
@@ -230,6 +249,17 @@ impl Graph {
             .iter()
             .map(|sg| hlir_subgraph_to_egglog(self, sg))
             .collect();
+
+        // Dump per-chunk egglog programs (technically gated by tracing, but always true for now)
+        if true || enabled!(Level::TRACE) {
+            let log_dir = std::path::Path::new("luminal_artifacts");
+            let _ = std::fs::create_dir_all(log_dir);
+            for (i, (program, root)) in egglog_texts.iter().enumerate() {
+                let _ = std::fs::write(log_dir.join(format!("hlir_chunk_{i}.egg")), program);
+                let _ = std::fs::write(log_dir.join(format!("hlir_chunk_{i}_root.txt")), root);
+            }
+            trace!("Dumped {} chunk egglog programs to luminal_artifacts/", egglog_texts.len());
+        }
 
         // Group by normalized egglog hash
         let mut hash_to_chunks: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
@@ -607,6 +637,16 @@ impl Graph {
             n_chunks,
             pretty_duration::pretty_duration(&start.elapsed(), None)
         );
+
+        // Dump LLIR graph artifact (technically gated by tracing, but always true for now)
+        if true || enabled!(Level::TRACE) {
+            let log_dir = std::path::Path::new("luminal_artifacts");
+            let _ = std::fs::create_dir_all(log_dir);
+            if let Ok(dot) = stitched.to_dot() {
+                let _ = std::fs::write(log_dir.join("LLIR.dot"), &dot);
+                trace!("Dumped LLIR graph to luminal_artifacts/LLIR.dot");
+            }
+        }
 
         // Clear stale buffers from chunk profiling before loading the final graph
         runtime.clear_intermediate_buffers();
