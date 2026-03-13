@@ -1424,7 +1424,14 @@ impl EgglogOp for SumReduce {
         true
     }
     fn rewrites(&self) -> Vec<Rule> {
-        vec![dtype_propagation_rule(&self.sort(), "inp")]
+        vec![
+            dtype_propagation_rule(&self.sort(), "inp"),
+            // Batch-collapse rules: rewrite N-dim Mul+Sum → (N-1)-dim Mul+Sum
+            // so that 2D cuBLAS rules can match. Fires recursively.
+            Rule::raw(include_str!("reshape_rules/squeeze.egg")),
+            Rule::raw(include_str!("reshape_rules/batch_merge_a_contig.egg")),
+            Rule::raw(include_str!("reshape_rules/batch_merge_b_contig.egg")),
+        ]
     }
     fn extract<'a>(
         &'a self,
