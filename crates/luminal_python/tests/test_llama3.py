@@ -314,13 +314,13 @@ def test_hf_llama3_full(device: torch.device):
     """
     from transformers import AutoConfig, LlamaForCausalLM
 
-    config = AutoConfig.from_pretrained("NousResearch/Llama-3.2-8B")
+    config = AutoConfig.from_pretrained("NousResearch/Meta-Llama-3-8B")
     config.use_cache = False
     config._attn_implementation = "eager"
 
     model = (
         LlamaForCausalLM.from_pretrained(
-            "NousResearch/Llama-3.2-8B",
+            "NousResearch/Meta-Llama-3-8B",
             config=config,
             torch_dtype=torch.float32,
         )
