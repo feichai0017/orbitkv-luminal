@@ -12,7 +12,7 @@
         }
     },
     "remoteUser": "luminal",
-    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}",
+    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && mkdir -p ${containerWorkspaceFolder}/.claude-memory && CLAUDE_PROJECT_DIR=\"$HOME/.claude/projects/$(echo ${containerWorkspaceFolder} | sed 's|/|-|g')\" && mkdir -p \"$CLAUDE_PROJECT_DIR\" && if [ -d \"$CLAUDE_PROJECT_DIR/memory\" ] && [ ! -L \"$CLAUDE_PROJECT_DIR/memory\" ]; then cp -a \"$CLAUDE_PROJECT_DIR/memory/.\" ${containerWorkspaceFolder}/.claude-memory/ 2>/dev/null; rm -rf \"$CLAUDE_PROJECT_DIR/memory\"; fi && ln -sfn ${containerWorkspaceFolder}/.claude-memory \"$CLAUDE_PROJECT_DIR/memory\"",
     "customizations": {
         "vscode": {
             "extensions": [

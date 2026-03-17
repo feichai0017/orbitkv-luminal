@@ -4,6 +4,7 @@
 
 *.env
 .claude/
+.claude-memory/
 .DS_Store
 *.vscode
 *.zed
