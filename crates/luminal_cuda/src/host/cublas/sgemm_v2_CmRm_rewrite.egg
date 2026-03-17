@@ -37,17 +37,17 @@
         (= ?b_k_stride (nth_from_end ?b_stride 0))
 
         ; Assert contiguous k stride on output (required for reduction)
-        (= ?k_stride (MNum 1))
+        (= ?k_stride (MIter))
 
         ; Assert A has strides [1, 0, m] (column-major A[m,k] broadcast to [m,n,k])
-        (= ?a_m_stride (MNum 1))
+        (= ?a_m_stride (MIter))
         (= ?a_n_stride (MNum 0))
-        (= ?a_k_stride ?m)
+        (= ?a_k_stride (MMul (MIter) ?m))
 
         ; Assert B has strides [0, 1, n] (row-major B[k,n] permuted to [n,k] then broadcast to [m,n,k])
         (= ?b_m_stride (MNum 0))
-        (= ?b_n_stride (MNum 1))
-        (= ?b_k_stride ?n)
+        (= ?b_n_stride (MIter))
+        (= ?b_k_stride (MMul (MIter) ?n))
 
         (= (F32) (dtype ?a))
         (= (F32) (dtype ?b))
