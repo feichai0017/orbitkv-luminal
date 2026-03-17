@@ -384,10 +384,12 @@ pub trait ToCudaInput {
 
 impl ToCudaInput for &[f32] {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        let bytes = self.len() * 4;
+        trace!("H2D copy: {} bytes ({} f32 elements)", bytes, self.len());
         CudaInput::Buffer(
             stream
                 .clone_htod(unsafe {
-                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, bytes)
                 })
                 .unwrap(),
         )
@@ -396,10 +398,12 @@ impl ToCudaInput for &[f32] {
 
 impl ToCudaInput for Vec<i32> {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        let bytes = self.len() * 4;
+        trace!("H2D copy: {} bytes ({} i32 elements)", bytes, self.len());
         CudaInput::Buffer(
             stream
                 .clone_htod(unsafe {
-                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, bytes)
                 })
                 .unwrap(),
         )
@@ -408,10 +412,12 @@ impl ToCudaInput for Vec<i32> {
 
 impl ToCudaInput for Vec<f32> {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        let bytes = self.len() * 4;
+        trace!("H2D copy: {} bytes ({} f32 elements)", bytes, self.len());
         CudaInput::Buffer(
             stream
                 .clone_htod(unsafe {
-                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, bytes)
                 })
                 .unwrap(),
         )
@@ -420,10 +426,12 @@ impl ToCudaInput for Vec<f32> {
 
 impl ToCudaInput for Vec<f16> {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        let bytes = self.len() * 2;
+        trace!("H2D copy: {} bytes ({} f16 elements)", bytes, self.len());
         CudaInput::Buffer(
             stream
                 .clone_htod(unsafe {
-                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 2)
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, bytes)
                 })
                 .unwrap(),
         )
@@ -432,10 +440,12 @@ impl ToCudaInput for Vec<f16> {
 
 impl ToCudaInput for Vec<bf16> {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        let bytes = self.len() * 2;
+        trace!("H2D copy: {} bytes ({} bf16 elements)", bytes, self.len());
         CudaInput::Buffer(
             stream
                 .clone_htod(unsafe {
-                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 2)
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, bytes)
                 })
                 .unwrap(),
         )
@@ -444,12 +454,14 @@ impl ToCudaInput for Vec<bf16> {
 
 impl ToCudaInput for &[u8] {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        trace!("H2D copy: {} bytes (raw u8 slice)", self.len());
         CudaInput::Buffer(stream.clone_htod(self).unwrap())
     }
 }
 
 impl ToCudaInput for Vec<u8> {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        trace!("H2D copy: {} bytes (raw u8 vec)", self.len());
         CudaInput::Buffer(stream.clone_htod(&self).unwrap())
     }
 }
