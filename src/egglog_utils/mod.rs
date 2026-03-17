@@ -566,13 +566,79 @@ fn termdag_to_egglog(td: &egglog::TermDag, root: egglog::TermId) -> (String, Str
     (out.replace("(MVar \"z\")", "(MIter)"), format!("t{root}"))
 }
 
+/// Per-rule match statistics from an egglog run.
+#[derive(Debug, Default, Clone)]
+pub struct RuleStats {
+    /// Map from rule name to number of matches.
+    pub matches: Vec<(String, usize)>,
+    /// Total egglog execution time.
+    pub total_time: std::time::Duration,
+}
+
+impl RuleStats {
+    /// Format rule stats into a categorized report string.
+    pub fn to_report(&self) -> String {
+        let mut reshape = Vec::new();
+        let mut cublas = Vec::new();
+        let mut other = Vec::new();
+
+        for (name, count) in &self.matches {
+            let entry = format!("  {name}: {count}");
+            if name.contains("batch-collapse") || name.contains("squeeze") {
+                reshape.push(entry);
+            } else if name.contains("cublas") || name.contains("cublaslt") {
+                cublas.push(entry);
+            } else {
+                other.push(entry);
+            }
+        }
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Egglog total time: {}\n\n",
+            pretty_duration::pretty_duration(&self.total_time, None)
+        ));
+
+        if !reshape.is_empty() {
+            out.push_str("=== Reshape Rules ===\n");
+            reshape.sort();
+            for e in &reshape {
+                out.push_str(e);
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+
+        if !cublas.is_empty() {
+            out.push_str("=== cuBLAS Rules ===\n");
+            cublas.sort();
+            for e in &cublas {
+                out.push_str(e);
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+
+        if !other.is_empty() {
+            out.push_str("=== Other Rules ===\n");
+            other.sort();
+            for e in &other {
+                out.push_str(e);
+                out.push('\n');
+            }
+        }
+
+        out
+    }
+}
+
 #[tracing::instrument(skip_all)]
 pub fn run_egglog(
     program: &str,
     root: &str,
     ops: &[Arc<Box<dyn EgglogOp>>],
     cleanup: bool,
-) -> Result<SerializedEGraph, egglog::Error> {
+) -> Result<(SerializedEGraph, RuleStats), egglog::Error> {
     let start = std::time::Instant::now();
     let code = early_egglog(program, root, ops, cleanup);
     let mut egraph = egglog::EGraph::default();
@@ -587,8 +653,18 @@ pub fn run_egglog(
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     trace!("{}", "Egglog running...".green());
     let _outputs = egraph.run_program(commands)?;
+    let total_time = start.elapsed();
     trace!("{}", "---- Egglog Rule Matches ----".green());
     let run_report = egraph.get_overall_run_report();
+    let rule_stats = RuleStats {
+        matches: run_report
+            .num_matches_per_rule
+            .iter()
+            .filter(|(k, _)| !k.contains("("))
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect(),
+        total_time,
+    };
     trace!(
         "{}",
         run_report
@@ -609,7 +685,7 @@ pub fn run_egglog(
         "{}",
         format!(
             "---- Egglog Took {} ----",
-            pretty_duration::pretty_duration(&start.elapsed(), None).bold()
+            pretty_duration::pretty_duration(&total_time, None).bold()
         )
         .green()
     );
@@ -704,7 +780,7 @@ pub fn run_egglog(
         "No valid graphs present in the e-graph!"
     );
 
-    Ok(egraph)
+    Ok((egraph, rule_stats))
 }
 
 pub fn extract_expr_list<'a>(

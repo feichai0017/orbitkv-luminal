@@ -35,6 +35,20 @@ pub trait Runtime {
     fn intermediate_buffer_bytes(&self) -> usize {
         0
     }
+    /// Estimate total intermediate buffer bytes for an LLIR graph.
+    /// Returns None if estimation is not supported or expressions can't resolve.
+    fn estimate_memory(
+        &self,
+        _llir_graph: &LLIRGraph,
+        _dyn_map: &FxHashMap<char, usize>,
+    ) -> Option<usize> {
+        None
+    }
+    /// Check if an LLIR graph's memory requirements fit within available capacity.
+    /// Returns true if memory fits or estimation is unavailable.
+    fn memory_fits(&self, _llir_graph: &LLIRGraph, _dyn_map: &FxHashMap<char, usize>) -> bool {
+        true
+    }
 }
 
 /// Optional runtime instrumentation for collecting execution statistics.

@@ -1,6 +1,7 @@
 use crate::egglog_utils::{
     egglog_to_llir, extract_generation, hash_choice_set, hash_egglog_normalized,
-    hlir_subgraph_to_egglog, hlir_to_egglog, random_initial_choice, run_egglog, stitch_llir_graphs,
+    hlir_subgraph_to_egglog, hlir_to_egglog, random_initial_choice, run_egglog,
+    stitch_llir_graphs, RuleStats,
 };
 use crate::{
     egglog_utils::SerializedEGraph,
@@ -193,11 +194,20 @@ impl Graph {
                 trace!("Dumped egglog program to luminal_artifacts/hlir_program.egg");
             }
 
-            self.egraphs = vec![run_egglog(&program, &root, &ops, cleanup_hlir).unwrap()];
+            let (egraph, rule_stats) =
+                run_egglog(&program, &root, &ops, cleanup_hlir).unwrap();
+            self.egraphs = vec![egraph];
             self.chunk_groups = vec![ChunkGroup {
                 representative: 0,
                 members: vec![0],
             }];
+            // Dump rule stats
+            {
+                let log_dir = std::path::Path::new("luminal_artifacts");
+                let _ = std::fs::create_dir_all(log_dir);
+                let _ =
+                    std::fs::write(log_dir.join("rule_stats.txt"), rule_stats.to_report());
+            }
         } else {
             println!(
                 "   {:>6}  {} chunks from graph breaks",
@@ -224,7 +234,9 @@ impl Graph {
         let subgraphs = split_at_graph_breaks(self);
         if subgraphs.len() <= 1 {
             let (program, root) = hlir_to_egglog(self);
-            self.egraphs = vec![run_egglog(&program, &root, &ops, cleanup_hlir).unwrap()];
+            let (egraph, _rule_stats) =
+                run_egglog(&program, &root, &ops, cleanup_hlir).unwrap();
+            self.egraphs = vec![egraph];
             self.chunk_groups = vec![ChunkGroup {
                 representative: 0,
                 members: vec![0],
@@ -288,7 +300,9 @@ impl Graph {
             .iter()
             .map(|g| {
                 let (ref program, ref root) = egglog_texts[g.representative];
-                run_egglog(program, root, ops, cleanup_hlir).unwrap()
+                let (egraph, _rule_stats) =
+                    run_egglog(program, root, ops, cleanup_hlir).unwrap();
+                egraph
             })
             .collect();
 
@@ -378,6 +392,7 @@ impl Graph {
 
             // Find a viable initial genome (may need multiple attempts if some panic)
             let (mut best_genome, mut best_graph, mut best_metric, display, mut n_graphs);
+            let mut memory_skips: usize = 0;
             let mut init_attempts = 0;
             loop {
                 init_attempts += 1;
@@ -389,23 +404,45 @@ impl Graph {
                 let genome = random_initial_choice(egraph, rng);
                 prev_selected.insert(hash_choice_set(&genome));
 
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let graph = egglog_to_llir(
-                        egraph,
-                        genome.clone(),
-                        ops,
-                        &self.custom_ops,
-                        &mut list_cache,
-                        &mut expr_cache,
-                        None,
-                    );
-                    runtime.clear_intermediate_buffers();
-                    let profile = runtime.profile(&graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
-                    (graph, profile)
-                }));
+                // Step 1: Extract LLIR (in catch_unwind)
+                let extract_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        egglog_to_llir(
+                            egraph,
+                            genome.clone(),
+                            ops,
+                            &self.custom_ops,
+                            &mut list_cache,
+                            &mut expr_cache,
+                            None,
+                        )
+                    }));
+                let graph = match extract_result {
+                    Ok(g) => g,
+                    Err(_) => {
+                        list_cache.clear();
+                        expr_cache.clear();
+                        continue;
+                    }
+                };
 
-                match result {
-                    Ok((graph, (metric, disp))) => {
+                // Step 2: Memory check (outside catch_unwind)
+                if !runtime.memory_fits(&graph, &self.dyn_map) {
+                    memory_skips += 1;
+                    list_cache.clear();
+                    expr_cache.clear();
+                    continue;
+                }
+
+                // Step 3: Profile (in catch_unwind)
+                let profile_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        runtime.clear_intermediate_buffers();
+                        runtime.profile(&graph, &self.dyn_map, Self::TRIALS_PER_PROFILE)
+                    }));
+
+                match profile_result {
+                    Ok((metric, disp)) => {
                         best_genome = genome;
                         best_graph = graph;
                         best_metric = metric;
@@ -474,11 +511,10 @@ impl Graph {
                     list_cache.clear();
                     expr_cache.clear();
 
-                    // Wrap LLIR extraction + profiling in catch_unwind to handle
-                    // panics from invalid genomes, expression simplification, or CUDA errors
-                    let profile_result =
+                    // Step 1: Extract LLIR (in catch_unwind)
+                    let extract_result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let llir_graph = egglog_to_llir(
+                            egglog_to_llir(
                                 egraph,
                                 genome.clone(),
                                 ops,
@@ -486,17 +522,66 @@ impl Graph {
                                 &mut list_cache,
                                 &mut expr_cache,
                                 None,
+                            )
+                        }));
+                    let llir_graph = match extract_result {
+                        Ok(g) => g,
+                        Err(_) => {
+                            if multi_chunk {
+                                print!(
+                                    "\x1b[1A\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
+                                    "Group".cyan().bold(),
+                                    make_bar(n_graphs, limit),
+                                    "Total".cyan().bold(),
+                                    make_bar(group_idx, n_groups)
+                                );
+                            } else {
+                                print!(
+                                    "\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                                    "Search".cyan().bold(),
+                                    make_bar(n_graphs, limit),
+                                );
+                            }
+                            std::io::stdout().flush().unwrap();
+                            continue;
+                        }
+                    };
+
+                    // Step 2: Memory check (outside catch_unwind)
+                    if !runtime.memory_fits(&llir_graph, &self.dyn_map) {
+                        memory_skips += 1;
+                        if multi_chunk {
+                            print!(
+                                "\x1b[1A\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
+                                "Group".cyan().bold(),
+                                make_bar(n_graphs, limit),
+                                "Total".cyan().bold(),
+                                make_bar(group_idx, n_groups)
                             );
+                        } else {
+                            print!(
+                                "\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                                "Search".cyan().bold(),
+                                make_bar(n_graphs, limit),
+                            );
+                        }
+                        std::io::stdout().flush().unwrap();
+                        continue;
+                    }
+
+                    // Step 3: Profile (in catch_unwind)
+                    let profile_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             runtime.clear_intermediate_buffers();
                             let result = runtime.profile(
                                 &llir_graph,
                                 &self.dyn_map,
                                 Self::TRIALS_PER_PROFILE,
                             );
-                            (result, llir_graph)
+                            result
                         }));
 
-                    let ((new_metric, display_metric), llir_graph) = match profile_result {
+                    let (new_metric, display_metric) = match profile_result {
                         Ok(result) => result,
                         Err(_) => {
                             if multi_chunk {
@@ -564,6 +649,34 @@ impl Graph {
                     }
                     std::io::stdout().flush().unwrap();
                 }
+            }
+
+            if memory_skips > 0 {
+                let skip_msg = format!(
+                    "   {:>8} skipped {} candidates (OOM)",
+                    "Memory".yellow().bold(),
+                    memory_skips,
+                );
+                if bars_drawn {
+                    print!("\x1b[1A\r\x1b[2K");
+                }
+                println!("{skip_msg}");
+                if multi_chunk {
+                    print!(
+                        "\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
+                        "Group".cyan().bold(),
+                        make_bar(n_graphs, limit),
+                        "Total".cyan().bold(),
+                        make_bar(group_idx, n_groups)
+                    );
+                } else {
+                    print!(
+                        "\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                        "Search".cyan().bold(),
+                        make_bar(n_graphs, limit),
+                    );
+                }
+                std::io::stdout().flush().unwrap();
             }
 
             group_best_llirs[group_idx] = Some(best_graph);
