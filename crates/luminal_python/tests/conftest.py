@@ -1,10 +1,14 @@
 """Test configuration."""
 
+import logging
+
 # Enable automatic Rust rebuilds during test development
 try:
     import maturin_import_hook
 
     maturin_import_hook.install()
+    logging.getLogger("maturin_import_hook").disabled = True
+    logging.getLogger("maturin_import_hook.project_importer").disabled = True
 except ImportError:
     pass  # Hook not available, rebuilds will be manual
 
