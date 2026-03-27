@@ -1,6 +1,8 @@
 /target
 /crates/**/target
 /examples/**/target
+.claude-project
+.claude-memory 
 
 *.env
 .claude/
