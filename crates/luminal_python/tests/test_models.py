@@ -41,9 +41,6 @@ class AddAddTestModel(torch.nn.Module):
 
 
 class AddConstantTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor):
         return x + 10
 
@@ -59,25 +56,16 @@ class LinearLayerModel(torch.nn.Module):
 
 
 class SqrtTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.sqrt()
 
 
 class SinTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.sin(x)
 
 
 class CosTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.cos(x)
 
@@ -94,18 +82,12 @@ class SubTestModel(torch.nn.Module):
 class TransposeTestModel(torch.nn.Module):
     """Test basic 2D transpose (matrix transpose)."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.t()  # 2D transpose
 
 
 class Transpose3DTestModel(torch.nn.Module):
     """Test 3D transpose with explicit permutation."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.permute(2, 0, 1)  # Rotate dimensions
@@ -114,18 +96,12 @@ class Transpose3DTestModel(torch.nn.Module):
 class Transpose4DTestModel(torch.nn.Module):
     """Test 4D transpose (NCHW -> NHWC)."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.permute(0, 2, 3, 1)  # Common in CNNs
 
 
 class TransposeReverseTestModel(torch.nn.Module):
     """Test reverse permutation (default transpose behavior)."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dims = list(range(x.ndim))
@@ -151,9 +127,6 @@ class TransposeInExpressionModel(torch.nn.Module):
 class ConstantScalarFloatModel(torch.nn.Module):
     """Test scalar constant (broadcasts to input shape)."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor(10.5).to(x.device)
         return x + constant
@@ -161,9 +134,6 @@ class ConstantScalarFloatModel(torch.nn.Module):
 
 class Constant1DArrayFloatModel(torch.nn.Module):
     """Test 1D array constant."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0]).to(x.device)
@@ -173,9 +143,6 @@ class Constant1DArrayFloatModel(torch.nn.Module):
 class Constant2DMatrixFloatModel(torch.nn.Module):
     """Test 2D matrix constant."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]).to(x.device)
         return x + constant
@@ -183,9 +150,6 @@ class Constant2DMatrixFloatModel(torch.nn.Module):
 
 class ConstantRawDataFloatModel(torch.nn.Module):
     """Test constant with specific values (tests raw data format)."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([7.5, 8.5, 9.5]).to(x.device)
@@ -195,9 +159,6 @@ class ConstantRawDataFloatModel(torch.nn.Module):
 class ConstantInt32ConversionModel(torch.nn.Module):
     """Test INT32 constant values (PyTorch exports as integers)."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32).to(x.device)
         return x + constant.float()
@@ -205,9 +166,6 @@ class ConstantInt32ConversionModel(torch.nn.Module):
 
 class ConstantInt64ConversionModel(torch.nn.Module):
     """Test INT64 constant values."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([100, 200, 300], dtype=torch.int64).to(x.device)
@@ -217,9 +175,6 @@ class ConstantInt64ConversionModel(torch.nn.Module):
 class ConstantFloat64ConversionModel(torch.nn.Module):
     """Test FLOAT64 (double) constant values."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([1.5, 2.5, 3.5], dtype=torch.float64).to(x.device)
         return x * constant.float()
@@ -227,9 +182,6 @@ class ConstantFloat64ConversionModel(torch.nn.Module):
 
 class ConstantBoolConversionModel(torch.nn.Module):
     """Test boolean constant values (converted to 0.0/1.0)."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([True, False, True, False, True], dtype=torch.bool).to(
@@ -241,9 +193,6 @@ class ConstantBoolConversionModel(torch.nn.Module):
 class ConstantInt64RawDataModel(torch.nn.Module):
     """Test INT64 constant with large values (tests raw data path)."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([1000, 2000, 3000], dtype=torch.int64).to(x.device)
         return x + constant.float()
@@ -251,9 +200,6 @@ class ConstantInt64RawDataModel(torch.nn.Module):
 
 class ConstantNegativeValuesModel(torch.nn.Module):
     """Test negative constant values."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([-5.0, -10.0, -15.0]).to(x.device)
@@ -263,9 +209,6 @@ class ConstantNegativeValuesModel(torch.nn.Module):
 class ConstantZeroValueModel(torch.nn.Module):
     """Test all-zero constant."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([0.0, 0.0, 0.0, 0.0]).to(x.device)
         return x * constant
@@ -273,9 +216,6 @@ class ConstantZeroValueModel(torch.nn.Module):
 
 class ConstantMultipleInGraphModel(torch.nn.Module):
     """Test multiple constants in one graph."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         const1 = torch.tensor([10.0, 20.0, 30.0]).to(x.device)
@@ -290,9 +230,6 @@ class ConstantMultipleInGraphModel(torch.nn.Module):
 class CastDoubleToFloatModel(torch.nn.Module):
     """Test downcast: Double (FLOAT64) -> Float."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Input will be float64, cast to float32
         return x.to(torch.float32)
@@ -301,18 +238,12 @@ class CastDoubleToFloatModel(torch.nn.Module):
 class CastInt32ToFloatModel(torch.nn.Module):
     """Test INT32 -> Float conversion."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.to(torch.float32)
 
 
 class CastInt64ToFloatModel(torch.nn.Module):
     """Test INT64 -> Float conversion."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.to(torch.float32)
@@ -321,18 +252,12 @@ class CastInt64ToFloatModel(torch.nn.Module):
 class CastBoolToFloatModel(torch.nn.Module):
     """Test BOOL -> Float conversion (non-zero -> 1.0, zero -> 0.0)."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.to(torch.float32)
 
 
 class CastInComputationGraphModel(torch.nn.Module):
     """Test Cast node followed by an operation (Cast + Add)."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         casted = x.to(torch.float32)
@@ -343,9 +268,6 @@ class CastInComputationGraphModel(torch.nn.Module):
 class CastWith2DTensorModel(torch.nn.Module):
     """Test Cast with 2D tensor (matrix)."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.to(torch.float32)
 
@@ -353,18 +275,12 @@ class CastWith2DTensorModel(torch.nn.Module):
 class CastNegativeValuesModel(torch.nn.Module):
     """Test Cast with negative integer values."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.to(torch.float32)
 
 
 class CastScalarValueModel(torch.nn.Module):
     """Test Cast with scalar (single element)."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.to(torch.float32)
@@ -388,9 +304,6 @@ class ModTestModel(torch.nn.Module):
 
 class ModByConstantModel(torch.nn.Module):
     """Tests modulo with an inline constant tensor (ONNX Constant node)."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([3.0, 4.0, 5.0]).to(x.device)
