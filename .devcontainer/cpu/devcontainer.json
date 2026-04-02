@@ -24,7 +24,8 @@
     },
     "remoteUser": "ubuntu",
     "remoteEnv": {
-        "CARGO_HOME": "/home/ubuntu/.cache/luminal/cargo"
+        "CARGO_HOME": "/home/ubuntu/.cache/luminal/cargo",
+        "CODEX_HOME": "${containerWorkspaceFolder}/.claude/codex"
     },
     "postStartCommand": "mkdir -p /home/ubuntu/.cache/luminal/cargo && git config --global --add safe.directory ${containerWorkspaceFolder} && gh auth setup-git",
     "customizations": {
