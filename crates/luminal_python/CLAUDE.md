@@ -1,4 +1,8 @@
-A couple of short things to keep in mind
+## Python Environment
+
+- Always use `uv run` to execute Python tools (pytest, pre-commit, python) — never bare `pytest` or `python`
+- Use `uv add` / `uv add --dev` / `uv remove` for dependencies — never hand-edit pyproject.toml deps
+- After modifying Rust source files, rebuild before running Python tests: `maturin develop --release`
 
 ## Lessons Learned
 
