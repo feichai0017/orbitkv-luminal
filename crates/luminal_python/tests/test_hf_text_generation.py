@@ -7,12 +7,12 @@ with the luminal backend to verify numerical equivalence.
 
 from __future__ import annotations
 
-import huggingface_hub
+from dataclasses import dataclass
+
 import pytest
 import torch
 import torch._dynamo
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-from transformers import logging as transformers_logging
 
 from luminal import luminal_backend
 
@@ -23,13 +23,17 @@ SIMPLE_DENSE_MODELS = [
 ]
 
 
+@dataclass(frozen=True)
+class HFTextGenerationBundle:
+    model: AutoModelForCausalLM
+    tokenizer: AutoTokenizer
+    device: torch.device
+
+
 def _load_model_and_tokenizer(
     model_id: str, device: torch.device
 ) -> tuple[AutoModelForCausalLM, AutoTokenizer]:
     """Load a pretrained HF causal LM and its tokenizer, ready for generation."""
-    transformers_logging.disable_progress_bar()
-    huggingface_hub.utils.disable_progress_bars()
-
     config = AutoConfig.from_pretrained(model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -38,7 +42,11 @@ def _load_model_and_tokenizer(
 
     dtype = torch.float16 if device.type == "cuda" else torch.float32
     model = (
-        AutoModelForCausalLM.from_pretrained(model_id, config=config, dtype=dtype)
+        AutoModelForCausalLM.from_pretrained(
+            model_id,
+            config=config,
+            torch_dtype=dtype,
+        )
         .eval()
         .to(device)
     )
@@ -76,40 +84,50 @@ def _generate_kwargs(
     )
 
 
+@pytest.fixture
+def hf_text_bundle(model_id: str, device: torch.device) -> HFTextGenerationBundle:
+    model, tokenizer = _load_model_and_tokenizer(model_id, device)
+    return HFTextGenerationBundle(model=model, tokenizer=tokenizer, device=device)
+
+
 @pytest.mark.slow
 class TestHFGeneration:
     """End-to-end tests comparing eager PyTorch against torch.compile with luminal."""
 
     @pytest.mark.parametrize("model_id", SIMPLE_DENSE_MODELS)
-    def test_capital_of_france(self, model_id: str, device: torch.device):
+    def test_capital_of_france(self, hf_text_bundle: HFTextGenerationBundle):
         """Basic greedy generation -- the original smoke test."""
-        model, tokenizer = _load_model_and_tokenizer(model_id, device)
-        encoded = _encode(tokenizer, "What is the capital of France ", device)
-        kwargs = _generate_kwargs(tokenizer, encoded)
+        encoded = _encode(
+            hf_text_bundle.tokenizer,
+            "What is the capital of France ",
+            hf_text_bundle.device,
+        )
+        kwargs = _generate_kwargs(hf_text_bundle.tokenizer, encoded)
 
         with torch.no_grad():
-            eager_output = model.generate(**kwargs)
+            eager_output = hf_text_bundle.model.generate(**kwargs)
 
-        compiled_model = torch.compile(model, backend=luminal_backend)
+        compiled_model = torch.compile(hf_text_bundle.model, backend=luminal_backend)
         with torch.no_grad():
             compiled_output = compiled_model.generate(**kwargs)
 
         torch.testing.assert_close(compiled_output, eager_output)
 
     @pytest.mark.parametrize("model_id", SIMPLE_DENSE_MODELS)
-    def test_forward_logits(self, model_id: str, device: torch.device):
+    def test_forward_logits(self, hf_text_bundle: HFTextGenerationBundle):
         """Forward pass only -- compare raw logits, not generated tokens."""
-        model, tokenizer = _load_model_and_tokenizer(model_id, device)
-        encoded = _encode(tokenizer, "The quick brown fox", device)
+        encoded = _encode(
+            hf_text_bundle.tokenizer, "The quick brown fox", hf_text_bundle.device
+        )
 
         with torch.no_grad():
-            eager_out = model(**encoded)
+            eager_out = hf_text_bundle.model(**encoded)
 
-        compiled_model = torch.compile(model, backend=luminal_backend)
+        compiled_model = torch.compile(hf_text_bundle.model, backend=luminal_backend)
         with torch.no_grad():
             compiled_out = compiled_model(**encoded)
 
-        dtype = next(model.parameters()).dtype
+        dtype = next(hf_text_bundle.model.parameters()).dtype
         atol = 1e-2 if dtype == torch.float16 else 1e-3
         torch.testing.assert_close(
             compiled_out.logits, eager_out.logits, atol=atol, rtol=1e-3
@@ -118,46 +136,55 @@ class TestHFGeneration:
     @pytest.mark.parametrize("model_id", SIMPLE_DENSE_MODELS[:1])
     @pytest.mark.parametrize(
         "prompt",
-        ["Hi", "What is the capital of France", "Explain the theory of general relativity in simple terms that a high school student could understand"],
+        [
+            "Hi",
+            "What is the capital of France",
+            "Explain the theory of general relativity in simple terms that a high school student could understand",
+        ],
         ids=["short", "medium", "long"],
     )
-    def test_variable_length_prompts(self, model_id: str, prompt: str, device: torch.device):
+    def test_variable_length_prompts(
+        self,
+        prompt: str,
+        hf_text_bundle: HFTextGenerationBundle,
+    ):
         """Generate with prompts of different lengths -- tests dynamic shape handling."""
-        model, tokenizer = _load_model_and_tokenizer(model_id, device)
-        encoded = _encode(tokenizer, prompt, device)
-        kwargs = _generate_kwargs(tokenizer, encoded, max_new_tokens=4)
+        encoded = _encode(hf_text_bundle.tokenizer, prompt, hf_text_bundle.device)
+        kwargs = _generate_kwargs(hf_text_bundle.tokenizer, encoded, max_new_tokens=4)
 
         with torch.no_grad():
-            eager_output = model.generate(**kwargs)
+            eager_output = hf_text_bundle.model.generate(**kwargs)
 
-        compiled_model = torch.compile(model, backend=luminal_backend)
+        compiled_model = torch.compile(hf_text_bundle.model, backend=luminal_backend)
         with torch.no_grad():
             compiled_output = compiled_model.generate(**kwargs)
 
         torch.testing.assert_close(compiled_output, eager_output)
 
     @pytest.mark.parametrize("model_id", SIMPLE_DENSE_MODELS[:1])
-    def test_chat_template_generation(self, model_id: str, device: torch.device):
+    def test_chat_template_generation(
+        self,
+        model_id: str,
+        hf_text_bundle: HFTextGenerationBundle,
+    ):
         """Generate using chat-templated input with special tokens."""
-        model, tokenizer = _load_model_and_tokenizer(model_id, device)
-
-        if tokenizer.chat_template is None:
+        if hf_text_bundle.tokenizer.chat_template is None:
             pytest.skip(f"{model_id} has no chat template")
 
         messages = [{"role": "user", "content": "What is 2+2?"}]
-        encoded = tokenizer.apply_chat_template(
+        encoded = hf_text_bundle.tokenizer.apply_chat_template(
             messages,
             return_tensors="pt",
             add_generation_prompt=True,
             return_dict=True,
         )
-        encoded = {k: v.to(device) for k, v in encoded.items()}
-        kwargs = _generate_kwargs(tokenizer, encoded)
+        encoded = {k: v.to(hf_text_bundle.device) for k, v in encoded.items()}
+        kwargs = _generate_kwargs(hf_text_bundle.tokenizer, encoded)
 
         with torch.no_grad():
-            eager_output = model.generate(**kwargs)
+            eager_output = hf_text_bundle.model.generate(**kwargs)
 
-        compiled_model = torch.compile(model, backend=luminal_backend)
+        compiled_model = torch.compile(hf_text_bundle.model, backend=luminal_backend)
         with torch.no_grad():
             compiled_output = compiled_model.generate(**kwargs)
 
@@ -165,31 +192,47 @@ class TestHFGeneration:
 
     @pytest.mark.parametrize("model_id", SIMPLE_DENSE_MODELS[:1])
     @pytest.mark.parametrize("max_new_tokens", [20, 50])
-    def test_longer_generation(self, model_id: str, max_new_tokens: int, device: torch.device):
+    def test_longer_generation(
+        self,
+        max_new_tokens: int,
+        hf_text_bundle: HFTextGenerationBundle,
+    ):
         """Generate many tokens to stress KV cache over extended decode loop."""
-        model, tokenizer = _load_model_and_tokenizer(model_id, device)
-        encoded = _encode(tokenizer, "Once upon a time", device)
-        kwargs = _generate_kwargs(tokenizer, encoded, max_new_tokens=max_new_tokens)
+        encoded = _encode(
+            hf_text_bundle.tokenizer, "Once upon a time", hf_text_bundle.device
+        )
+        kwargs = _generate_kwargs(
+            hf_text_bundle.tokenizer,
+            encoded,
+            max_new_tokens=max_new_tokens,
+        )
 
         with torch.no_grad():
-            eager_output = model.generate(**kwargs)
+            eager_output = hf_text_bundle.model.generate(**kwargs)
 
-        compiled_model = torch.compile(model, backend=luminal_backend)
+        compiled_model = torch.compile(hf_text_bundle.model, backend=luminal_backend)
         with torch.no_grad():
             compiled_output = compiled_model.generate(**kwargs)
 
         torch.testing.assert_close(compiled_output, eager_output)
 
     @pytest.mark.parametrize("model_id", SIMPLE_DENSE_MODELS[:1])
-    def test_greedy_determinism(self, model_id: str, device: torch.device):
+    def test_greedy_determinism(
+        self,
+        hf_text_bundle: HFTextGenerationBundle,
+        configure_dynamo,
+    ):
         """Greedy generation produces identical results on repeated calls."""
-        torch._dynamo.config.cache_size_limit = 4
+        configure_dynamo(cache_size_limit=4)
 
-        model, tokenizer = _load_model_and_tokenizer(model_id, device)
-        encoded = _encode(tokenizer, "The meaning of life is", device)
-        kwargs = _generate_kwargs(tokenizer, encoded, max_new_tokens=10)
+        encoded = _encode(
+            hf_text_bundle.tokenizer,
+            "The meaning of life is",
+            hf_text_bundle.device,
+        )
+        kwargs = _generate_kwargs(hf_text_bundle.tokenizer, encoded, max_new_tokens=10)
 
-        compiled_model = torch.compile(model, backend=luminal_backend)
+        compiled_model = torch.compile(hf_text_bundle.model, backend=luminal_backend)
         with torch.no_grad():
             output_1 = compiled_model.generate(**kwargs)
             output_2 = compiled_model.generate(**kwargs)
@@ -197,12 +240,15 @@ class TestHFGeneration:
         torch.testing.assert_close(output_1, output_2)
 
     @pytest.mark.parametrize("model_id", SIMPLE_DENSE_MODELS[:1])
-    def test_reuse_compiled_model(self, model_id: str, device: torch.device):
+    def test_reuse_compiled_model(
+        self,
+        hf_text_bundle: HFTextGenerationBundle,
+        configure_dynamo,
+    ):
         """Call the same compiled model multiple times with different prompts."""
-        torch._dynamo.config.cache_size_limit = 8
+        configure_dynamo(cache_size_limit=8)
 
-        model, tokenizer = _load_model_and_tokenizer(model_id, device)
-        compiled_model = torch.compile(model, backend=luminal_backend)
+        compiled_model = torch.compile(hf_text_bundle.model, backend=luminal_backend)
 
         prompts = [
             "The capital of France is",
@@ -211,30 +257,31 @@ class TestHFGeneration:
         ]
 
         for prompt in prompts:
-            encoded = _encode(tokenizer, prompt, device)
-            kwargs = _generate_kwargs(tokenizer, encoded, max_new_tokens=4)
+            encoded = _encode(hf_text_bundle.tokenizer, prompt, hf_text_bundle.device)
+            kwargs = _generate_kwargs(
+                hf_text_bundle.tokenizer, encoded, max_new_tokens=4
+            )
 
             with torch.no_grad():
-                eager_output = model.generate(**kwargs)
+                eager_output = hf_text_bundle.model.generate(**kwargs)
                 compiled_output = compiled_model.generate(**kwargs)
 
             torch.testing.assert_close(compiled_output, eager_output)
 
     @pytest.mark.parametrize("model_id", SIMPLE_DENSE_MODELS[:1])
-    def test_batched_inference(self, model_id: str, device: torch.device):
+    def test_batched_inference(self, hf_text_bundle: HFTextGenerationBundle):
         """Batched generation with multiple prompts and left-padding."""
-        model, tokenizer = _load_model_and_tokenizer(model_id, device)
-        tokenizer.padding_side = "left"
+        hf_text_bundle.tokenizer.padding_side = "left"
 
         prompts = ["Hello", "What is the capital of France"]
-        encoded = tokenizer(prompts, return_tensors="pt", padding=True)
-        encoded = {k: v.to(device) for k, v in encoded.items()}
-        kwargs = _generate_kwargs(tokenizer, encoded, max_new_tokens=4)
+        encoded = hf_text_bundle.tokenizer(prompts, return_tensors="pt", padding=True)
+        encoded = {k: v.to(hf_text_bundle.device) for k, v in encoded.items()}
+        kwargs = _generate_kwargs(hf_text_bundle.tokenizer, encoded, max_new_tokens=4)
 
         with torch.no_grad():
-            eager_output = model.generate(**kwargs)
+            eager_output = hf_text_bundle.model.generate(**kwargs)
 
-        compiled_model = torch.compile(model, backend=luminal_backend)
+        compiled_model = torch.compile(hf_text_bundle.model, backend=luminal_backend)
         with torch.no_grad():
             compiled_output = compiled_model.generate(**kwargs)
 

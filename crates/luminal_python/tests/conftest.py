@@ -1,4 +1,5 @@
 """Test configuration."""
+# ruff: noqa: E402
 
 import logging
 import os
@@ -6,6 +7,13 @@ from pathlib import Path
 import tempfile
 from urllib.request import urlopen
 import warnings
+
+try:
+    import huggingface_hub
+    from transformers import logging as transformers_logging
+except ImportError:  # pragma: no cover - optional for non-HF test environments
+    huggingface_hub = None
+    transformers_logging = None
 
 # Enable automatic Rust rebuilds during test development
 import maturin_import_hook
@@ -59,6 +67,33 @@ torch.set_float32_matmul_precision("highest")
 def device() -> torch.device:
     backend = os.getenv("LUMINAL_BACKEND", "native").lower()
     return torch.device("cuda") if backend == "cuda" else torch.device("cpu")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def configure_hf_test_output() -> None:
+    if transformers_logging is not None:
+        transformers_logging.disable_progress_bar()
+    if huggingface_hub is not None:
+        huggingface_hub.utils.disable_progress_bars()
+
+
+@pytest.fixture
+def configure_dynamo():
+    original_cache_size_limit = torch._dynamo.config.cache_size_limit
+    original_suppress_errors = torch._dynamo.config.suppress_errors
+
+    def _configure(
+        *, cache_size_limit: int | None = None, suppress_errors: bool | None = None
+    ) -> None:
+        if cache_size_limit is not None:
+            torch._dynamo.config.cache_size_limit = cache_size_limit
+        if suppress_errors is not None:
+            torch._dynamo.config.suppress_errors = suppress_errors
+
+    yield _configure
+
+    torch._dynamo.config.cache_size_limit = original_cache_size_limit
+    torch._dynamo.config.suppress_errors = original_suppress_errors
 
 
 @pytest.fixture(scope="session")
@@ -116,16 +151,12 @@ def hf_multimodal_image_path(
 
 
 @pytest.fixture(scope="session")
-def _llama38b_onnx_bundle(
-    pytestconfig: pytest.Config, _llama38b_cache_dir: Path
-):
+def _llama38b_onnx_bundle(pytestconfig: pytest.Config, _llama38b_cache_dir: Path):
     return ensure_onnx_bundle(pytestconfig.cache, _llama38b_cache_dir)
 
 
 @pytest.fixture(scope="session")
-def _llama38b_pt2_bundle(
-    pytestconfig: pytest.Config, _llama38b_cache_dir: Path
-):
+def _llama38b_pt2_bundle(pytestconfig: pytest.Config, _llama38b_cache_dir: Path):
     return ensure_pt2_bundle(pytestconfig.cache, _llama38b_cache_dir)
 
 

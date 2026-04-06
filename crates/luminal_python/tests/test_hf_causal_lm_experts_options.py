@@ -10,11 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 
-import huggingface_hub
 import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
-from transformers import logging as transformers_logging
 
 from luminal import luminal_backend
 
@@ -46,6 +44,18 @@ _MODEL_CASES = [
 ]
 
 _EXPERTS_IMPLEMENTATIONS = ("eager", "batched_mm", "grouped_mm")
+_CUDA_BACKEND_AVAILABLE = (
+    os.getenv("LUMINAL_BACKEND", "native").lower() == "cuda"
+    and torch.cuda.is_available()
+)
+
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not _CUDA_BACKEND_AVAILABLE,
+        reason="HF MoE experts backend tests require the CUDA backend",
+    ),
+]
 
 
 def _model_dtype(device: torch.device) -> torch.dtype:
@@ -76,15 +86,13 @@ def _compare_router_logits(lhs, rhs, *, atol: float, rtol: float) -> None:
 
 
 @pytest.fixture(scope="module", params=_MODEL_CASES, ids=lambda case: case.case_id)
-def hf_moe_bundle(request: pytest.FixtureRequest) -> _HFMoeBundle:
-    backend = os.getenv("LUMINAL_BACKEND", "native").lower()
-    if backend != "cuda" or not torch.cuda.is_available():
-        pytest.skip("HF MoE experts backend tests require the CUDA backend")
+def hf_moe_case(request: pytest.FixtureRequest) -> _HFMoeCase:
+    return request.param
 
-    transformers_logging.disable_progress_bar()
-    huggingface_hub.utils.disable_progress_bars()
 
-    case: _HFMoeCase = request.param
+@pytest.fixture
+def hf_moe_bundle(hf_moe_case: _HFMoeCase) -> _HFMoeBundle:
+    case = hf_moe_case
     device = torch.device("cuda")
     dtype = _model_dtype(device)
 
@@ -98,7 +106,7 @@ def hf_moe_bundle(request: pytest.FixtureRequest) -> _HFMoeBundle:
         AutoModelForCausalLM.from_pretrained(
             case.model_id,
             config=config,
-            dtype=dtype,
+            torch_dtype=dtype,
         )
         .eval()
         .to(device)
@@ -106,7 +114,6 @@ def hf_moe_bundle(request: pytest.FixtureRequest) -> _HFMoeBundle:
     return _HFMoeBundle(case=case, model=model, device=device, dtype=dtype)
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize(
     "experts_implementation",
     _EXPERTS_IMPLEMENTATIONS,

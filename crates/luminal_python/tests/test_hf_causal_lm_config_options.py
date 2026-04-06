@@ -8,14 +8,13 @@ through AutoConfig.
 from __future__ import annotations
 
 import importlib
+import os
 from dataclasses import dataclass
 
-import huggingface_hub
 import pytest
 import torch
 import torch._dynamo
 from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig
-from transformers import logging as transformers_logging
 from transformers.generation.configuration_utils import ContinuousBatchingConfig
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
@@ -26,7 +25,6 @@ _ATTN_REQUIRES_PACKAGE: dict[str, str] = {
     "flash_attention_2": "flash_attn",
     "flash_attention_3": "flash_attn_3",
     "flash_attention_4": "cutlass",
-    "paged|flash_attention_4": "cutlass",
 }
 
 # Attention implementations known to be incompatible with tiny random models
@@ -60,13 +58,64 @@ _MODEL_CASES = [
 _ATTN_IMPLEMENTATIONS = tuple(
     dict.fromkeys([None, "eager", *ALL_ATTENTION_FUNCTIONS.valid_keys()])
 )
-
-transformers_logging.disable_progress_bar()
-huggingface_hub.utils.disable_progress_bars()
+_CUDA_BACKEND_AVAILABLE = (
+    os.getenv("LUMINAL_BACKEND", "native").lower() == "cuda"
+    and torch.cuda.is_available()
+)
 
 
 def _attn_id(attn_impl: str | None) -> str:
     return "default" if attn_impl is None else attn_impl
+
+
+def _base_attn_impl(attn_impl: str | None) -> str | None:
+    if attn_impl is None:
+        return None
+    if attn_impl.startswith("paged|"):
+        return attn_impl.split("|", maxsplit=1)[1]
+    return attn_impl
+
+
+def _attn_param(attn_impl: str | None, *, allow_paged: bool) -> pytest.ParameterSet:
+    marks = []
+    base_attn_impl = _base_attn_impl(attn_impl)
+
+    if base_attn_impl == "flash_attention_2":
+        marks.append(pytest.mark.skip(reason="flash_attention_2 is very slow"))
+
+    if attn_impl is not None and attn_impl.startswith("paged|") and not allow_paged:
+        marks.append(
+            pytest.mark.skip(reason=f"{attn_impl} requires continuous batching API")
+        )
+
+    if base_attn_impl in _ATTN_REQUIRES_PACKAGE:
+        pkg = _ATTN_REQUIRES_PACKAGE[base_attn_impl]
+        if importlib.util.find_spec(pkg) is None:
+            marks.append(
+                pytest.mark.skip(
+                    reason=f"{attn_impl} requires package '{pkg}' which is not installed"
+                )
+            )
+
+    if base_attn_impl in _ATTN_SKIP_TINY_MODEL:
+        marks.append(
+            pytest.mark.skip(
+                reason=f"{attn_impl} is incompatible with tiny random test models"
+            )
+        )
+
+    kwargs = {"id": _attn_id(attn_impl)}
+    if marks:
+        kwargs["marks"] = marks
+    return pytest.param(attn_impl, **kwargs)
+
+
+_ATTN_PREFILL_PARAMS = tuple(
+    _attn_param(attn_impl, allow_paged=False) for attn_impl in _ATTN_IMPLEMENTATIONS
+)
+_ATTN_GENERATE_BATCH_PARAMS = tuple(
+    _attn_param(attn_impl, allow_paged=True) for attn_impl in _ATTN_IMPLEMENTATIONS
+)
 
 
 def _compare_past_key_values(lhs, rhs, *, atol: float, rtol: float) -> None:
@@ -95,34 +144,17 @@ def _instantiate_model(
 
 @pytest.mark.parametrize("model_case", _MODEL_CASES, ids=lambda case: case.case_id)
 @pytest.mark.parametrize("use_cache", [False, True], ids=["no_cache", "cache"])
-@pytest.mark.parametrize("attn_impl", _ATTN_IMPLEMENTATIONS, ids=_attn_id)
+@pytest.mark.parametrize("attn_impl", _ATTN_PREFILL_PARAMS)
 def test_hf_causal_lm_config_options_match_eager(
     model_case: _CausalLMConfigCase,
     use_cache: bool,
     attn_impl: str | None,
     device: torch.device,
+    configure_dynamo,
 ):
     """Compare luminal against eager HF across causal-LM config options."""
-    # flash_attention_2 is very slow; skip unless explicitly requested.
-    if attn_impl == "flash_attention_2":
-        pytest.skip("flash_attention_2 is very slow")
-
-    # Skip paged variants -- they require the continuous batching API.
-    if attn_impl is not None and attn_impl.startswith("paged|"):
-        pytest.skip(f"{attn_impl} requires continuous batching API")
-
-    # Skip attention implementations that need missing optional packages.
-    if attn_impl in _ATTN_REQUIRES_PACKAGE:
-        pkg = _ATTN_REQUIRES_PACKAGE[attn_impl]
-        if importlib.util.find_spec(pkg) is None:
-            pytest.skip(f"{attn_impl} requires package '{pkg}' which is not installed")
-
-    # Skip implementations incompatible with tiny random models.
-    if attn_impl in _ATTN_SKIP_TINY_MODEL:
-        pytest.skip(f"{attn_impl} is incompatible with tiny random test models")
-
     if use_cache:
-        torch._dynamo.config.cache_size_limit = 2
+        configure_dynamo(cache_size_limit=2)
 
     model = _instantiate_model(
         model_case.model_id,
@@ -187,30 +219,22 @@ def test_hf_causal_lm_config_options_match_eager(
 
 
 @pytest.mark.parametrize("model_case", _MODEL_CASES, ids=lambda case: case.case_id)
-@pytest.mark.parametrize("attn_impl", _ATTN_IMPLEMENTATIONS, ids=_attn_id)
+@pytest.mark.parametrize("attn_impl", _ATTN_GENERATE_BATCH_PARAMS)
+@pytest.mark.skipif(not _CUDA_BACKEND_AVAILABLE, reason="generate_batch requires CUDA")
 def test_hf_generate_batch(
     model_case: _CausalLMConfigCase,
     attn_impl: str | None,
     device: torch.device,
 ):
     """Compare generate_batch output for each attention variant against eager baseline."""
-    if attn_impl is not None and "flash_attention_2" in attn_impl:
-        pytest.skip("flash_attention_2 is very slow")
-
-    if attn_impl in _ATTN_REQUIRES_PACKAGE:
-        pkg = _ATTN_REQUIRES_PACKAGE[attn_impl]
-        if importlib.util.find_spec(pkg) is None:
-            pytest.skip(f"{attn_impl} requires package '{pkg}' which is not installed")
-
-    if attn_impl in _ATTN_SKIP_TINY_MODEL:
-        pytest.skip(f"{attn_impl} is incompatible with tiny random test models")
-
-    if device.type != "cuda":
-        pytest.skip("generate_batch requires CUDA")
-
     config = AutoConfig.from_pretrained(model_case.model_id)
     config.use_cache = True
-    model = AutoModelForCausalLM.from_config(config).to(dtype=torch.bfloat16).eval().to(device)
+    model = (
+        AutoModelForCausalLM.from_config(config)
+        .to(dtype=torch.bfloat16)
+        .eval()
+        .to(device)
+    )
 
     gen_config = GenerationConfig(
         do_sample=False,

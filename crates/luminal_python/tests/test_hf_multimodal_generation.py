@@ -7,15 +7,25 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
-import huggingface_hub
 import pytest
 import torch
 from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
-from transformers import logging as transformers_logging
 
 from luminal import luminal_backend
 
 MODEL_ID = "google/gemma-3-4b-it"
+_CUDA_BACKEND_AVAILABLE = (
+    os.getenv("LUMINAL_BACKEND", "native").lower() == "cuda"
+    and torch.cuda.is_available()
+)
+
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not _CUDA_BACKEND_AVAILABLE,
+        reason="Gemma 3 multimodal tests require the CUDA backend",
+    ),
+]
 
 
 @dataclass(frozen=True)
@@ -157,13 +167,6 @@ def _logits_tolerance(dtype: torch.dtype) -> float:
 
 @pytest.fixture(scope="module")
 def gemma3_multimodal_bundle() -> Gemma3MultimodalBundle:
-    backend = os.getenv("LUMINAL_BACKEND", "native").lower()
-    if backend != "cuda" or not torch.cuda.is_available():
-        pytest.skip("Gemma 3 multimodal tests require the CUDA backend")
-
-    transformers_logging.disable_progress_bar()
-    huggingface_hub.utils.disable_progress_bars()
-
     device = torch.device("cuda")
     dtype = _model_dtype(device)
 
@@ -188,7 +191,6 @@ def gemma3_multimodal_bundle() -> Gemma3MultimodalBundle:
     )
 
 
-@pytest.mark.slow
 class TestHFMultimodalGeneration:
     @pytest.mark.parametrize("case", MULTIMODAL_CASES, ids=lambda case: case.case_id)
     def test_generate_matches_eager(
