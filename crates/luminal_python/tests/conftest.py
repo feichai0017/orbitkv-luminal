@@ -3,19 +3,49 @@
 import logging
 import os
 from pathlib import Path
+import tempfile
+from urllib.request import urlopen
+import warnings
 
 # Enable automatic Rust rebuilds during test development
-try:
-    import maturin_import_hook
-    from maturin_import_hook.settings import MaturinSettings
+import maturin_import_hook
+from maturin_import_hook.settings import MaturinSettings
+from maturin_import_hook.project_importer import DefaultProjectFileSearcher
 
-    backend = os.getenv("LUMINAL_BACKEND", "native").lower()
-    settings = MaturinSettings(features=["cuda"]) if backend == "cuda" else None
-    maturin_import_hook.install(settings=settings)
-    logging.getLogger("maturin_import_hook").disabled = True
-    logging.getLogger("maturin_import_hook.project_importer").disabled = True
-except ImportError:
-    pass  # Hook not available, rebuilds will be manual
+backend = os.getenv("LUMINAL_BACKEND", "native").lower()
+settings = MaturinSettings(
+    release=(backend == "cuda"),
+    features=["cuda"] if backend == "cuda" else None,
+    skip_install=True,
+)
+searcher = DefaultProjectFileSearcher(
+    source_excluded_dir_names=(
+        DefaultProjectFileSearcher.DEFAULT_SOURCE_EXCLUDED_DIR_NAMES
+        | {".claude", "docs", ".github", "examples"}
+    ),
+)
+maturin_import_hook.install(
+    settings=settings,
+    enable_automatic_installation=True,
+    file_searcher=searcher,
+)
+logging.getLogger("maturin_import_hook").disabled = True
+logging.getLogger("maturin_import_hook.project_importer").disabled = True
+
+# Silence noisy ONNX / onnxscript / httpx logging
+for _logger_name in (
+    "onnxscript",
+    "onnx_ir",
+    "torch.onnx",
+    "httpx",
+):
+    logging.getLogger(_logger_name).setLevel(logging.WARNING)
+
+# Suppress torch.onnx diagnostics/progress output and torchvision warnings
+os.environ.setdefault("TORCH_ONNX_VERBOSE", "0")
+os.environ.setdefault("TORCH_ONNX_LOG_LEVEL", "ERROR")
+warnings.filterwarnings("ignore", message=".*torchvision.*")
+warnings.filterwarnings("ignore", module="torch.onnx")
 
 import pytest
 import torch
@@ -34,6 +64,55 @@ def device() -> torch.device:
 @pytest.fixture(scope="session")
 def _llama38b_cache_dir(pytestconfig: pytest.Config) -> Path:
     return pytestconfig.cache.mkdir("luminal_llama38b_artifacts_v1")
+
+
+@pytest.fixture(scope="session")
+def _hf_multimodal_cache_dir(pytestconfig: pytest.Config) -> Path:
+    return pytestconfig.cache.mkdir("luminal_hf_multimodal_v1")
+
+
+@pytest.fixture(scope="session")
+def hf_multimodal_image_path(
+    pytestconfig: pytest.Config, _hf_multimodal_cache_dir: Path
+) -> Path:
+    image_url = (
+        "https://huggingface.co/datasets/huggingface/documentation-images/"
+        "resolve/main/bee.jpg"
+    )
+    image_path = _hf_multimodal_cache_dir / "bee.jpg"
+    metadata_key = "luminal_python/hf_multimodal_image_v1"
+    metadata = {
+        "schema_version": 1,
+        "url": image_url,
+        "filename": image_path.name,
+    }
+
+    needs_download = pytestconfig.cache.get(metadata_key, None) != metadata or not (
+        image_path.is_file()
+    )
+    if not needs_download:
+        return image_path
+
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with urlopen(image_url, timeout=60) as response:
+            with tempfile.NamedTemporaryFile(
+                dir=image_path.parent, delete=False
+            ) as tmp_file:
+                tmp_path = Path(tmp_file.name)
+                while chunk := response.read(1024 * 1024):
+                    tmp_file.write(chunk)
+
+        assert tmp_path is not None
+        tmp_path.replace(image_path)
+    except Exception:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+    pytestconfig.cache.set(metadata_key, metadata)
+    return image_path
 
 
 @pytest.fixture(scope="session")
