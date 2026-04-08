@@ -4,8 +4,8 @@ import logging
 import os
 import tempfile
 
+from torch._logging import _internal as _torch_log_internal
 from torch._logging._internal import register_log, register_artifact
-from torch._logging import getArtifactLogger
 
 # Register with PyTorch's logging system BEFORE importing the Rust extension.
 # This ensures Python loggers are configured before pyo3-log queries their levels.
@@ -43,9 +43,11 @@ def _build_artifact_config():
     """
     config = {}
 
-    # Check luminal_hello_world artifact
-    hello_logger = getArtifactLogger("luminal", "luminal_hello_world")
-    if hello_logger.isEnabledFor(logging.DEBUG):
+    # Check luminal_hello_world artifact via torch._logging's authoritative state.
+    # We use log_state.is_artifact_enabled() rather than checking logger.isEnabledFor()
+    # because the latter walks the parent logger chain and gives false positives
+    # for off_by_default artifacts when the parent "luminal" logger is set to DEBUG.
+    if _torch_log_internal.log_state.is_artifact_enabled("luminal_hello_world"):
         config["luminal_hello_world"] = {
             "enabled": "true",
             "output_path": os.environ.get(

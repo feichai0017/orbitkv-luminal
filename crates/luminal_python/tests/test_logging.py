@@ -60,12 +60,12 @@ def test_luminal_artifact_registered():
 
 def test_programmatic_log_level_debug(device, capfd):
     """Setting luminal to DEBUG via set_logs should produce Rust trace output."""
-    torch._logging.set_logs(luminal=logging.DEBUG)
+    torch._logging.set_logs(modules={"luminal": logging.DEBUG})
     try:
         _compile_and_run(device)
     finally:
         # Reset to defaults
-        torch._logging.set_logs(luminal=logging.WARNING)
+        torch._logging.set_logs(modules={"luminal": logging.WARNING})
 
     # Rust trace/debug output goes through Python logging to stderr
     captured = capfd.readouterr()
@@ -75,7 +75,7 @@ def test_programmatic_log_level_debug(device, capfd):
 
 def test_programmatic_log_level_warning_suppresses(device, capfd):
     """Setting luminal to WARNING should suppress DEBUG/INFO output."""
-    torch._logging.set_logs(luminal=logging.WARNING)
+    torch._logging.set_logs(modules={"luminal": logging.WARNING})
     _compile_and_run(device)
     # At WARNING level, trace-level Rust output should not appear
 
@@ -83,15 +83,15 @@ def test_programmatic_log_level_warning_suppresses(device, capfd):
 def test_dynamic_level_change(device, capfd):
     """Log level changes after import should take effect on next compilation."""
     # Start at WARNING (quiet)
-    torch._logging.set_logs(luminal=logging.WARNING)
+    torch._logging.set_logs(modules={"luminal": logging.WARNING})
     _compile_and_run(device)
 
     # Switch to DEBUG (verbose) — should take effect immediately
-    torch._logging.set_logs(luminal=logging.DEBUG)
+    torch._logging.set_logs(modules={"luminal": logging.DEBUG})
     _compile_and_run(device)
 
     # Switch back to WARNING
-    torch._logging.set_logs(luminal=logging.WARNING)
+    torch._logging.set_logs(modules={"luminal": logging.WARNING})
     _compile_and_run(device)
 
     # The key assertion is that none of this crashes — level changes are respected
@@ -108,7 +108,7 @@ def test_artifact_off_by_default(device):
     os.environ["LUMINAL_HELLO_WORLD_PATH"] = output_path
     try:
         # Ensure artifact is not enabled (default state)
-        torch._logging.set_logs(luminal=logging.WARNING)
+        torch._logging.set_logs(modules={"luminal": logging.WARNING})
         _compile_and_run(device)
         assert not os.path.exists(output_path), (
             "Artifact file created even though luminal_hello_world was not enabled"
@@ -122,7 +122,7 @@ def test_artifact_programmatic_enable(device):
     output_path = os.path.join(tempfile.mkdtemp(), "hello_programmatic.txt")
     os.environ["LUMINAL_HELLO_WORLD_PATH"] = output_path
     try:
-        torch._logging.set_logs(luminal_hello_world=True)
+        torch._logging.set_logs(modules={"luminal_hello_world": True})
         _compile_and_run(device)
         assert os.path.exists(output_path), (
             f"Artifact file not created at {output_path}"
@@ -131,7 +131,7 @@ def test_artifact_programmatic_enable(device):
         assert "Hello from luminal" in content
     finally:
         os.environ.pop("LUMINAL_HELLO_WORLD_PATH", None)
-        torch._logging.set_logs(luminal_hello_world=False)
+        torch._logging.set_logs(modules={"luminal_hello_world": False})
         if os.path.exists(output_path):
             os.unlink(output_path)
 
@@ -142,20 +142,20 @@ def test_artifact_disable_after_enable(device):
     os.environ["LUMINAL_HELLO_WORLD_PATH"] = output_path
     try:
         # Enable, compile, file should exist
-        torch._logging.set_logs(luminal_hello_world=True)
+        torch._logging.set_logs(modules={"luminal_hello_world": True})
         _compile_and_run(device)
         assert os.path.exists(output_path)
         os.unlink(output_path)
 
         # Disable, compile again, file should NOT be recreated
-        torch._logging.set_logs(luminal_hello_world=False)
+        torch._logging.set_logs(modules={"luminal_hello_world": False})
         _compile_and_run(device)
         assert not os.path.exists(output_path), (
             "Artifact file recreated after disabling luminal_hello_world"
         )
     finally:
         os.environ.pop("LUMINAL_HELLO_WORLD_PATH", None)
-        torch._logging.set_logs(luminal_hello_world=False)
+        torch._logging.set_logs(modules={"luminal_hello_world": False})
         if os.path.exists(output_path):
             os.unlink(output_path)
 

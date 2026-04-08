@@ -72,12 +72,13 @@ fn process_onnx(
 }
 
 #[pymodule]
-fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn luminal(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Bridge Rust `log` crate → Python `logging` module via pyo3-log.
     // With tracing's `log` feature enabled, all tracing events flow through here.
-    // No caching: every log call checks the current Python logger level,
+    // Caching::Nothing: every log call checks the current Python logger level,
     // so runtime changes via torch._logging.set_logs() take effect immediately.
-    let _ = pyo3_log::Logger::default()
+    // This is acceptable because Rust code only runs during compilation, not inference.
+    let _ = pyo3_log::Logger::new(py, pyo3_log::Caching::Nothing)?
         .filter(log::LevelFilter::Trace)
         .install();
 
