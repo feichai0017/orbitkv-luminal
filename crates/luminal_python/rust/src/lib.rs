@@ -1,3 +1,4 @@
+mod artifacts;
 mod compiled_graph;
 mod dispatch;
 mod onnx_translator;
@@ -12,6 +13,7 @@ mod pt2_schema;
 mod pt2_util;
 mod translator;
 
+use artifacts::ArtifactConfig;
 use compiled_graph::CompiledGraph;
 use pt2_compiled_model::process_pt2;
 use pyo3::prelude::*;
@@ -46,14 +48,19 @@ fn validate_backend(backend: &str) -> PyResult<()> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (path, backend="native", search_iters=10, weight_device_ptrs=None))]
+#[pyo3(signature = (path, backend="native", search_iters=10, weight_device_ptrs=None, artifact_config=None))]
 fn process_onnx(
     path: &str,
     backend: &str,
     search_iters: usize,
     weight_device_ptrs: Option<HashMap<String, (u64, usize)>>,
+    artifact_config: Option<ArtifactConfig>,
 ) -> PyResult<CompiledGraph> {
     validate_backend(backend)?;
+
+    if let Some(ref config) = artifact_config {
+        artifacts::process_artifacts(config);
+    }
 
     onnx_translator::compile_onnx(
         path,
@@ -66,6 +73,14 @@ fn process_onnx(
 
 #[pymodule]
 fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Bridge Rust `log` crate → Python `logging` module via pyo3-log.
+    // With tracing's `log` feature enabled, all tracing events flow through here.
+    // No caching: every log call checks the current Python logger level,
+    // so runtime changes via torch._logging.set_logs() take effect immediately.
+    let _ = pyo3_log::Logger::default()
+        .filter(log::LevelFilter::Trace)
+        .install();
+
     m.add_function(wrap_pyfunction!(process_onnx, m)?)?;
     m.add_function(wrap_pyfunction!(process_pt2, m)?)?;
     m.add_class::<CompiledGraph>()?;

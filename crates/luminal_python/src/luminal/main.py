@@ -127,8 +127,14 @@ def _compile_onnx(gm, example_inputs, backend, opset=20):
             input_names=[f"input_{i}" for i in range(len(example_inputs))],
         )
 
+        from . import _build_artifact_config
+
+        artifact_config = _build_artifact_config()
         result = luminal.process_onnx(
-            tmp_path, backend, weight_device_ptrs=weight_device_ptrs
+            tmp_path,
+            backend,
+            weight_device_ptrs=weight_device_ptrs,
+            artifact_config=artifact_config or None,
         )
     finally:
         os.unlink(tmp_path)

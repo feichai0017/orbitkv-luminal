@@ -35,14 +35,19 @@ fn resolve_dim_sizes(
 }
 
 #[pyfunction]
-#[pyo3(signature = (pt2_path, weights_path, backend, search_iters, weight_device_ptrs=None))]
+#[pyo3(signature = (pt2_path, weights_path, backend, search_iters, weight_device_ptrs=None, artifact_config=None))]
 pub fn process_pt2(
     pt2_path: &str,
     weights_path: &str,
     backend: &str,
     search_iters: usize,
     weight_device_ptrs: Option<HashMap<String, (u64, usize)>>,
+    artifact_config: Option<crate::artifacts::ArtifactConfig>,
 ) -> PyResult<CompiledGraph> {
+    if let Some(ref config) = artifact_config {
+        crate::artifacts::process_artifacts(config);
+    }
+
     compile_pt2(
         pt2_path,
         weights_path,

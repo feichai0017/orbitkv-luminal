@@ -1,5 +1,22 @@
 """Luminal Python bindings - PyTorch backend using Luminal."""
 
+import logging
+import os
+import tempfile
+
+from torch._logging._internal import register_log, register_artifact
+from torch._logging import getArtifactLogger
+
+# Register with PyTorch's logging system BEFORE importing the Rust extension.
+# This ensures Python loggers are configured before pyo3-log queries their levels.
+register_log("luminal", ["luminal"])
+register_artifact(
+    "luminal_hello_world",
+    "Writes a hello-world file to demonstrate the artifact system",
+    visible=True,
+    off_by_default=True,
+)
+
 # Import Python components
 from .compiled_model import CompiledModel
 
@@ -13,6 +30,33 @@ from .cache_utils import _register_cache_serialization
 
 _register_cache_serialization()
 
+
+def _build_artifact_config():
+    """Query torch._logging for enabled luminal artifacts and build config dict.
+
+    Called at compilation time (not import time), so it respects runtime
+    changes made via torch._logging.set_logs().
+
+    Returns:
+        dict[str, dict[str, str]]: Artifact name -> key-value params.
+        Empty dict if no artifacts are enabled.
+    """
+    config = {}
+
+    # Check luminal_hello_world artifact
+    hello_logger = getArtifactLogger("luminal", "luminal_hello_world")
+    if hello_logger.isEnabledFor(logging.DEBUG):
+        config["luminal_hello_world"] = {
+            "enabled": "true",
+            "output_path": os.environ.get(
+                "LUMINAL_HELLO_WORLD_PATH",
+                os.path.join(tempfile.gettempdir(), "luminal_hello.txt"),
+            ),
+        }
+
+    return config
+
+
 # Re-export everything for clean package interface
 __all__ = [
     "CompiledModel",
@@ -20,4 +64,5 @@ __all__ = [
     "process_onnx",
     "CompiledGraph",
     "process_pt2",
+    "_build_artifact_config",
 ]

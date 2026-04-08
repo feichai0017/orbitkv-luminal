@@ -25,6 +25,10 @@ memmap2 = "0.9"
 safetensors = "0.5"
 half = "2"
 
+pyo3-log = "0.13"
+log = "0.4"
+tracing = { version = "0.1", features = ["log"] }
+
 [dependencies.pyo3]
 version = "0.28.0"
 features = ["abi3-py38"]

@@ -62,8 +62,12 @@ def _save_and_compile(ep_or_path, backend, search_iterations, original_weights=N
         )
 
         # Compile with device pointers — search uses actual weight memory (zero-copy)
+        from . import _build_artifact_config
+
+        artifact_config = _build_artifact_config()
         compiled = process_pt2(
-            pt2_path, "", backend, search_iterations, weight_device_ptrs
+            pt2_path, "", backend, search_iterations, weight_device_ptrs,
+            artifact_config=artifact_config or None,
         )
 
         # Load CPU weights after compilation
