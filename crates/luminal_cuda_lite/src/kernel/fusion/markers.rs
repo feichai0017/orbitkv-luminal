@@ -209,6 +209,16 @@ impl EgglogOp for FusionEnd {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
+        // Escape hatch: disable elementwise fusion entirely (one kernel
+        // launch per op). Useful when the cross-region buffer wiring goes
+        // wrong on a particular graph (e.g. fan-out of an op into both a
+        // fused region's interior and an unfused consumer in another
+        // region) — no FusionStart/FusionEnd nodes in the LLIR means no
+        // chance of the fusion subsystem leaving an external_input
+        // pointing at a non-buffer-bearing producer.
+        if std::env::var_os("LUMINAL_DISABLE_FUSION").is_some() {
+            return Vec::new();
+        }
         // Seven rule families build and extend FE-bracketed regions. Each
         // pair-fuse rule's LHS pattern matches *un-fused* `KernelX` ops; the
         // RHS produces `FusedX` variants in a different egglog sort, so the

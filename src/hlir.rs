@@ -2043,6 +2043,12 @@ impl EgglogOp for Gather {
     fn rewrites(&self) -> Vec<Rule> {
         // Gather inherits dtype from second input (data), not first (indexes).
         // Use a custom rule instead of the generic first-input propagation.
+        // **Must be in `dtype_prop` ruleset** — without it, Gather dtype
+        // propagation only advances one Gather per `(run)` iteration of
+        // the schedule, so deep stacks of Gathers (e.g. YOLO's per-conv
+        // padding gathers + per-concat make_contiguous gathers) leave the
+        // outermost Gathers with no dtype set, which in turn blocks the
+        // KernelGather kernel-rewrite from firing.
         let (_, kind_term) = self.sort().new_call();
         let e = v("__e");
         let indexes = v("__indexes");
@@ -2068,7 +2074,8 @@ impl EgglogOp for Gather {
                     ),
                 ))
                 .fact(eq(dty.clone(), dtype(data)))
-                .action(Action::Set(dtype(e), dty)),
+                .action(Action::Set(dtype(e), dty))
+                .ruleset("dtype_prop"),
         ]
     }
     fn extract<'a>(
@@ -2217,7 +2224,8 @@ impl EgglogOp for Scatter {
                     ),
                 ))
                 .fact(eq(dty.clone(), dtype(src)))
-                .action(Action::Set(dtype(e), dty)),
+                .action(Action::Set(dtype(e), dty))
+                .ruleset("dtype_prop"),
         ]
     }
     fn extract<'a>(
