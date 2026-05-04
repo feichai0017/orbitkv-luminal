@@ -8,8 +8,8 @@
 //!   YOLO_DEBUG_LAYERS=3 cargo run -p yolo_v11 --release --bin yolo_v11_egglog_debug
 //!   YOLO_DEBUG_LAYERS=4 cargo run -p yolo_v11 --release --bin yolo_v11_egglog_debug
 
-use std::time::Instant;
 use std::sync::Arc;
+use std::time::Instant;
 
 use luminal::egglog_utils::*;
 use luminal::op::EgglogOp;
@@ -83,7 +83,9 @@ fn main() {
 
     // Replicate build_search_space's egglog construction so we can call
     // run_egglog_with_report and see the per-rule statistics.
-    let mut ops: Vec<Arc<Box<dyn EgglogOp>>> = <(luminal_cuda_lite::kernel::Ops, luminal_cuda_lite::host::Ops) as IntoEgglogOp>::into_vec();
+    let mut ops: Vec<Arc<Box<dyn EgglogOp>>> =
+        <(luminal_cuda_lite::kernel::Ops, luminal_cuda_lite::host::Ops) as IntoEgglogOp>::into_vec(
+        );
     ops.extend(<luminal::hlir::HLIROps as IntoEgglogOp>::into_vec());
     println!("Op set size: {} ops", ops.len());
 
@@ -109,9 +111,12 @@ fn main() {
                 egraph.eclasses.len(),
                 egraph.roots.len()
             );
-            println!("\n=== EARLY stage took {:?} ===", report.early.total_time);
-            print_top_rules(&report.early, 30);
-            println!("\n=== FULL stage took {:?} ===", report.full.total_time);
+            println!("\n=== PHASES took {:?} ===", report.total_time);
+            print_phase_summary(&report, 30);
+            println!(
+                "\n=== AGGREGATED RULES took {:?} ===",
+                report.full.total_time
+            );
             print_top_rules(&report.full, 30);
 
             // Report eclass-label statistics: which op kinds have how many
@@ -148,8 +153,15 @@ fn print_eclass_stats(egraph: &SerializedEGraph) {
             continue;
         }
         // Identify HLIR-only eclasses (no Kernel*/cuBLAS alternative)
-        let has_kernel_alt = labels.iter().any(|l| l.contains("Kernel") || l.contains("cublas") || l.contains("Tile"));
-        let has_hlir = labels.iter().any(|l| !l.contains("Kernel") && !l.contains("cublas") && !l.contains("Tile") && !l.contains("[..."));
+        let has_kernel_alt = labels
+            .iter()
+            .any(|l| l.contains("Kernel") || l.contains("cublas") || l.contains("Tile"));
+        let has_hlir = labels.iter().any(|l| {
+            !l.contains("Kernel")
+                && !l.contains("cublas")
+                && !l.contains("Tile")
+                && !l.contains("[...")
+        });
         if has_hlir && !has_kernel_alt {
             // Only HLIR ops, no kernel alternative — would cascade if cleaned up
             for l in &labels {
@@ -167,6 +179,18 @@ fn print_eclass_stats(egraph: &SerializedEGraph) {
     println!("Total HLIR-only eclasses: {}", no_alt.len());
 }
 
+fn print_phase_summary(report: &EgglogRunReport, n: usize) {
+    let mut phases = report.phases.iter().collect::<Vec<_>>();
+    phases.sort_by_key(|phase| std::cmp::Reverse(phase.total_time));
+    println!("Top phases by wall time:");
+    for phase in phases.into_iter().take(n) {
+        let tuple_delta = phase.tuples_after as isize - phase.tuples_before as isize;
+        println!(
+            "  {:>10?}  {:+8} tuples  {:>3} iterations  updated={:<5}  {}",
+            phase.total_time, tuple_delta, phase.iterations, phase.updated, phase.name
+        );
+    }
+}
 
 fn print_top_rules(report: &EgglogStageReport, n: usize) {
     let mut entries: Vec<(String, usize, std::time::Duration)> = report
@@ -203,5 +227,9 @@ fn print_top_rules(report: &EgglogStageReport, n: usize) {
 // Make CudaRuntime referenced so the Runtime::Ops are linked in.
 #[allow(dead_code)]
 fn _force_link() -> CudaRuntime {
-    CudaRuntime::initialize(luminal_cuda_lite::cudarc::driver::CudaContext::new(0).unwrap().default_stream())
+    CudaRuntime::initialize(
+        luminal_cuda_lite::cudarc::driver::CudaContext::new(0)
+            .unwrap()
+            .default_stream(),
+    )
 }

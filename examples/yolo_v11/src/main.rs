@@ -1,7 +1,15 @@
 mod model;
 
-use std::{fs::File, io::Read, path::PathBuf, time::Instant};
+use std::{
+    env,
+    fs::{self, File},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    process,
+    time::Instant,
+};
 
+use image::{ImageBuffer, ImageReader, Rgb, RgbImage};
 use luminal::prelude::*;
 use luminal_cuda_lite::{cudarc::driver::CudaContext, runtime::CudaRuntime};
 use luminal_tracing::*;
@@ -9,6 +17,34 @@ use model::*;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 const ARTIFACT_DIR: &str = "examples/yolo_v11/artifacts";
+const CONF_THRES: f32 = 0.25;
+const IOU_THRES: f32 = 0.45;
+const MAX_DET: usize = 300;
+
+#[derive(Debug, Clone, Copy)]
+struct LetterboxMeta {
+    orig_width: u32,
+    orig_height: u32,
+    ratio: f32,
+    pad_x: f32,
+    pad_y: f32,
+}
+
+#[derive(Debug, Clone)]
+struct Detection {
+    score: f32,
+    class_id: usize,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+}
+
+#[derive(Debug, Clone)]
+struct CliArgs {
+    image_path: Option<PathBuf>,
+    annotated_path: PathBuf,
+}
 
 fn read_f32_bin(path: &PathBuf) -> Vec<f32> {
     let mut f = File::open(path).expect("Failed to open binary file");
@@ -22,6 +58,198 @@ fn read_f32_bin(path: &PathBuf) -> Vec<f32> {
         data.push(f32::from_le_bytes(chunk));
     }
     data
+}
+
+fn write_f32_bin(path: &Path, data: &[f32]) {
+    let mut f =
+        File::create(path).unwrap_or_else(|e| panic!("Failed to create {}: {e}", path.display()));
+    for value in data {
+        f.write_all(&value.to_le_bytes())
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", path.display()));
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn print_usage() {
+    println!(
+        "Usage: cargo run --release -p yolo_v11 --bin yolo_v11 -- [--input <image.jpg|image.png>] [--output <annotated.png>]\n\
+         \n\
+         Positional form is also supported:\n\
+         cargo run --release -p yolo_v11 --bin yolo_v11 -- <image.jpg|image.png> <annotated.png>\n\
+         \n\
+         If no image is supplied, the example uses examples/yolo_v11/artifacts/bus.jpg.\n\
+         Set YOLO_INPUT_BIN=1 YOLO_COMPARE_REF=1 to run the exact reference_input.bin regression.\n\
+         Set YOLO_DUMP_INPUT=/tmp/input.bin to write the Rust-preprocessed input tensor."
+    );
+}
+
+fn cli_args(artifact_dir: &Path) -> CliArgs {
+    let mut image_path = None;
+    let mut annotated_path = None;
+    let mut positionals = Vec::new();
+    let mut args = env::args_os().skip(1);
+
+    while let Some(arg) = args.next() {
+        let arg_str = arg.to_string_lossy();
+        match arg_str.as_ref() {
+            "-h" | "--help" => {
+                print_usage();
+                process::exit(0);
+            }
+            "--input" | "--image" => {
+                image_path = Some(next_cli_path(&mut args, arg_str.as_ref()));
+            }
+            "--output" | "-o" => {
+                annotated_path = Some(next_cli_path(&mut args, arg_str.as_ref()));
+            }
+            "--" => {
+                positionals.extend(args.map(PathBuf::from));
+                break;
+            }
+            _ if arg_str.starts_with('-') => panic!("Unknown argument: {arg_str}"),
+            _ => positionals.push(PathBuf::from(arg)),
+        }
+    }
+
+    if let Some(positional) = positionals.first() {
+        if image_path.is_some() {
+            panic!("Input image was provided both positionally and with --input");
+        }
+        image_path = Some(positional.clone());
+    }
+    if let Some(positional) = positionals.get(1) {
+        if annotated_path.is_some() {
+            panic!("Output image was provided both positionally and with --output");
+        }
+        annotated_path = Some(positional.clone());
+    }
+    if positionals.len() > 2 {
+        panic!("Too many positional arguments; expected at most <input> <output>");
+    }
+
+    let image_path = image_path.or_else(|| {
+        let default_image = artifact_dir.join("bus.jpg");
+        default_image.exists().then_some(default_image)
+    });
+    let annotated_path = annotated_path.unwrap_or_else(|| artifact_dir.join("annotated.png"));
+
+    CliArgs {
+        image_path,
+        annotated_path,
+    }
+}
+
+fn next_cli_path(args: &mut impl Iterator<Item = std::ffi::OsString>, flag: &str) -> PathBuf {
+    args.next()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("{flag} requires a path"))
+}
+
+fn preprocess_image(path: &Path) -> (Vec<f32>, LetterboxMeta) {
+    let rgb = ImageReader::open(path)
+        .unwrap_or_else(|e| panic!("Failed to open image {}: {e}", path.display()))
+        .decode()
+        .unwrap_or_else(|e| panic!("Failed to decode image {}: {e}", path.display()))
+        .to_rgb8();
+    let (orig_width, orig_height) = rgb.dimensions();
+    assert!(
+        orig_width > 0 && orig_height > 0,
+        "image must have non-zero dimensions"
+    );
+
+    let img_size = IMG_SIZE as u32;
+    let ratio = (img_size as f32 / orig_height as f32).min(img_size as f32 / orig_width as f32);
+    let resized_width = ((orig_width as f32 * ratio).round() as u32).max(1);
+    let resized_height = ((orig_height as f32 * ratio).round() as u32).max(1);
+    let resized = resize_rgb_inter_linear(&rgb, resized_width, resized_height);
+
+    let dw = img_size.saturating_sub(resized_width) as f32;
+    let dh = img_size.saturating_sub(resized_height) as f32;
+    let left = ((dw / 2.0) - 0.1).round().max(0.0) as u32;
+    let top = ((dh / 2.0) - 0.1).round().max(0.0) as u32;
+
+    let mut letterboxed: RgbImage =
+        ImageBuffer::from_pixel(img_size, img_size, Rgb([114, 114, 114]));
+    image::imageops::replace(&mut letterboxed, &resized, left.into(), top.into());
+
+    let plane = IMG_SIZE * IMG_SIZE;
+    let mut data = vec![0.0_f32; 3 * plane];
+    for y in 0..IMG_SIZE {
+        for x in 0..IMG_SIZE {
+            let p = letterboxed.get_pixel(x as u32, y as u32);
+            let idx = y * IMG_SIZE + x;
+            data[idx] = p[0] as f32 / 255.0;
+            data[plane + idx] = p[1] as f32 / 255.0;
+            data[2 * plane + idx] = p[2] as f32 / 255.0;
+        }
+    }
+
+    (
+        data,
+        LetterboxMeta {
+            orig_width,
+            orig_height,
+            ratio,
+            pad_x: left as f32,
+            pad_y: top as f32,
+        },
+    )
+}
+
+fn resize_rgb_inter_linear(src: &RgbImage, dst_width: u32, dst_height: u32) -> RgbImage {
+    let (src_width, src_height) = src.dimensions();
+    assert!(src_width > 0 && src_height > 0);
+    if src_width == dst_width && src_height == dst_height {
+        return src.clone();
+    }
+
+    let scale_x = src_width as f32 / dst_width as f32;
+    let scale_y = src_height as f32 / dst_height as f32;
+    let mut dst = RgbImage::new(dst_width, dst_height);
+
+    for y in 0..dst_height {
+        let (y0, y1, wy) = resize_axis(y, scale_y, src_height);
+        for x in 0..dst_width {
+            let (x0, x1, wx) = resize_axis(x, scale_x, src_width);
+            let p00 = src.get_pixel(x0, y0);
+            let p01 = src.get_pixel(x1, y0);
+            let p10 = src.get_pixel(x0, y1);
+            let p11 = src.get_pixel(x1, y1);
+            let mut out = [0u8; 3];
+            for c in 0..3 {
+                let top = p00[c] as f32 * (1.0 - wx) + p01[c] as f32 * wx;
+                let bottom = p10[c] as f32 * (1.0 - wx) + p11[c] as f32 * wx;
+                out[c] = (top * (1.0 - wy) + bottom * wy).round().clamp(0.0, 255.0) as u8;
+            }
+            dst.put_pixel(x, y, Rgb(out));
+        }
+    }
+
+    dst
+}
+
+fn resize_axis(dst_index: u32, scale: f32, src_len: u32) -> (u32, u32, f32) {
+    if src_len == 1 {
+        return (0, 0, 0.0);
+    }
+
+    let src = (dst_index as f32 + 0.5) * scale - 0.5;
+    if src < 0.0 {
+        return (0, 0, 0.0);
+    }
+
+    let mut i0 = src.floor() as u32;
+    let mut weight = src - i0 as f32;
+    if i0 >= src_len - 1 {
+        i0 = src_len - 2;
+        weight = 1.0;
+    }
+    (i0, i0 + 1, weight)
 }
 
 fn main() {
@@ -46,12 +274,55 @@ fn main() {
     println!("Using artifact directory: {}", artifact_dir.display());
 
     let weights_path = artifact_dir.join("weights.safetensors");
-    let input_path = artifact_dir.join("reference_input.bin");
+    let input_bin_path = artifact_dir.join("reference_input.bin");
     let output_path = artifact_dir.join("reference_output.bin");
+    let use_input_bin = env_flag("YOLO_INPUT_BIN");
+    let compare_reference = env_flag("YOLO_COMPARE_REF");
+    let cli = cli_args(&artifact_dir);
+    let image_path = if use_input_bin {
+        None
+    } else {
+        cli.image_path.clone()
+    };
 
-    assert!(weights_path.exists(), "Missing {:?}; run python/reference.py first", weights_path);
-    assert!(input_path.exists(), "Missing {:?}; run python/reference.py first", input_path);
-    assert!(output_path.exists(), "Missing {:?}; run python/reference.py first", output_path);
+    assert!(
+        weights_path.exists(),
+        "Missing {:?}; run python/reference.py first",
+        weights_path
+    );
+
+    let (img_data, letterbox_meta) = if let Some(path) = image_path.as_deref() {
+        assert!(
+            path.exists(),
+            "Image path does not exist: {}",
+            path.display()
+        );
+        println!("Input image: {}", path.display());
+        let (data, meta) = preprocess_image(path);
+        println!(
+            "  original={}x{} letterbox_ratio={:.6} pad=({:.0}, {:.0})",
+            meta.orig_width, meta.orig_height, meta.ratio, meta.pad_x, meta.pad_y
+        );
+        (data, Some(meta))
+    } else {
+        assert!(
+            input_bin_path.exists(),
+            "Missing {:?}; run python/reference.py first or pass an image path",
+            input_bin_path
+        );
+        println!("Input tensor: {}", input_bin_path.display());
+        (read_f32_bin(&input_bin_path), None)
+    };
+    let expected_input = 1 * 3 * IMG_SIZE * IMG_SIZE;
+    assert_eq!(img_data.len(), expected_input, "input size mismatch");
+    if let Some(path) = env::var_os("YOLO_DUMP_INPUT") {
+        let path = PathBuf::from(path);
+        write_f32_bin(&path, &img_data);
+        println!("Wrote preprocessed input tensor: {}", path.display());
+    }
+    if env_flag("YOLO_PREPROCESS_ONLY") {
+        return;
+    }
 
     let ctx = CudaContext::new(0).unwrap();
     let stream = ctx.default_stream();
@@ -77,11 +348,7 @@ fn main() {
     runtime.set_data(yolo.detect.strides, strides_flat.clone());
     runtime.set_data(yolo.detect.dfl_weight, dfl_weight());
 
-    // Read input image
-    let img_data = read_f32_bin(&input_path);
-    let expected_input = 1 * 3 * IMG_SIZE * IMG_SIZE;
-    assert_eq!(img_data.len(), expected_input, "input size mismatch");
-    runtime.set_data(img, img_data);
+    runtime.set_data(img, img_data.clone());
 
     println!("Compiling (search_graphs={search_graphs})...");
     let t0 = Instant::now();
@@ -92,7 +359,6 @@ fn main() {
     runtime.set_data(yolo.detect.anchors, anchors_flat);
     runtime.set_data(yolo.detect.strides, strides_flat);
     runtime.set_data(yolo.detect.dfl_weight, dfl_weight());
-    let img_data = read_f32_bin(&input_path);
     runtime.set_data(img, img_data);
 
     println!("Executing...");
@@ -116,11 +382,32 @@ fn main() {
     );
     let out = &out[..expected_out_len];
 
-    // Load reference output
-    let ref_out = read_f32_bin(&output_path);
-    assert_eq!(ref_out.len(), expected_out_len, "reference output size mismatch");
+    if compare_reference {
+        compare_reference_output(out, &output_path, expected_out_len);
+    }
 
-    // Compute element-wise difference statistics
+    let detections = nms_detections(out, total_anchors, CONF_THRES, IOU_THRES, MAX_DET);
+    print_detections(&detections, letterbox_meta);
+
+    if let (Some(input_image), Some(meta)) = (image_path.as_deref(), letterbox_meta) {
+        save_annotated_image(input_image, &cli.annotated_path, &detections, meta);
+        println!("Wrote annotated image: {}", cli.annotated_path.display());
+    }
+}
+
+fn compare_reference_output(out: &[f32], output_path: &PathBuf, expected_out_len: usize) {
+    assert!(
+        output_path.exists(),
+        "Missing {:?}; run python/reference.py first",
+        output_path
+    );
+    let ref_out = read_f32_bin(output_path);
+    assert_eq!(
+        ref_out.len(),
+        expected_out_len,
+        "reference output size mismatch"
+    );
+
     let (mut max_abs, mut sum_abs) = (0.0_f32, 0.0_f64);
     let mut argmax_idx = 0usize;
     for (i, (a, b)) in out.iter().zip(ref_out.iter()).enumerate() {
@@ -136,17 +423,371 @@ fn main() {
         "Comparison vs Python reference: max_abs={:.6} mean_abs={:.6e}  (worst at idx {} our={} ref={})",
         max_abs, mean_abs, argmax_idx, out[argmax_idx], ref_out[argmax_idx]
     );
-
-    // Show top detections (greedy max class per anchor)
-    print_top_detections(out, total_anchors);
 }
 
-fn print_top_detections(out: &[f32], total_anchors: usize) {
-    // Layout: (1, NO, A) flat. We iterate columns (anchors).
+fn print_detections(detections: &[Detection], meta: Option<LetterboxMeta>) {
+    println!(
+        "Detections after NMS (conf >= {:.2}, iou <= {:.2}):",
+        CONF_THRES, IOU_THRES
+    );
+    if detections.is_empty() {
+        println!("  none");
+        return;
+    }
+
+    let coco_names = coco_names();
+    for det in detections.iter().take(20) {
+        let name = coco_names.get(det.class_id).copied().unwrap_or("?");
+        let (x1, y1, x2, y2) = if let Some(meta) = meta {
+            map_to_original(det.x1, det.y1, det.x2, det.y2, meta)
+        } else {
+            (det.x1, det.y1, det.x2, det.y2)
+        };
+        println!(
+            "  conf={:.3} class={:>14}  xyxy=[{:.1}, {:.1}, {:.1}, {:.1}]",
+            det.score, name, x1, y1, x2, y2
+        );
+    }
+}
+
+fn save_annotated_image(
+    input_path: &Path,
+    output_path: &Path,
+    detections: &[Detection],
+    meta: LetterboxMeta,
+) {
+    let mut image = ImageReader::open(input_path)
+        .unwrap_or_else(|e| panic!("Failed to open image {}: {e}", input_path.display()))
+        .decode()
+        .unwrap_or_else(|e| panic!("Failed to decode image {}: {e}", input_path.display()))
+        .to_rgb8();
+    let names = coco_names();
+    let thickness = ((image.width().min(image.height()) as f32 / 320.0).round() as u32).max(2);
+
+    for det in detections.iter().take(MAX_DET) {
+        let (x1, y1, x2, y2) = map_to_original(det.x1, det.y1, det.x2, det.y2, meta);
+        let color = class_color(det.class_id);
+        draw_rect(&mut image, x1, y1, x2, y2, color, thickness);
+        let name = names.get(det.class_id).copied().unwrap_or("?");
+        draw_label(
+            &mut image,
+            x1,
+            y1,
+            &format!("{name} {:.2}", det.score),
+            color,
+        );
+    }
+
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .unwrap_or_else(|e| panic!("Failed to create {}: {e}", parent.display()));
+    }
+    image.save(output_path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to write annotated image {}: {e}",
+            output_path.display()
+        )
+    });
+}
+
+fn class_color(class_id: usize) -> Rgb<u8> {
+    const COLORS: [[u8; 3]; 20] = [
+        [220, 38, 38],
+        [37, 99, 235],
+        [22, 163, 74],
+        [217, 119, 6],
+        [147, 51, 234],
+        [8, 145, 178],
+        [219, 39, 119],
+        [101, 163, 13],
+        [234, 88, 12],
+        [79, 70, 229],
+        [15, 118, 110],
+        [190, 18, 60],
+        [124, 58, 237],
+        [202, 138, 4],
+        [2, 132, 199],
+        [132, 204, 22],
+        [249, 115, 22],
+        [168, 85, 247],
+        [20, 184, 166],
+        [244, 63, 94],
+    ];
+    Rgb(COLORS[class_id % COLORS.len()])
+}
+
+fn draw_rect(
+    image: &mut RgbImage,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    color: Rgb<u8>,
+    thickness: u32,
+) {
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let left = x1.min(x2).floor().clamp(0.0, (width - 1) as f32) as u32;
+    let right = x1.max(x2).ceil().clamp(0.0, (width - 1) as f32) as u32;
+    let top = y1.min(y2).floor().clamp(0.0, (height - 1) as f32) as u32;
+    let bottom = y1.max(y2).ceil().clamp(0.0, (height - 1) as f32) as u32;
+    if left > right || top > bottom {
+        return;
+    }
+
+    for t in 0..thickness {
+        if top + t <= bottom {
+            draw_hline(image, left, right, top + t, color);
+        }
+        if bottom >= t && bottom - t >= top {
+            draw_hline(image, left, right, bottom - t, color);
+        }
+        if left + t <= right {
+            draw_vline(image, left + t, top, bottom, color);
+        }
+        if right >= t && right - t >= left {
+            draw_vline(image, right - t, top, bottom, color);
+        }
+    }
+}
+
+fn draw_hline(image: &mut RgbImage, x1: u32, x2: u32, y: u32, color: Rgb<u8>) {
+    if y >= image.height() {
+        return;
+    }
+    let start = x1.min(x2).min(image.width().saturating_sub(1));
+    let end = x1.max(x2).min(image.width().saturating_sub(1));
+    for x in start..=end {
+        image.put_pixel(x, y, color);
+    }
+}
+
+fn draw_vline(image: &mut RgbImage, x: u32, y1: u32, y2: u32, color: Rgb<u8>) {
+    if x >= image.width() {
+        return;
+    }
+    let start = y1.min(y2).min(image.height().saturating_sub(1));
+    let end = y1.max(y2).min(image.height().saturating_sub(1));
+    for y in start..=end {
+        image.put_pixel(x, y, color);
+    }
+}
+
+fn draw_label(image: &mut RgbImage, box_x: f32, box_y: f32, text: &str, color: Rgb<u8>) {
+    let scale = ((image.width().min(image.height()) as f32 / 500.0).round() as u32).max(2);
+    let text = text.to_ascii_uppercase();
+    let text_width = text_pixel_width(&text, scale);
+    let text_height = 7 * scale;
+    let pad = 3 * scale;
+    let label_width = text_width + pad * 2;
+    let label_height = text_height + pad * 2;
+
+    let mut x = box_x.floor().max(0.0) as u32;
+    if x + label_width >= image.width() {
+        x = image.width().saturating_sub(label_width + 1);
+    }
+
+    let box_top = box_y.floor().max(0.0) as u32;
+    let y = if box_top > label_height {
+        box_top - label_height
+    } else {
+        box_top.min(image.height().saturating_sub(label_height + 1))
+    };
+
+    fill_rect(image, x, y, label_width, label_height, color);
+    draw_text_5x7(image, x + pad, y + pad, &text, Rgb([255, 255, 255]), scale);
+}
+
+fn fill_rect(image: &mut RgbImage, x: u32, y: u32, width: u32, height: u32, color: Rgb<u8>) {
+    let max_x = (x + width).min(image.width());
+    let max_y = (y + height).min(image.height());
+    for py in y..max_y {
+        for px in x..max_x {
+            image.put_pixel(px, py, color);
+        }
+    }
+}
+
+fn text_pixel_width(text: &str, scale: u32) -> u32 {
+    let mut width = 0;
+    for ch in text.chars() {
+        width += if ch == ' ' { 3 * scale } else { 5 * scale };
+        width += scale;
+    }
+    width.saturating_sub(scale)
+}
+
+fn draw_text_5x7(image: &mut RgbImage, x: u32, y: u32, text: &str, color: Rgb<u8>, scale: u32) {
+    let mut cursor = x;
+    for ch in text.chars() {
+        if ch == ' ' {
+            cursor += 4 * scale;
+            continue;
+        }
+        draw_glyph_5x7(image, cursor, y, ch, color, scale);
+        cursor += 6 * scale;
+    }
+}
+
+fn draw_glyph_5x7(image: &mut RgbImage, x: u32, y: u32, ch: char, color: Rgb<u8>, scale: u32) {
+    let Some(rows) = glyph_5x7(ch) else {
+        return;
+    };
+    for (row_idx, row) in rows.iter().enumerate() {
+        for (col_idx, pixel) in row.as_bytes().iter().enumerate() {
+            if *pixel != b'1' {
+                continue;
+            }
+            let px = x + col_idx as u32 * scale;
+            let py = y + row_idx as u32 * scale;
+            fill_rect(image, px, py, scale, scale, color);
+        }
+    }
+}
+
+fn glyph_5x7(ch: char) -> Option<[&'static str; 7]> {
+    Some(match ch {
+        'A' => [
+            "01110", "10001", "10001", "11111", "10001", "10001", "10001",
+        ],
+        'B' => [
+            "11110", "10001", "10001", "11110", "10001", "10001", "11110",
+        ],
+        'C' => [
+            "01111", "10000", "10000", "10000", "10000", "10000", "01111",
+        ],
+        'D' => [
+            "11110", "10001", "10001", "10001", "10001", "10001", "11110",
+        ],
+        'E' => [
+            "11111", "10000", "10000", "11110", "10000", "10000", "11111",
+        ],
+        'F' => [
+            "11111", "10000", "10000", "11110", "10000", "10000", "10000",
+        ],
+        'G' => [
+            "01111", "10000", "10000", "10011", "10001", "10001", "01111",
+        ],
+        'H' => [
+            "10001", "10001", "10001", "11111", "10001", "10001", "10001",
+        ],
+        'I' => [
+            "11111", "00100", "00100", "00100", "00100", "00100", "11111",
+        ],
+        'J' => [
+            "00111", "00010", "00010", "00010", "00010", "10010", "01100",
+        ],
+        'K' => [
+            "10001", "10010", "10100", "11000", "10100", "10010", "10001",
+        ],
+        'L' => [
+            "10000", "10000", "10000", "10000", "10000", "10000", "11111",
+        ],
+        'M' => [
+            "10001", "11011", "10101", "10101", "10001", "10001", "10001",
+        ],
+        'N' => [
+            "10001", "11001", "10101", "10011", "10001", "10001", "10001",
+        ],
+        'O' => [
+            "01110", "10001", "10001", "10001", "10001", "10001", "01110",
+        ],
+        'P' => [
+            "11110", "10001", "10001", "11110", "10000", "10000", "10000",
+        ],
+        'Q' => [
+            "01110", "10001", "10001", "10001", "10101", "10010", "01101",
+        ],
+        'R' => [
+            "11110", "10001", "10001", "11110", "10100", "10010", "10001",
+        ],
+        'S' => [
+            "01111", "10000", "10000", "01110", "00001", "00001", "11110",
+        ],
+        'T' => [
+            "11111", "00100", "00100", "00100", "00100", "00100", "00100",
+        ],
+        'U' => [
+            "10001", "10001", "10001", "10001", "10001", "10001", "01110",
+        ],
+        'V' => [
+            "10001", "10001", "10001", "10001", "10001", "01010", "00100",
+        ],
+        'W' => [
+            "10001", "10001", "10001", "10101", "10101", "10101", "01010",
+        ],
+        'X' => [
+            "10001", "10001", "01010", "00100", "01010", "10001", "10001",
+        ],
+        'Y' => [
+            "10001", "10001", "01010", "00100", "00100", "00100", "00100",
+        ],
+        'Z' => [
+            "11111", "00001", "00010", "00100", "01000", "10000", "11111",
+        ],
+        '0' => [
+            "01110", "10001", "10011", "10101", "11001", "10001", "01110",
+        ],
+        '1' => [
+            "00100", "01100", "00100", "00100", "00100", "00100", "01110",
+        ],
+        '2' => [
+            "01110", "10001", "00001", "00010", "00100", "01000", "11111",
+        ],
+        '3' => [
+            "11110", "00001", "00001", "01110", "00001", "00001", "11110",
+        ],
+        '4' => [
+            "00010", "00110", "01010", "10010", "11111", "00010", "00010",
+        ],
+        '5' => [
+            "11111", "10000", "10000", "11110", "00001", "00001", "11110",
+        ],
+        '6' => [
+            "01110", "10000", "10000", "11110", "10001", "10001", "01110",
+        ],
+        '7' => [
+            "11111", "00001", "00010", "00100", "01000", "01000", "01000",
+        ],
+        '8' => [
+            "01110", "10001", "10001", "01110", "10001", "10001", "01110",
+        ],
+        '9' => [
+            "01110", "10001", "10001", "01111", "00001", "00001", "01110",
+        ],
+        '.' => [
+            "00000", "00000", "00000", "00000", "00000", "01100", "01100",
+        ],
+        '-' => [
+            "00000", "00000", "00000", "11111", "00000", "00000", "00000",
+        ],
+        '/' => [
+            "00001", "00010", "00010", "00100", "01000", "01000", "10000",
+        ],
+        '?' => [
+            "01110", "10001", "00001", "00010", "00100", "00000", "00100",
+        ],
+        _ => return None,
+    })
+}
+
+fn nms_detections(
+    out: &[f32],
+    total_anchors: usize,
+    conf_thres: f32,
+    iou_thres: f32,
+    max_det: usize,
+) -> Vec<Detection> {
     let nc = NC;
-    let mut detections = Vec::new();
+    let mut candidates = Vec::new();
     for a in 0..total_anchors {
-        // box xywh
         let cx = out[0 * total_anchors + a];
         let cy = out[1 * total_anchors + a];
         let w = out[2 * total_anchors + a];
@@ -160,39 +801,141 @@ fn print_top_detections(out: &[f32], total_anchors: usize) {
                 best_class = c;
             }
         }
-        if best_score > 0.25 {
-            detections.push((best_score, best_class, cx, cy, w, h));
+        if best_score >= conf_thres {
+            candidates.push(Detection {
+                score: best_score,
+                class_id: best_class,
+                x1: cx - w / 2.0,
+                y1: cy - h / 2.0,
+                x2: cx + w / 2.0,
+                y2: cy + h / 2.0,
+            });
         }
     }
-    detections.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-    println!("Top {} pre-NMS detections (conf > 0.25):", detections.len().min(10));
-    let coco_names = coco_names();
-    for det in detections.iter().take(10) {
-        let (s, c, cx, cy, w, h) = *det;
-        let name = coco_names.get(c).copied().unwrap_or("?");
-        let x1 = cx - w / 2.0;
-        let y1 = cy - h / 2.0;
-        let x2 = cx + w / 2.0;
-        let y2 = cy + h / 2.0;
-        println!(
-            "  conf={:.3} class={:>14}  xyxy=[{:.1}, {:.1}, {:.1}, {:.1}]",
-            s, name, x1, y1, x2, y2
-        );
+
+    candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    let mut keep: Vec<Detection> = Vec::new();
+    'candidate: for candidate in candidates {
+        for selected in &keep {
+            if candidate.class_id == selected.class_id && box_iou(&candidate, selected) > iou_thres
+            {
+                continue 'candidate;
+            }
+        }
+        keep.push(candidate);
+        if keep.len() >= max_det {
+            break;
+        }
     }
+    keep
+}
+
+fn box_iou(a: &Detection, b: &Detection) -> f32 {
+    let ix1 = a.x1.max(b.x1);
+    let iy1 = a.y1.max(b.y1);
+    let ix2 = a.x2.min(b.x2);
+    let iy2 = a.y2.min(b.y2);
+    let intersection = (ix2 - ix1).max(0.0) * (iy2 - iy1).max(0.0);
+    let a_area = (a.x2 - a.x1).max(0.0) * (a.y2 - a.y1).max(0.0);
+    let b_area = (b.x2 - b.x1).max(0.0) * (b.y2 - b.y1).max(0.0);
+    intersection / (a_area + b_area - intersection + f32::EPSILON)
+}
+
+fn map_to_original(
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    meta: LetterboxMeta,
+) -> (f32, f32, f32, f32) {
+    let ox1 = ((x1 - meta.pad_x) / meta.ratio).clamp(0.0, meta.orig_width as f32);
+    let oy1 = ((y1 - meta.pad_y) / meta.ratio).clamp(0.0, meta.orig_height as f32);
+    let ox2 = ((x2 - meta.pad_x) / meta.ratio).clamp(0.0, meta.orig_width as f32);
+    let oy2 = ((y2 - meta.pad_y) / meta.ratio).clamp(0.0, meta.orig_height as f32);
+    (ox1, oy1, ox2, oy2)
 }
 
 fn coco_names() -> [&'static str; NC] {
     [
-        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
-        "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
-        "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
-        "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis",
-        "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
-        "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife",
-        "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
-        "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed",
-        "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-        "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
-        "scissors", "teddy bear", "hair drier", "toothbrush",
+        "person",
+        "bicycle",
+        "car",
+        "motorcycle",
+        "airplane",
+        "bus",
+        "train",
+        "truck",
+        "boat",
+        "traffic light",
+        "fire hydrant",
+        "stop sign",
+        "parking meter",
+        "bench",
+        "bird",
+        "cat",
+        "dog",
+        "horse",
+        "sheep",
+        "cow",
+        "elephant",
+        "bear",
+        "zebra",
+        "giraffe",
+        "backpack",
+        "umbrella",
+        "handbag",
+        "tie",
+        "suitcase",
+        "frisbee",
+        "skis",
+        "snowboard",
+        "sports ball",
+        "kite",
+        "baseball bat",
+        "baseball glove",
+        "skateboard",
+        "surfboard",
+        "tennis racket",
+        "bottle",
+        "wine glass",
+        "cup",
+        "fork",
+        "knife",
+        "spoon",
+        "bowl",
+        "banana",
+        "apple",
+        "sandwich",
+        "orange",
+        "broccoli",
+        "carrot",
+        "hot dog",
+        "pizza",
+        "donut",
+        "cake",
+        "chair",
+        "couch",
+        "potted plant",
+        "bed",
+        "dining table",
+        "toilet",
+        "tv",
+        "laptop",
+        "mouse",
+        "remote",
+        "keyboard",
+        "cell phone",
+        "microwave",
+        "oven",
+        "toaster",
+        "sink",
+        "refrigerator",
+        "book",
+        "clock",
+        "vase",
+        "scissors",
+        "teddy bear",
+        "hair drier",
+        "toothbrush",
     ]
 }

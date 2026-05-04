@@ -35,6 +35,19 @@ pub fn make_contiguous(t: GraphTensor) -> GraphTensor {
     gathered
 }
 
+fn canonicalize_static_shape(mut t: GraphTensor) -> GraphTensor {
+    for dim in &mut t.shape.dims {
+        *dim = dim
+            .to_usize()
+            .map(Expression::from)
+            .unwrap_or_else(|| dim.simplify());
+    }
+    for stride in &mut t.shape.strides {
+        *stride = stride.simplify();
+    }
+    t
+}
+
 pub const NC: usize = 80;
 pub const REG_MAX: usize = 16;
 pub const NO: usize = NC + REG_MAX * 4; // 84
@@ -61,12 +74,28 @@ pub struct Conv {
 }
 
 impl Conv {
-    pub fn new(name: &str, c_in: usize, c_out: usize, k: usize, s: usize, p: usize, cx: &mut Graph) -> Self {
+    pub fn new(
+        name: &str,
+        c_in: usize,
+        c_out: usize,
+        k: usize,
+        s: usize,
+        p: usize,
+        cx: &mut Graph,
+    ) -> Self {
         let weight = cx
             .named_tensor(format!("{name}.weight"), (c_out, c_in * k * k))
             .persist();
         let bias = cx.named_tensor(format!("{name}.bias"), c_out).persist();
-        Self { weight, bias, k, s, p, c_in, c_out }
+        Self {
+            weight,
+            bias,
+            k,
+            s,
+            p,
+            c_in,
+            c_out,
+        }
     }
 
     /// Apply the convolution + bias (no activation). Closely mirrors the
@@ -74,6 +103,7 @@ impl Conv {
     /// paths in the luminal e-graph. Special-cases 1x1 convs to a plain matmul
     /// (no unfold) since they don't need spatial windowing.
     pub fn forward_no_act(&self, x: GraphTensor) -> GraphTensor {
+        let x = canonicalize_static_shape(x);
         if self.k == 1 && self.s == 1 && self.p == 0 {
             return self.forward_1x1(x);
         }
@@ -160,8 +190,8 @@ impl Conv {
         let w = dims[3];
         let x = x.squeeze(0); // (c_in, H, W)
         let xt = x.permute(&[1, 2, 0]); // (H, W, c_in)
+                                        // 2D matmul matches the specialized kernel in cuda_lite.
         let xt = xt.merge_dims(0, 1); // (H*W, c_in)
-        // 2D matmul matches the specialized kernel in cuda_lite.
         let out = xt.matmul(self.weight.t()); // (H*W, c_out)
         let out = out.split_dims(0, w); // (H, W, c_out)
         let out = out.permute(&[2, 0, 1]); // (c_out, H, W)
@@ -188,10 +218,18 @@ impl DwConv {
             .named_tensor(format!("{name}.weight"), (c, k * k))
             .persist();
         let bias = cx.named_tensor(format!("{name}.bias"), c).persist();
-        Self { weight, bias, c, k, s, p }
+        Self {
+            weight,
+            bias,
+            c,
+            k,
+            s,
+            p,
+        }
     }
 
     pub fn forward_no_act(&self, x: GraphTensor) -> GraphTensor {
+        let x = canonicalize_static_shape(x);
         let dims = x.dims();
         let h = dims[2];
         let w = dims[3];
@@ -201,10 +239,7 @@ impl DwConv {
         // Pad spatial dims only.
         let zero = Expression::from(0);
         let pp = Expression::from(self.p);
-        let padded = x.pad(
-            vec![(zero, zero), (zero, zero), (pp, pp), (pp, pp)],
-            0.0,
-        );
+        let padded = x.pad(vec![(zero, zero), (zero, zero), (pp, pp), (pp, pp)], 0.0);
         // Unfold: kernel for batch and channel = 1, spatial = k.
         let unfolded = padded.unfold(
             vec![1usize, 1, self.k, self.k],
@@ -256,12 +291,20 @@ impl Bottleneck {
         let c_ = (c2 as f32 * e) as usize;
         let cv1 = Conv::new(&format!("{name}.cv1.conv"), c1, c_, k0, 1, k0 / 2, cx);
         let cv2 = Conv::new(&format!("{name}.cv2.conv"), c_, c2, k1, 1, k1 / 2, cx);
-        Self { cv1, cv2, add: shortcut && c1 == c2 }
+        Self {
+            cv1,
+            cv2,
+            add: shortcut && c1 == c2,
+        }
     }
 
     pub fn forward(&self, x: GraphTensor) -> GraphTensor {
         let y = self.cv2.forward(self.cv1.forward(x));
-        if self.add { (x + y) * 1.0 } else { y }
+        if self.add {
+            (x + y) * 1.0
+        } else {
+            y
+        }
     }
 }
 
@@ -283,7 +326,13 @@ impl C3k {
         let m = (0..n)
             .map(|i| Bottleneck::new(&format!("{name}.m.{i}"), c_, c_, shortcut, 3, 3, 1.0, cx))
             .collect();
-        Self { cv1, cv2, cv3, m, c_ }
+        Self {
+            cv1,
+            cv2,
+            cv3,
+            m,
+            c_,
+        }
     }
 
     pub fn forward(&self, x: GraphTensor) -> GraphTensor {
@@ -336,8 +385,8 @@ impl C3k2 {
         cx: &mut Graph,
     ) -> Self {
         let c = (c2 as f32 * e) as usize; // hidden
-        // Two halves of the original cv1 (channel-split). Saved as
-        // model.<L>.cv1{a,b}.conv.{weight,bias} by python/reference.py.
+                                          // Two halves of the original cv1 (channel-split). Saved as
+                                          // model.<L>.cv1{a,b}.conv.{weight,bias} by python/reference.py.
         let cv1a = Conv::new(&format!("{name}.cv1a.conv"), c1, c, 1, 1, 0, cx);
         let cv1b = Conv::new(&format!("{name}.cv1b.conv"), c1, c, 1, 1, 0, cx);
         let cv2 = Conv::new(&format!("{name}.cv2.conv"), (2 + n) * c, c2, 1, 1, 0, cx);
@@ -359,7 +408,13 @@ impl C3k2 {
                 }
             })
             .collect();
-        Self { cv1a, cv1b, cv2, m, c }
+        Self {
+            cv1a,
+            cv1b,
+            cv2,
+            m,
+            c,
+        }
     }
 
     pub fn forward(&self, x: GraphTensor) -> GraphTensor {
@@ -401,13 +456,17 @@ impl Sppf {
         let y1 = max_pool_2d(y0, self.k, 1, self.k / 2);
         let y2 = max_pool_2d(y1, self.k, 1, self.k / 2);
         let y3 = max_pool_2d(y2, self.k, 1, self.k / 2);
-        let cat = y0.concat_along(y1, 1).concat_along(y2, 1).concat_along(y3, 1);
+        let cat = y0
+            .concat_along(y1, 1)
+            .concat_along(y2, 1)
+            .concat_along(y3, 1);
         self.cv2.forward(cat)
     }
 }
 
 /// MaxPool2d via pad (with -inf-equivalent) + unfold + max reduction.
 pub fn max_pool_2d(x: GraphTensor, k: usize, s: usize, p: usize) -> GraphTensor {
+    let x = canonicalize_static_shape(x);
     let dims = x.dims();
     let h = dims[2];
     let w = dims[3];
@@ -595,7 +654,13 @@ impl C2psa {
         let m = (0..n)
             .map(|i| PsaBlock::new(&format!("{name}.m.{i}"), c, 0.5, num_heads, cx))
             .collect();
-        Self { cv1a, cv1b, cv2, m, c }
+        Self {
+            cv1a,
+            cv1b,
+            cv2,
+            m,
+            c,
+        }
     }
 
     pub fn forward(&self, x: GraphTensor) -> GraphTensor {
@@ -612,35 +677,66 @@ impl C2psa {
 /// One detection scale's box + class branches (without DFL/decode — applied later).
 pub struct DetectScale {
     // Box regression branch (cv2[i]):
-    pub box1: Conv, // 3x3 + SiLU
-    pub box2: Conv, // 3x3 + SiLU
+    pub box1: Conv,    // 3x3 + SiLU
+    pub box2: Conv,    // 3x3 + SiLU
     pub box_out: Conv, // 1x1 plain Conv2d with bias (no act)
 
     // Classification branch (cv3[i]):
-    pub dw_a: DwConv, // 3x3 depthwise + SiLU
-    pub pw_a: Conv,   // 1x1 + SiLU
-    pub dw_b: DwConv, // 3x3 depthwise + SiLU
-    pub pw_b: Conv,   // 1x1 + SiLU
+    pub dw_a: DwConv,  // 3x3 depthwise + SiLU
+    pub pw_a: Conv,    // 1x1 + SiLU
+    pub dw_b: DwConv,  // 3x3 depthwise + SiLU
+    pub pw_b: Conv,    // 1x1 + SiLU
     pub cls_out: Conv, // 1x1 plain Conv2d with bias (no act)
 
     pub c_in: usize,
 }
 
 impl DetectScale {
-    pub fn new(name_prefix_cv2: &str, name_prefix_cv3: &str, c_in: usize, c2: usize, c3: usize, cx: &mut Graph) -> Self {
+    pub fn new(
+        name_prefix_cv2: &str,
+        name_prefix_cv3: &str,
+        c_in: usize,
+        c2: usize,
+        c3: usize,
+        cx: &mut Graph,
+    ) -> Self {
         // cv2: Sequential(Conv(c_in, c2, 3), Conv(c2, c2, 3), Conv2d(c2, 4*reg_max, 1))
         let box1 = Conv::new(&format!("{name_prefix_cv2}.0.conv"), c_in, c2, 3, 1, 1, cx);
         let box2 = Conv::new(&format!("{name_prefix_cv2}.1.conv"), c2, c2, 3, 1, 1, cx);
-        let box_out = Conv::new(name_prefix_cv2_terminal(name_prefix_cv2).as_str(), c2, 4 * REG_MAX, 1, 1, 0, cx);
+        let box_out = Conv::new(
+            name_prefix_cv2_terminal(name_prefix_cv2).as_str(),
+            c2,
+            4 * REG_MAX,
+            1,
+            1,
+            0,
+            cx,
+        );
 
         // cv3: Sequential(Sequential(DWConv(c_in, c_in, 3), Conv(c_in, c3, 1)),
         //                 Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
         //                 Conv2d(c3, nc, 1))
         let dw_a = DwConv::new(&format!("{name_prefix_cv3}.0.0.conv"), c_in, 3, 1, 1, cx);
-        let pw_a = Conv::new(&format!("{name_prefix_cv3}.0.1.conv"), c_in, c3, 1, 1, 0, cx);
+        let pw_a = Conv::new(
+            &format!("{name_prefix_cv3}.0.1.conv"),
+            c_in,
+            c3,
+            1,
+            1,
+            0,
+            cx,
+        );
         let dw_b = DwConv::new(&format!("{name_prefix_cv3}.1.0.conv"), c3, 3, 1, 1, cx);
         let pw_b = Conv::new(&format!("{name_prefix_cv3}.1.1.conv"), c3, c3, 1, 1, 0, cx);
-        let cls_out = Conv::new(name_prefix_cv3_terminal(name_prefix_cv3).as_str(), c3, NC, 1, 1, 0, cx);
+        let cls_out = Conv::new(
+            name_prefix_cv3_terminal(name_prefix_cv3).as_str(),
+            c3,
+            NC,
+            1,
+            1,
+            0,
+            cx,
+        );
 
         Self {
             box1,
@@ -682,7 +778,7 @@ fn name_prefix_cv3_terminal(prefix: &str) -> String {
 
 pub struct Detect {
     pub scales: Vec<DetectScale>,
-    pub dfl_weight: GraphTensor, // (1, 16, 1, 1) - constant arange(16)
+    pub dfl_weight: GraphTensor, // (16,) - constant arange(16)
     pub anchors: GraphTensor,    // (2, 8400) precomputed
     pub strides: GraphTensor,    // (1, 8400) precomputed
     pub feat_sizes: Vec<usize>,
@@ -694,17 +790,19 @@ impl Detect {
         let c2 = (16usize).max(ch[0] / 4).max(REG_MAX * 4);
         let c3 = ch[0].max(NC.min(100));
         let scales = (0..ch.len())
-            .map(|i| DetectScale::new(
-                &format!("{name}.cv2.{i}"),
-                &format!("{name}.cv3.{i}"),
-                ch[i],
-                c2,
-                c3,
-                cx,
-            ))
+            .map(|i| {
+                DetectScale::new(
+                    &format!("{name}.cv2.{i}"),
+                    &format!("{name}.cv3.{i}"),
+                    ch[i],
+                    c2,
+                    c3,
+                    cx,
+                )
+            })
             .collect();
         let dfl_weight = cx
-            .named_tensor(format!("{name}.dfl.conv.weight"), (1, REG_MAX, 1, 1))
+            .named_tensor(format!("{name}.dfl.conv.weight"), REG_MAX)
             .persist();
 
         // Anchors and strides aren't in the safetensors — we feed them as inputs.
@@ -751,16 +849,16 @@ impl Detect {
         // 4 outer and reg_max inner. luminal split_dims(axis, inner_size) places `inner_size`
         // as the new inner dim, so we must pass REG_MAX (not 4) to get (1, 4, REG_MAX, A).
         let dfl_in = boxes.split_dims(1, REG_MAX); // (1, 4, REG_MAX, A)
-        // Then transpose so the REG_MAX bin axis becomes the softmax channel axis.
+                                                   // Then transpose so the REG_MAX bin axis becomes the softmax channel axis.
         let dfl_in = dfl_in.transpose(1, 2); // (1, REG_MAX, 4, A)
         let dfl_in = dfl_in.softmax(1);
 
-        // dfl_weight: (1, reg_max, 1, 1). Conv1x1 == channel-wise weighted sum.
-        // (1, reg_max, 4, A) * (1, reg_max, 1, 1) -> sum over reg_max -> (1, 1, 4, A)
+        // dfl_weight: (reg_max,). Broadcast over batch, box coords, and anchors.
+        // Conv1x1 == channel-wise weighted sum:
+        // (1, reg_max, 4, A) * (1, reg_max, 4, A) -> sum over reg_max -> (1, 4, A)
         let w = self
             .dfl_weight
-            .expand_dim(2, 4usize)
-            .expand_dim(3, dfl_in.dims()[3]);
+            .expand_to_shape_on_axes(dfl_in.shape, &[0usize, 2, 3]);
         let dfl_out = (dfl_in * w).sum(&[1usize]); // (1, 4, A)
 
         // dist2bbox xywh: lt = dfl[:, :2, :], rb = dfl[:, 2:, :]
@@ -778,7 +876,7 @@ impl Detect {
         // Multiply by strides: (1, 1, A)
         let strides = self.strides.expand_dim(0, 1); // (1, 1, A)
         let dbox = dbox * strides.expand_dim(1, 4usize).squeeze(2); // broadcast across 4 box dims
-        // (the squeeze removes the size-1 channel from the second expand)
+                                                                    // (the squeeze removes the size-1 channel from the second expand)
 
         let scores_sig = scores.sigmoid();
         dbox.concat_along(scores_sig, 1)
@@ -787,17 +885,17 @@ impl Detect {
 
 pub struct YoloV11 {
     // Backbone
-    pub conv0: Conv,         // model.0
-    pub conv1: Conv,         // model.1
-    pub c3k2_2: C3k2,        // model.2
-    pub conv3: Conv,         // model.3
-    pub c3k2_4: C3k2,        // model.4
-    pub conv5: Conv,         // model.5
-    pub c3k2_6: C3k2,        // model.6
-    pub conv7: Conv,         // model.7
-    pub c3k2_8: C3k2,        // model.8
-    pub sppf_9: Sppf,        // model.9
-    pub c2psa_10: C2psa,     // model.10
+    pub conv0: Conv,     // model.0
+    pub conv1: Conv,     // model.1
+    pub c3k2_2: C3k2,    // model.2
+    pub conv3: Conv,     // model.3
+    pub c3k2_4: C3k2,    // model.4
+    pub conv5: Conv,     // model.5
+    pub c3k2_6: C3k2,    // model.6
+    pub conv7: Conv,     // model.7
+    pub c3k2_8: C3k2,    // model.8
+    pub sppf_9: Sppf,    // model.9
+    pub c2psa_10: C2psa, // model.10
     // Head
     pub c3k2_13: C3k2,
     pub c3k2_16: C3k2,
@@ -832,12 +930,7 @@ impl YoloV11 {
         let c3k2_22 = C3k2::new("model.22", C3 + C4, C4, 1, true, 0.5, true, cx);
 
         // Detect head reads from layers (16, 19, 22) at (80, 40, 20) feature sizes
-        let detect = Detect::new(
-            "model.23",
-            &[C2, C3, C4],
-            &[80, 40, 20],
-            cx,
-        );
+        let detect = Detect::new("model.23", &[C2, C3, C4], &[80, 40, 20], cx);
         Self {
             conv0,
             conv1,
@@ -894,7 +987,10 @@ impl YoloV11 {
 
 /// Compute the (anchors, strides) flat tensors for the three YOLO scales.
 /// Returns (anchors flat (2*A,), strides flat (A,)).
-pub fn make_anchors_and_strides(feat_sizes: &[usize], stride_values: &[usize]) -> (Vec<f32>, Vec<f32>) {
+pub fn make_anchors_and_strides(
+    feat_sizes: &[usize],
+    stride_values: &[usize],
+) -> (Vec<f32>, Vec<f32>) {
     let total_anchors: usize = feat_sizes.iter().map(|s| s * s).sum();
     // anchors stored as (2, A): row 0 = x, row 1 = y
     let mut anchors_x = Vec::with_capacity(total_anchors);

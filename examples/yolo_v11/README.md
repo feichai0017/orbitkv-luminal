@@ -41,17 +41,38 @@ examples/yolo_v11/
    # Quick smoke test (first three layers, compiles in ~3s)
    cargo run --release -p yolo_v11 --bin yolo_v11_tiny
 
-   # Full model (long e-graph compile time — see notes below)
+   # Full model on the default bus.jpg sample
    cargo run --release -p yolo_v11 --bin yolo_v11
+
+   # Full model on any JPEG or PNG
+   cargo run --release -p yolo_v11 --bin yolo_v11 -- --input /path/to/image.jpg --output /tmp/yolo_annotated.png
+
+   # Positional shorthand: <input> <output>
+   cargo run --release -p yolo_v11 --bin yolo_v11 -- /path/to/image.jpg /tmp/yolo_annotated.png
    ```
 
    `yolo_v11_tiny` loads `weights.safetensors`, runs only `model[0]`, `model[1]`,
    and `model[2]`, and reports the (1, 64, 160, 160) intermediate. This output
    matches PyTorch's eager forward exactly (within f32 rounding).
 
-   `yolo_v11` builds the entire YOLO v11n graph and the Detect head, runs the
-   forward, prints the top decoded detections, and compares against
-   `reference_output.bin`.
+   `yolo_v11` builds the entire YOLO v11n graph and the Detect head, preprocesses
+   a JPEG/PNG with a Rust implementation of the 640x640 Ultralytics-style
+   letterbox transform, runs the forward, applies class-aware NMS, and prints
+   detections in the original image coordinates. For image inputs, it also writes
+   an annotated PNG to `examples/yolo_v11/artifacts/annotated.png` by default.
+   The input and annotated output paths can be supplied as CLI arguments:
+   `--input /path/to/image.png --output /path/to/out.png`.
+
+   For exact regression against the saved PyTorch tensor, run:
+
+   ```bash
+   YOLO_INPUT_BIN=1 YOLO_COMPARE_REF=1 cargo run --release -p yolo_v11 --bin yolo_v11
+   ```
+
+   The exact regression path feeds the saved PyTorch-preprocessed tensor and is
+   the strict check for Luminal-vs-PyTorch model output parity. The direct image
+   path may differ slightly from Python/OpenCV preprocessing because it uses
+   Rust image decoding and resizing.
 
 3. **(Optional) Run the Python compiled-model example**:
 
@@ -77,9 +98,8 @@ examples/yolo_v11/
   Python script pre-splits those conv weights along the output-channel dim and
   the Rust model exposes them as separate convs (`cv1a`/`cv1b` for C3k2/C2PSA,
   `q_split`/`k_split`/`v_split` for Attention).
-* Anchors and per-anchor strides aren't in the safetensors; they're computed in
-  Rust (`make_anchors_and_strides`) and pushed in via `runtime.set_data`. The
-  DFL convolution weight is the constant `arange(reg_max)`.
+* Anchors, per-anchor strides, and the DFL projection weight are fed from Rust
+  via `runtime.set_data`. The DFL projection is the constant `arange(reg_max)`.
 * `make_contiguous` (a free function in `src/model.rs`) materializes a
   non-contiguous view via `gather + iota` (the same trick `GraphTensor::output`
   uses internally). It's applied wherever an op chain produces a strided view

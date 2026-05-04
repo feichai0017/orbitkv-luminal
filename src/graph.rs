@@ -126,8 +126,9 @@ impl DimBucket {
 pub struct BuildSearchSpaceOptions {
     /// Optional maximum runtime-specific intermediate memory, in bytes.
     ///
-    /// Runtimes that support memory estimates can use this to reject candidate
-    /// graphs before profiling them.
+    /// When this is `None`, search does not apply a memory cap. Runtimes that
+    /// support memory estimates can use an explicitly provided limit to reject
+    /// candidate graphs before profiling them.
     pub max_memory_bytes: Option<usize>,
 }
 
@@ -2550,6 +2551,16 @@ mod tests {
         ) -> Option<usize> {
             Some(1)
         }
+    }
+
+    #[test]
+    fn build_search_space_without_explicit_max_memory_has_no_cap() {
+        let mut cx = Graph::new();
+        let _ = cx.tensor(1).output();
+
+        cx.build_search_space::<TestMemoryRuntime>();
+
+        assert_eq!(cx.search_space_max_memory_bytes, None);
     }
 
     #[test]

@@ -15,6 +15,10 @@ path = "src/main_tiny.rs"
 name = "yolo_v11_egglog_debug"
 path = "src/main_egglog_debug.rs"
 
+[[bin]]
+name = "yolo_v11_conv_probe"
+path = "src/main_conv_probe.rs"
+
 [features]
 
 [dependencies]
