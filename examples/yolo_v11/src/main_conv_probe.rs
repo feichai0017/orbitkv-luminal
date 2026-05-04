@@ -17,48 +17,24 @@ use model::Conv;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Probe {
     Standalone,
-    Cv1b,
-    Chain,
-    PrefixCv1b,
-    PrefixChain,
 }
 
 impl Probe {
-    fn from_env() -> Self {
-        match std::env::var("YOLO_CONV_PROBE").as_deref() {
-            Ok("standalone") | Err(_) => Self::Standalone,
-            Ok("cv1b") => Self::Cv1b,
-            Ok("chain") => Self::Chain,
-            Ok("prefix_cv1b") => Self::PrefixCv1b,
-            Ok("prefix_chain") => Self::PrefixChain,
-            Ok(other) => panic!(
-                "unknown YOLO_CONV_PROBE={other}; expected standalone, cv1b, chain, prefix_cv1b, or prefix_chain"
-            ),
-        }
-    }
-
     fn input_shape(self) -> (usize, usize, usize, usize) {
         match self {
             Self::Standalone => (1, 16, 160, 160),
-            Self::Cv1b | Self::Chain => (1, 32, 160, 160),
-            Self::PrefixCv1b | Self::PrefixChain => (1, 3, model::IMG_SIZE, model::IMG_SIZE),
         }
     }
 
     fn input_file(self, artifact_dir: &std::path::Path) -> PathBuf {
         match self {
             Self::Standalone => artifact_dir.join("model_2_cv1b.bin"),
-            Self::Cv1b | Self::Chain => artifact_dir.join("reference_layer_1.bin"),
-            Self::PrefixCv1b | Self::PrefixChain => artifact_dir.join("reference_input.bin"),
         }
     }
 
     fn reference_file(self, artifact_dir: &std::path::Path) -> PathBuf {
         match self {
-            Self::Standalone | Self::Chain | Self::PrefixChain => {
-                artifact_dir.join("model_2_m_0_cv1.bin")
-            }
-            Self::Cv1b | Self::PrefixCv1b => artifact_dir.join("model_2_cv1b.bin"),
+            Self::Standalone => artifact_dir.join("model_2_m_0_cv1.bin"),
         }
     }
 }
@@ -144,12 +120,10 @@ fn main() {
     let cwd = std::env::current_dir().unwrap();
     let artifact_dir = cwd.join("examples/yolo_v11/artifacts");
     let weights_path = artifact_dir.join("weights.safetensors");
-    let probe = Probe::from_env();
+    let probe = Probe::Standalone;
     let input_path = probe.input_file(&artifact_dir);
     let reference_path = probe.reference_file(&artifact_dir);
-    let use_native = std::env::var("YOLO_CONV_PROBE_BACKEND")
-        .map(|s| s == "native")
-        .unwrap_or(false);
+    let use_native = false;
 
     println!("Running {probe:?} probe");
     let mut cx = Graph::default();
@@ -158,28 +132,6 @@ fn main() {
         Probe::Standalone => {
             let conv = Conv::new("model.2.m.0.cv1.conv", 16, 8, 3, 1, 1, &mut cx);
             conv.forward(input)
-        }
-        Probe::Cv1b => {
-            let cv1b = Conv::new("model.2.cv1b.conv", 32, 16, 1, 1, 0, &mut cx);
-            cv1b.forward(input)
-        }
-        Probe::Chain => {
-            let cv1b = Conv::new("model.2.cv1b.conv", 32, 16, 1, 1, 0, &mut cx);
-            let conv = Conv::new("model.2.m.0.cv1.conv", 16, 8, 3, 1, 1, &mut cx);
-            conv.forward(cv1b.forward(input))
-        }
-        Probe::PrefixCv1b => {
-            let conv0 = Conv::new("model.0.conv", 3, model::C0, 3, 2, 1, &mut cx);
-            let conv1 = Conv::new("model.1.conv", model::C0, model::C1, 3, 2, 1, &mut cx);
-            let cv1b = Conv::new("model.2.cv1b.conv", model::C1, 16, 1, 1, 0, &mut cx);
-            cv1b.forward(conv1.forward(conv0.forward(input)))
-        }
-        Probe::PrefixChain => {
-            let conv0 = Conv::new("model.0.conv", 3, model::C0, 3, 2, 1, &mut cx);
-            let conv1 = Conv::new("model.1.conv", model::C0, model::C1, 3, 2, 1, &mut cx);
-            let cv1b = Conv::new("model.2.cv1b.conv", model::C1, 16, 1, 1, 0, &mut cx);
-            let conv = Conv::new("model.2.m.0.cv1.conv", 16, 8, 3, 1, 1, &mut cx);
-            conv.forward(cv1b.forward(conv1.forward(conv0.forward(input))))
         }
     };
     let output = output_tensor.output();

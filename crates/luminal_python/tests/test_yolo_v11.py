@@ -11,7 +11,7 @@ easier than debugging a 100-layer mismatch in one go.
 Marked ``slow`` because the first run downloads ~6 MB of weights and the
 luminal e-graph compile of the full model is non-trivial. Run with::
 
-    LUMINAL_TEST_DEVICE=cuda uv run pytest tests/test_yolo_v11.py -v -s
+    uv run pytest tests/test_yolo_v11.py -v -s
 """
 
 from typing import Callable

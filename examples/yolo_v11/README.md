@@ -63,16 +63,8 @@ examples/yolo_v11/
    The input and annotated output paths can be supplied as CLI arguments:
    `--input /path/to/image.png --output /path/to/out.png`.
 
-   For exact regression against the saved PyTorch tensor, run:
-
-   ```bash
-   YOLO_INPUT_BIN=1 YOLO_COMPARE_REF=1 cargo run --release -p yolo_v11 --bin yolo_v11
-   ```
-
-   The exact regression path feeds the saved PyTorch-preprocessed tensor and is
-   the strict check for Luminal-vs-PyTorch model output parity. The direct image
-   path may differ slightly from Python/OpenCV preprocessing because it uses
-   Rust image decoding and resizing.
+   The direct image path may differ slightly from Python/OpenCV preprocessing
+   because it uses Rust image decoding and resizing.
 
 3. **(Optional) Run the Python compiled-model example**:
 

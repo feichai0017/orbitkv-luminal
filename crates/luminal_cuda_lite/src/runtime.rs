@@ -1132,21 +1132,6 @@ impl Runtime for CudaRuntime {
                             }
                             None => {}
                         }
-                    } else if std::env::var_os("LUMINAL_DUMP_EXTRA_BUF").is_some() {
-                        let in_buffer_specs = bucket.buffer_specs.contains_key(&extra_node);
-                        let in_llir_to_hlir = bucket.llir_to_hlir.contains_key(&extra_node);
-                        let llir = &bucket.exec_graph;
-                        let _ = llir; // can't easily inspect llir from here; print specs counts
-                        eprintln!(
-                            "[runtime] no buffer for extra_node {extra_node:?}: \
-                             in_bucket.buffers={}, in_external_outputs={}, \
-                             in_llir_to_hlir={in_llir_to_hlir}, in_buffer_specs={in_buffer_specs}, \
-                             total buffer_specs={}, total bucket.buffers={}",
-                            bucket.buffers.contains_key(&extra_node),
-                            self.external_output_buffers.contains_key(&extra_node),
-                            bucket.buffer_specs.len(),
-                            bucket.buffers.len(),
-                        );
                     }
                 }
             }
@@ -1195,17 +1180,6 @@ impl Runtime for CudaRuntime {
                         exec_op.internal.stats_name().unwrap_or("unknown")
                     );
                 });
-            // Debug aid: sync after every op so a CUDA error is attributed to
-            // the kernel that actually caused it, not to the eventual end-of-
-            // execute synchronize. Set LUMINAL_SYNC_EACH_OP=1 to enable.
-            if std::env::var_os("LUMINAL_SYNC_EACH_OP").is_some()
-                && let Err(e) = self.cuda_stream.synchronize()
-            {
-                panic!(
-                    "CUDA sync error after op {:?}: {e}",
-                    exec_op.internal.stats_name().unwrap_or("unknown")
-                );
-            }
         }
         // Single sync at end - CUDA stream ordering guarantees sequential execution
         self.cuda_stream.synchronize().unwrap();
@@ -1339,19 +1313,6 @@ impl CudaRuntime {
                     .collect_vec()
             };
 
-            if std::env::var_os("LUMINAL_DUMP_BUFFER_DECISION").is_some() {
-                use luminal::hlir::NativeOp;
-                eprintln!(
-                    "node {:?}: kernel={:?} host={} native={} display={}",
-                    node,
-                    llir_graph[node]
-                        .to_dialect::<dyn KernelOp>()
-                        .map(|k| k.kernel_name()),
-                    llir_graph[node].to_dialect::<dyn HostOp>().is_some(),
-                    llir_graph[node].to_dialect::<dyn NativeOp>().is_some(),
-                    llir_graph[node],
-                );
-            }
             if let Some(kernel_op) = llir_graph[node].to_dialect::<dyn KernelOp>() {
                 let kernel_name = kernel_op.kernel_name();
                 bucket.kernel_names.push(kernel_name);
@@ -1401,11 +1362,6 @@ impl CudaRuntime {
                             }
                         });
                 let allocated = !is_marker || has_external_consumer;
-                if std::env::var_os("LUMINAL_DUMP_BUFFER_DECISION").is_some() {
-                    eprintln!(
-                        "  -> kernel={kernel_name} is_marker={is_marker} has_ext_consumer={has_external_consumer} -> allocated={allocated}"
-                    );
-                }
                 if allocated {
                     bucket.buffer_specs.insert(
                         node,

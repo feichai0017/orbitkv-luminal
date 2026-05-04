@@ -1,12 +1,10 @@
-//! Diagnostic binary: builds a small slice of the YOLO graph (configurable via
-//! `YOLO_DEBUG_LAYERS`), runs the luminal egglog pipeline manually, and prints
-//! the per-rule match counts and timings. Useful for figuring out which rules
-//! cause the e-graph to balloon on conv-heavy networks.
+//! Diagnostic binary: builds a small slice of the YOLO graph, runs the luminal
+//! egglog pipeline manually, and prints the per-rule match counts and timings.
+//! Useful for figuring out which rules cause the e-graph to balloon on
+//! conv-heavy networks.
 //!
 //! Run with:
-//!   YOLO_DEBUG_LAYERS=2 cargo run -p yolo_v11 --release --bin yolo_v11_egglog_debug
-//!   YOLO_DEBUG_LAYERS=3 cargo run -p yolo_v11 --release --bin yolo_v11_egglog_debug
-//!   YOLO_DEBUG_LAYERS=4 cargo run -p yolo_v11 --release --bin yolo_v11_egglog_debug
+//!   cargo run -p yolo_v11 --release --bin yolo_v11_egglog_debug
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,10 +20,7 @@ mod model;
 use model::*;
 
 fn main() {
-    let n_layers: usize = std::env::var("YOLO_DEBUG_LAYERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(3);
+    let n_layers = 3usize;
     println!("Building YOLO subset with {n_layers} backbone layers");
 
     let mut cx = Graph::default();
@@ -92,9 +87,7 @@ fn main() {
     let (program, root) = hlir_to_egglog(&cx);
     println!("Egglog program length: {} bytes", program.len());
 
-    let cleanup_mode = std::env::var("YOLO_DEBUG_CLEANUP")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+    let cleanup_mode = true;
     println!("Running egglog with cleanup={cleanup_mode}...");
     let t0 = Instant::now();
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

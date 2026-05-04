@@ -449,14 +449,6 @@ pub(crate) fn compile_region(
          }}"
     );
 
-    if std::env::var_os("LUMINAL_DUMP_FUSED_REGION").is_some() {
-        eprintln!(
-            "===== fused_region_k (out_shape={:?}, fs={}) =====\n{}\n=========\n",
-            out_shape,
-            region.fs_nodes.len(),
-            kernel
-        );
-    }
     let (module, function) = if let Some((m, f)) = compile_cache.get(&kernel) {
         (m.clone(), f.clone())
     } else {

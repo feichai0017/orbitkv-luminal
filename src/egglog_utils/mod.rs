@@ -1164,10 +1164,6 @@ fn inject_kernel_alternatives(egraph: &mut SerializedEGraph, hlir_to_kernel: &[(
             Some(k) => k,
             None => continue,
         };
-        if std::env::var_os("LUMINAL_DUMP_INJECT").is_some() && kinds.iter().any(|k| k == "Gather")
-        {
-            eprintln!("[inject] Gather eclass {op_class:?}: kinds={:?}", kinds);
-        }
         // Skip if this Op eclass already has a "real" kernel-side kind
         // alternative — either one of the kernel kinds we know how to
         // inject, or any other kind we don't recognise (which we treat
@@ -1189,9 +1185,6 @@ fn inject_kernel_alternatives(egraph: &mut SerializedEGraph, hlir_to_kernel: &[(
         // KernelEmbed), leave it alone.
         let has_other_specialised = kinds.iter().any(|k| !kind_map.contains_key(k.as_str()));
         if has_other_specialised {
-            if std::env::var_os("LUMINAL_DUMP_INJECT").is_some() {
-                eprintln!("[inject] skip op_class={op_class:?}: kinds={:?}", kinds);
-            }
             continue;
         }
         // Find the HLIR kind we know how to convert.
@@ -1238,11 +1231,6 @@ fn inject_kernel_alternatives(egraph: &mut SerializedEGraph, hlir_to_kernel: &[(
             })
             .unwrap_or_default();
         if candidate_enode_ids.is_empty() {
-            if std::env::var_os("LUMINAL_DUMP_INJECT").is_some() {
-                eprintln!(
-                    "[inject] no kind enode for label {hlir_kind_label} in eclass {kind_class:?}"
-                );
-            }
             continue;
         }
         // For each candidate, compute the extractor's-view length of each
@@ -1392,22 +1380,10 @@ fn inject_kernel_alternatives(egraph: &mut SerializedEGraph, hlir_to_kernel: &[(
                         new_kc.push(c.clone());
                     }
                 }
-                if std::env::var_os("LUMINAL_DUMP_INJECT").is_some() {
-                    eprintln!(
-                        "[inject] {hlir_kind_label} eclass {kind_class:?}: deep-cloning ELIST children for consistency"
-                    );
-                }
                 (cand, new_kc)
             }
         };
         let _ = kind_enode_id;
-        if std::env::var_os("LUMINAL_DUMP_INJECT").is_some() {
-            eprintln!(
-                "[inject] {hlir_kind_label} → {kernel_kind_label}: kind_children.len()={} (need {})",
-                kind_children.len(),
-                if hlir_kind_label == "Gather" { 4 } else { 0 },
-            );
-        }
 
         // Build the synthetic kernel kind enode (HLIR fields + dtype).
         let mut k_children = kind_children.clone();
@@ -1485,169 +1461,6 @@ fn inject_kernel_alternatives(egraph: &mut SerializedEGraph, hlir_to_kernel: &[(
         egraph.node_to_class.insert(nid.clone(), cid);
         egraph.enodes.insert(nid, (label, children));
     }
-}
-
-/// Walk every Op enode whose first kind enode is HLIR `Gather` and dump
-/// its data input's producing op chain. Used to debug why dtype
-/// propagation didn't reach the data input — without dtype, the
-/// `KernelGather` rewrite never fires and the eclass stays HLIR-only.
-fn diagnose_hlir_only_gathers(egraph: &SerializedEGraph) {
-    use egraph_serialize::ClassId;
-    // Helper: list all OP-kind enode labels for a given OP eclass, by
-    // walking each Op enode in the eclass and reading its first-child
-    // (kind) eclass.
-    fn op_eclass_kinds(egraph: &SerializedEGraph, op_eclass: &ClassId) -> Vec<String> {
-        let mut out = vec![];
-        let Some((_, enodes)) = egraph.eclasses.get(op_eclass) else {
-            return out;
-        };
-        for n in enodes {
-            let (l, ch) = &egraph.enodes[n];
-            if l == "Op" && !ch.is_empty() {
-                if let Some((_, kinds)) = egraph.eclasses.get(&ch[0]) {
-                    for k in kinds {
-                        let lbl = egraph.enodes[k].0.clone();
-                        if !out.contains(&lbl) {
-                            out.push(lbl);
-                        }
-                    }
-                }
-            } else {
-                let lbl = l.clone();
-                if !out.contains(&lbl) {
-                    out.push(lbl);
-                }
-            }
-        }
-        out
-    }
-    fn dump_chain(
-        egraph: &SerializedEGraph,
-        eclass: &ClassId,
-        depth: usize,
-        max_depth: usize,
-        seen: &mut FxHashSet<ClassId>,
-    ) {
-        if depth > max_depth {
-            eprintln!("{:indent$}<truncated>", "", indent = depth * 2);
-            return;
-        }
-        if !seen.insert(eclass.clone()) {
-            eprintln!("{:indent$}<cycle to {eclass:?}>", "", indent = depth * 2);
-            return;
-        }
-        let kinds = op_eclass_kinds(egraph, eclass);
-        eprintln!("{:indent$}{eclass:?}: {kinds:?}", "", indent = depth * 2);
-        // Walk first Op enode's IList inputs.
-        let Some((_, enodes)) = egraph.eclasses.get(eclass) else {
-            return;
-        };
-        let Some(first) = enodes.first() else { return };
-        let (label, children) = &egraph.enodes[first];
-        if label != "Op" || children.len() < 2 {
-            return;
-        }
-        // Walk IList chain
-        let mut cur = children[1].clone();
-        let mut input_n = 0;
-        loop {
-            let Some((_, ilen)) = egraph.eclasses.get(&cur) else {
-                break;
-            };
-            let Some(head) = ilen.first() else { break };
-            let (h_lbl, h_ch) = &egraph.enodes[head];
-            if h_lbl == "INil" {
-                break;
-            }
-            if h_lbl != "ICons" || h_ch.len() < 2 {
-                break;
-            }
-            let inp_eclass = &h_ch[0];
-            eprintln!("{:indent$}input{input_n}:", "", indent = depth * 2 + 2);
-            dump_chain(egraph, inp_eclass, depth + 1, max_depth, seen);
-            cur = h_ch[1].clone();
-            input_n += 1;
-        }
-    }
-
-    // For each OP eclass: gather kinds across all Op enodes in it.
-    let mut hlir_only_count = 0;
-    let mut visited_op_classes: FxHashSet<ClassId> = FxHashSet::default();
-    for (nid, (label, children)) in &egraph.enodes {
-        if label != "Op" || children.len() < 2 {
-            continue;
-        }
-        let op_class = egraph.node_to_class[nid].clone();
-        if !visited_op_classes.insert(op_class.clone()) {
-            continue;
-        }
-        // Aggregate ALL kind labels across all Op enodes in this op_class.
-        let kinds = op_eclass_kinds(egraph, &op_class);
-        let has_kernel = kinds
-            .iter()
-            .any(|l| l.starts_with("Kernel") || l.starts_with("Fused"));
-        if has_kernel {
-            continue;
-        }
-        let has_gather = kinds.iter().any(|l| l == "Gather");
-        if !has_gather {
-            continue;
-        }
-        // This Op eclass has Gather but NO kernel survivor.
-        let ilist_eclass = &children[1];
-        let Some((_, ilist_enodes)) = egraph.eclasses.get(ilist_eclass) else {
-            continue;
-        };
-        let Some(icons1) = ilist_enodes.first() else {
-            continue;
-        };
-        let icons1_children = &egraph.enodes[icons1].1;
-        if icons1_children.len() < 2 {
-            continue;
-        }
-        let tail_eclass = &icons1_children[1];
-        let Some((_, tail_enodes)) = egraph.eclasses.get(tail_eclass) else {
-            continue;
-        };
-        let Some(icons2) = tail_enodes.first() else {
-            continue;
-        };
-        let icons2_children = &egraph.enodes[icons2].1;
-        if icons2_children.is_empty() {
-            continue;
-        }
-        let data_eclass = &icons2_children[0];
-        let indexes_eclass = &icons1_children[0];
-        hlir_only_count += 1;
-        // Count Op enodes in this eclass and dump their kind eclass labels.
-        let mut op_enode_count = 0;
-        let mut kind_eclasses_seen: Vec<(ClassId, Vec<String>)> = vec![];
-        for n in &egraph.eclasses[&op_class].1 {
-            if egraph.enodes[n].0 == "Op" {
-                op_enode_count += 1;
-                let kc = egraph.enodes[n].1[0].clone();
-                let labels: Vec<String> = egraph
-                    .eclasses
-                    .get(&kc)
-                    .map(|(_, e)| e.iter().map(|n| egraph.enodes[n].0.clone()).collect())
-                    .unwrap_or_default();
-                kind_eclasses_seen.push((kc, labels));
-            }
-        }
-        eprintln!(
-            "[gather-dbg #{hlir_only_count}] op_class={op_class:?} kinds={kinds:?} ({op_enode_count} Op enodes)"
-        );
-        for (kc, lbls) in &kind_eclasses_seen {
-            eprintln!("  kind_eclass {kc:?}: {lbls:?}");
-        }
-        eprintln!("  indexes input:");
-        let mut seen = FxHashSet::default();
-        dump_chain(egraph, indexes_eclass, 1, 6, &mut seen);
-        eprintln!("  data input:");
-        let mut seen = FxHashSet::default();
-        dump_chain(egraph, data_eclass, 1, 6, &mut seen);
-    }
-    eprintln!("[gather-dbg] total HLIR-only Gather Op eclasses: {hlir_only_count}");
 }
 
 /// Reorder every ELIST/IList eclass so that an `ECons`/`ENil`/`ICons`/
@@ -1926,38 +1739,10 @@ fn enforce_consistent_first_kind_enodes(egraph: &mut SerializedEGraph) {
             }
             // Pick a starting enode with the target length when possible;
             // fall back to first enode otherwise.
-            let target_match = target_len.and_then(|t| find_chain_with_len(egraph, c, t));
-            let used_fallback = target_match.is_none();
-            let start_enode: NodeId = target_match
+            let start_enode: NodeId = target_len
+                .and_then(|t| find_chain_with_len(egraph, c, t))
                 .or_else(|| egraph.eclasses.get(c).and_then(|(_, e)| e.first().cloned()))
                 .unwrap_or_else(|| c.as_ref().to_string().into());
-            if used_fallback && std::env::var_os("LUMINAL_DUMP_CONSISTENCY").is_some() {
-                let mut chain_dump = String::new();
-                let mut cur: ClassId = c.clone();
-                let mut visited: FxHashSet<ClassId> = FxHashSet::default();
-                for _ in 0..10 {
-                    if !visited.insert(cur.clone()) {
-                        chain_dump.push_str(&format!(" → <cycle to {cur:?}>"));
-                        break;
-                    }
-                    let Some((lbl, enodes)) = egraph.eclasses.get(&cur) else {
-                        chain_dump.push_str(" → <missing>");
-                        break;
-                    };
-                    let enode_labels: Vec<String> =
-                        enodes.iter().map(|n| egraph.enodes[n].0.clone()).collect();
-                    chain_dump.push_str(&format!(" → {cur:?} [{lbl}] {enode_labels:?}"));
-                    let Some(head) = enodes.first() else { break };
-                    let h_ch = &egraph.enodes[head].1;
-                    if egraph.enodes[head].0 != "ECons" || h_ch.len() < 2 {
-                        break;
-                    }
-                    cur = h_ch[1].clone();
-                }
-                eprintln!(
-                    "[consistency] WARNING: no chain of target_len={target_len:?} found in eclass {c:?};{chain_dump}; falling back to first enode"
-                );
-            }
             // Walk the chain starting from `start_enode`, cloning each
             // level into a new single-enode eclass.
             let mut chain_eclass_ids: Vec<ClassId> = Vec::new();
@@ -2085,22 +1870,11 @@ fn enforce_consistent_first_kind_enodes(egraph: &mut SerializedEGraph) {
             still_inconsistent += 1;
         }
     }
-    if still_inconsistent > 0
-        && (std::env::var_os("LUMINAL_DUMP_CONSISTENCY").is_some()
-            || std::env::var_os("LUMINAL_DUMP_INJECT").is_some())
-    {
-        eprintln!(
-            "[consistency] WARNING: {still_inconsistent}/{} prepended synth kind enodes are still inconsistent — deep-clone has a bug",
-            prepended_kinds.len()
-        );
-    }
-    if std::env::var_os("LUMINAL_DUMP_INJECT").is_some()
-        || std::env::var_os("LUMINAL_DUMP_CONSISTENCY").is_some()
-    {
-        eprintln!(
-            "[consistency] {total_kind_eclasses} kind eclasses: {already_consistent} ok, {reordered} reordered, {deep_cloned} deep-cloned"
-        );
-    }
+    let _ = still_inconsistent;
+    let _ = total_kind_eclasses;
+    let _ = already_consistent;
+    let _ = reordered;
+    let _ = deep_cloned;
 }
 
 pub fn run_egglog_with_report(
@@ -2142,11 +1916,6 @@ pub fn run_egglog_with_report_parts(
     let setup_code = egglog_setup_with(program, op_parts);
     let setup_text_elapsed = setup_text_start.elapsed();
     let setup_lines = setup_code.lines().count();
-    if let Ok(path) = std::env::var("LUMINAL_DUMP_EGGLOG") {
-        let code = full_egglog_with(program, op_parts);
-        let _ = std::fs::write(&path, &code);
-        eprintln!("[egglog] wrote full program to {path}");
-    }
     let mut egraph = egglog::EGraph::default();
     egraph.set_report_level(ReportLevel::WithPlan);
     let setup_start = std::time::Instant::now();
@@ -2321,7 +2090,7 @@ pub fn run_egglog_with_report_parts(
         .copied()
         .filter(|(_, kernel)| op_parts.all_op_names.contains(*kernel))
         .collect();
-    if std::env::var_os("LUMINAL_DISABLE_INJECT").is_none() && !filtered_kinds.is_empty() {
+    if !filtered_kinds.is_empty() {
         // First normalize every ELIST eclass so its first enode is an
         // `ECons`/`ENil` rather than an unsimplified list operator
         // (`RemoveNthFromEnd`, `MReplaceList`, `RowMajor`, ...). The
@@ -2336,10 +2105,6 @@ pub fn run_egglog_with_report_parts(
         // any kind eclass (including kernel-rewrite-generated ones) whose
         // first-enode walk would mix shape/stride lengths.
         enforce_consistent_first_kind_enodes(&mut egraph);
-    }
-
-    if std::env::var_os("LUMINAL_DUMP_GATHER").is_some() {
-        diagnose_hlir_only_gathers(&egraph);
     }
 
     // Conditional cleanup: an `Op` enode in our IR has the shape
@@ -2403,43 +2168,9 @@ pub fn run_egglog_with_report_parts(
                 entry.1 = true;
             }
         }
-        let mut hlir_only_summary: FxHashMap<String, usize> = FxHashMap::default();
-        let mut total_op_classes = 0usize;
-        let mut hlir_only_classes = 0usize;
-        // Strict mode: also remove HLIR enodes from eclasses that have no
-        // kernel alternative. This deliberately makes the cascade kill the
-        // root if the model has a dependency on an HLIR-only op, surfacing
-        // the bad rewrite at compile time instead of letting the search
-        // pick an unrunnable enode and crash at CUDA-launch time.
-        let strict_kernel_only = std::env::var_os("LUMINAL_STRICT_KERNEL_ONLY").is_some();
         for (_op_class, (cleanable_nodes, has_survivor)) in op_eclass_status {
-            total_op_classes += 1;
-            if has_survivor || strict_kernel_only {
+            if has_survivor {
                 to_strip.extend(cleanable_nodes);
-            } else {
-                hlir_only_classes += 1;
-                for nid in &cleanable_nodes {
-                    let kind_class = egraph.enodes[nid].1.first();
-                    if let Some(kc) = kind_class {
-                        if let Some(kinds) = opkind_class_kinds.get(kc) {
-                            for k in kinds {
-                                *hlir_only_summary.entry(k.clone()).or_default() += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if (std::env::var_os("LUMINAL_DUMP_CLEANUP").is_some() || strict_kernel_only)
-            && hlir_only_classes > 0
-        {
-            eprintln!(
-                "[cleanup] {hlir_only_classes}/{total_op_classes} Op eclasses have NO kernel alternative. HLIR-only kinds:"
-            );
-            let mut summary: Vec<(String, usize)> = hlir_only_summary.into_iter().collect();
-            summary.sort_by(|a, b| b.1.cmp(&a.1));
-            for (k, c) in summary.iter().take(20) {
-                eprintln!("    {c} × {k}");
             }
         }
         for nid in to_strip {
@@ -3097,13 +2828,6 @@ pub fn egglog_to_llir_from_root<'a>(
                 .or_else(|| kind_enodes.iter().find(|n| is_consistent(n)))
                 .or_else(|| kind_enodes.iter().find(|n| is_kernel(n)))
                 .unwrap_or(&kind_enodes[0]);
-            if std::env::var_os("LUMINAL_DUMP_EXTRACT").is_some() && !is_consistent(kind_enode) {
-                eprintln!(
-                    "[extract] WARNING: kind {:?} in eclass {kind_eclass:?} has inconsistent ELIST lens {:?}",
-                    egraph.enodes[kind_enode].0,
-                    elist_lens_for(kind_enode)
-                );
-            }
             let kind_label = &egraph.enodes[kind_enode].0;
 
             // Resolve kind's metadata children (shapes, strides, etc.)

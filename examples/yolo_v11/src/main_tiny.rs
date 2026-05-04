@@ -1,9 +1,7 @@
-//! Correctness probe for YOLO prefixes. `YOLO_TINY_LAYERS=N` runs the first N
-//! Ultralytics model layers, including the skip-connected head for N > 11.
+//! Correctness probe for the first three YOLO model layers.
 //!
 //! Run with:
 //!   cargo run -p yolo_v11 --release --bin yolo_v11_tiny
-//!   YOLO_TINY_LAYERS=17 cargo run -p yolo_v11 --release --bin yolo_v11_tiny
 
 use std::{fs::File, io::Read, path::PathBuf, time::Instant};
 
@@ -27,35 +25,6 @@ fn read_f32_bin(path: &PathBuf) -> Vec<f32> {
         data.push(f32::from_le_bytes(chunk));
     }
     data
-}
-
-fn compare_reference(out: &[f32], path: &PathBuf) {
-    let ref_out = read_f32_bin(path);
-    assert_eq!(
-        out.len(),
-        ref_out.len(),
-        "reference length mismatch for {}",
-        path.display()
-    );
-    let (mut max_abs, mut sum_abs) = (0.0_f32, 0.0_f64);
-    let mut argmax_idx = 0usize;
-    for (i, (a, b)) in out.iter().zip(ref_out.iter()).enumerate() {
-        let d = (a - b).abs();
-        sum_abs += d as f64;
-        if d > max_abs {
-            max_abs = d;
-            argmax_idx = i;
-        }
-    }
-    println!(
-        "Comparison vs {}: max_abs={:.6} mean_abs={:.6e} (worst idx {} our={} ref={})",
-        path.display(),
-        max_abs,
-        sum_abs / out.len() as f64,
-        argmax_idx,
-        out[argmax_idx],
-        ref_out[argmax_idx]
-    );
 }
 
 fn load_safetensors_native(
@@ -86,14 +55,9 @@ fn main() {
     let weights_path = artifact_dir.join("weights.safetensors");
     let input_path = artifact_dir.join("reference_input.bin");
 
-    let n_layers: usize = std::env::var("YOLO_TINY_LAYERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(3);
-    let probe = std::env::var("YOLO_TINY_PROBE").ok();
-    let use_native = std::env::var("YOLO_TINY_BACKEND")
-        .map(|s| s == "native")
-        .unwrap_or(false);
+    let n_layers = 3usize;
+    let probe: Option<String> = None;
+    let use_native = false;
     println!("Building YOLO subset with first {n_layers} model layers");
     let mut cx = Graph::default();
     let img = cx.named_tensor("input.image", (1usize, 3usize, IMG_SIZE, IMG_SIZE));
@@ -277,9 +241,6 @@ fn main() {
             out.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
             out.iter().sum::<f32>() / out.len() as f32
         );
-        if let Ok(path) = std::env::var("YOLO_TINY_REF") {
-            compare_reference(out, &PathBuf::from(path));
-        }
         return;
     }
 
@@ -337,7 +298,4 @@ fn main() {
         out.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
         out.iter().sum::<f32>() / out.len() as f32
     );
-    if let Ok(path) = std::env::var("YOLO_TINY_REF") {
-        compare_reference(&out, &PathBuf::from(path));
-    }
 }

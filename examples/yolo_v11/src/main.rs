@@ -1,9 +1,7 @@
 mod model;
 
 use std::{
-    env,
-    fs::{self, File},
-    io::{Read, Write},
+    env, fs,
     path::{Path, PathBuf},
     process,
     time::Instant,
@@ -46,35 +44,6 @@ struct CliArgs {
     annotated_path: PathBuf,
 }
 
-fn read_f32_bin(path: &PathBuf) -> Vec<f32> {
-    let mut f = File::open(path).expect("Failed to open binary file");
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).unwrap();
-    assert_eq!(buf.len() % 4, 0, "binary file size must be multiple of 4");
-    let mut data = Vec::with_capacity(buf.len() / 4);
-    let mut chunk = [0u8; 4];
-    for i in 0..buf.len() / 4 {
-        chunk.copy_from_slice(&buf[i * 4..(i + 1) * 4]);
-        data.push(f32::from_le_bytes(chunk));
-    }
-    data
-}
-
-fn write_f32_bin(path: &Path, data: &[f32]) {
-    let mut f =
-        File::create(path).unwrap_or_else(|e| panic!("Failed to create {}: {e}", path.display()));
-    for value in data {
-        f.write_all(&value.to_le_bytes())
-            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", path.display()));
-    }
-}
-
-fn env_flag(name: &str) -> bool {
-    env::var(name)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
-}
-
 fn print_usage() {
     println!(
         "Usage: cargo run --release -p yolo_v11 --bin yolo_v11 -- [--input <image.jpg|image.png>] [--output <annotated.png>]\n\
@@ -82,9 +51,7 @@ fn print_usage() {
          Positional form is also supported:\n\
          cargo run --release -p yolo_v11 --bin yolo_v11 -- <image.jpg|image.png> <annotated.png>\n\
          \n\
-         If no image is supplied, the example uses examples/yolo_v11/artifacts/bus.jpg.\n\
-         Set YOLO_INPUT_BIN=1 YOLO_COMPARE_REF=1 to run the exact reference_input.bin regression.\n\
-         Set YOLO_DUMP_INPUT=/tmp/input.bin to write the Rust-preprocessed input tensor."
+         If no image is supplied, the example uses examples/yolo_v11/artifacts/bus.jpg."
     );
 }
 
@@ -101,7 +68,7 @@ fn cli_args(artifact_dir: &Path) -> CliArgs {
                 print_usage();
                 process::exit(0);
             }
-            "--input" | "--image" => {
+            "--input" => {
                 image_path = Some(next_cli_path(&mut args, arg_str.as_ref()));
             }
             "--output" | "-o" => {
@@ -258,10 +225,7 @@ fn main() {
         .with(luminal_filter())
         .init();
 
-    let search_graphs: usize = std::env::var("YOLO_SEARCH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+    let search_graphs = 1usize;
     println!(
         "NOTE: the full YOLO v11n graph is large (~2200 HLIR nodes). The current\n\
          luminal_cuda_lite e-graph rewrite phase can take many minutes to converge\n\
@@ -274,16 +238,8 @@ fn main() {
     println!("Using artifact directory: {}", artifact_dir.display());
 
     let weights_path = artifact_dir.join("weights.safetensors");
-    let input_bin_path = artifact_dir.join("reference_input.bin");
-    let output_path = artifact_dir.join("reference_output.bin");
-    let use_input_bin = env_flag("YOLO_INPUT_BIN");
-    let compare_reference = env_flag("YOLO_COMPARE_REF");
     let cli = cli_args(&artifact_dir);
-    let image_path = if use_input_bin {
-        None
-    } else {
-        cli.image_path.clone()
-    };
+    let image_path = cli.image_path.clone();
 
     assert!(
         weights_path.exists(),
@@ -291,38 +247,28 @@ fn main() {
         weights_path
     );
 
-    let (img_data, letterbox_meta) = if let Some(path) = image_path.as_deref() {
-        assert!(
-            path.exists(),
-            "Image path does not exist: {}",
-            path.display()
-        );
-        println!("Input image: {}", path.display());
-        let (data, meta) = preprocess_image(path);
-        println!(
-            "  original={}x{} letterbox_ratio={:.6} pad=({:.0}, {:.0})",
-            meta.orig_width, meta.orig_height, meta.ratio, meta.pad_x, meta.pad_y
-        );
-        (data, Some(meta))
-    } else {
-        assert!(
-            input_bin_path.exists(),
-            "Missing {:?}; run python/reference.py first or pass an image path",
-            input_bin_path
-        );
-        println!("Input tensor: {}", input_bin_path.display());
-        (read_f32_bin(&input_bin_path), None)
-    };
+    let image_path = image_path.unwrap_or_else(|| {
+        panic!(
+            "No input image supplied and default image is missing; pass --input <image.jpg|image.png>"
+        )
+    });
+    assert!(
+        image_path.exists(),
+        "Image path does not exist: {}",
+        image_path.display()
+    );
+    println!("Input image: {}", image_path.display());
+    let (img_data, letterbox_meta) = preprocess_image(&image_path);
+    println!(
+        "  original={}x{} letterbox_ratio={:.6} pad=({:.0}, {:.0})",
+        letterbox_meta.orig_width,
+        letterbox_meta.orig_height,
+        letterbox_meta.ratio,
+        letterbox_meta.pad_x,
+        letterbox_meta.pad_y
+    );
     let expected_input = 1 * 3 * IMG_SIZE * IMG_SIZE;
     assert_eq!(img_data.len(), expected_input, "input size mismatch");
-    if let Some(path) = env::var_os("YOLO_DUMP_INPUT") {
-        let path = PathBuf::from(path);
-        write_f32_bin(&path, &img_data);
-        println!("Wrote preprocessed input tensor: {}", path.display());
-    }
-    if env_flag("YOLO_PREPROCESS_ONLY") {
-        return;
-    }
 
     let ctx = CudaContext::new(0).unwrap();
     let stream = ctx.default_stream();
@@ -382,47 +328,16 @@ fn main() {
     );
     let out = &out[..expected_out_len];
 
-    if compare_reference {
-        compare_reference_output(out, &output_path, expected_out_len);
-    }
-
     let detections = nms_detections(out, total_anchors, CONF_THRES, IOU_THRES, MAX_DET);
-    print_detections(&detections, letterbox_meta);
+    print_detections(&detections, Some(letterbox_meta));
 
-    if let (Some(input_image), Some(meta)) = (image_path.as_deref(), letterbox_meta) {
-        save_annotated_image(input_image, &cli.annotated_path, &detections, meta);
-        println!("Wrote annotated image: {}", cli.annotated_path.display());
-    }
-}
-
-fn compare_reference_output(out: &[f32], output_path: &PathBuf, expected_out_len: usize) {
-    assert!(
-        output_path.exists(),
-        "Missing {:?}; run python/reference.py first",
-        output_path
+    save_annotated_image(
+        &image_path,
+        &cli.annotated_path,
+        &detections,
+        letterbox_meta,
     );
-    let ref_out = read_f32_bin(output_path);
-    assert_eq!(
-        ref_out.len(),
-        expected_out_len,
-        "reference output size mismatch"
-    );
-
-    let (mut max_abs, mut sum_abs) = (0.0_f32, 0.0_f64);
-    let mut argmax_idx = 0usize;
-    for (i, (a, b)) in out.iter().zip(ref_out.iter()).enumerate() {
-        let d = (a - b).abs();
-        sum_abs += d as f64;
-        if d > max_abs {
-            max_abs = d;
-            argmax_idx = i;
-        }
-    }
-    let mean_abs = sum_abs / expected_out_len as f64;
-    println!(
-        "Comparison vs Python reference: max_abs={:.6} mean_abs={:.6e}  (worst at idx {} our={} ref={})",
-        max_abs, mean_abs, argmax_idx, out[argmax_idx], ref_out[argmax_idx]
-    );
+    println!("Wrote annotated image: {}", cli.annotated_path.display());
 }
 
 fn print_detections(detections: &[Detection], meta: Option<LetterboxMeta>) {

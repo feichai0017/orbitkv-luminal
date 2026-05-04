@@ -383,40 +383,13 @@ impl CudaGraphOp {
 
             // Build params for each kernel first
             let num_kernels = state.kernels.len();
-            let strict_buf = std::env::var_os("LUMINAL_STRICT_BUFFERS").is_some();
             for idx in 0..num_kernels {
                 let kernel = &state.kernels[idx];
-                let output_ptr = current_buffer_ptrs
-                    .get(&kernel.node)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        if strict_buf {
-                            panic!(
-                                "missing output buffer for kernel #{idx} {} (node {:?}); \
-                                 buffers populated for {} nodes",
-                                kernel.kernel_op.kernel_name(),
-                                kernel.node,
-                                current_buffer_ptrs.len()
-                            );
-                        }
-                        0
-                    });
+                let output_ptr = current_buffer_ptrs.get(&kernel.node).copied().unwrap_or(0);
                 let input_ptrs: Vec<u64> = kernel
                     .inputs
                     .iter()
-                    .enumerate()
-                    .map(|(i, inp)| {
-                        current_buffer_ptrs.get(inp).copied().unwrap_or_else(|| {
-                            if strict_buf {
-                                panic!(
-                                    "missing input buffer #{i} for kernel #{idx} {} (input node {:?})",
-                                    kernel.kernel_op.kernel_name(),
-                                    inp
-                                );
-                            }
-                            0
-                        })
-                    })
+                    .map(|inp| current_buffer_ptrs.get(inp).copied().unwrap_or(0))
                     .collect();
 
                 let param_values = kernel.kernel_op.build_params(
@@ -550,46 +523,11 @@ impl CudaGraphOp {
             );
             let shared_mem = kernel.shared_mem.exec(dyn_map).unwrap() as u32;
 
-            let strict_buf = std::env::var_os("LUMINAL_STRICT_BUFFERS").is_some();
-            let output_ptr = buffer_ptrs.get(&kernel.node).copied().unwrap_or_else(|| {
-                if strict_buf {
-                    let in_buffer_nodes = self.buffer_nodes.contains(&kernel.node);
-                    panic!(
-                        "[build_graph] missing output buffer for kernel #{idx} {} (node {:?}); \
-                         buffer_ptrs has {} nodes, in self.buffer_nodes={in_buffer_nodes}",
-                        kernel.kernel_op.kernel_name(),
-                        kernel.node,
-                        buffer_ptrs.len(),
-                    );
-                }
-                0
-            });
+            let output_ptr = buffer_ptrs.get(&kernel.node).copied().unwrap_or(0);
             let input_ptrs: Vec<u64> = kernel
                 .inputs
                 .iter()
-                .enumerate()
-                .map(|(i, inp)| {
-                    buffer_ptrs.get(inp).copied().unwrap_or_else(|| {
-                        if strict_buf {
-                            let in_buffer_nodes = self.buffer_nodes.contains(inp);
-                            let in_buffers_map = buffers.contains_key(inp);
-                            let in_buffer_sizes = self.buffer_sizes.contains_key(inp);
-                            let buf_size = self
-                                .buffer_sizes
-                                .get(inp)
-                                .map(|e| format!("{:?}", e.exec(&FxHashMap::default())))
-                                .unwrap_or_else(|| "<not in buffer_sizes>".to_string());
-                            panic!(
-                                "[build_graph] missing input #{i} for kernel #{idx} {} \
-                                 (input node {inp:?}); buffers_map_contains={in_buffers_map}, \
-                                 buffer_nodes_contains={in_buffer_nodes}, \
-                                 buffer_sizes_contains={in_buffer_sizes} ({buf_size})",
-                                kernel.kernel_op.kernel_name(),
-                            );
-                        }
-                        0
-                    })
-                })
+                .map(|inp| buffer_ptrs.get(inp).copied().unwrap_or(0))
                 .collect();
 
             let param_values = kernel.kernel_op.build_params(
