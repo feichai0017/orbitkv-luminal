@@ -260,7 +260,7 @@ impl EgglogOp for FusionEnd {
                         (let ?fu2 (Op ({fo2} ?shape ?s ?s ?dt) (ICons ?fu1 (INil))))
                         (let ?fe (Op (FusionEnd ?shape ?s ?dt) (ICons ?fu2 (INil))))
                         (union ?u2 ?fe)
-                     ) :name \"pair-fuse-U-U-{ki1}-{ko2}\")"
+                     ) :ruleset fusion_pair :name \"pair-fuse-U-U-{ki1}-{ko2}\")"
                 )));
             }
         }
@@ -281,7 +281,7 @@ impl EgglogOp for FusionEnd {
                         (let ?fu (Op ({fu} ?shape ?o_s ?o_s ?dt) (ICons ?fbin (INil))))
                         (let ?fe (Op (FusionEnd ?shape ?o_s ?dt) (ICons ?fu (INil))))
                         (union ?u ?fe)
-                     ) :name \"pair-fuse-B-U-{lb}-{ku}\")"
+                     ) :ruleset fusion_pair :name \"pair-fuse-B-U-{lb}-{ku}\")"
                 )));
             }
         }
@@ -304,7 +304,7 @@ impl EgglogOp for FusionEnd {
                                        (ICons ?fu (ICons ?fs_b (INil)))))
                         (let ?fe (Op (FusionEnd ?shape ?o_s ?dt) (ICons ?fbin (INil))))
                         (union ?bin ?fe)
-                     ) :name \"pair-fuse-U-B-lhs-{ku}-{lb}\")"
+                     ) :ruleset fusion_pair :name \"pair-fuse-U-B-lhs-{ku}-{lb}\")"
                 )));
                 rules.push(Rule::raw(format!(
                     "(rule (
@@ -319,7 +319,7 @@ impl EgglogOp for FusionEnd {
                                        (ICons ?fs_a (ICons ?fu (INil)))))
                         (let ?fe (Op (FusionEnd ?shape ?o_s ?dt) (ICons ?fbin (INil))))
                         (union ?bin ?fe)
-                     ) :name \"pair-fuse-U-B-rhs-{ku}-{lb}\")"
+                     ) :ruleset fusion_pair :name \"pair-fuse-U-B-rhs-{ku}-{lb}\")"
                 )));
             }
         }
@@ -343,7 +343,7 @@ impl EgglogOp for FusionEnd {
                                        (ICons ?fbi (ICons ?fs_c (INil)))))
                         (let ?fe (Op (FusionEnd ?shape ?oo_s ?dt) (ICons ?fbo (INil))))
                         (union ?bo ?fe)
-                     ) :name \"pair-fuse-B-B-lhs-{lbi}-{lbo}\")"
+                     ) :ruleset fusion_pair :name \"pair-fuse-B-B-lhs-{lbi}-{lbo}\")"
                 )));
                 rules.push(Rule::raw(format!(
                     "(rule (
@@ -361,7 +361,7 @@ impl EgglogOp for FusionEnd {
                                        (ICons ?fs_c (ICons ?fbi (INil)))))
                         (let ?fe (Op (FusionEnd ?shape ?oo_s ?dt) (ICons ?fbo (INil))))
                         (union ?bo ?fe)
-                     ) :name \"pair-fuse-B-B-rhs-{lbi}-{lbo}\")"
+                     ) :ruleset fusion_pair :name \"pair-fuse-B-B-rhs-{lbi}-{lbo}\")"
                 )));
             }
         }
@@ -376,7 +376,7 @@ impl EgglogOp for FusionEnd {
                     (let ?fu (Op ({fu} ?shape ?s ?s ?dt) (ICons ?inner (INil))))
                     (let ?new_fe (Op (FusionEnd ?shape ?s ?dt) (ICons ?fu (INil))))
                     (union ?u ?new_fe)
-                 ) :name \"grow-FE-U-{ku}\")"
+                 ) :ruleset fusion_grow :name \"grow-FE-U-{ku}\")"
             )));
         }
 
@@ -393,7 +393,7 @@ impl EgglogOp for FusionEnd {
                                    (ICons ?inner_a (ICons ?fs_b (INil)))))
                     (let ?new_fe (Op (FusionEnd ?shape ?o_s ?dt) (ICons ?fbin (INil))))
                     (union ?bin ?new_fe)
-                 ) :name \"grow-FE-B-lhs-{lb}\")"
+                 ) :ruleset fusion_grow :name \"grow-FE-B-lhs-{lb}\")"
             )));
             rules.push(Rule::raw(format!(
                 "(rule (
@@ -406,7 +406,7 @@ impl EgglogOp for FusionEnd {
                                    (ICons ?fs_a (ICons ?inner_b (INil)))))
                     (let ?new_fe (Op (FusionEnd ?shape ?o_s ?dt) (ICons ?fbin (INil))))
                     (union ?bin ?new_fe)
-                 ) :name \"grow-FE-B-rhs-{lb}\")"
+                 ) :ruleset fusion_grow :name \"grow-FE-B-rhs-{lb}\")"
             )));
         }
 
@@ -430,7 +430,7 @@ impl EgglogOp for FusionEnd {
                     (union ?bin ?new_fe)
                     (subsume (Op (FusionEnd ?shape ?a_s ?dt) (ICons ?inner_a (INil))))
                     (subsume (Op (FusionEnd ?shape ?b_s ?dt) (ICons ?inner_b (INil))))
-                 ) :name \"merge-FE-FE-{lb}\")"
+                 ) :ruleset fusion_merge :name \"merge-FE-FE-{lb}\")"
             )));
         }
 

@@ -815,6 +815,21 @@ impl Runtime for CudaRuntime {
     type ExecReturn = ();
     type ProfileMetric = Duration;
 
+    fn late_egglog_passes(
+        ops: &[Arc<Box<dyn luminal::op::EgglogOp>>],
+        _options: &luminal::graph::BuildSearchSpaceOptions,
+    ) -> Vec<luminal::egglog_utils::LateEgglogPass> {
+        vec![crate::memory_analysis::cuda_memory_analysis_pass(ops)]
+    }
+
+    fn estimate_graph_memory<'a>(
+        egraph: &'a SerializedEGraph,
+        choices: &luminal::egglog_utils::EGraphChoiceSet<'a>,
+        dyn_map: &FxHashMap<char, usize>,
+    ) -> Option<usize> {
+        crate::memory_analysis::estimate_graph_memory_bytes(egraph, choices, dyn_map)
+    }
+
     fn initialize(stream: Self::CompileArg) -> Self {
         Self {
             hlir_buffers: FxHashMap::default(),
@@ -940,6 +955,7 @@ impl Runtime for CudaRuntime {
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
         _trials: usize,
+        _timeout: Option<std::time::Duration>,
     ) -> (Self::ProfileMetric, String) {
         // Clear active bucket's buffers before loading new LLIR for profiling
         if !self.compiled_buckets.is_empty() {
@@ -1365,8 +1381,7 @@ impl CudaRuntime {
                 // of a different region) or a non-marker op (e.g. an
                 // unfused Add/Mul reading the value directly), allocate a
                 // buffer so cross-region reads have somewhere to land.
-                let is_marker = kernel_name == "FusionStart"
-                    || kernel_name.starts_with("Fused");
+                let is_marker = kernel_name == "FusionStart" || kernel_name.starts_with("Fused");
                 let has_external_consumer = is_marker
                     && llir_graph
                         .neighbors_directed(node, Direction::Outgoing)

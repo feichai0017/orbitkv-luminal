@@ -40,6 +40,9 @@ EXPECTED_OUTPUT = {
     "gemma4_moe": [
         "city of romance, art and culture",
     ],
+    "whisper": [
+        "ask not what your country can do for you",
+    ],
 }
 
 
