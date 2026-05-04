@@ -74,7 +74,14 @@ fn main() {
         x = conv1.forward(x);
     }
     if n_layers >= 3 {
-        let c3k2_2 = C3k2::new("model.2", C1, C2, 1, false, 0.25, true, &mut cx);
+        let c3k2_2 = C3k2::new(
+            "model.2",
+            C1,
+            C2,
+            1,
+            C3k2Config::new(false, 0.25, true),
+            &mut cx,
+        );
         x = match probe.as_deref() {
             Some("model.2.cv1a") => c3k2_2.cv1a.forward(x),
             Some("model.2.cv1b") => c3k2_2.cv1b.forward(x),
@@ -116,7 +123,14 @@ fn main() {
         x = conv3.forward(x);
     }
     if n_layers >= 5 {
-        let c3k2_4 = C3k2::new("model.4", C2, C3, 1, false, 0.25, true, &mut cx);
+        let c3k2_4 = C3k2::new(
+            "model.4",
+            C2,
+            C3,
+            1,
+            C3k2Config::new(false, 0.25, true),
+            &mut cx,
+        );
         x = c3k2_4.forward(x);
         l4 = Some(x);
     }
@@ -125,7 +139,14 @@ fn main() {
         x = conv5.forward(x);
     }
     if n_layers >= 7 {
-        let c3k2_6 = C3k2::new("model.6", C3, C3, 1, true, 0.5, true, &mut cx);
+        let c3k2_6 = C3k2::new(
+            "model.6",
+            C3,
+            C3,
+            1,
+            C3k2Config::new(true, 0.5, true),
+            &mut cx,
+        );
         x = c3k2_6.forward(x);
         l6 = Some(x);
     }
@@ -134,7 +155,14 @@ fn main() {
         x = conv7.forward(x);
     }
     if n_layers >= 9 {
-        let c3k2_8 = C3k2::new("model.8", C4, C4, 1, true, 0.5, true, &mut cx);
+        let c3k2_8 = C3k2::new(
+            "model.8",
+            C4,
+            C4,
+            1,
+            C3k2Config::new(true, 0.5, true),
+            &mut cx,
+        );
         x = c3k2_8.forward(x);
     }
     if n_layers >= 10 {
@@ -153,7 +181,14 @@ fn main() {
         x = make_contiguous(x.concat_along(l6.expect("layer 6 output required"), 1));
     }
     if n_layers >= 14 {
-        let c3k2_13 = C3k2::new("model.13", C4 + C3, C3, 1, false, 0.5, true, &mut cx);
+        let c3k2_13 = C3k2::new(
+            "model.13",
+            C4 + C3,
+            C3,
+            1,
+            C3k2Config::new(false, 0.5, true),
+            &mut cx,
+        );
         x = c3k2_13.forward(x);
         l13 = Some(x);
     }
@@ -164,7 +199,14 @@ fn main() {
         x = make_contiguous(x.concat_along(l4.expect("layer 4 output required"), 1));
     }
     if n_layers >= 17 {
-        let c3k2_16 = C3k2::new("model.16", C3 + C3, C2, 1, false, 0.5, true, &mut cx);
+        let c3k2_16 = C3k2::new(
+            "model.16",
+            C3 + C3,
+            C2,
+            1,
+            C3k2Config::new(false, 0.5, true),
+            &mut cx,
+        );
         x = c3k2_16.forward(x);
         l16 = Some(x);
     }
@@ -176,7 +218,14 @@ fn main() {
         x = make_contiguous(x.concat_along(l13.expect("layer 13 output required"), 1));
     }
     if n_layers >= 20 {
-        let c3k2_19 = C3k2::new("model.19", C2 + C3, C3, 1, false, 0.5, true, &mut cx);
+        let c3k2_19 = C3k2::new(
+            "model.19",
+            C2 + C3,
+            C3,
+            1,
+            C3k2Config::new(false, 0.5, true),
+            &mut cx,
+        );
         x = c3k2_19.forward(x);
         l19 = Some(x);
     }
@@ -188,7 +237,14 @@ fn main() {
         x = make_contiguous(x.concat_along(l10.expect("layer 10 output required"), 1));
     }
     if n_layers >= 23 {
-        let c3k2_22 = C3k2::new("model.22", C3 + C4, C4, 1, true, 0.5, true, &mut cx);
+        let c3k2_22 = C3k2::new(
+            "model.22",
+            C3 + C4,
+            C4,
+            1,
+            C3k2Config::new(true, 0.5, true),
+            &mut cx,
+        );
         x = c3k2_22.forward(x);
     }
     if n_layers >= 24 {

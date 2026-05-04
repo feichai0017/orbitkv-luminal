@@ -267,7 +267,7 @@ fn main() {
         letterbox_meta.pad_x,
         letterbox_meta.pad_y
     );
-    let expected_input = 1 * 3 * IMG_SIZE * IMG_SIZE;
+    let expected_input = 3 * IMG_SIZE * IMG_SIZE;
     assert_eq!(img_data.len(), expected_input, "input size mismatch");
 
     let ctx = CudaContext::new(0).unwrap();
@@ -318,7 +318,7 @@ fn main() {
     // (NC + REG_MAX*4) channels.
     let out = runtime.get_f32(logits);
     let total_anchors: usize = 80 * 80 + 40 * 40 + 20 * 20;
-    let expected_out_len = 1 * (4 + NC) * total_anchors;
+    let expected_out_len = (4 + NC) * total_anchors;
     println!(
         "  output buffer length: {} (expected {} for shape (1, {}, {}))",
         out.len(),
@@ -703,8 +703,8 @@ fn nms_detections(
     let nc = NC;
     let mut candidates = Vec::new();
     for a in 0..total_anchors {
-        let cx = out[0 * total_anchors + a];
-        let cy = out[1 * total_anchors + a];
+        let cx = out[a];
+        let cy = out[total_anchors + a];
         let w = out[2 * total_anchors + a];
         let h = out[3 * total_anchors + a];
         let mut best_score = 0.0_f32;

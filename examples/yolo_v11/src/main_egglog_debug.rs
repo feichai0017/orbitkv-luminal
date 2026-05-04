@@ -34,7 +34,14 @@ fn main() {
         x = conv1.forward(x);
     }
     if n_layers >= 3 {
-        let c3k2_2 = C3k2::new("model.2", C1, C2, 1, false, 0.25, true, &mut cx);
+        let c3k2_2 = C3k2::new(
+            "model.2",
+            C1,
+            C2,
+            1,
+            C3k2Config::new(false, 0.25, true),
+            &mut cx,
+        );
         x = c3k2_2.forward(x);
     }
     if n_layers >= 4 {
@@ -42,7 +49,14 @@ fn main() {
         x = conv3.forward(x);
     }
     if n_layers >= 5 {
-        let c3k2_4 = C3k2::new("model.4", C2, C3, 1, false, 0.25, true, &mut cx);
+        let c3k2_4 = C3k2::new(
+            "model.4",
+            C2,
+            C3,
+            1,
+            C3k2Config::new(false, 0.25, true),
+            &mut cx,
+        );
         x = c3k2_4.forward(x);
     }
     if n_layers >= 6 {
@@ -50,7 +64,14 @@ fn main() {
         x = conv5.forward(x);
     }
     if n_layers >= 7 {
-        let c3k2_6 = C3k2::new("model.6", C3, C3, 1, true, 0.5, true, &mut cx);
+        let c3k2_6 = C3k2::new(
+            "model.6",
+            C3,
+            C3,
+            1,
+            C3k2Config::new(true, 0.5, true),
+            &mut cx,
+        );
         x = c3k2_6.forward(x);
     }
     if n_layers >= 8 {
@@ -58,7 +79,14 @@ fn main() {
         x = conv7.forward(x);
     }
     if n_layers >= 9 {
-        let c3k2_8 = C3k2::new("model.8", C4, C4, 1, true, 0.5, true, &mut cx);
+        let c3k2_8 = C3k2::new(
+            "model.8",
+            C4,
+            C4,
+            1,
+            C3k2Config::new(true, 0.5, true),
+            &mut cx,
+        );
         x = c3k2_8.forward(x);
     }
     if n_layers >= 10 {
@@ -199,7 +227,7 @@ fn print_top_rules(report: &EgglogStageReport, n: usize) {
         })
         .collect();
     // Sort by time (descending) so we surface the heaviest rules first.
-    entries.sort_by(|a, b| b.2.cmp(&a.2));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.2));
     println!("Top rules by time (matches, total time):");
     for (name, matches, time) in entries.iter().take(n) {
         if name.contains('(') {

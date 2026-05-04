@@ -282,15 +282,14 @@ impl Bottleneck {
         c1: usize,
         c2: usize,
         shortcut: bool,
-        k0: usize,
-        k1: usize,
+        k: (usize, usize),
         e: f32,
         cx: &mut Graph,
     ) -> Self {
         // PyTorch impl: c_ = int(c2 * e).
         let c_ = (c2 as f32 * e) as usize;
-        let cv1 = Conv::new(&format!("{name}.cv1.conv"), c1, c_, k0, 1, k0 / 2, cx);
-        let cv2 = Conv::new(&format!("{name}.cv2.conv"), c_, c2, k1, 1, k1 / 2, cx);
+        let cv1 = Conv::new(&format!("{name}.cv1.conv"), c1, c_, k.0, 1, k.0 / 2, cx);
+        let cv2 = Conv::new(&format!("{name}.cv2.conv"), c_, c2, k.1, 1, k.1 / 2, cx);
         Self {
             cv1,
             cv2,
@@ -324,7 +323,7 @@ impl C3k {
         let cv2 = Conv::new(&format!("{name}.cv2.conv"), c1, c_, 1, 1, 0, cx);
         let cv3 = Conv::new(&format!("{name}.cv3.conv"), 2 * c_, c2, 1, 1, 0, cx);
         let m = (0..n)
-            .map(|i| Bottleneck::new(&format!("{name}.m.{i}"), c_, c_, shortcut, 3, 3, 1.0, cx))
+            .map(|i| Bottleneck::new(&format!("{name}.m.{i}"), c_, c_, shortcut, (3, 3), 1.0, cx))
             .collect();
         Self {
             cv1,
@@ -348,8 +347,8 @@ impl C3k {
 
 /// Two variants of the inner block in C3k2.
 pub enum C3k2Inner {
-    Bottleneck(Bottleneck),
-    C3k(C3k),
+    Bottleneck(Box<Bottleneck>),
+    C3k(Box<C3k>),
 }
 
 impl C3k2Inner {
@@ -373,38 +372,55 @@ pub struct C3k2 {
     pub c: usize, // hidden channel size
 }
 
+#[derive(Clone, Copy)]
+pub struct C3k2Config {
+    pub c3k: bool,
+    pub e: f32,
+    pub shortcut: bool,
+}
+
+impl C3k2Config {
+    pub const fn new(c3k: bool, e: f32, shortcut: bool) -> Self {
+        Self { c3k, e, shortcut }
+    }
+}
+
 impl C3k2 {
     pub fn new(
         name: &str,
         c1: usize,
         c2: usize,
         n: usize,
-        c3k: bool,
-        e: f32,
-        shortcut: bool,
+        config: C3k2Config,
         cx: &mut Graph,
     ) -> Self {
-        let c = (c2 as f32 * e) as usize; // hidden
-                                          // Two halves of the original cv1 (channel-split). Saved as
-                                          // model.<L>.cv1{a,b}.conv.{weight,bias} by python/reference.py.
+        let c = (c2 as f32 * config.e) as usize; // hidden
+                                                 // Two halves of the original cv1 (channel-split). Saved as
+                                                 // model.<L>.cv1{a,b}.conv.{weight,bias} by python/reference.py.
         let cv1a = Conv::new(&format!("{name}.cv1a.conv"), c1, c, 1, 1, 0, cx);
         let cv1b = Conv::new(&format!("{name}.cv1b.conv"), c1, c, 1, 1, 0, cx);
         let cv2 = Conv::new(&format!("{name}.cv2.conv"), (2 + n) * c, c2, 1, 1, 0, cx);
         let m: Vec<_> = (0..n)
             .map(|i| {
-                if c3k {
-                    C3k2Inner::C3k(C3k::new(&format!("{name}.m.{i}"), c, c, 2, shortcut, cx))
-                } else {
-                    C3k2Inner::Bottleneck(Bottleneck::new(
+                if config.c3k {
+                    C3k2Inner::C3k(Box::new(C3k::new(
                         &format!("{name}.m.{i}"),
                         c,
                         c,
-                        shortcut,
-                        3,
-                        3,
+                        2,
+                        config.shortcut,
+                        cx,
+                    )))
+                } else {
+                    C3k2Inner::Bottleneck(Box::new(Bottleneck::new(
+                        &format!("{name}.m.{i}"),
+                        c,
+                        c,
+                        config.shortcut,
+                        (3, 3),
                         0.5,
                         cx,
-                    ))
+                    )))
                 }
             })
             .collect();
@@ -911,23 +927,51 @@ impl YoloV11 {
         // Backbone
         let conv0 = Conv::new("model.0.conv", 3, C0, 3, 2, 1, cx);
         let conv1 = Conv::new("model.1.conv", C0, C1, 3, 2, 1, cx);
-        let c3k2_2 = C3k2::new("model.2", C1, C2, 1, false, 0.25, true, cx);
+        let c3k2_2 = C3k2::new("model.2", C1, C2, 1, C3k2Config::new(false, 0.25, true), cx);
         let conv3 = Conv::new("model.3.conv", C2, C2, 3, 2, 1, cx);
-        let c3k2_4 = C3k2::new("model.4", C2, C3, 1, false, 0.25, true, cx);
+        let c3k2_4 = C3k2::new("model.4", C2, C3, 1, C3k2Config::new(false, 0.25, true), cx);
         let conv5 = Conv::new("model.5.conv", C3, C3, 3, 2, 1, cx);
-        let c3k2_6 = C3k2::new("model.6", C3, C3, 1, true, 0.5, true, cx);
+        let c3k2_6 = C3k2::new("model.6", C3, C3, 1, C3k2Config::new(true, 0.5, true), cx);
         let conv7 = Conv::new("model.7.conv", C3, C4, 3, 2, 1, cx);
-        let c3k2_8 = C3k2::new("model.8", C4, C4, 1, true, 0.5, true, cx);
+        let c3k2_8 = C3k2::new("model.8", C4, C4, 1, C3k2Config::new(true, 0.5, true), cx);
         let sppf_9 = Sppf::new("model.9", C4, C4, 5, cx);
         let c2psa_10 = C2psa::new("model.10", C4, C4, 1, 0.5, cx);
 
         // Head
-        let c3k2_13 = C3k2::new("model.13", C4 + C3, C3, 1, false, 0.5, true, cx);
-        let c3k2_16 = C3k2::new("model.16", C3 + C3, C2, 1, false, 0.5, true, cx);
+        let c3k2_13 = C3k2::new(
+            "model.13",
+            C4 + C3,
+            C3,
+            1,
+            C3k2Config::new(false, 0.5, true),
+            cx,
+        );
+        let c3k2_16 = C3k2::new(
+            "model.16",
+            C3 + C3,
+            C2,
+            1,
+            C3k2Config::new(false, 0.5, true),
+            cx,
+        );
         let conv17 = Conv::new("model.17.conv", C2, C2, 3, 2, 1, cx);
-        let c3k2_19 = C3k2::new("model.19", C2 + C3, C3, 1, false, 0.5, true, cx);
+        let c3k2_19 = C3k2::new(
+            "model.19",
+            C2 + C3,
+            C3,
+            1,
+            C3k2Config::new(false, 0.5, true),
+            cx,
+        );
         let conv20 = Conv::new("model.20.conv", C3, C3, 3, 2, 1, cx);
-        let c3k2_22 = C3k2::new("model.22", C3 + C4, C4, 1, true, 0.5, true, cx);
+        let c3k2_22 = C3k2::new(
+            "model.22",
+            C3 + C4,
+            C4,
+            1,
+            C3k2Config::new(true, 0.5, true),
+            cx,
+        );
 
         // Detect head reads from layers (16, 19, 22) at (80, 40, 20) feature sizes
         let detect = Detect::new("model.23", &[C2, C3, C4], &[80, 40, 20], cx);
