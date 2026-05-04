@@ -1352,13 +1352,13 @@ fn inject_kernel_alternatives(egraph: &mut SerializedEGraph, hlir_to_kernel: &[(
                         // so each ECons points at the next chain eclass
                         // instead of the original (potentially-multi-variant)
                         // tail eclass.
-                        for i in 0..chain_enodes.len() {
+                        for (i, chain_enode) in chain_enodes.iter_mut().enumerate() {
                             let next_eclass_for_tail = chain_eclass_ids.get(i + 1).cloned();
                             if let Some(tail_eclass) = next_eclass_for_tail
-                                && (chain_enodes[i].1 == "ECons" || chain_enodes[i].1 == "ICons")
-                                && chain_enodes[i].2.len() >= 2
+                                && (chain_enode.1 == "ECons" || chain_enode.1 == "ICons")
+                                && chain_enode.2.len() >= 2
                             {
-                                chain_enodes[i].2[1] = tail_eclass;
+                                chain_enode.2[1] = tail_eclass;
                             }
                         }
                         for (nid, label, children, cid) in chain_enodes {
@@ -1404,14 +1404,14 @@ fn inject_kernel_alternatives(egraph: &mut SerializedEGraph, hlir_to_kernel: &[(
         let k_children = if hlir_kind_label == "Gather" {
             // HLIR Gather kind children: [index_shape, index_strides,
             // data_shape, data_strides] — need to reorder/extend.
-            let mut kc = Vec::with_capacity(6);
-            kc.push(kind_children[0].clone()); // out_shape = index_shape
-            kc.push(kind_children[1].clone()); // index_strides
-            kc.push(kind_children[2].clone()); // data_shape
-            kc.push(kind_children[3].clone()); // data_strides
-            kc.push(kind_children[1].clone()); // out_strides ≈ index_strides
-            kc.push(f32_eclass.clone()); // dtype = F32
-            kc
+            vec![
+                kind_children[0].clone(), // out_shape = index_shape
+                kind_children[1].clone(), // index_strides
+                kind_children[2].clone(), // data_shape
+                kind_children[3].clone(), // data_strides
+                kind_children[1].clone(), // out_strides ~= index_strides
+                f32_eclass.clone(),       // dtype = F32
+            ]
         } else {
             k_children
         };
@@ -1623,7 +1623,7 @@ fn enforce_consistent_first_kind_enodes(egraph: &mut SerializedEGraph) {
         }
         // First kind enode is inconsistent or HLIR. Look for any kernel
         // candidate that is also consistent; reorder eclass.
-        let good_idx = enodes_clone.iter().position(|n| is_good(n));
+        let good_idx = enodes_clone.iter().position(is_good);
         if let Some(idx) = good_idx {
             if idx != 0 {
                 let eclass = egraph.eclasses.get_mut(&kind_eclass).unwrap();
@@ -1813,13 +1813,13 @@ fn enforce_consistent_first_kind_enodes(egraph: &mut SerializedEGraph) {
                 cur = head_children[1].clone();
             }
             // Patch tails to point at the next synth eclass.
-            for i in 0..chain_enodes.len() {
+            for (i, chain_enode) in chain_enodes.iter_mut().enumerate() {
                 let next_eclass = chain_eclass_ids.get(i + 1).cloned();
                 if let Some(tail_eclass) = next_eclass
-                    && (chain_enodes[i].1 == "ECons" || chain_enodes[i].1 == "ICons")
-                    && chain_enodes[i].2.len() >= 2
+                    && (chain_enode.1 == "ECons" || chain_enode.1 == "ICons")
+                    && chain_enode.2.len() >= 2
                 {
-                    chain_enodes[i].2[1] = tail_eclass;
+                    chain_enode.2[1] = tail_eclass;
                 }
             }
             for (nid, label, children, cid) in chain_enodes {
