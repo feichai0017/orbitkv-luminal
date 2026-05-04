@@ -132,7 +132,8 @@ fn unary_dtype_rewrite(hlir_sort: &SortDef, metal_sort: &SortDef) -> Rule {
         args["__inputs"].clone(),
     );
     let dt = v("?__dt");
-    rule(union(hlir_match, metal_op.clone()))
+    rule(union(hlir_match.clone(), metal_op.clone()))
+        .subsume(hlir_match)
         .set(dtype(metal_op), dt.clone())
         .fact(eq(dt, dtype(args["inp"].clone())))
         .ruleset("kernel_lower")
@@ -145,7 +146,8 @@ fn binary_dtype_rewrite(hlir_sort: &SortDef, metal_sort: &SortDef) -> Rule {
         args["__inputs"].clone(),
     );
     let dt = v("?__dt");
-    rule(union(hlir_match, metal_op.clone()))
+    rule(union(hlir_match.clone(), metal_op.clone()))
+        .subsume(hlir_match)
         .set(dtype(metal_op), dt.clone())
         .fact(eq(dt, dtype(args["inp_a"].clone())))
         .ruleset("kernel_lower")
@@ -386,7 +388,8 @@ impl EgglogOp for MetalAdd {
 
         vec![
             binary_dtype_rewrite(&Add::default().sort(), &self.sort()),
-            rule(union(hlir_match2, metal_op2.clone()))
+            rule(union(hlir_match2.clone(), metal_op2.clone()))
+                .subsume(hlir_match2)
                 .set(dtype(metal_op2), app(&SORTS.f32_dt, vec![]))
                 .ruleset("kernel_lower"),
         ]
@@ -1739,7 +1742,8 @@ impl EgglogOp for MetalConstant {
     fn rewrites(&self) -> Vec<Rule> {
         let (args, const_match) = new_op_call(&Constant::default().sort(), &[]);
         let metal_op = call_sort_from_args(&self.sort(), &args);
-        vec![rule(union(const_match, metal_op.clone()))
+        vec![rule(union(const_match.clone(), metal_op.clone()))
+            .subsume(const_match)
             .set(dtype(metal_op), app(&SORTS.f32_dt, vec![]))
             .ruleset("kernel_lower")]
     }
@@ -1848,7 +1852,8 @@ impl EgglogOp for MetalIota {
     fn rewrites(&self) -> Vec<Rule> {
         let (args, iota_match) = new_op_call(&Iota::default().sort(), &[]);
         let metal_op = call_sort_from_args(&self.sort(), &args);
-        vec![rule(union(iota_match, metal_op.clone()))
+        vec![rule(union(iota_match.clone(), metal_op.clone()))
+            .subsume(iota_match)
             .set(dtype(metal_op), app(&SORTS.int_dt, vec![]))
             .ruleset("kernel_lower")]
     }
@@ -1991,7 +1996,8 @@ impl EgglogOp for MetalGather {
             ("out_strides".to_string(), out_strides),
         ];
         let metal_op = self.sort().call(metal_args);
-        vec![rule(union(gather_match, metal_op.clone()))
+        vec![rule(union(gather_match.clone(), metal_op.clone()))
+            .subsume(gather_match)
             .set(dtype(metal_op), dt.clone())
             .fact(eq(dt, dtype(gather_args["data"].clone())))
             .ruleset("kernel_lower")]
@@ -2208,7 +2214,8 @@ impl EgglogOp for MetalScatter {
             ("out_strides".to_string(), out_strides),
         ];
         let metal_op = self.sort().call(metal_args);
-        vec![rule(union(scatter_match, metal_op.clone()))
+        vec![rule(union(scatter_match.clone(), metal_op.clone()))
+            .subsume(scatter_match)
             .set(dtype(metal_op), dt.clone())
             .fact(eq(dt, dtype(scatter_args["src"].clone())))
             .ruleset("kernel_lower")]
@@ -2440,7 +2447,8 @@ impl EgglogOp for MetalCast {
     fn rewrites(&self) -> Vec<Rule> {
         let (args, cast_match) = new_op_call(&Cast::default().sort(), &["inp"]);
         let metal_op = call_sort_from_args(&self.sort(), &args);
-        vec![rule(union(cast_match, metal_op.clone()))
+        vec![rule(union(cast_match.clone(), metal_op.clone()))
+            .subsume(cast_match)
             .set(dtype(metal_op), args["dtype"].clone())
             .ruleset("kernel_lower")]
     }
