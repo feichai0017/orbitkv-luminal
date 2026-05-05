@@ -1061,10 +1061,10 @@ def test_index_by_scalar_tensor(device: torch.device) -> None:
 
 @pytest.mark.xfail(
     reason=(
-        "0-d index tensor for gather: PT2 export emits "
-        "'invalid type: null, expected i64' from luminal's model.json parser. "
-        "Suspect: PT2 serializes a 0-d int64 input with a null shape entry "
-        "the parser does not yet accept."
+        "0-d index tensor for gather: the original LUM-498 model.json parse "
+        "error is fixed (range_constraints now accept null bounds), but a "
+        "downstream translator panic ('left: 0, right: 1') still trips on "
+        "the rank-0 index. Tracking separately."
     ),
     strict=False,
 )
@@ -1128,17 +1128,16 @@ def test_float_0d_plus_int_nd(device: torch.device) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "0-d int64 graph input fails PT2 export: "
-        "'Failed to parse model.json: invalid type: null, expected i64'. "
-        "Same root cause as test_gather_with_0d_index — the model.json shape "
-        "encoding for 0-d int tensors hits the null/i64 branch."
-    ),
-    strict=False,
-)
 def test_int_0d_plus_float_nd(device: torch.device) -> None:
     s = torch.tensor(3, device=device, dtype=torch.int64)
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_Int0dPlusFloatNd(), s, x)
+    _strict_match(compiled, eager)
+
+
+def test_int32_0d_plus_float_nd(device: torch.device) -> None:
+    """Regression for LUM-498: int32 (not just int64) 0-d input must also work."""
+    s = torch.tensor(3, device=device, dtype=torch.int32)
     x = torch.rand((3, 4), device=device)
     eager, compiled = _run(_Int0dPlusFloatNd(), s, x)
     _strict_match(compiled, eager)

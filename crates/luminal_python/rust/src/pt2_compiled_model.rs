@@ -113,10 +113,13 @@ pub fn translate_pt2(
     let translated = translator::translate(&parsed)?;
     let mut graph = translated.graph;
 
-    // Set initial dynamic dim values from symbol ranges
+    // Set initial dynamic dim values from symbol ranges. PT2 emits
+    // `min_val: null` when the constraint is unbounded; fall back to 1 in
+    // that case (the smallest valid dim — used only as an initial value).
     for (sym_name, c) in &translated.sym_map.sym_to_char {
         if let Some(rc) = translated.sym_map.ranges.get(sym_name) {
-            graph.set_dim(*c, rc.min_val as usize);
+            let initial = rc.min_val.unwrap_or(1).max(0) as usize;
+            graph.set_dim(*c, initial);
         }
     }
 
