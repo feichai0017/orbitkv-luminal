@@ -146,6 +146,7 @@ impl<'a> Translator<'a> {
 
             // Slice/index ops
             "torch.ops.aten.slice.Tensor" => self.translate_slice(node)?,
+            "torch.ops.aten.select.int" => self.translate_select(node)?,
             "torch.ops.aten.cat.default" => self.translate_cat(node)?,
             "torch.ops.aten.index.Tensor" => self.translate_index_tensor(node)?,
 

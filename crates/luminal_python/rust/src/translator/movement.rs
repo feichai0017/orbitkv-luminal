@@ -120,6 +120,47 @@ impl<'a> Translator<'a> {
         Ok(a.slice_along(start..end, dim))
     }
 
+    /// `aten.select.int(self, dim, index)` — select element `index` along
+    /// `dim`, dropping that dim. Output rank = input rank − 1, so a 1-D input
+    /// produces a rank-0 scalar. Both `dim` and `index` may be negative and
+    /// are normalized against the input shape.
+    ///
+    /// Lowered as `slice_along(index..index+1, dim).squeeze(dim)`. We use the
+    /// slice + squeeze decomposition (rather than `gather`) because the
+    /// composition is a pure shape manipulation with a single iota, which the
+    /// luminal compiler can fold into surrounding ops.
+    pub(crate) fn translate_select(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, 0)?;
+        let dim = self.get_int_arg(node, 1)?;
+        let dim = normalize_dim(dim, a.shape.len());
+        let index_raw = self.get_int_arg(node, 2)?;
+
+        // Normalize a possibly-negative index. PyTorch accepts indices in
+        // [-size, size); negative wraps from the end.
+        let index = if index_raw < 0 {
+            let axis_size = a.shape.dims[dim].to_usize().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "select.int: dim {} must be concrete to normalize a negative index",
+                    dim
+                )
+            })?;
+            let normalized = axis_size as i64 + index_raw;
+            if normalized < 0 {
+                bail!(
+                    "select.int: index {} out of range for dim {} of size {}",
+                    index_raw,
+                    dim,
+                    axis_size
+                );
+            }
+            normalized as usize
+        } else {
+            index_raw as usize
+        };
+
+        Ok(a.slice_along(index..index + 1, dim).squeeze(dim))
+    }
+
     pub(crate) fn translate_cat(&mut self, node: &Node) -> Result<GraphTensor> {
         let tensors: Vec<GraphTensor> = if let Some(names) = node.inputs[0].arg.as_tensors() {
             names
