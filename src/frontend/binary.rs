@@ -137,7 +137,6 @@ impl Rem<GraphTensor> for GraphTensor {
     type Output = GraphTensor;
 
     fn rem(self, rhs: GraphTensor) -> Self::Output {
-        assert_eq!(self.dims(), rhs.dims(), "Dims must match to mod tensors.");
         assert_eq!(
             self.dtype, rhs.dtype,
             "Dtypes must match to mod tensors. Got {:?} and {:?}",
@@ -288,7 +287,6 @@ impl<S: Into<Expression>> Rem<S> for GraphTensor {
 impl GraphTensor {
     /// Less than comparison
     pub fn lt(self, rhs: GraphTensor) -> GraphTensor {
-        assert_eq!(self.dims(), rhs.dims(), "Dims must match to lt tensors.");
         assert_eq!(
             self.dtype, rhs.dtype,
             "Dtypes must match to compare tensors. Got {:?} and {:?}",
@@ -550,12 +548,55 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
+        fn test_mod_scalar_broadcast(size in 1usize..64) {
+            // rank-0 RHS expanded against rank-N LHS, mirroring `x % torch.tensor(c)`.
+            test_binary_transforms(
+                size,
+                (),
+                |a, b| a % b.expand_rhs(a.shape),
+                |a, b| {
+                    let lhs = a.to_vec1::<f32>().unwrap();
+                    let rhs_scalar = b.to_scalar::<f32>().unwrap();
+                    let remainder: Vec<f32> = lhs.iter().map(|x| x % rhs_scalar).collect();
+                    Tensor::from_vec(remainder, size, &Device::Cpu).unwrap()
+                },
+                identity,
+                shift_from_zero,
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
         fn test_lt(size in 1usize..64) {
             test_binary(
                 size,
                 size,
                 |a, b| a.lt(b).cast(crate::dtype::DType::F32),
                 |a, b| a.lt(&b).unwrap().to_dtype(DType::F32).unwrap(),
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_lt_scalar_broadcast(size in 1usize..64) {
+            // rank-0 RHS expanded against rank-N LHS for `lt`.
+            test_binary(
+                size,
+                (),
+                |a, b| a.lt(b.expand_rhs(a.shape)).cast(crate::dtype::DType::F32),
+                |a, b| {
+                    let scalar = b.to_scalar::<f32>().unwrap();
+                    let lhs = a.to_vec1::<f32>().unwrap();
+                    let result: Vec<f32> = lhs
+                        .iter()
+                        .map(|x| if *x < scalar { 1.0f32 } else { 0.0f32 })
+                        .collect();
+                    Tensor::from_vec(result, size, &Device::Cpu).unwrap()
+                },
             );
         }
     }

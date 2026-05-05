@@ -408,6 +408,28 @@ impl<'a> Translator<'a> {
                 let (a, b) = broadcast_binary(a, b);
                 a % b
             }
+            // Remainder (Python-style modulo). For float tensors aten.remainder
+            // returns the same value as `%` would in luminal (Mod follows the
+            // language's % semantics on f32). The Tensor variant accepts a
+            // tensor RHS that may be rank-0; broadcast both operands so a
+            // scalar RHS is expanded to match the LHS shape before mod.
+            "torch.ops.aten.remainder.Tensor" => {
+                let a = self.get_input_tensor(node, 0)?;
+                let b = self.get_input_tensor(node, 1)?;
+                let (a, b) = ensure_same_dtype(a, b);
+                let (a, b) = broadcast_binary(a, b);
+                a % b
+            }
+            "torch.ops.aten.remainder.Scalar" => {
+                let a = self.get_input_tensor(node, 0)?;
+                let val = self.get_float_arg(node, 1)? as f32;
+                let scalar = self
+                    .graph
+                    .constant_float(val)
+                    .cast(a.dtype)
+                    .expand_rhs(a.shape);
+                a % scalar
+            }
             // Prod reduction
             "torch.ops.aten.prod.dim_int" => self.translate_reduction(node, ReductionOp::Prod)?,
 
