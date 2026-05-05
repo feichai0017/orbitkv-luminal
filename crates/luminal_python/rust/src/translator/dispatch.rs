@@ -263,6 +263,7 @@ impl<'a> Translator<'a> {
 
             // Clamp
             "torch.ops.aten.clamp.default" => self.translate_clamp(node)?,
+            "torch.ops.aten.clamp.Tensor" => self.translate_clamp_tensor(node)?,
 
             // Cumsum
             "torch.ops.aten.cumsum.default" => {

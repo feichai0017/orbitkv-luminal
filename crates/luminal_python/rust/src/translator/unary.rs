@@ -266,4 +266,37 @@ impl<'a> Translator<'a> {
         }
         Ok(result)
     }
+
+    /// `aten.clamp.Tensor(Tensor self, Tensor? min=None, Tensor? max=None)`
+    ///
+    /// Unlike `clamp.default` (which takes Python scalar bounds), the `.Tensor`
+    /// overload takes 0-d tensor bounds that appear as separate input nodes in
+    /// the FX graph. Either bound may be absent (FX represents this as a
+    /// non-tensor argument), in which case we clamp to one side only.
+    pub(crate) fn translate_clamp_tensor(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, 0)?;
+        let min_tensor = node
+            .inputs
+            .get(1)
+            .and_then(|i| i.arg.as_tensor_name())
+            .map(|n| self.get_tensor(n))
+            .transpose()?;
+        let max_tensor = node
+            .inputs
+            .get(2)
+            .and_then(|i| i.arg.as_tensor_name())
+            .map(|n| self.get_tensor(n))
+            .transpose()?;
+
+        let mut result = a;
+        if let Some(lo) = min_tensor {
+            let lo = lo.cast(result.dtype).expand_rhs(result.shape);
+            result = result.maximum(lo);
+        }
+        if let Some(hi) = max_tensor {
+            let hi = hi.cast(result.dtype).expand_rhs(result.shape);
+            result = result.minimum(hi);
+        }
+        Ok(result)
+    }
 }
