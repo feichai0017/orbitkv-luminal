@@ -124,10 +124,6 @@ def test_mean_all_produces_scalar(device: torch.device, shape: tuple) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(
-    reason="aten.prod.default not implemented in luminal_python translator",
-    strict=False,
-)
 @pytest.mark.parametrize("shape", [(3,), (2, 3)])
 def test_prod_all_produces_scalar(device: torch.device, shape: tuple) -> None:
     # Use values close to 1.0 so the product stays well-conditioned.
@@ -377,13 +373,6 @@ def test_mul_scalar_tensor_constant(device: torch.device, shape: tuple) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "aten.clamp.Tensor (scalar-tensor min/max args) not implemented; "
-        "only the literal-bounds form aten.clamp.default works."
-    ),
-    strict=False,
-)
 @pytest.mark.parametrize("shape", [(5,), (3, 4)])
 def test_clamp_with_scalar_tensors(device: torch.device, shape: tuple) -> None:
     x = torch.rand(shape, device=device) * 2.0 - 1.0  # in [-1, 1]
@@ -455,15 +444,6 @@ class _ModByScalarTensor(torch.nn.Module):
         return x % torch.tensor(3.0).to(x.device)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "aten.remainder.Tensor not implemented in translator; also the "
-        "core src/frontend/binary.rs:140 Rem op asserts dims must match "
-        "exactly (no rank-0 vs rank-N broadcast), so a translator that "
-        "tries the obvious dispatch will fail until expand_rhs is added."
-    ),
-    strict=False,
-)
 @pytest.mark.parametrize("shape", [(5,), (3, 4)])
 def test_mod_by_scalar_tensor(device: torch.device, shape: tuple) -> None:
     x = torch.rand(shape, device=device) * 10.0
@@ -493,28 +473,18 @@ class _IndexThenAddScalarConst(torch.nn.Module):
         return x[1, 2] + torch.tensor(7.0).to(x.device)
 
 
-_INDEX_SELECT_REASON = (
-    "aten.select.int not implemented in luminal_python translator; "
-    "single-element indexing producing a 0-d scalar is unreachable "
-    "until that op is added."
-)
-
-
-@pytest.mark.xfail(reason=_INDEX_SELECT_REASON, strict=False)
 def test_index_1d_produces_scalar(device: torch.device) -> None:
     x = torch.rand((5,), device=device)
     eager, compiled = _run(_Index1DToScalar(), x)
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(reason=_INDEX_SELECT_REASON, strict=False)
 def test_index_all_dims_produces_scalar(device: torch.device) -> None:
     x = torch.rand((4, 5, 6), device=device)
     eager, compiled = _run(_IndexAllDimsToScalar(), x)
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(reason=_INDEX_SELECT_REASON, strict=False)
 def test_index_then_add_scalar_const(device: torch.device) -> None:
     x = torch.rand((4, 5), device=device)
     eager, compiled = _run(_IndexThenAddScalarConst(), x)
@@ -549,7 +519,6 @@ def test_model_returns_scalar_sum(device: torch.device) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(reason=_INDEX_SELECT_REASON, strict=False)
 def test_model_returns_scalar_from_index(device: torch.device) -> None:
     x = torch.rand((3, 4), device=device)
     eager, compiled = _run(_ReturnScalarFromIndex(), x)
@@ -579,15 +548,6 @@ class _FloatScalarTimesIntTensor(torch.nn.Module):
         return x.float() * torch.tensor(0.5).to(x.device)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Silent dtype downcast: int64 input -> int32 scalar output from "
-        "a full reduction. PyTorch eager preserves int64. Numerically "
-        "correct but type-incorrect — risks overflow on large reductions "
-        "and breaks any downstream op that requires int64."
-    ),
-    strict=False,
-)
 def test_int_sum_produces_int_scalar(device: torch.device) -> None:
     x = torch.randint(0, 10, (3, 4), device=device, dtype=torch.int64)
     eager, compiled = _run(_IntSumProducesIntScalar(), x)
