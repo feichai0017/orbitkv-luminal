@@ -1096,6 +1096,17 @@ def test_reduce_sum_all_axes(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
+def test_reduce_sum_all_axes_int64_preserves_dtype(device: torch.device):
+    """Full reduction of an int64 tensor must preserve int64 (regression for LUM-486)."""
+    model: torch.nn.Module = ReduceSumAllAxesModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randint(0, 10, (3, 4), device=device, dtype=torch.int64)
+    eager = model(x)
+    out = model_compiled(x)
+    assert out.dtype == eager.dtype == torch.int64
+    assert torch.equal(out, eager)
+
+
 def test_reduce_sum_3d_axis1(device: torch.device):
     """Test sum reduction along axis 1 for a 3D tensor."""
     model: torch.nn.Module = ReduceSum3DAxis1Model().to(device)
@@ -1979,8 +1990,9 @@ def test_argsort_stable_duplicates(device: torch.device):
     )
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
-    assert output.dtype == torch.int32
-    assert torch.equal(output, original.to(torch.int32))
+    # PyTorch eager argsort returns int64; luminal preserves that dtype.
+    assert output.dtype == original.dtype
+    assert torch.equal(output, original)
 
 
 def test_tiny_moe_routing(device: torch.device):
@@ -1996,17 +2008,9 @@ def test_tiny_moe_routing(device: torch.device):
     expected = model(scores)
     output = model_compiled(scores)
 
-    expected_dtypes = (
-        torch.int32,
-        torch.float32,
-        torch.int32,
-        torch.bool,
-        torch.int32,
-        torch.float32,
-    )
-    for actual, eager, expected_dtype in zip(output, expected, expected_dtypes):
-        assert actual.dtype == expected_dtype
-        eager = eager.to(actual.dtype)
+    # PyTorch eager produces int64 for argsort/topk indices; luminal preserves dtype.
+    for actual, eager in zip(output, expected):
+        assert actual.dtype == eager.dtype
         if actual.dtype.is_floating_point:
             assert torch.allclose(actual, eager)
         else:

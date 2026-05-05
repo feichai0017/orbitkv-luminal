@@ -132,14 +132,14 @@ pub fn translate_pt2(
         })
         .collect();
 
-    let output_dtypes: Vec<DType> = translated
+    // Preserve original PT2 dtype codes for outputs (e.g. 5 = int64) so the
+    // Python wrapper can return tensors with the right torch.dtype, even when
+    // luminal collapses the type internally (e.g. int64 → DType::Int).
+    let output_dtypes: Vec<u32> = translated
         .output_ids
         .iter()
         .map(|(name, _id)| {
-            parsed
-                .tensor_meta(name)
-                .map(|meta| pt2_util::torch_dtype_int_to_luminal(meta.dtype))
-                .unwrap_or(DType::F32)
+            parsed.tensor_meta(name).map(|meta| meta.dtype).unwrap_or(7) // default to f32
         })
         .collect();
 
