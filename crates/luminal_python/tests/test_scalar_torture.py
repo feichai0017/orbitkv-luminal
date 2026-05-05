@@ -548,3 +548,868 @@ def test_float_scalar_times_int_tensor(device: torch.device) -> None:
     x = torch.randint(0, 10, (3, 4), device=device, dtype=torch.int64)
     eager, compiled = _run(_FloatScalarTimesIntTensor(), x)
     _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 10: Binary ops with INPUT 0-d (not reduction-derived).
+#
+# torch.compile may dispatch a 0-d graph input through aten.{op}.Tensor while
+# routing a constant-folded 0-d through aten.{op}.Scalar. Both paths matter.
+# ---------------------------------------------------------------------------
+
+
+class _Add0dInputLhs(torch.nn.Module):
+    def forward(self, s: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        return s + x
+
+
+class _Add0dInputRhs(torch.nn.Module):
+    def forward(self, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        return x + s
+
+
+class _Sub0dInputLhs(torch.nn.Module):
+    def forward(self, s: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        return s - x
+
+
+class _Mul0dInputRhs(torch.nn.Module):
+    def forward(self, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        return x * s
+
+
+class _Div0dInputRhs(torch.nn.Module):
+    def forward(self, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        return x / s
+
+
+class _Mod0dInputRhs(torch.nn.Module):
+    def forward(self, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        return x % s
+
+
+class _Maximum0dInput(torch.nn.Module):
+    def forward(self, s: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        return torch.maximum(s, x)
+
+
+class _Minimum0dInput(torch.nn.Module):
+    def forward(self, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        return torch.minimum(x, s)
+
+
+class _PowNd0dExponent(torch.nn.Module):
+    def forward(self, x: torch.Tensor, e: torch.Tensor) -> torch.Tensor:
+        return torch.pow(x, e)
+
+
+class _FloorDivide0dInput(torch.nn.Module):
+    def forward(self, x: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
+        return torch.floor_divide(x, d)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4), (2, 3, 4)])
+def test_add_input_0d_lhs(device: torch.device, shape: tuple) -> None:
+    s = torch.tensor(2.5, device=device)
+    x = torch.rand(shape, device=device)
+    eager, compiled = _run(_Add0dInputLhs(), s, x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4), (2, 3, 4)])
+def test_add_input_0d_rhs(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    s = torch.tensor(2.5, device=device)
+    eager, compiled = _run(_Add0dInputRhs(), x, s)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_sub_input_0d_lhs(device: torch.device, shape: tuple) -> None:
+    s = torch.tensor(0.7, device=device)
+    x = torch.rand(shape, device=device)
+    eager, compiled = _run(_Sub0dInputLhs(), s, x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_mul_input_0d_rhs(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    s = torch.tensor(0.5, device=device)
+    eager, compiled = _run(_Mul0dInputRhs(), x, s)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_div_input_0d_rhs(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    s = torch.tensor(2.0, device=device)
+    eager, compiled = _run(_Div0dInputRhs(), x, s)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_mod_input_0d_rhs(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device) * 10.0
+    s = torch.tensor(3.0, device=device)
+    eager, compiled = _run(_Mod0dInputRhs(), x, s)
+    _strict_match(compiled, eager, atol=1e-4)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_maximum_input_0d(device: torch.device, shape: tuple) -> None:
+    s = torch.tensor(0.5, device=device)
+    x = torch.rand(shape, device=device)
+    eager, compiled = _run(_Maximum0dInput(), s, x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_minimum_input_0d(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    s = torch.tensor(0.5, device=device)
+    eager, compiled = _run(_Minimum0dInput(), x, s)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_pow_nd_with_0d_exponent(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device) + 0.1
+    e = torch.tensor(2.0, device=device)
+    eager, compiled = _run(_PowNd0dExponent(), x, e)
+    _strict_match(compiled, eager, atol=1e-4)
+
+
+@pytest.mark.xfail(
+    reason=(
+        "floor_divide with 0-d divisor produces the un-floored quotient: "
+        "luminal returns the regular x/d result instead of floor(x/d). "
+        "Likely the translator dispatches aten.floor_divide.default through "
+        "the same path as aten.div.Tensor and never applies the floor."
+    ),
+    strict=False,
+)
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_floor_divide_input_0d(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device) * 10.0
+    d = torch.tensor(3.0, device=device)
+    eager, compiled = _run(_FloorDivide0dInput(), x, d)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 11: Pure 0-d ↔ 0-d arithmetic (no broadcasting required).
+# ---------------------------------------------------------------------------
+
+
+class _ScalarPlusScalar(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return a + b
+
+
+class _ScalarMulScalar(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return a * b
+
+
+class _ScalarPipelineMix(torch.nn.Module):
+    """Pure scalar pipeline: (a + b) * (a - b)."""
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return (a + b) * (a - b)
+
+
+def test_scalar_plus_scalar(device: torch.device) -> None:
+    a = torch.tensor(1.5, device=device)
+    b = torch.tensor(2.5, device=device)
+    eager, compiled = _run(_ScalarPlusScalar(), a, b)
+    _strict_match(compiled, eager)
+
+
+def test_scalar_mul_scalar(device: torch.device) -> None:
+    a = torch.tensor(1.5, device=device)
+    b = torch.tensor(2.5, device=device)
+    eager, compiled = _run(_ScalarMulScalar(), a, b)
+    _strict_match(compiled, eager)
+
+
+def test_scalar_only_pipeline(device: torch.device) -> None:
+    a = torch.tensor(2.5, device=device)
+    b = torch.tensor(1.5, device=device)
+    eager, compiled = _run(_ScalarPipelineMix(), a, b)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 12: Comparisons producing 0-d bool from 0-d inputs.
+# ---------------------------------------------------------------------------
+
+
+class _GtInput0ds(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return (a > b).float()
+
+
+class _GeInput0ds(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return (a >= b).float()
+
+
+class _LeInput0ds(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return (a <= b).float()
+
+
+class _EqInput0ds(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return (a == b).float()
+
+
+class _NeInput0ds(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return (a != b).float()
+
+
+class _ThresholdByInputScalar(torch.nn.Module):
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        return (x > t).float()
+
+
+class _MaskByScalarEq(torch.nn.Module):
+    def forward(self, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        return torch.where(s == 0, x, x * 2)
+
+
+@pytest.mark.parametrize(
+    "model_cls,a_val,b_val",
+    [
+        (_GtInput0ds, 0.7, 0.5),
+        (_GeInput0ds, 0.5, 0.5),
+        (_LeInput0ds, 0.5, 0.7),
+        (_EqInput0ds, 0.5, 0.5),
+        pytest.param(
+            _NeInput0ds,
+            0.5,
+            0.7,
+            marks=pytest.mark.xfail(
+                reason="aten.ne.Tensor not implemented in translator; "
+                "only ne against constants seems to lower (the eq path also "
+                "lacks .Scalar — see test_mask_by_scalar_eq).",
+                strict=False,
+            ),
+        ),
+    ],
+)
+def test_input_0d_comparisons(
+    device: torch.device,
+    model_cls: type,
+    a_val: float,
+    b_val: float,
+) -> None:
+    a = torch.tensor(a_val, device=device)
+    b = torch.tensor(b_val, device=device)
+    eager, compiled = _run(model_cls(), a, b)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_threshold_by_input_scalar(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    t = torch.tensor(0.5, device=device)
+    eager, compiled = _run(_ThresholdByInputScalar(), x, t)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.xfail(
+    reason="aten.eq.Scalar not implemented in translator dispatch.",
+    strict=False,
+)
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_mask_by_scalar_eq(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    s = torch.tensor(0.0, device=device)  # equals branch chosen
+    eager, compiled = _run(_MaskByScalarEq(), x, s)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 13: Reduction extras.
+# ---------------------------------------------------------------------------
+
+
+class _ArgmaxAll(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.argmax()
+
+
+class _ArgminAll(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.argmin()
+
+
+class _ArgmaxKeepDim(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.argmax(dim=0, keepdim=True)
+
+
+class _SumEmptyDimTuple(torch.nn.Module):
+    """sum(dim=()) is documented as a no-op identity in PyTorch."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum(dim=())
+
+
+class _SumOf0d(torch.nn.Module):
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
+        return s.sum()
+
+
+class _MeanOfOneElem(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.mean()
+
+
+class _CumsumOf0d(torch.nn.Module):
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
+        return torch.cumsum(s, 0)
+
+
+_ARGMAX_REASON = (
+    "aten.argmax.default and aten.argmin.default are not in the translator "
+    "dispatch table. argsort is supported, so these could be expressed as "
+    "argsort(...)[0] or via a dedicated handler."
+)
+
+
+@pytest.mark.xfail(reason=_ARGMAX_REASON, strict=False)
+@pytest.mark.parametrize("shape", [(5,), (3, 4), (2, 3, 4)])
+def test_argmax_all(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    eager, compiled = _run(_ArgmaxAll(), x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.xfail(reason=_ARGMAX_REASON, strict=False)
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_argmin_all(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    eager, compiled = _run(_ArgminAll(), x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.xfail(reason=_ARGMAX_REASON, strict=False)
+def test_argmax_keepdim_1d(device: torch.device) -> None:
+    x = torch.rand(5, device=device)
+    eager, compiled = _run(_ArgmaxKeepDim(), x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_sum_empty_dim_tuple(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    eager, compiled = _run(_SumEmptyDimTuple(), x)
+    _strict_match(compiled, eager)
+
+
+def test_sum_of_0d(device: torch.device) -> None:
+    s = torch.tensor(7.5, device=device)
+    eager, compiled = _run(_SumOf0d(), s)
+    _strict_match(compiled, eager)
+
+
+def test_mean_of_one_element(device: torch.device) -> None:
+    x = torch.rand(1, device=device)
+    eager, compiled = _run(_MeanOfOneElem(), x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.xfail(
+    reason=(
+        "cumsum on a 0-d tensor panics with "
+        "'index out of bounds: the len is 0 but the index is 0' — the "
+        "translator or core cumsum implementation indexes shape[dim] without "
+        "guarding for rank-0 input."
+    ),
+    strict=False,
+)
+def test_cumsum_of_0d(device: torch.device) -> None:
+    s = torch.tensor(3.5, device=device)
+    eager, compiled = _run(_CumsumOf0d(), s)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 14: Shape-flattening ops on 0-d.
+# PyTorch documents that flatten/ravel/reshape(-1)/view(-1) on a 0-d tensor
+# return shape (1,) — the rank surprises many users. Worth pinning.
+# ---------------------------------------------------------------------------
+
+
+class _Flatten0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum().flatten()
+
+
+class _Ravel0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ravel(x.sum())
+
+
+class _ReshapeMinusOne0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum().reshape(-1)
+
+
+class _ReshapeOneToScalar(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.reshape(())
+
+
+class _ViewMinusOne0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum().view(-1)
+
+
+class _PermuteEmptyOn0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum().permute([])
+
+
+class _Contiguous0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum().contiguous()
+
+
+class _SqueezeAll1s(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.squeeze()
+
+
+class _ExpandAs0dTo2d(torch.nn.Module):
+    def forward(self, s: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        return s.expand_as(x)
+
+
+def test_flatten_0d_returns_rank1(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_Flatten0d(), x)
+    _strict_match(compiled, eager)
+
+
+def test_ravel_0d_returns_rank1(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_Ravel0d(), x)
+    _strict_match(compiled, eager)
+
+
+def test_reshape_minus_one_on_0d(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_ReshapeMinusOne0d(), x)
+    _strict_match(compiled, eager)
+
+
+def test_reshape_to_empty_from_one_elem(device: torch.device) -> None:
+    x = torch.rand(1, device=device)
+    eager, compiled = _run(_ReshapeOneToScalar(), x)
+    _strict_match(compiled, eager)
+
+
+def test_view_minus_one_on_0d(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_ViewMinusOne0d(), x)
+    _strict_match(compiled, eager)
+
+
+def test_permute_empty_on_0d(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_PermuteEmptyOn0d(), x)
+    _strict_match(compiled, eager)
+
+
+def test_contiguous_on_0d(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_Contiguous0d(), x)
+    _strict_match(compiled, eager)
+
+
+def test_squeeze_no_arg_collapses_all_size_1_dims(device: torch.device) -> None:
+    x = torch.rand((1, 1, 1, 1), device=device)
+    eager, compiled = _run(_SqueezeAll1s(), x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(3, 4), (2, 3, 4)])
+def test_expand_as_0d_to_nd(device: torch.device, shape: tuple) -> None:
+    s = torch.tensor(2.5, device=device)
+    x = torch.rand(shape, device=device)
+    eager, compiled = _run(_ExpandAs0dTo2d(), s, x)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 15: Indexing extras.
+# ---------------------------------------------------------------------------
+
+
+class _EllipsisOn0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x.sum())[...]
+
+
+class _IndexByScalarTensor(torch.nn.Module):
+    def forward(self, x: torch.Tensor, i: torch.Tensor) -> torch.Tensor:
+        return x[i]
+
+
+class _GatherWith0dIndex(torch.nn.Module):
+    def forward(self, x: torch.Tensor, i: torch.Tensor) -> torch.Tensor:
+        return torch.gather(x, 0, i)
+
+
+class _NegativeIndexOn1d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x[-1]
+
+
+def test_ellipsis_on_0d(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_EllipsisOn0d(), x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.xfail(
+    reason=(
+        "Indexing with a 0-d int tensor trips a torch._dynamo guard: "
+        "'NameError: name L is not defined' inside the generated _guards_fn. "
+        "Likely needs torch.compile to see the index as a SymInt rather than "
+        "as a 0-d tensor — may be addressable via a translator-side coerce."
+    ),
+    strict=False,
+)
+def test_index_by_scalar_tensor(device: torch.device) -> None:
+    x = torch.rand(5, device=device)
+    i = torch.tensor(2, device=device)
+    eager, compiled = _run(_IndexByScalarTensor(), x, i)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.xfail(
+    reason=(
+        "0-d index tensor for gather: PT2 export emits "
+        "'invalid type: null, expected i64' from luminal's model.json parser. "
+        "Suspect: PT2 serializes a 0-d int64 input with a null shape entry "
+        "the parser does not yet accept."
+    ),
+    strict=False,
+)
+def test_gather_with_0d_index(device: torch.device) -> None:
+    x = torch.rand(5, device=device)
+    i = torch.zeros((), dtype=torch.int64, device=device)
+    eager, compiled = _run(_GatherWith0dIndex(), x, i)
+    _strict_match(compiled, eager)
+
+
+def test_negative_index_on_1d_to_scalar(device: torch.device) -> None:
+    x = torch.rand(5, device=device)
+    eager, compiled = _run(_NegativeIndexOn1d(), x)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 16: Type promotion with 0-d.
+# ---------------------------------------------------------------------------
+
+
+class _Float0dPlusIntNd(torch.nn.Module):
+    def forward(self, s: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        return s + x
+
+
+class _Int0dPlusFloatNd(torch.nn.Module):
+    def forward(self, s: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        return s + x
+
+
+class _CastRoundTrip0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum().to(torch.int32).to(torch.float32)
+
+
+class _DotShorthandFloat0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum().float()
+
+
+class _DotShorthandInt0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x.sum() * 10).int()
+
+
+class _WhereMixedDtypeBranches(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        c = x > 0.5
+        return torch.where(
+            c,
+            torch.tensor(1).to(x.device),
+            torch.tensor(0.0).to(x.device),
+        )
+
+
+def test_float_0d_plus_int_nd(device: torch.device) -> None:
+    s = torch.tensor(2.5, device=device)
+    x = torch.randint(0, 10, (3, 4), device=device, dtype=torch.int64)
+    eager, compiled = _run(_Float0dPlusIntNd(), s, x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.xfail(
+    reason=(
+        "0-d int64 graph input fails PT2 export: "
+        "'Failed to parse model.json: invalid type: null, expected i64'. "
+        "Same root cause as test_gather_with_0d_index — the model.json shape "
+        "encoding for 0-d int tensors hits the null/i64 branch."
+    ),
+    strict=False,
+)
+def test_int_0d_plus_float_nd(device: torch.device) -> None:
+    s = torch.tensor(3, device=device, dtype=torch.int64)
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_Int0dPlusFloatNd(), s, x)
+    _strict_match(compiled, eager)
+
+
+def test_cast_roundtrip_through_0d(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_CastRoundTrip0d(), x)
+    _strict_match(compiled, eager)
+
+
+def test_dot_float_shorthand_on_0d(device: torch.device) -> None:
+    x = torch.randint(0, 10, (3, 4), device=device, dtype=torch.int64)
+    eager, compiled = _run(_DotShorthandFloat0d(), x)
+    _strict_match(compiled, eager)
+
+
+def test_dot_int_shorthand_on_0d(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_DotShorthandInt0d(), x)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_where_mixed_dtype_branches(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    eager, compiled = _run(_WhereMixedDtypeBranches(), x)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 17: Unary math on 0-d (parametric).
+# ---------------------------------------------------------------------------
+
+
+class _UnaryOn0d(torch.nn.Module):
+    """Parametric: applies a unary op to a reduction-derived 0-d."""
+
+    def __init__(self, op: Callable) -> None:
+        super().__init__()
+        self.op = op
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.op(x.sum())
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        torch.abs,
+        torch.neg,
+        torch.exp,
+        torch.sin,
+        torch.cos,
+        torch.tanh,
+        torch.sigmoid,
+        torch.sqrt,
+        torch.sign,
+        torch.floor,
+        torch.ceil,
+    ],
+    ids=lambda f: f.__name__,
+)
+def test_unary_on_reduced_0d(device: torch.device, op: Callable) -> None:
+    x = torch.rand((3, 4), device=device) + 0.1  # avoid log(0)/sqrt(neg)
+    eager, compiled = _run(_UnaryOn0d(op), x)
+    _strict_match(compiled, eager, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Section 18: Logical / bitwise ops on 0-d bools.
+# ---------------------------------------------------------------------------
+
+
+class _AndBools(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return ((a > 0) & (b > 0)).float()
+
+
+class _OrBools(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return ((a > 0) | (b > 0)).float()
+
+
+class _XorBools(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return torch.logical_xor(a > 0, b > 0).float()
+
+
+class _NotBoolFromCmp(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return torch.logical_not(a < b).float()
+
+
+@pytest.mark.parametrize("model_cls", [_AndBools, _OrBools, _XorBools, _NotBoolFromCmp])
+def test_bool_logic_on_0d(device: torch.device, model_cls: type) -> None:
+    a = torch.tensor(0.5, device=device)
+    b = torch.tensor(-0.5, device=device)
+    eager, compiled = _run(model_cls(), a, b)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 19: Stack / cat near 0-d.
+# ---------------------------------------------------------------------------
+
+
+class _StackZeroDs(torch.nn.Module):
+    def forward(
+        self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.stack([a, b, c])
+
+
+class _CatUnsqueezedZeroDs(torch.nn.Module):
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return torch.cat([a.unsqueeze(0), b.unsqueeze(0)], dim=0)
+
+
+def test_stack_three_0d(device: torch.device) -> None:
+    a = torch.tensor(1.0, device=device)
+    b = torch.tensor(2.0, device=device)
+    c = torch.tensor(3.0, device=device)
+    eager, compiled = _run(_StackZeroDs(), a, b, c)
+    _strict_match(compiled, eager)
+
+
+def test_cat_two_unsqueezed_0d(device: torch.device) -> None:
+    a = torch.tensor(1.0, device=device)
+    b = torch.tensor(2.0, device=device)
+    eager, compiled = _run(_CatUnsqueezedZeroDs(), a, b)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 20: full / full_like / scalar_tensor.
+# ---------------------------------------------------------------------------
+
+
+class _FullEmptyShape(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + torch.full((), 3.0).to(x.device)
+
+
+class _FullLike0d(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.full_like(x.sum(), 7.0)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_full_empty_shape_constant(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device)
+    eager, compiled = _run(_FullEmptyShape(), x)
+    _strict_match(compiled, eager)
+
+
+def test_full_like_of_0d(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_FullLike0d(), x)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 21: Reduction edge cases — keepdim semantics, broadcast onto views.
+# ---------------------------------------------------------------------------
+
+
+class _SumKeepdimAllAxes(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x / x.sum(dim=tuple(range(x.dim())), keepdim=True)
+
+
+class _ScalarBroadcastOntoTransposed(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.t() - x.sum()
+
+
+@pytest.mark.parametrize("shape", [(3, 4), (2, 3, 4)])
+def test_sum_keepdim_all_axes_then_div(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device) + 0.1
+    eager, compiled = _run(_SumKeepdimAllAxes(), x)
+    _strict_match(compiled, eager, atol=1e-4)
+
+
+def test_scalar_broadcast_onto_transposed(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    eager, compiled = _run(_ScalarBroadcastOntoTransposed(), x)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 22: where / clamp with mixed scalar + tensor + python.
+# ---------------------------------------------------------------------------
+
+
+class _ClampScalarTensorAndPyFloat(torch.nn.Module):
+    def forward(self, x: torch.Tensor, lo: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(x, lo, 0.5)
+
+
+class _WhereScalarOther(torch.nn.Module):
+    def forward(self, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        return torch.where(x > 0.0, s, x)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_clamp_scalar_tensor_lo_python_hi(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device) * 2.0 - 1.0
+    lo = torch.tensor(-0.25, device=device)
+    eager, compiled = _run(_ClampScalarTensorAndPyFloat(), x, lo)
+    _strict_match(compiled, eager)
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4)])
+def test_where_with_input_scalar_branch(device: torch.device, shape: tuple) -> None:
+    x = torch.rand(shape, device=device) * 2.0 - 1.0
+    s = torch.tensor(99.0, device=device)
+    eager, compiled = _run(_WhereScalarOther(), x, s)
+    _strict_match(compiled, eager)
+
+
+# ---------------------------------------------------------------------------
+# Section 23: Models returning multiple outputs (one rank-0, one rank-N).
+# ---------------------------------------------------------------------------
+
+
+class _ReturnPairScalarAndTensor(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return x.sum(), x * 2
+
+
+def test_return_pair_scalar_and_tensor(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device)
+    model = _ReturnPairScalarAndTensor()
+    compiled_fn = torch.compile(model, backend=luminal_backend)
+    eager_outs = model(x)
+    compiled_outs = compiled_fn(x)
+    assert len(eager_outs) == len(compiled_outs)
+    for c, e in zip(compiled_outs, eager_outs):
+        _strict_match(c, e)
