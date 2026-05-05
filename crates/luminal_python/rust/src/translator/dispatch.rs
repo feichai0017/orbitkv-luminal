@@ -369,6 +369,7 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.max.default" => self.translate_reduction(node, ReductionOp::Max)?,
             "torch.ops.aten.min.default" => self.translate_reduction(node, ReductionOp::Min)?,
             "torch.ops.aten.amin.default" => self.translate_reduction(node, ReductionOp::Min)?,
+            "torch.ops.aten.prod.default" => self.translate_reduction(node, ReductionOp::Prod)?,
 
             // Gather (axis-aware)
             "torch.ops.aten.gather.default" => self.translate_gather(node)?,
