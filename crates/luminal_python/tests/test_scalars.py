@@ -680,15 +680,6 @@ def test_pow_nd_with_0d_exponent(device: torch.device, shape: tuple) -> None:
     _strict_match(compiled, eager, atol=1e-4)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "floor_divide with 0-d divisor produces the un-floored quotient: "
-        "luminal returns the regular x/d result instead of floor(x/d). "
-        "Likely the translator dispatches aten.floor_divide.default through "
-        "the same path as aten.div.Tensor and never applies the floor."
-    ),
-    strict=False,
-)
 @pytest.mark.parametrize("shape", [(5,), (3, 4)])
 def test_floor_divide_input_0d(device: torch.device, shape: tuple) -> None:
     x = torch.rand(shape, device=device) * 10.0

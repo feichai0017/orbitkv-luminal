@@ -210,12 +210,18 @@ impl<'a> Translator<'a> {
         let (a, b) = crate::pt2_util::ensure_same_dtype(a, b);
         let (a, b) = broadcast_binary(a, b);
 
-        // Check rounding_mode kwarg
+        // Check rounding_mode kwarg. PT2 serializes string args as
+        // {"as_string": "<value>"}, so we have to drill into the JSON.
         let rounding_mode = node.inputs.iter().find_map(|input| {
             if input.name == "rounding_mode"
                 && let Argument::Other(val) = &input.arg
             {
-                return val.as_str().map(|s| s.to_string());
+                if let Some(s) = val.as_str() {
+                    return Some(s.to_string());
+                }
+                if let Some(s) = val.get("as_string").and_then(|v| v.as_str()) {
+                    return Some(s.to_string());
+                }
             }
             None
         });
