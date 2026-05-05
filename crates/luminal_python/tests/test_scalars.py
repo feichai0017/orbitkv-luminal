@@ -778,17 +778,7 @@ class _MaskByScalarEq(torch.nn.Module):
         (_GeInput0ds, 0.5, 0.5),
         (_LeInput0ds, 0.5, 0.7),
         (_EqInput0ds, 0.5, 0.5),
-        pytest.param(
-            _NeInput0ds,
-            0.5,
-            0.7,
-            marks=pytest.mark.xfail(
-                reason="aten.ne.Tensor not implemented in translator; "
-                "only ne against constants seems to lower (the eq path also "
-                "lacks .Scalar — see test_mask_by_scalar_eq).",
-                strict=False,
-            ),
-        ),
+        (_NeInput0ds, 0.5, 0.7),
     ],
 )
 def test_input_0d_comparisons(
@@ -811,10 +801,6 @@ def test_threshold_by_input_scalar(device: torch.device, shape: tuple) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(
-    reason="aten.eq.Scalar not implemented in translator dispatch.",
-    strict=False,
-)
 @pytest.mark.parametrize("shape", [(5,), (3, 4)])
 def test_mask_by_scalar_eq(device: torch.device, shape: tuple) -> None:
     x = torch.rand(shape, device=device)

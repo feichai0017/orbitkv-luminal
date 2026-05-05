@@ -209,6 +209,16 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.le.Scalar" => self.translate_scalar_comparison(node, |a, s| a.le(s))?,
 
             // Tensor comparisons
+            "torch.ops.aten.eq.Scalar" => {
+                let a = self.get_input_tensor(node, 0)?;
+                let val = self.get_float_arg(node, 1)? as f32;
+                let scalar = self
+                    .graph
+                    .constant_float(val)
+                    .cast(a.dtype)
+                    .expand_rhs(a.shape);
+                a.eq(scalar)
+            }
             "torch.ops.aten.ne.Scalar" => {
                 let a = self.get_input_tensor(node, 0)?;
                 let val = self.get_float_arg(node, 1)? as f32;
@@ -225,6 +235,13 @@ impl<'a> Translator<'a> {
                 let (a, b) = ensure_same_dtype(a, b);
                 let (a, b) = broadcast_binary(a, b);
                 a.eq(b)
+            }
+            "torch.ops.aten.ne.Tensor" => {
+                let a = self.get_input_tensor(node, 0)?;
+                let b = self.get_input_tensor(node, 1)?;
+                let (a, b) = ensure_same_dtype(a, b);
+                let (a, b) = broadcast_binary(a, b);
+                a.ne(b)
             }
             "torch.ops.aten.le.Tensor" => {
                 let a = self.get_input_tensor(node, 0)?;
