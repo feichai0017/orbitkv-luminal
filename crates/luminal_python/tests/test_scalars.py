@@ -1,4 +1,4 @@
-"""Torture tests for scalar (rank-0) tensor handling.
+"""Tests for scalar (rank-0) tensor handling.
 
 Most tests in this suite use ``torch.allclose`` which is silent about shape.
 That hides discrepancies between PyTorch (where ``x.sum()`` is shape ``()``)
