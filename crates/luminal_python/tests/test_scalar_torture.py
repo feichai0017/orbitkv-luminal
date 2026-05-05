@@ -47,8 +47,7 @@ def _strict_match(
         return
     if output.dtype.is_floating_point:
         assert torch.allclose(output, original, atol=atol, rtol=rtol), (
-            f"value mismatch (max abs err: "
-            f"{(output - original).abs().max().item()})"
+            f"value mismatch (max abs err: {(output - original).abs().max().item()})"
         )
     else:
         assert torch.equal(output, original), (
