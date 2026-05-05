@@ -6,6 +6,20 @@ use crate::pt2_util::*;
 
 use super::Translator;
 
+/// Whether `argmax` / `argmin` should pick the largest (descending sort) or
+/// smallest (ascending sort) element when scanning the input.
+#[derive(Clone, Copy)]
+pub(crate) enum ArgExtremum {
+    Max,
+    Min,
+}
+
+impl ArgExtremum {
+    fn descending(self) -> bool {
+        matches!(self, ArgExtremum::Max)
+    }
+}
+
 /// Compute total element count, returning an error if any dimension is symbolic.
 fn concrete_numel(a: &GraphTensor) -> Result<usize> {
     a.dims().iter().try_fold(1usize, |acc, d| {
@@ -79,5 +93,93 @@ impl<'a> Translator<'a> {
         }
 
         Ok(result)
+    }
+
+    /// Lower `aten.argmax.default` / `aten.argmin.default` by reusing the
+    /// existing `stable_argsort` op and selecting the first index along the
+    /// sort axis.
+    ///
+    /// PyTorch signature: `argmax(self, dim=None, keepdim=False)` (likewise
+    /// for argmin). FX export emits the inputs positionally:
+    ///   - input 0: tensor
+    ///   - input 1: dim (Int) or None (Other) — when `dim=None`
+    ///   - input 2: keepdim (Bool, optional)
+    ///
+    /// When `dim=None`, PyTorch flattens the tensor; we mirror that by
+    /// reshaping to a 1-D `[numel]` view (which requires concrete dims).
+    /// The result of argsort along the sort axis is sliced at index 0,
+    /// then squeezed away — i.e. `select(dim, 0)` — to give the index of
+    /// the extremum. With `keepdim=True` we re-insert a size-1 dim at
+    /// `dim`.
+    ///
+    /// The slice + squeeze chain produces a non-contiguous `DType::Int`
+    /// view; we materialize it with `* 1` so the resulting node has
+    /// contiguous strides matching its visible shape (mirroring the
+    /// `topk` lowering in `translate_topk`). Without this, the output
+    /// buffer would be sized for the un-sliced argsort tensor while the
+    /// shape tracker reports a smaller rank.
+    ///
+    /// The output dtype is `DType::Int` (luminal's 32-bit int); PT2
+    /// metadata records int64 and the Python wrapper widens at the
+    /// boundary, so the PyTorch contract is preserved end-to-end
+    /// (LUM-486).
+    pub(crate) fn translate_argextremum(
+        &mut self,
+        node: &Node,
+        which: ArgExtremum,
+    ) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, 0)?;
+
+        // dim is positional input 1. PyTorch encodes `dim=None` as a non-Int
+        // argument (typically `Argument::Other(Null)`), so a missing or
+        // non-int slot means "reduce over the flattened tensor".
+        let dim_opt: Option<i64> = if node.inputs.len() > 1 {
+            self.get_int_arg(node, 1).ok()
+        } else {
+            None
+        };
+        let keepdim = if node.inputs.len() > 2 {
+            self.get_bool_arg(node, 2).unwrap_or(false)
+        } else {
+            false
+        };
+
+        let descending = which.descending();
+
+        let (sort_axis, base) = match dim_opt {
+            None => {
+                // Full-reduce: flatten to 1-D, argsort along axis 0.
+                if a.shape.is_empty() {
+                    // Edge case: argmax of a 0-d tensor is index 0. Not
+                    // currently exercised by the test suite but guarded so
+                    // we don't reshape a rank-0 tensor.
+                    let zero = self.graph.constant(0i64).cast(DType::Int);
+                    return Ok(if keepdim { zero.unsqueeze(0) } else { zero });
+                }
+                let total = concrete_numel(&a)?;
+                let flat = reshape_tensor(a, vec![Expression::from(total)]);
+                (0usize, flat)
+            }
+            Some(dim_raw) => {
+                let dim = normalize_dim(dim_raw, a.shape.len());
+                (dim, a)
+            }
+        };
+
+        // Pick index 0 along the sort axis. The slice-then-squeeze chain
+        // produces a non-contiguous view whose physical buffer is still
+        // sized for the un-sliced argsort tensor; the optional `keepdim`
+        // unsqueeze adds a stride-0 axis which is also non-contiguous.
+        // Materialize at the end with `* 1` so the resulting node has
+        // contiguous strides matching its visible shape (matches the
+        // pattern used by `translate_topk` for sliced index outputs).
+        let sorted = base.stable_argsort(sort_axis, descending);
+        let picked = sorted.slice_along(0..1, sort_axis).squeeze(sort_axis);
+        let result = if keepdim {
+            picked.unsqueeze(sort_axis)
+        } else {
+            picked
+        };
+        Ok(result * 1)
     }
 }

@@ -865,14 +865,6 @@ class _CumsumOf0d(torch.nn.Module):
         return torch.cumsum(s, 0)
 
 
-_ARGMAX_REASON = (
-    "aten.argmax.default and aten.argmin.default are not in the translator "
-    "dispatch table. argsort is supported, so these could be expressed as "
-    "argsort(...)[0] or via a dedicated handler."
-)
-
-
-@pytest.mark.xfail(reason=_ARGMAX_REASON, strict=False)
 @pytest.mark.parametrize("shape", [(5,), (3, 4), (2, 3, 4)])
 def test_argmax_all(device: torch.device, shape: tuple) -> None:
     x = torch.rand(shape, device=device)
@@ -880,7 +872,6 @@ def test_argmax_all(device: torch.device, shape: tuple) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(reason=_ARGMAX_REASON, strict=False)
 @pytest.mark.parametrize("shape", [(5,), (3, 4)])
 def test_argmin_all(device: torch.device, shape: tuple) -> None:
     x = torch.rand(shape, device=device)
@@ -888,7 +879,6 @@ def test_argmin_all(device: torch.device, shape: tuple) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(reason=_ARGMAX_REASON, strict=False)
 def test_argmax_keepdim_1d(device: torch.device) -> None:
     x = torch.rand(5, device=device)
     eager, compiled = _run(_ArgmaxKeepDim(), x)

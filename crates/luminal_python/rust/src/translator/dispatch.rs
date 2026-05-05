@@ -5,6 +5,7 @@ use crate::pt2_schema::*;
 use crate::pt2_util::*;
 
 use super::Translator;
+use super::reduction::ArgExtremum;
 
 impl<'a> Translator<'a> {
     pub(crate) fn translate_node(&mut self, node: &Node) -> Result<()> {
@@ -378,6 +379,16 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.min.default" => self.translate_reduction(node, ReductionOp::Min)?,
             "torch.ops.aten.amin.default" => self.translate_reduction(node, ReductionOp::Min)?,
             "torch.ops.aten.prod.default" => self.translate_reduction(node, ReductionOp::Prod)?,
+
+            // Argmax / argmin — built on top of `stable_argsort` (LUM-496).
+            // PyTorch's argmax/argmin returns int64; the dtype is preserved
+            // through the LUM-486 boundary widening.
+            "torch.ops.aten.argmax.default" => {
+                self.translate_argextremum(node, ArgExtremum::Max)?
+            }
+            "torch.ops.aten.argmin.default" => {
+                self.translate_argextremum(node, ArgExtremum::Min)?
+            }
 
             // Gather (axis-aware)
             "torch.ops.aten.gather.default" => self.translate_gather(node)?,
