@@ -914,18 +914,17 @@ def test_mean_of_one_element(device: torch.device) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "cumsum on a 0-d tensor panics with "
-        "'index out of bounds: the len is 0 but the index is 0' — the "
-        "translator or core cumsum implementation indexes shape[dim] without "
-        "guarding for rank-0 input."
-    ),
-    strict=False,
-)
 def test_cumsum_of_0d(device: torch.device) -> None:
     s = torch.tensor(3.5, device=device)
     eager, compiled = _run(_CumsumOf0d(), s)
+    _strict_match(compiled, eager)
+
+
+def test_cumsum_of_1elem_1d(device: torch.device) -> None:
+    x = torch.tensor([3.5], device=device)
+    eager, compiled = _run(_CumsumOf0d(), x)
+    assert compiled.shape == (1,)
+    assert eager.shape == (1,)
     _strict_match(compiled, eager)
 
 

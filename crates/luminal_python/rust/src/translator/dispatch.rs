@@ -268,14 +268,22 @@ impl<'a> Translator<'a> {
             // Cumsum
             "torch.ops.aten.cumsum.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let dim = self.get_int_arg(node, 1)?;
-                let dim = normalize_dim(dim, a.shape.len());
                 let a = if a.dtype == DType::Bool {
                     a.cast(DType::Int)
                 } else {
                     a
                 };
-                a.cumsum(dim)
+                // Rank-0 (scalar) input: cumsum of a single element is the element
+                // itself. PyTorch eager treats `dim=0` on a 0-d as an identity op,
+                // and the underlying `cumop` indexes `shape.dims[axis]` which would
+                // panic with empty dims.
+                if a.shape.is_empty() {
+                    a
+                } else {
+                    let dim = self.get_int_arg(node, 1)?;
+                    let dim = normalize_dim(dim, a.shape.len());
+                    a.cumsum(dim)
+                }
             }
 
             // Floor / Ceil / Erf (approximations)
