@@ -1043,18 +1043,10 @@ def test_ellipsis_on_0d(device: torch.device) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Indexing with a 0-d int tensor trips a torch._dynamo guard: "
-        "'NameError: name L is not defined' inside the generated _guards_fn. "
-        "Likely needs torch.compile to see the index as a SymInt rather than "
-        "as a 0-d tensor — may be addressable via a translator-side coerce."
-    ),
-    strict=False,
-)
-def test_index_by_scalar_tensor(device: torch.device) -> None:
+@pytest.mark.parametrize("index", [2, -1])
+def test_index_by_scalar_tensor(device: torch.device, index: int) -> None:
     x = torch.rand(5, device=device)
-    i = torch.tensor(2, device=device)
+    i = torch.tensor(index, device=device)
     eager, compiled = _run(_IndexByScalarTensor(), x, i)
     _strict_match(compiled, eager)
 
