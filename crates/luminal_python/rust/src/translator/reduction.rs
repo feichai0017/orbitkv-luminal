@@ -37,16 +37,26 @@ impl<'a> Translator<'a> {
                 (axes, keepdim)
             }
             _ => {
-                // Full reduce: flatten to [1, N] and reduce axis 1
+                // Full reduce: reduce over every axis, leaving a rank-0 (scalar) tensor.
+                // PyTorch eager returns shape () for `x.sum()` etc., and downstream ops
+                // (e.g. unsqueeze(0).expand(N)) rely on this rank.
+                let ndim = a.shape.len();
+                if ndim == 0 {
+                    // Already rank-0 — reducing over no axes is a no-op for sum/max/min/prod,
+                    // and mean of a scalar is just the scalar.
+                    return Ok(a);
+                }
                 let total = concrete_numel(&a)?;
-                let mut flat = a;
-                flat.shape = ShapeTracker::new(vec![1, total]);
+                let axes: Vec<usize> = (0..ndim).collect();
                 let result = match op {
-                    ReductionOp::Sum => flat.sum(vec![1]),
-                    ReductionOp::Mean => flat.sum(vec![1]) / total as f32,
-                    ReductionOp::Max => flat.max(vec![1]),
-                    ReductionOp::Min => flat.min(vec![1]),
-                    ReductionOp::Prod => flat.prod(vec![1]),
+                    ReductionOp::Sum => a.sum(axes),
+                    // Note: the luminal `mean` helper divides by the product of the
+                    // axis dims, but we already require concrete dims here so we
+                    // divide by the cached `total` to avoid recomputing.
+                    ReductionOp::Mean => a.sum(axes) / total as f32,
+                    ReductionOp::Max => a.max(axes),
+                    ReductionOp::Min => a.min(axes),
+                    ReductionOp::Prod => a.prod(axes),
                 };
                 return Ok(result);
             }

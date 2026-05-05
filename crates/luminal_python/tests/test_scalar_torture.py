@@ -244,15 +244,6 @@ def test_reshape_to_and_from_scalar(device: torch.device) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Full reduction (x.sum()) returns shape [1] instead of () in "
-        "translator/reduction.rs; downstream unsqueeze(0).expand(5) then "
-        "tries to contract rank-2 (1,1) to rank-1, panicking with "
-        "'Cannot expand from 2 dims to 1 dims'."
-    ),
-    strict=False,
-)
 def test_unsqueeze_expand_sum_back(device: torch.device) -> None:
     x = torch.rand((3, 4), device=device)
     eager, compiled = _run(_UnsqueezeExpandSumBack(), x)
