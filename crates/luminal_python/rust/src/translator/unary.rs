@@ -276,9 +276,22 @@ impl<'a> Translator<'a> {
     /// `aten.clamp.Tensor(Tensor self, Tensor? min=None, Tensor? max=None)`
     ///
     /// Unlike `clamp.default` (which takes Python scalar bounds), the `.Tensor`
-    /// overload takes 0-d tensor bounds that appear as separate input nodes in
-    /// the FX graph. Either bound may be absent (FX represents this as a
-    /// non-tensor argument), in which case we clamp to one side only.
+    /// overload takes tensor bounds that appear as separate input nodes in the
+    /// FX graph. PyTorch supports any NumPy-broadcastable bound shape:
+    ///
+    ///   - rank-0 (scalar wrapped in a tensor) — most common
+    ///   - same shape as self (per-element clamp, e.g. learned bounds)
+    ///   - any shape that broadcasts to self via right-align + size-1 expand
+    ///     (e.g. `(3, 1)` against `(3, 4)` for per-row clamp; `(4,)` against
+    ///     `(3, 4)` for per-column clamp; `(3, 4)` against `(2, 3, 4)`)
+    ///
+    /// We use `broadcast_binary` to right-align and expand both operands to a
+    /// common shape before the elementwise max/min, matching PyTorch semantics
+    /// across all three modes.
+    ///
+    /// Either bound may be absent (FX represents this as a non-tensor argument
+    /// at the corresponding input slot), in which case we clamp to one side
+    /// only.
     pub(crate) fn translate_clamp_tensor(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let min_tensor = node
@@ -296,12 +309,14 @@ impl<'a> Translator<'a> {
 
         let mut result = a;
         if let Some(lo) = min_tensor {
-            let lo = lo.cast(result.dtype).expand_rhs(result.shape);
-            result = result.maximum(lo);
+            let lo = lo.cast(result.dtype);
+            let (r, lo) = broadcast_binary(result, lo);
+            result = r.maximum(lo);
         }
         if let Some(hi) = max_tensor {
-            let hi = hi.cast(result.dtype).expand_rhs(result.shape);
-            result = result.minimum(hi);
+            let hi = hi.cast(result.dtype);
+            let (r, hi) = broadcast_binary(result, hi);
+            result = r.minimum(hi);
         }
         Ok(result)
     }

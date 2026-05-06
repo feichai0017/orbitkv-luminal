@@ -1361,3 +1361,89 @@ def test_return_pair_scalar_and_tensor(device: torch.device) -> None:
     assert len(eager_outs) == len(compiled_outs)
     for c, e in zip(compiled_outs, eager_outs):
         _strict_match(c, e)
+
+
+# ---------------------------------------------------------------------------
+# Section 24: aten.clamp.Tensor shape coverage.
+#
+# PyTorch's clamp.Tensor accepts bounds with rank-0 (scalar), same-shape,
+# or any NumPy-broadcastable shape. The translator must handle all three.
+# ---------------------------------------------------------------------------
+
+
+class _ClampTensorBothBounds(torch.nn.Module):
+    """clamp(x, lo, hi) — both bounds are tensors of arbitrary broadcastable shape."""
+
+    def forward(
+        self, x: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.clamp(x, lo, hi)
+
+
+class _ClampTensorMinOnly(torch.nn.Module):
+    def forward(self, x: torch.Tensor, lo: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(x, min=lo)
+
+
+class _ClampTensorMaxOnly(torch.nn.Module):
+    def forward(self, x: torch.Tensor, hi: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(x, max=hi)
+
+
+def test_clamp_tensor_same_shape_bounds(device: torch.device) -> None:
+    """Per-element clamp: lo and hi same shape as x (e.g. learned bounds)."""
+    x = torch.rand((3, 4), device=device) * 2.0 - 1.0
+    lo = torch.full_like(x, -0.5)
+    hi = torch.full_like(x, 0.5)
+    eager, compiled = _run(_ClampTensorBothBounds(), x, lo, hi)
+    _strict_match(compiled, eager)
+
+
+def test_clamp_tensor_per_row_bounds(device: torch.device) -> None:
+    """Per-row clamp: x is (3, 4); lo/hi are (3, 1) — broadcasts across columns."""
+    x = torch.rand((3, 4), device=device) * 2.0 - 1.0
+    lo = torch.tensor([[-0.5], [-0.25], [-0.1]], device=device)
+    hi = torch.tensor([[0.5], [0.25], [0.1]], device=device)
+    eager, compiled = _run(_ClampTensorBothBounds(), x, lo, hi)
+    _strict_match(compiled, eager)
+
+
+def test_clamp_tensor_per_col_bounds(device: torch.device) -> None:
+    """Per-column clamp: x is (3, 4); lo/hi are (4,) — right-aligned broadcast."""
+    x = torch.rand((3, 4), device=device) * 2.0 - 1.0
+    lo = torch.tensor([-0.5, -0.25, -0.1, 0.0], device=device)
+    hi = torch.tensor([0.5, 0.25, 0.1, 0.2], device=device)
+    eager, compiled = _run(_ClampTensorBothBounds(), x, lo, hi)
+    _strict_match(compiled, eager)
+
+
+def test_clamp_tensor_mixed_rank0_and_full_shape(device: torch.device) -> None:
+    """One bound rank-0, the other matching x.shape."""
+    x = torch.rand((3, 4), device=device) * 2.0 - 1.0
+    lo = torch.tensor(-0.25, device=device)  # rank-0
+    hi = torch.full_like(x, 0.5)  # same shape as x
+    eager, compiled = _run(_ClampTensorBothBounds(), x, lo, hi)
+    _strict_match(compiled, eager)
+
+
+def test_clamp_tensor_min_only_same_shape(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device) * 2.0 - 1.0
+    lo = torch.full_like(x, -0.25)
+    eager, compiled = _run(_ClampTensorMinOnly(), x, lo)
+    _strict_match(compiled, eager)
+
+
+def test_clamp_tensor_max_only_per_row(device: torch.device) -> None:
+    x = torch.rand((3, 4), device=device) * 2.0 - 1.0
+    hi = torch.tensor([[0.5], [0.25], [0.1]], device=device)
+    eager, compiled = _run(_ClampTensorMaxOnly(), x, hi)
+    _strict_match(compiled, eager)
+
+
+def test_clamp_tensor_3d_with_2d_bounds(device: torch.device) -> None:
+    """x is (2, 3, 4); bounds are (3, 4) — left-unsqueeze broadcast."""
+    x = torch.rand((2, 3, 4), device=device) * 2.0 - 1.0
+    lo = torch.full((3, 4), -0.5, device=device)
+    hi = torch.full((3, 4), 0.5, device=device)
+    eager, compiled = _run(_ClampTensorBothBounds(), x, lo, hi)
+    _strict_match(compiled, eager)
