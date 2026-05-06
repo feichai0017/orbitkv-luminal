@@ -1051,15 +1051,6 @@ def test_index_by_scalar_tensor(device: torch.device, index: int) -> None:
     _strict_match(compiled, eager)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "0-d index tensor for gather: the original LUM-498 model.json parse "
-        "error is fixed (range_constraints now accept null bounds), but a "
-        "downstream translator panic ('left: 0, right: 1') still trips on "
-        "the rank-0 index. Tracking separately."
-    ),
-    strict=False,
-)
 def test_gather_with_0d_index(device: torch.device) -> None:
     x = torch.rand(5, device=device)
     i = torch.zeros((), dtype=torch.int64, device=device)

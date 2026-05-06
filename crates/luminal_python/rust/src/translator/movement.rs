@@ -380,6 +380,17 @@ impl<'a> Translator<'a> {
         let dim = normalize_dim(dim, a.shape.len());
         let indices = self.get_input_tensor(node, 2)?;
 
+        // PyTorch eager allows torch.gather(rank-1, 0, rank-0) and returns
+        // a rank-0 scalar — the only rank-mismatch case eager permits. Our
+        // gather_elements requires the index rank to match the source rank,
+        // so unsqueeze the rank-0 index to (1,), gather, then squeeze back.
+        let promoted_rank0 = indices.shape.is_empty() && a.shape.len() == 1;
+        let indices = if promoted_rank0 {
+            indices.unsqueeze(0)
+        } else {
+            indices
+        };
+
         // Normalize negative indices: -1 → last, -2 → second-to-last, etc.
         let axis_dim = a.shape.dims[dim].to_usize().ok_or_else(|| {
             anyhow::anyhow!("Gather: axis dim must be concrete for negative index normalization")
@@ -393,7 +404,12 @@ impl<'a> Translator<'a> {
         let is_negative = indices_f32.lt(zero).cast(DType::F32);
         let normalized = (indices_f32 + is_negative * adjustment).cast(DType::Int);
 
-        Ok(a.gather_elements(normalized, dim))
+        let result = a.gather_elements(normalized, dim);
+        Ok(if promoted_rank0 {
+            result.squeeze(0)
+        } else {
+            result
+        })
     }
 
     pub(crate) fn translate_scatter_src(&mut self, node: &Node) -> Result<GraphTensor> {
