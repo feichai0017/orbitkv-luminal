@@ -1118,7 +1118,10 @@ mod tests {
         // rank-0 tensor has 1 element. Returning 0 here would yield a CUDA
         // launch with grid=(0, 1, 1) and crash at runtime.
         let empty: Vec<Expression> = vec![];
-        assert_eq!(empty.into_iter().product::<Expression>(), Expression::from(1));
+        assert_eq!(
+            empty.into_iter().product::<Expression>(),
+            Expression::from(1)
+        );
     }
 
     #[test]
