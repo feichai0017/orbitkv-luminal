@@ -994,8 +994,12 @@ impl<E: Into<Expression>> BitOr<E> for Expression {
 
 impl std::iter::Product for Expression {
     fn product<I: Iterator<Item = Expression>>(mut iter: I) -> Self {
+        // Empty product is the multiplicative identity, 1 — not 0. Returning
+        // 0 here breaks rank-0 tensors: every `shape.iter().product()` call
+        // site treats this as `numel`, and a `numel=0` rank-0 tensor reduces
+        // to an invalid CUDA grid (0 blocks) and a nonsensical buffer size.
         let Some(mut p) = iter.next() else {
-            return 0.into();
+            return 1.into();
         };
         for n in iter {
             p *= n;
@@ -1105,6 +1109,24 @@ fn egglog_simplify(e: Expression) -> Expression {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn test_empty_product_is_one() {
+        // The empty product (e.g. for a rank-0 tensor's shape) must be the
+        // multiplicative identity, 1 — not 0. cuda_lite and other kernel
+        // emitters use `shape.iter().product()` to compute `numel`, and a
+        // rank-0 tensor has 1 element. Returning 0 here would yield a CUDA
+        // launch with grid=(0, 1, 1) and crash at runtime.
+        let empty: Vec<Expression> = vec![];
+        assert_eq!(empty.into_iter().product::<Expression>(), Expression::from(1));
+    }
+
+    #[test]
+    fn test_empty_sum_is_zero() {
+        // Sanity check the additive identity stays 0 (it always was).
+        let empty: Vec<Expression> = vec![];
+        assert_eq!(empty.into_iter().sum::<Expression>(), Expression::from(0));
+    }
 
     #[test]
     fn test_basic_simplifications() {
