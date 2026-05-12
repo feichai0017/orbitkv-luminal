@@ -1965,7 +1965,7 @@ pub fn run_egglog_with_report_parts(
     let setup_text_elapsed = setup_text_start.elapsed();
     let setup_lines = setup_code.lines().count();
     let mut egraph = egglog::EGraph::default();
-    egraph.set_report_level(ReportLevel::WithPlan);
+    egraph.set_report_level(ReportLevel::TimeOnly);
     let setup_start = std::time::Instant::now();
     let setup_tuples_before = egraph.num_tuples();
     let parse_start = std::time::Instant::now();
