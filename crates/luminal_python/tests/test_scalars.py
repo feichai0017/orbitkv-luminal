@@ -1027,6 +1027,13 @@ class _IndexByScalarTensor(torch.nn.Module):
         return x[i]
 
 
+class _ReturnScalarIndexAndVector(torch.nn.Module):
+    def forward(
+        self, x: torch.Tensor, i: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return i, x
+
+
 class _GatherWith0dIndex(torch.nn.Module):
     def forward(self, x: torch.Tensor, i: torch.Tensor) -> torch.Tensor:
         return torch.gather(x, 0, i)
@@ -1049,6 +1056,15 @@ def test_index_by_scalar_tensor(device: torch.device, index: int) -> None:
     i = torch.tensor(index, device=device)
     eager, compiled = _run(_IndexByScalarTensor(), x, i)
     _strict_match(compiled, eager)
+
+
+def test_passthrough_scalar_index_and_vector(device: torch.device) -> None:
+    x = torch.rand(5, device=device)
+    i = torch.tensor(2, device=device)
+    eager, compiled = _run(_ReturnScalarIndexAndVector(), x, i)
+    assert isinstance(compiled, tuple)
+    _strict_match(compiled[0], eager[0])
+    _strict_match(compiled[1], eager[1])
 
 
 def test_gather_with_0d_index(device: torch.device) -> None:
