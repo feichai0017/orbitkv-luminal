@@ -1,0 +1,13 @@
+[package]
+name = "export_model_eggs"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+luminal = { path = "../.." }
+luminal_cuda_lite = { path = "../../crates/luminal_cuda_lite" }
+luminal_nn = { path = "../../crates/luminal_nn" }
+tracing = "0.1.43"

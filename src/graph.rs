@@ -1,6 +1,6 @@
 use crate::egglog_utils::{
-    count_choice_sets_up_to, egglog_to_llir, extract_generation, hash_choice_set, hlir_to_egglog,
-    random_initial_choice, run_egglog_with_late_passes,
+    count_choice_sets_up_to, egglog_to_llir, extract_generation, full_egglog_with_late_passes,
+    hash_choice_set, hlir_to_egglog, random_initial_choice, run_egglog_with_late_passes,
 };
 use crate::{
     egglog_utils::SerializedEGraph,
@@ -1039,6 +1039,27 @@ impl Graph {
         ];
         self.ops = Some(ops);
         self.search_space_max_memory_bytes = options.max_memory_bytes;
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn export_egglog_search_program<Rt: Runtime + 'static>(&mut self) -> String {
+        self.export_egglog_search_program_with_options::<Rt>(BuildSearchSpaceOptions::default())
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn export_egglog_search_program_with_options<Rt: Runtime + 'static>(
+        &mut self,
+        options: BuildSearchSpaceOptions,
+    ) -> String {
+        self.run_auto_loop_rolling_prepass();
+        let mut ops = Rt::Ops::into_vec();
+        ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
+        let cleanup_hlir = TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>();
+        let memory_dyn_map = self.memory_limit_dyn_map();
+        let late_passes = Rt::late_egglog_passes(&ops, &options, &memory_dyn_map);
+
+        let (program, _) = hlir_to_egglog(self);
+        full_egglog_with_late_passes(&program, &ops, cleanup_hlir, &late_passes)
     }
 
     #[tracing::instrument(skip_all)]

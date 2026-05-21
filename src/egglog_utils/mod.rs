@@ -136,6 +136,16 @@ pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool)
     full_egglog_with(program, &parts)
 }
 
+pub fn full_egglog_with_late_passes(
+    program: &str,
+    ops: &[Arc<Box<dyn EgglogOp>>],
+    cleanup: bool,
+    late_passes: &[LateEgglogPass],
+) -> String {
+    let parts = OpTextParts::new_with_late_passes(ops, cleanup, late_passes);
+    full_egglog_with(program, &parts)
+}
+
 /// Pre-computed per-op text fragments. Materialising all op-derived strings
 /// once up front means callers that want to drive multiple egglog runs in
 /// parallel only need to share `&str` references and never touch the non-Send
