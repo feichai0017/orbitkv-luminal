@@ -2,10 +2,12 @@
 //!
 //! Walks the parsed PT2 graph and constructs an equivalent Luminal computation graph.
 
+mod attention;
 mod binary;
+mod conv;
 mod dispatch;
-mod matmul;
 mod movement;
+mod movement_dynamic;
 mod reduction;
 mod tensor;
 mod unary;
@@ -16,8 +18,10 @@ use anyhow::{Context, Result};
 use luminal::graph::Graph;
 use luminal::prelude::*;
 
+use crate::pt2_expr::parse_sympy_expr_with_ranges;
 use crate::pt2_parser::{InputKind, ParsedPT2, SymDimMap};
 use crate::pt2_schema::*;
+use crate::pt2_util;
 
 /// Result of translating a PT2 graph to a Luminal graph.
 pub struct TranslatedGraph {
@@ -76,7 +80,13 @@ impl<'a> Translator<'a> {
         let output_names = self.parsed.output_names();
         for name in &output_names {
             let tensor = self.get_tensor(name)?;
-            let tensor = tensor + 0.0;
+            let tensor = if tensor.dtype == DType::Bool {
+                tensor.cast(DType::Int).cast(DType::Bool)
+            } else if tensor.dtype == DType::Int {
+                tensor
+            } else {
+                tensor + 0.0
+            };
             tensor.output();
             self.output_ids.push((name.clone(), tensor.id));
         }
@@ -97,7 +107,12 @@ impl<'a> Translator<'a> {
                         .tensor_meta(graph_name)
                         .with_context(|| format!("Missing tensor meta for param {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
-                    let tensor = self.graph.named_tensor(original_name, shape);
+                    let dtype = pt2_util::torch_dtype_int_to_luminal(meta.dtype);
+                    let tensor = self
+                        .graph
+                        .named_tensor(original_name, shape)
+                        .as_dtype(dtype);
+                    tensor.persist();
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
                 InputKind::Buffer {
@@ -109,7 +124,12 @@ impl<'a> Translator<'a> {
                         .tensor_meta(graph_name)
                         .with_context(|| format!("Missing tensor meta for buffer {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
-                    let tensor = self.graph.named_tensor(original_name, shape);
+                    let dtype = pt2_util::torch_dtype_int_to_luminal(meta.dtype);
+                    let tensor = self
+                        .graph
+                        .named_tensor(original_name, shape)
+                        .as_dtype(dtype);
+                    tensor.persist();
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
                 InputKind::UserInput { graph_name } => {
@@ -118,7 +138,8 @@ impl<'a> Translator<'a> {
                         .tensor_meta(graph_name)
                         .with_context(|| format!("Missing tensor meta for input {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
-                    let tensor = self.graph.named_tensor(graph_name, shape);
+                    let dtype = pt2_util::torch_dtype_int_to_luminal(meta.dtype);
+                    let tensor = self.graph.named_tensor(graph_name, shape).as_dtype(dtype);
                     self.user_input_ids.push((graph_name.clone(), tensor.id));
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
@@ -138,7 +159,6 @@ impl<'a> Translator<'a> {
 
     // --- Helper methods ---
 
-    /// Look up tensor metadata by name, checking subgraph extras first.
     pub(crate) fn tensor_meta(&self, name: &str) -> Option<&TensorMeta> {
         self.extra_tensor_values
             .get(name)
@@ -170,8 +190,21 @@ impl<'a> Translator<'a> {
             .get(idx)
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
-        arg.as_int()
-            .with_context(|| format!("Input {idx} of {} is not an int: {:?}", node.target, arg))
+        if let Some(v) = arg.as_int() {
+            return Ok(v);
+        }
+        // Fall through to symbolic-aware resolution. Op-arg slots like `dim`
+        // and `axis` are always concrete in practice, but with dynamic shapes
+        // PT2 occasionally hands us a SymInt that is fully bound at export
+        // time (e.g. an `unsqueeze` whose dim was derived from `len(shape)`);
+        // accept those when they reduce to a concrete int rather than failing
+        // with the misleading "not an int" diagnostic.
+        if let Some(expr) = self.resolve_arg_as_expression(arg)
+            && let Some(v) = expr.to_usize()
+        {
+            return Ok(v as i64);
+        }
+        anyhow::bail!("Input {idx} of {} is not an int: {:?}", node.target, arg)
     }
 
     pub(crate) fn get_float_arg(&self, node: &Node, idx: usize) -> Result<f64> {
@@ -190,11 +223,37 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn get_ints_arg(&self, node: &Node, idx: usize) -> Result<Vec<i64>> {
+        use crate::pt2_schema::SymIntEntry;
         let arg = &node
             .inputs
             .get(idx)
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
+        // Symbolic int lists: tolerate them as long as every entry is a
+        // bound concrete value. Prevents false "not an int list" failures on
+        // graphs where torch.export emits sym_ints for what is dimensionally
+        // a static parameter (kernel sizes, etc. with dynamic batch).
+        if let Some(entries) = arg.as_sym_ints() {
+            let mut out = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let v = match entry {
+                    SymIntEntry::Int(i) => Some(i.as_int),
+                    SymIntEntry::Name(s) => self
+                        .resolve_sym_int(&s.as_name)
+                        .and_then(|e| e.to_usize().map(|u| u as i64)),
+                };
+                match v {
+                    Some(n) => out.push(n),
+                    None => {
+                        anyhow::bail!(
+                            "Input {idx} of {} contains an unresolved sym_int entry",
+                            node.target
+                        )
+                    }
+                }
+            }
+            return Ok(out);
+        }
         arg.as_ints()
             .map(|v| v.to_vec())
             .with_context(|| format!("Input {idx} of {} is not int list: {:?}", node.target, arg))
@@ -222,13 +281,13 @@ impl<'a> Translator<'a> {
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
         if let Some(ints) = arg.as_ints() {
-            return Ok(ints.iter().map(|&v| Expression::from(v as usize)).collect());
+            return Ok(ints.iter().map(|&v| Expression::from(v)).collect());
         }
         if let Some(entries) = arg.as_sym_ints() {
             return entries
                 .iter()
                 .map(|entry| match entry {
-                    SymIntEntry::Int(i) => Ok(Expression::from(i.as_int as usize)),
+                    SymIntEntry::Int(i) => Ok(Expression::from(i.as_int)),
                     SymIntEntry::Name(s) => self
                         .resolve_sym_int(&s.as_name)
                         .with_context(|| format!("Cannot resolve sym_int: {}", s.as_name)),
@@ -261,17 +320,13 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn dim_size_to_expr(&self, dim: &DimSize) -> Result<Expression> {
         match dim {
-            DimSize::Int(i) => Ok(Expression::from(i.as_int as usize)),
-            DimSize::Expr(e) => {
-                let sym_name = crate::pt2_parser::extract_symbol_name_pub(&e.as_expr.expr_str)
-                    .with_context(|| format!("Cannot parse symbol: {}", e.as_expr.expr_str))?;
-                let c = self
-                    .sym_map
-                    .sym_to_char
-                    .get(&sym_name)
-                    .with_context(|| format!("Unknown symbol: {sym_name}"))?;
-                Ok(Expression::from(*c))
-            }
+            DimSize::Int(i) => Ok(Expression::from(i.as_int)),
+            DimSize::Expr(e) => self.resolve_expr_value(&e.as_expr).with_context(|| {
+                format!(
+                    "Cannot resolve symbolic dimension expression: {}",
+                    e.as_expr.expr_str
+                )
+            }),
         }
     }
 
@@ -282,10 +337,9 @@ impl<'a> Translator<'a> {
                 .get("as_expr")
                 .and_then(|e| e.get("expr_str"))
                 .and_then(|s| s.as_str())
-                && let Some(sym) = crate::pt2_parser::extract_symbol_name_pub(expr_str)
-                && let Some(&c) = self.sym_map.sym_to_char.get(&sym)
+                && let Some(expr) = self.resolve_expr_str(expr_str)
             {
-                return Some(Expression::from(c));
+                return Some(expr);
             }
             if let Some(hint) = val
                 .get("as_expr")
@@ -293,7 +347,7 @@ impl<'a> Translator<'a> {
                 .and_then(|h| h.get("as_int"))
                 .and_then(|v| v.as_i64())
             {
-                return Some(Expression::from(hint as usize));
+                return Some(Expression::from(hint));
             }
         }
         None
@@ -301,21 +355,32 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn resolve_arg_as_expression(&self, arg: &Argument) -> Option<Expression> {
         if let Some(v) = arg.as_int() {
-            return Some(Expression::from(v as usize));
+            return Some(Expression::from(v));
         }
         if let Some(name) = arg.as_sym_int_name() {
             return self.resolve_sym_int(name);
         }
         if let Argument::Expr(e) = arg {
-            if let Some(sym) = crate::pt2_parser::extract_symbol_name_pub(&e.as_expr.expr_str)
-                && let Some(&c) = self.sym_map.sym_to_char.get(&sym)
-            {
-                return Some(Expression::from(c));
-            }
-            if let Some(hint) = e.as_expr.hint.as_ref().and_then(|h| h.as_int()) {
-                return Some(Expression::from(hint as usize));
-            }
+            return self.resolve_expr_value(&e.as_expr);
         }
         None
+    }
+
+    pub(crate) fn resolve_expr_str(&self, expr_str: &str) -> Option<Expression> {
+        parse_sympy_expr_with_ranges(expr_str, &self.sym_map.sym_to_char, &self.sym_map.ranges)
+            .or_else(|| {
+                crate::pt2_parser::extract_symbol_name_pub(expr_str)
+                    .and_then(|sym| self.sym_map.sym_to_char.get(&sym).copied())
+                    .map(Expression::from)
+            })
+    }
+
+    pub(crate) fn resolve_expr_value(&self, expr: &ExprValue) -> Option<Expression> {
+        self.resolve_expr_str(&expr.expr_str).or_else(|| {
+            expr.hint
+                .as_ref()
+                .and_then(|h| h.as_int())
+                .map(Expression::from)
+        })
     }
 }

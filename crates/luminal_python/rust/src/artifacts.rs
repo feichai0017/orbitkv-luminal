@@ -34,10 +34,7 @@ fn handle_hello_world(params: &HashMap<String, String>) {
         .unwrap_or(default_path);
 
     match std::fs::write(&path, "Hello from luminal!\n") {
-        Ok(()) => log::info!(
-            "luminal_hello_world artifact written to {}",
-            path.display()
-        ),
+        Ok(()) => log::info!("luminal_hello_world artifact written to {}", path.display()),
         Err(e) => log::error!(
             "Failed to write hello_world artifact to {}: {}",
             path.display(),

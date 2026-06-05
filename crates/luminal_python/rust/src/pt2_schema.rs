@@ -15,7 +15,16 @@ pub struct ExportedProgram {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RangeConstraint {
-    pub min_val: i64,
+    /// Lower bound on a symbolic dimension. PT2 emits `null` when the
+    /// constraint is unbounded (no min set), so this must accept None.
+    #[serde(default)]
+    pub min_val: Option<i64>,
+    /// Upper bound on a symbolic dimension. Also nullable in PT2. Currently
+    /// unused on the luminal side, but accepted to avoid deserialization
+    /// errors when PT2 emits it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub max_val: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +86,7 @@ pub enum Argument {
     SymInts(SymIntsArg),
     SymInt(SymIntArg),
     Expr(ExprArg),
+    #[allow(dead_code)]
     ScalarType(ScalarTypeArg),
     Tensors(TensorsArg),
     OptionalTensors(OptionalTensorsArg),
@@ -168,6 +178,7 @@ pub struct NoneArg {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct ScalarTypeArg {
     pub as_scalar_type: u32,
 }
@@ -224,6 +235,7 @@ impl Argument {
         }
     }
 
+    #[allow(dead_code)]
     pub fn as_scalar_type(&self) -> Option<u32> {
         match self {
             Argument::ScalarType(s) => Some(s.as_scalar_type),

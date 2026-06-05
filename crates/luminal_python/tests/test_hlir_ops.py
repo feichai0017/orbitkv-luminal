@@ -1,5 +1,6 @@
 from typing import Callable
 
+import pytest
 import torch
 import torch._dynamo
 from test_models import (
@@ -8,6 +9,8 @@ from test_models import (
     AddTestModel,
     # And model
     AndTestModel,
+    # Dtype round-trip model
+    SelfAddModel,
     CastBoolToFloatModel,
     # Cast models
     CastDoubleToFloatModel,
@@ -213,9 +216,40 @@ from test_models import (
     WhereWithConstantModel,
     # Xor model
     XorTestModel,
+    ArgsortStableDuplicatesModel,
+    # Conv models
+    Conv1dNoPadModel,
+    Conv1dSamePadModel,
+    Conv1dBiasModel,
+    Conv1dFloorDivPositionalModel,
+    Conv2dNoPadModel,
+    Conv2dSamePadModel,
+    Conv2dBiasModel,
+    Conv2dStrideModel,
+    Conv2dDilationModel,
+    Conv3dSamePadModel,
+    DepthwiseConv1dModel,
+    DepthwiseConv2dModel,
+    DepthwiseMultiplierConv2dModel,
+    GroupedConv2dModel,
+    GroupedConv2dGroups3Model,
+    MambaConvBlockModel,
+    TinyMoERoutingModel,
 )
 
 from luminal import luminal_backend
+
+
+def _compile_for_export_mode(
+    model: torch.nn.Module, export_mode: str | None = None
+) -> Callable:
+    if export_mode is None:
+        return torch.compile(model, backend=luminal_backend)
+    return torch.compile(
+        model,
+        backend=luminal_backend,
+        options={"export_mode": export_mode},
+    )
 
 
 def test_add(device: torch.device):
@@ -416,9 +450,9 @@ def test_transpose_square_matrix(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Constant Node Tests ==========
+# ========== PT2 Constant Node Tests ==========
 # These tests verify the parse_constant_node function in ops_parse.rs
-# which handles ONNX Constant nodes (nodes with embedded data in attributes)
+# which handles PT2 Constant nodes (nodes with embedded data in attributes)
 
 
 def test_constant_scalar_float(device: torch.device):
@@ -541,9 +575,9 @@ def test_constant_multiple_in_graph(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Cast Node Tests ==========
+# ========== PT2 Cast Node Tests ==========
 # These tests verify the parse_cast_node function in ops_parse.rs
-# which handles ONNX Cast nodes (type conversion operations)
+# which handles PT2 Cast nodes (type conversion operations)
 
 
 def test_cast_double_to_float(device: torch.device):
@@ -630,7 +664,7 @@ def test_cast_scalar_value(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Mod Node Tests ==========
+# ========== PT2 Mod Node Tests ==========
 
 
 def test_mod(device: torch.device):
@@ -663,7 +697,7 @@ def test_mod_by_constant(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Floor Node Tests ==========
+# ========== PT2 Floor Node Tests ==========
 
 
 def test_floor(device: torch.device):
@@ -696,7 +730,7 @@ def test_floor_in_expression(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Ceil Node Tests ==========
+# ========== PT2 Ceil Node Tests ==========
 
 
 def test_ceil(device: torch.device):
@@ -729,7 +763,7 @@ def test_ceil_in_expression(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Reshape Node Tests ==========
+# ========== PT2 Reshape Node Tests ==========
 # These tests verify parse_reshape_node and parse_shape_node in ops_parse.rs
 
 
@@ -843,7 +877,7 @@ def test_shape_reshape_view_batch(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Less Node Tests ==========
+# ========== PT2 Less Node Tests ==========
 # These tests verify parse_less_node in ops_parse.rs
 
 
@@ -877,7 +911,7 @@ def test_less_with_constant(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Equal Node Tests ==========
+# ========== PT2 Equal Node Tests ==========
 # These tests verify parse_equal_node in ops_parse/binary.rs
 
 
@@ -911,7 +945,7 @@ def test_equal_with_constant(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Gather Node Tests ==========
+# ========== PT2 Gather Node Tests ==========
 # These tests verify parse_gather_node in ops_parse.rs
 
 
@@ -975,7 +1009,7 @@ def test_gather_constant_fold(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Squeeze Node Tests ==========
+# ========== PT2 Squeeze Node Tests ==========
 # These tests verify parse_squeeze_node in ops_parse.rs
 
 
@@ -1029,7 +1063,7 @@ def test_squeeze_in_expression(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX ReduceSum Node Tests ==========
+# ========== PT2 ReduceSum Node Tests ==========
 
 
 def test_reduce_sum_axis0(device: torch.device):
@@ -1062,6 +1096,17 @@ def test_reduce_sum_all_axes(device: torch.device):
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_sum_all_axes_int64_preserves_dtype(device: torch.device):
+    """Full reduction of an int64 tensor must preserve int64 (regression for LUM-486)."""
+    model: torch.nn.Module = ReduceSumAllAxesModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randint(0, 10, (3, 4), device=device, dtype=torch.int64)
+    eager = model(x)
+    out = model_compiled(x)
+    assert out.dtype == eager.dtype == torch.int64
+    assert torch.equal(out, eager)
 
 
 def test_reduce_sum_3d_axis1(device: torch.device):
@@ -1104,7 +1149,7 @@ def test_reduce_sum_in_expression(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-# ========== ONNX ReduceMax Node Tests ==========
+# ========== PT2 ReduceMax Node Tests ==========
 
 
 def test_reduce_max_axis0(device: torch.device):
@@ -1179,7 +1224,7 @@ def test_reduce_max_in_expression(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-# ========== ONNX ReduceMin Node Tests ==========
+# ========== PT2 ReduceMin Node Tests ==========
 # These tests verify parse_reduce_min_node in ops_parse/reduction.rs
 
 
@@ -1255,7 +1300,7 @@ def test_reduce_min_in_expression(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-# ========== ONNX ReduceMean Node Tests ==========
+# ========== PT2 ReduceMean Node Tests ==========
 # These tests verify parse_reduce_mean_node in ops_parse/reduction.rs
 
 
@@ -1331,7 +1376,7 @@ def test_reduce_mean_in_expression(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-# ========== ONNX Pow Node Tests ==========
+# ========== PT2 Pow Node Tests ==========
 # These tests verify parse_pow_node in ops_parse/binary.rs
 
 
@@ -1365,7 +1410,7 @@ def test_pow_by_constant(device: torch.device):
     assert torch.allclose(output, original, rtol=1e-4, atol=1e-4)
 
 
-# ========== ONNX Where Node Tests ==========
+# ========== PT2 Where Node Tests ==========
 # These tests verify parse_where_node in ops_parse/binary.rs
 
 
@@ -1403,7 +1448,7 @@ def test_where_with_constant(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Max Node Tests ==========
+# ========== PT2 Max Node Tests ==========
 # These tests verify parse_max_node in ops_parse/binary.rs
 
 
@@ -1427,7 +1472,7 @@ def test_max_with_constant(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Min Node Tests ==========
+# ========== PT2 Min Node Tests ==========
 # These tests verify parse_min_node in ops_parse/binary.rs
 
 
@@ -1451,7 +1496,7 @@ def test_min_with_constant(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Concat Node Tests ==========
+# ========== PT2 Concat Node Tests ==========
 # These tests verify parse_concat_node in ops_parse/movement.rs
 
 
@@ -1495,7 +1540,7 @@ def test_concat_in_expression(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x))
 
 
-# ========== ONNX Softmax Node Tests ==========
+# ========== PT2 Softmax Node Tests ==========
 # These tests verify parse_softmax_node in ops_parse/unary.rs
 
 
@@ -1519,7 +1564,7 @@ def test_softmax_dim0(device: torch.device):
     assert torch.allclose(output, original, atol=1e-5)
 
 
-# ========== ONNX LessOrEqual Node Tests ==========
+# ========== PT2 LessOrEqual Node Tests ==========
 
 
 def test_less_or_equal(device: torch.device):
@@ -1542,7 +1587,7 @@ def test_less_or_equal_with_constant(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX GreaterOrEqual Node Tests ==========
+# ========== PT2 GreaterOrEqual Node Tests ==========
 
 
 def test_greater_or_equal(device: torch.device):
@@ -1565,7 +1610,7 @@ def test_greater_or_equal_with_constant(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Not Node Tests ==========
+# ========== PT2 Not Node Tests ==========
 
 
 def test_not(device: torch.device):
@@ -1578,7 +1623,7 @@ def test_not(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX And Node Tests ==========
+# ========== PT2 And Node Tests ==========
 
 
 def test_and(device: torch.device):
@@ -1591,7 +1636,7 @@ def test_and(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Or Node Tests ==========
+# ========== PT2 Or Node Tests ==========
 
 
 def test_or(device: torch.device):
@@ -1604,7 +1649,22 @@ def test_or(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Xor Node Tests ==========
+def test_bitwise_or(device: torch.device):
+    """Test bitwise_or on boolean tensors. PyTorch's `a | b` on Bool tensors
+    emits `aten.bitwise_or.Tensor`, NOT `aten.logical_or.default` — Gemma-style
+    sliding+full attention mask fusion takes this path."""
+    from test_models import BitwiseOrTestModel
+
+    model: torch.nn.Module = BitwiseOrTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    a = torch.tensor([True, False, True, False, True, True], device=device)
+    b = torch.tensor([False, True, True, False, False, True], device=device)
+    original = model(a, b)
+    output = model_compiled(a, b)
+    assert torch.equal(output, original)
+
+
+# ========== PT2 Xor Node Tests ==========
 
 
 def test_xor(device: torch.device):
@@ -1617,7 +1677,7 @@ def test_xor(device: torch.device):
     assert torch.allclose(output, original)
 
 
-# ========== ONNX Trilu Node Tests ==========
+# ========== PT2 Trilu Node Tests ==========
 
 
 def test_tril(device: torch.device):
@@ -1800,6 +1860,60 @@ def test_scaled_dot_product_attention(device: torch.device):
     assert torch.allclose(output, original, atol=1e-5)
 
 
+# ========== F.scaled_dot_product_attention (SDPA aten variants) ==========
+# Tests for `torch.nn.functional.scaled_dot_product_attention`, which lowers
+# to one of `aten._scaled_dot_product_*_attention.default` (variant chosen by
+# PyTorch's dispatcher: efficient/flash/flash_for_cpu/cudnn). Coverage here
+# exercises `translate_sdpa` end-to-end.
+
+
+def _sdpa_qkv(device: torch.device, b: int = 1, h: int = 2, s: int = 4, d: int = 8):
+    """Build a `(B, H, S, D)` Q/K/V triple of float32 tensors on `device`."""
+    torch.manual_seed(0)
+    q = torch.rand((b, h, s, d), device=device)
+    k = torch.rand((b, h, s, d), device=device)
+    v = torch.rand((b, h, s, d), device=device)
+    return q, k, v
+
+
+def test_sdpa_basic(device: torch.device):
+    """`F.scaled_dot_product_attention(q, k, v)` — default scale, no mask."""
+    from test_models import SdpaBasicModel
+
+    model: torch.nn.Module = SdpaBasicModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    q, k, v = _sdpa_qkv(device)
+    expected: torch.Tensor = model(q, k, v)
+    actual: torch.Tensor = compiled(q, k, v)
+    assert torch.allclose(actual, expected, atol=1e-5)
+
+
+def test_sdpa_causal(device: torch.device):
+    """`F.scaled_dot_product_attention(q, k, v, is_causal=True)`."""
+    from test_models import SdpaCausalModel
+
+    model: torch.nn.Module = SdpaCausalModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    q, k, v = _sdpa_qkv(device)
+    expected: torch.Tensor = model(q, k, v)
+    actual: torch.Tensor = compiled(q, k, v)
+    assert torch.allclose(actual, expected, atol=1e-5)
+
+
+def test_sdpa_with_attn_bias(device: torch.device):
+    """SDPA with an additive `attn_mask` (float bias) broadcast over heads."""
+    from test_models import SdpaWithBiasModel
+
+    model: torch.nn.Module = SdpaWithBiasModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    q, k, v = _sdpa_qkv(device)
+    bias = torch.zeros((1, 1, q.shape[-2], k.shape[-2]), device=device)
+    bias[..., 0, 1] = -1.0  # any non-trivial bias to verify it's actually applied
+    expected: torch.Tensor = model(q, k, v, bias)
+    actual: torch.Tensor = compiled(q, k, v, bias)
+    assert torch.allclose(actual, expected, atol=1e-5)
+
+
 def test_mlp_block(device: torch.device):
     """Test two-layer MLP: Linear(8,16) -> ReLU -> Linear(16,4) on input (2,8)."""
     model: torch.nn.Module = MLPBlockModel().to(device)
@@ -1812,11 +1926,11 @@ def test_mlp_block(device: torch.device):
     assert torch.allclose(output, original, atol=1e-5)
 
 
-# ========== ONNX GatherElements Node Tests ==========
+# ========== PT2 GatherElements Node Tests ==========
 
 
 def test_gather_elements(device: torch.device):
-    """Tests GatherElements op (torch.gather → ONNX GatherElements)."""
+    """Tests GatherElements op (torch.gather → PT2 GatherElements)."""
     model: torch.nn.Module = GatherElementsTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((2, 3), device=device)
@@ -1831,18 +1945,18 @@ def test_gather_elements_large(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x))
 
 
-# ========== ONNX Expand Node Tests ==========
+# ========== PT2 Expand Node Tests ==========
 
 
 def test_expand(device: torch.device):
-    """Tests Expand op (tensor.expand → ONNX Expand)."""
+    """Tests Expand op (tensor.expand → PT2 Expand)."""
     model: torch.nn.Module = ExpandTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((1, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x))
 
 
-# ========== ONNX IsNaN Node Tests ==========
+# ========== PT2 IsNaN Node Tests ==========
 
 
 def test_isnan(device: torch.device):
@@ -1853,29 +1967,29 @@ def test_isnan(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x))
 
 
-# ========== ONNX LayerNormalization Node Tests ==========
+# ========== PT2 LayerNormalization Node Tests ==========
 
 
 def test_layernorm(device: torch.device):
-    """Tests LayerNormalization op (nn.LayerNorm → ONNX LayerNormalization)."""
+    """Tests LayerNormalization op (nn.LayerNorm → PT2 LayerNormalization)."""
     model: torch.nn.Module = LayerNormTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((2, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-# ========== ONNX Gemm Node Tests ==========
+# ========== PT2 Gemm Node Tests ==========
 
 
 def test_gemm(device: torch.device):
-    """Tests Gemm op (nn.Linear → ONNX Gemm)."""
+    """Tests Gemm op (nn.Linear → PT2 Gemm)."""
     model: torch.nn.Module = GemmTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-# ========== ONNX Erf Node Tests ==========
+# ========== PT2 Erf Node Tests ==========
 
 
 def test_erf(device: torch.device):
@@ -1888,7 +2002,7 @@ def test_erf(device: torch.device):
     assert torch.allclose(output, original, atol=1e-4)
 
 
-# ========== ONNX Slice Node Tests ==========
+# ========== PT2 Slice Node Tests ==========
 
 
 def test_slice_1d(device: torch.device):
@@ -1907,7 +2021,7 @@ def test_slice_2d(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x))
 
 
-# ========== ONNX Split Node Tests ==========
+# ========== PT2 Split Node Tests ==========
 
 
 def test_split(device: torch.device):
@@ -1918,7 +2032,63 @@ def test_split(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x))
 
 
-# ========== ONNX TopK Node Tests ==========
+# ========== Argsort / MoE Routing Tests ==========
+
+
+@pytest.mark.parametrize("idx_dtype", [torch.int32, torch.int64])
+def test_argsort_stable_duplicates(device: torch.device, idx_dtype: torch.dtype):
+    """Duplicate values should follow stable lower-index-first tie-breaking.
+
+    Parametrized over int32/int64 to verify luminal preserves whichever
+    integer dtype the eager model declares (LUM-486).
+    """
+    model: torch.nn.Module = ArgsortStableDuplicatesModel(idx_dtype=idx_dtype).to(
+        device
+    )
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.tensor(
+        [[2.0, 1.0, 1.0, 3.0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert original.dtype == idx_dtype, "test setup: model should cast to idx_dtype"
+    assert output.dtype == original.dtype, (
+        f"luminal returned {output.dtype}, eager produced {original.dtype}"
+    )
+    assert torch.equal(output, original)
+
+
+@pytest.mark.parametrize("idx_dtype", [torch.int32, torch.int64])
+def test_tiny_moe_routing(device: torch.device, idx_dtype: torch.dtype):
+    """Focused proof for built MoE routing support.
+
+    Parametrized over int32/int64 for the integer-valued outputs to verify
+    luminal preserves the dtype declared by the eager model (LUM-486).
+    """
+    model: torch.nn.Module = TinyMoERoutingModel(idx_dtype=idx_dtype).to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    scores = torch.tensor(
+        [[0.1, 0.9, 0.4, 0.7], [0.6, -0.8, 0.95, 0.2]],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    expected = model(scores)
+    output = model_compiled(scores)
+
+    for actual, eager in zip(output, expected):
+        assert actual.dtype == eager.dtype, (
+            f"luminal returned {actual.dtype}, eager produced {eager.dtype}"
+        )
+        if actual.dtype.is_floating_point:
+            assert torch.allclose(actual, eager)
+        else:
+            assert torch.equal(actual, eager)
+
+
+# ========== PT2 TopK Node Tests ==========
 
 
 def test_topk_values(device: torch.device):
@@ -1929,6 +2099,23 @@ def test_topk_values(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x))
 
 
+def test_topk_values_width_128_with_indices(device: torch.device):
+    """Regression for router-sized TopK values when both tuple outputs are used."""
+
+    class TopKValuesAndIndices(torch.nn.Module):
+        def forward(self, x: torch.Tensor):
+            values, indices = torch.topk(torch.softmax(x, dim=-1), 8, dim=1)
+            return values, indices
+
+    model = TopKValuesAndIndices().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(4, 128, device=device)
+    actual_values, actual_indices = model_compiled(x)
+    expected_values, expected_indices = model(x)
+    assert torch.allclose(actual_values, expected_values, atol=1e-5)
+    assert torch.equal(actual_indices.to(expected_indices.dtype), expected_indices)
+
+
 def test_topk_indices(device: torch.device):
     """Tests TopK indices output for 2D tensor along axis=1."""
     model: torch.nn.Module = TopKIndicesTestModel().to(device)
@@ -1937,7 +2124,7 @@ def test_topk_indices(device: torch.device):
     assert torch.allclose(model_compiled(x), model(x))
 
 
-# ========== ONNX OneHot Node Tests ==========
+# ========== PT2 OneHot Node Tests ==========
 
 
 def test_onehot(device: torch.device):
@@ -1984,3 +2171,503 @@ def test_scatter_nd(device: torch.device):
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
+
+
+# ========== Bool-mask index_put correctness tests ==========
+#
+# `x[bool_mask] = scalar` is semantically `where(mask, scalar, x)`, NOT a
+# scatter into Int(mask) positions. Pre-fix, the translator cast the Bool
+# mask to Int and routed through scatter_nd, reinterpreting True/False as
+# row indices 1/0 and silently corrupting `x`. Each variant below exercises
+# a different mask configuration; together they would catch any regression
+# in the bool-mask blend path.
+
+
+def _check_bool_mask(
+    device: torch.device, model_cls, x: torch.Tensor, mask: torch.Tensor
+):
+    """Shared body: compile, run eager + compiled, assert exact equality."""
+    from test_models import (
+        BoolMaskAssign3DModel,
+        BoolMaskAssignFloatModel,
+        BoolMaskAssignIntModel,
+    )
+
+    _ = (BoolMaskAssign3DModel, BoolMaskAssignFloatModel, BoolMaskAssignIntModel)
+    model: torch.nn.Module = model_cls().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    original: torch.Tensor = model(x, mask)
+    output: torch.Tensor = model_compiled(x, mask)
+    # Bit-equal (not allclose) — the lowering should produce identical
+    # results to eager for bool-mask blends.
+    assert torch.equal(output, original), (
+        f"bool-mask index_put mismatch:\n"
+        f"  mask = {mask.flatten().tolist()}\n"
+        f"  eager = {original.flatten().tolist()}\n"
+        f"  out   = {output.flatten().tolist()}"
+    )
+
+
+def test_bool_mask_index_put_all_false(device: torch.device):
+    """All-False mask must be a no-op. Pre-fix this *silently* corrupted row 0
+    — the regression that drove the Gemma-4 ~30-magnitude logits drift."""
+    from test_models import BoolMaskAssignIntModel
+
+    x = torch.arange(16, device=device, dtype=torch.long).reshape(4, 4)
+    mask = torch.zeros(4, 4, dtype=torch.bool, device=device)
+    _check_bool_mask(device, BoolMaskAssignIntModel, x, mask)
+
+
+def test_bool_mask_index_put_one_true(device: torch.device):
+    """Single True position — only that position should change."""
+    from test_models import BoolMaskAssignIntModel
+
+    x = torch.arange(16, device=device, dtype=torch.long).reshape(4, 4)
+    mask = torch.zeros(4, 4, dtype=torch.bool, device=device)
+    mask[1, 2] = True
+    _check_bool_mask(device, BoolMaskAssignIntModel, x, mask)
+
+
+def test_bool_mask_index_put_many_true(device: torch.device):
+    """Multiple scattered True positions — each should be replaced independently."""
+    from test_models import BoolMaskAssignIntModel
+
+    x = torch.arange(16, device=device, dtype=torch.long).reshape(4, 4)
+    mask = torch.tensor(
+        [
+            [True, False, False, True],
+            [False, False, True, False],
+            [True, False, False, False],
+            [False, True, False, True],
+        ],
+        dtype=torch.bool,
+        device=device,
+    )
+    _check_bool_mask(device, BoolMaskAssignIntModel, x, mask)
+
+
+def test_bool_mask_index_put_all_true(device: torch.device):
+    """All-True mask — every element should become the scalar value."""
+    from test_models import BoolMaskAssignIntModel
+
+    x = torch.arange(16, device=device, dtype=torch.long).reshape(4, 4)
+    mask = torch.ones(4, 4, dtype=torch.bool, device=device)
+    _check_bool_mask(device, BoolMaskAssignIntModel, x, mask)
+
+
+def test_bool_mask_index_put_float(device: torch.device):
+    """Float data + float scalar value. Verifies the where-blend works for
+    non-integer dtypes — the blend formula `a*(1-mask) + value*mask` casts
+    mask to data's dtype, so dtype-specific paths must compose correctly."""
+    from test_models import BoolMaskAssignFloatModel
+
+    x = torch.arange(20, device=device, dtype=torch.float32).reshape(4, 5)
+    mask = torch.tensor(
+        [
+            [True, False, False, True, False],
+            [False, True, False, False, True],
+            [True, True, False, False, False],
+            [False, False, False, True, True],
+        ],
+        dtype=torch.bool,
+        device=device,
+    )
+    model = BoolMaskAssignFloatModel().to(device)
+    compiled = torch.compile(model, backend=luminal_backend)
+    original = model(x, mask)
+    output = compiled(x, mask)
+    assert torch.allclose(output, original)
+
+
+def test_bool_mask_index_put_3d(device: torch.device):
+    """3-D `x` with a 3-D bool mask of matching shape. Catches regressions
+    where the bool-mask detection only works at one specific rank — the
+    `idx_tensor.shape.dims == a.shape.dims` check has to handle arbitrary
+    ranks, not just 2-D."""
+    from test_models import BoolMaskAssign3DModel
+
+    x = torch.arange(24, device=device, dtype=torch.float32).reshape(2, 3, 4)
+    mask = torch.zeros(2, 3, 4, dtype=torch.bool, device=device)
+    mask[0, 1, 2] = True
+    mask[1, 0, 0] = True
+    mask[1, 2, 3] = True
+    model = BoolMaskAssign3DModel().to(device)
+    compiled = torch.compile(model, backend=luminal_backend)
+    original = model(x, mask)
+    output = compiled(x, mask)
+    assert torch.allclose(output, original)
+
+
+def test_int_index_put_scalar_src(device: torch.device):
+    """`x[indices] = scalar` with int indices: the scatter path receives a
+    scalar src against a 1D index tensor. Pre-fix `GraphTensor::scatter`
+    panicked at `flatten_strides` (rank mismatch: index_shape=[2],
+    src_strides=[]). With the zero-stride padding the scalar broadcasts
+    across all indexed positions correctly."""
+    from test_models import IntIndexAssignScalarModel
+
+    x = torch.arange(20, device=device, dtype=torch.float32).reshape(5, 4)
+    indices = torch.tensor([0, 3], device=device, dtype=torch.long)
+    model = IntIndexAssignScalarModel().to(device)
+    compiled = torch.compile(model, backend=luminal_backend)
+    original = model(x, indices)
+    output = compiled(x, indices)
+    assert torch.allclose(output, original)
+
+
+def test_grouped_mm_fallback(device: torch.device):
+    """Tests transformers::grouped_mm_fallback — the per-expert batched matmul
+    used by HF MoE forward passes (DeepSeek-V2/V3, Qwen2/3-MoE, Mixtral, ...).
+
+    Importing transformers.integrations.moe registers the custom_op via
+    `torch.library.custom_op("transformers::grouped_mm_fallback", ...)`. After
+    import, `torch.ops.transformers.grouped_mm_fallback` is callable directly.
+    """
+    # Side-effect import: registers the custom_op via torch.library.custom_op.
+    # The name itself isn't referenced — ruff's F401 must be suppressed.
+    import transformers.integrations.moe  # noqa: F401
+    from test_models import GroupedMMFallbackTestModel
+
+    model: torch.nn.Module = GroupedMMFallbackTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    # 2 experts, 4 tokens, K=8, N=16. Tokens [0,1] go to expert 0, [2,3] to expert 1.
+    g, s, k, n = 2, 4, 8, 16
+    input = torch.randn(s, k, device=device)
+    weight = torch.randn(g, k, n, device=device)
+    offs = torch.tensor([2, 4], device=device, dtype=torch.int32)
+    original: torch.Tensor = model(input, weight, offs)
+    output: torch.Tensor = model_compiled(input, weight, offs)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_grouped_mm_fallback_routing_invariance(device: torch.device):
+    """The MoE forest, not just the trees: one compile must correctly handle
+    *any* routing pattern at the same shape.
+
+    `translate_grouped_mm` is correct only if `offs` flows through as a runtime
+    tensor — the gate's top-k decision varies per token batch, and the same
+    compiled graph has to dispatch tokens to the right experts for whatever
+    `offs` arrives at execution. If our lowering accidentally specialized on a
+    particular `offs` value (baking in expert assignments), `compiled(input_b,
+    weight, offs_b)` would either silently produce wrong-expert output or
+    trigger a recompile.
+
+    This test asserts three things at once:
+      (a) Different `offs` (= different routing) doesn't trigger a recompile.
+      (b) `offs` appears as an FX graph node, not a baked constant.
+      (c) The same compiled graph produces correct output for both routings,
+          and outputs *differ* between routings (else the test is moot).
+    """
+    import transformers.integrations.moe  # noqa: F401
+    from test_models import GroupedMMFallbackTestModel
+
+    g, s, k, n = 2, 4, 8, 16
+
+    # Wrap luminal_backend to capture the FX graph(s) dynamo hands us.
+    captured = []
+
+    def capturing_backend(gm, example_inputs):
+        captured.append(gm)
+        return luminal_backend(gm, example_inputs)
+
+    model = GroupedMMFallbackTestModel().to(device)
+    compiled = torch.compile(model, backend=capturing_backend)
+
+    # Same shapes, different data → different routing patterns.
+    weight = torch.randn(g, k, n, device=device)
+    input_a = torch.randn(s, k, device=device)
+    input_b = torch.randn(s, k, device=device)
+    # offs[i] = cumulative tokens through expert i. Different routings:
+    #   offs_a: 1 token to expert 0, 3 to expert 1
+    #   offs_b: 3 tokens to expert 0, 1 to expert 1
+    offs_a = torch.tensor([1, 4], device=device, dtype=torch.int32)
+    offs_b = torch.tensor([3, 4], device=device, dtype=torch.int32)
+
+    with torch.no_grad():
+        ref_a = model(input_a, weight, offs_a)
+        out_a = compiled(input_a, weight, offs_a)
+        n_compiles_after_first = len(captured)
+
+        ref_b = model(input_b, weight, offs_b)
+        out_b = compiled(input_b, weight, offs_b)
+
+    # (a) No recompile between distinct routings.
+    assert len(captured) == n_compiles_after_first, (
+        f"Different routings triggered a recompile: "
+        f"{n_compiles_after_first} → {len(captured)}"
+    )
+
+    # (b) offs is an FX graph node, not a baked constant.
+    grouped_nodes = [
+        node for node in captured[0].graph.nodes if "grouped_mm" in str(node.target)
+    ]
+    assert len(grouped_nodes) == 1, (
+        f"Expected exactly one grouped_mm node, got {len(grouped_nodes)}"
+    )
+    grouped_node = grouped_nodes[0]
+    # transformers::grouped_mm_fallback emits offs as a kwarg; aten._grouped_mm
+    # may emit it as a positional. Accept either.
+    offs_arg = grouped_node.kwargs.get("offs")
+    if offs_arg is None and len(grouped_node.args) > 2:
+        offs_arg = grouped_node.args[2]
+    assert hasattr(offs_arg, "op"), (
+        f"offs argument should be an FX graph node, got {offs_arg!r} "
+        f"({type(offs_arg).__name__}) — looks baked as constant"
+    )
+
+    # (c) Both routings produce correct output, and outputs differ.
+    assert torch.allclose(out_a, ref_a, atol=1e-4), (
+        f"routing A: max_diff={torch.max(torch.abs(out_a - ref_a)).item():.2e}"
+    )
+    assert torch.allclose(out_b, ref_b, atol=1e-4), (
+        f"routing B: max_diff={torch.max(torch.abs(out_b - ref_b)).item():.2e}"
+    )
+    assert not torch.allclose(out_a, out_b, atol=1e-3), (
+        "Outputs of routing A and B should differ — otherwise routing isn't "
+        "actually being exercised."
+    )
+
+
+# ========== Dtype Round-Trip Tests ==========
+
+
+def test_dtype_float16(device: torch.device):
+    """Verify float16 input produces float16 output with correct values."""
+    model: torch.nn.Module = SelfAddModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor(
+        [1.0, 2.0, 3.0, 4.0], dtype=torch.float16, device=device
+    )
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert output.dtype == torch.float16, f"Expected float16 output, got {output.dtype}"
+    assert torch.allclose(output.float(), original.float())
+
+
+def test_dtype_float32(device: torch.device):
+    """Verify float32 input produces float32 output (baseline)."""
+    model: torch.nn.Module = SelfAddModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor(
+        [1.0, 2.0, 3.0, 4.0], dtype=torch.float32, device=device
+    )
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert output.dtype == torch.float32, f"Expected float32 output, got {output.dtype}"
+    assert torch.allclose(output, original)
+
+
+# ========== Convolution Tests ==========
+
+
+def _run_conv1d_no_pad(device: torch.device, export_mode: str | None = None):
+    """Conv1d without padding: output length = input - (kernel-1)."""
+    model: torch.nn.Module = Conv1dNoPadModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(2, 8, 32, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv1d_no_pad(device: torch.device):
+    _run_conv1d_no_pad(device)
+
+
+def test_conv1d_no_pad_pt2(device: torch.device):
+    _run_conv1d_no_pad(device, "pt2")
+
+
+def test_conv1d_same_pad(device: torch.device):
+    """Conv1d with padding=1: output length == input length."""
+    model: torch.nn.Module = Conv1dSamePadModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(2, 8, 32, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv1d_bias(device: torch.device):
+    """Conv1d with bias term."""
+    model: torch.nn.Module = Conv1dBiasModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(2, 8, 32, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv1d_floor_div_positional_pt2(device: torch.device):
+    """Conv1d stride output uses floor division before positional add."""
+    model: torch.nn.Module = Conv1dFloorDivPositionalModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, "pt2")
+    x: torch.Tensor = torch.randn(1, 8, 30, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert output.shape == original.shape == (15, 16)
+    assert torch.allclose(output, original, atol=1e-3, rtol=1e-3)
+
+
+def _run_conv2d_no_pad(device: torch.device, export_mode: str | None = None):
+    """Conv2d without padding: output spatial = input - (kernel-1)."""
+    model: torch.nn.Module = Conv2dNoPadModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(1, 3, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv2d_no_pad(device: torch.device):
+    _run_conv2d_no_pad(device)
+
+
+def test_conv2d_no_pad_pt2(device: torch.device):
+    _run_conv2d_no_pad(device, "pt2")
+
+
+def test_conv2d_same_pad(device: torch.device):
+    """Conv2d with padding=1: output spatial == input spatial."""
+    model: torch.nn.Module = Conv2dSamePadModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(1, 3, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv2d_bias(device: torch.device):
+    """Conv2d with bias term."""
+    model: torch.nn.Module = Conv2dBiasModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(1, 3, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv2d_stride(device: torch.device):
+    """Conv2d with stride=2: output spatial dims halved."""
+    model: torch.nn.Module = Conv2dStrideModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(1, 3, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def _run_conv2d_dilation(device: torch.device, export_mode: str | None = None):
+    """Conv2d with dilation=2 preserves the expected spatial shape and values."""
+    model: torch.nn.Module = Conv2dDilationModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(2, 8, 17, 19, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv2d_dilation(device: torch.device):
+    _run_conv2d_dilation(device)
+
+
+def test_conv2d_dilation_pt2(device: torch.device):
+    _run_conv2d_dilation(device, "pt2")
+
+
+def _run_conv3d_same_pad(device: torch.device, export_mode: str | None = None):
+    """Conv3d exercises the spatial=3 unfold/permute/split path."""
+    model: torch.nn.Module = Conv3dSamePadModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(2, 4, 6, 7, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-3)
+
+
+def test_conv3d_same_pad(device: torch.device):
+    _run_conv3d_same_pad(device)
+
+
+def test_conv3d_same_pad_pt2(device: torch.device):
+    _run_conv3d_same_pad(device, "pt2")
+
+
+def test_depthwise_conv1d(device: torch.device):
+    """Depthwise Conv1d with groups=in_channels, as used in Mamba."""
+    model: torch.nn.Module = DepthwiseConv1dModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(2, 16, 32, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_depthwise_conv2d(device: torch.device):
+    """Depthwise Conv2d with groups=in_channels."""
+    model: torch.nn.Module = DepthwiseConv2dModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(1, 8, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def _run_depthwise_multiplier_conv2d(
+    device: torch.device, export_mode: str | None = None
+):
+    """Depthwise Conv2d with multiplier > 1 should preserve both output channels per input channel."""
+    model: torch.nn.Module = DepthwiseMultiplierConv2dModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(2, 8, 9, 9, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_depthwise_multiplier_conv2d(device: torch.device):
+    _run_depthwise_multiplier_conv2d(device)
+
+
+def test_depthwise_multiplier_conv2d_pt2(device: torch.device):
+    _run_depthwise_multiplier_conv2d(device, "pt2")
+
+
+def test_grouped_conv2d(device: torch.device):
+    """Conv2d with groups=4 (grouped, not depthwise)."""
+    model: torch.nn.Module = GroupedConv2dModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(1, 16, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def _run_grouped_conv2d_groups3_batch4(
+    device: torch.device, export_mode: str | None = None
+):
+    """Grouped Conv2d with groups=3 and batch>1 exercises the pre-pad + slice path."""
+    model: torch.nn.Module = GroupedConv2dGroups3Model().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(4, 12, 11, 9, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-3)
+
+
+def test_grouped_conv2d_groups3_batch4(device: torch.device):
+    _run_grouped_conv2d_groups3_batch4(device)
+
+
+def test_grouped_conv2d_groups3_batch4_pt2(device: torch.device):
+    _run_grouped_conv2d_groups3_batch4(device, "pt2")
+
+
+def test_mamba_conv_block(device: torch.device):
+    """Minimal Mamba-style block: depthwise Conv1d with causal gating (end-to-end)."""
+    model: torch.nn.Module = MambaConvBlockModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(2, 64, 16, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)

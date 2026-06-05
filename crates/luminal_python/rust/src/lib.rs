@@ -1,89 +1,76 @@
 mod artifacts;
 mod compiled_graph;
-mod dispatch;
-mod onnx_translator;
-mod ops_parse;
-mod runtime;
-mod util;
+mod dim_arith;
+pub mod torch_dtype;
+pub mod typed_data;
 
 // PT2 modules
 mod pt2_compiled_model;
+mod pt2_expr;
 mod pt2_parser;
 mod pt2_schema;
 mod pt2_util;
 mod translator;
 
-use artifacts::ArtifactConfig;
 use compiled_graph::CompiledGraph;
 use pt2_compiled_model::process_pt2;
 use pyo3::prelude::*;
+use pyo3::types::PyCapsule;
 use std::collections::HashMap;
-
-fn validate_backend(backend: &str) -> PyResult<()> {
-    match backend {
-        "native" => Ok(()),
-        #[cfg(feature = "cuda")]
-        "cuda" => Ok(()),
-        #[cfg(not(feature = "cuda"))]
-        "cuda" => Err(pyo3::exceptions::PyValueError::new_err(
-            "CUDA backend requested, but this luminal extension was built without the `cuda` feature. Rebuild with `maturin develop --features cuda -r` or use backend='native'.",
-        )),
-        _ => {
-            #[cfg(feature = "cuda")]
-            {
-                Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Invalid backend '{}'. Must be 'native' or 'cuda'",
-                    backend
-                )))
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Invalid backend '{}'. This build only supports 'native'. Rebuild with the `cuda` feature to enable 'cuda'.",
-                    backend
-                )))
-            }
-        }
-    }
-}
-
-#[pyfunction]
-#[pyo3(signature = (path, backend="native", search_iters=10, weight_device_ptrs=None, artifact_config=None))]
-fn process_onnx(
-    path: &str,
-    backend: &str,
-    search_iters: usize,
-    weight_device_ptrs: Option<HashMap<String, (u64, usize)>>,
-    artifact_config: Option<ArtifactConfig>,
-) -> PyResult<CompiledGraph> {
-    validate_backend(backend)?;
-
-    if let Some(ref config) = artifact_config {
-        artifacts::process_artifacts(config);
-    }
-
-    onnx_translator::compile_onnx(
-        path,
-        backend,
-        weight_device_ptrs.unwrap_or_default(),
-        search_iters,
-    )
-    .map_err(pyo3::exceptions::PyRuntimeError::new_err)
-}
+use torch_dtype::TorchDType;
 
 #[pymodule]
 fn luminal(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Bridge Rust `log` crate → Python `logging` module via pyo3-log.
-    // With tracing's `log` feature enabled, all tracing events flow through here.
-    // Caching::Nothing: every log call checks the current Python logger level,
-    // so runtime changes via torch._logging.set_logs() take effect immediately.
-    // This is acceptable because Rust code only runs during compilation, not inference.
+    // Bridge Rust `log` crate -> Python `logging` module via pyo3-log.
+    // Caching::Nothing lets torch._logging.set_logs() changes take effect
+    // between compilations without re-importing the extension.
     let _ = pyo3_log::Logger::new(py, pyo3_log::Caching::Nothing)?
         .filter(log::LevelFilter::Trace)
         .install();
 
-    m.add_function(wrap_pyfunction!(process_onnx, m)?)?;
     m.add_function(wrap_pyfunction!(process_pt2, m)?)?;
     m.add_class::<CompiledGraph>()?;
+    m.add_function(wrap_pyfunction!(_native_factory_capsule, m)?)?;
+    m.add_function(wrap_pyfunction!(_torch_dtype_codes, m)?)?;
+    #[cfg(feature = "cuda")]
+    m.add_function(wrap_pyfunction!(_cuda_lite_factory_capsule, m)?)?;
     Ok(())
+}
+
+/// `{variant_name: pt2_code}` for every `TorchDType` variant. The Python
+/// parity test (`tests/test_torch_dtype_parity.py`) consumes this and
+/// asserts every entry matches `torch._export.serde.schema.ScalarType.<name>
+/// .value` — drift fails CI rather than silently miscompiling at runtime.
+#[pyfunction]
+fn _torch_dtype_codes() -> HashMap<&'static str, u32> {
+    TorchDType::ALL
+        .iter()
+        .map(|v| (v.name(), v.code()))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Factory capsule helpers
+// ---------------------------------------------------------------------------
+
+/// Wrapper to put a function pointer into a PyCapsule.
+#[allow(dead_code)]
+struct FnPtrWrapper(pub *const std::ffi::c_void);
+unsafe impl Send for FnPtrWrapper {}
+
+/// PyCapsule wrapping the native (CPU) backend factory.
+#[pyfunction]
+fn _native_factory_capsule<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+    let fptr = ::luminal::dyn_backend::native_factory as *const std::ffi::c_void;
+    let name = ::luminal::dyn_backend::BACKEND_FACTORY_CAPSULE_NAME.to_owned();
+    PyCapsule::new(py, FnPtrWrapper(fptr), Some(name))
+}
+
+/// PyCapsule wrapping the cuda_lite backend factory.
+#[cfg(feature = "cuda")]
+#[pyfunction]
+fn _cuda_lite_factory_capsule<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+    let fptr = luminal_cuda_lite::dyn_backend::cuda_lite_factory as *const std::ffi::c_void;
+    let name = ::luminal::dyn_backend::BACKEND_FACTORY_CAPSULE_NAME.to_owned();
+    PyCapsule::new(py, FnPtrWrapper(fptr), Some(name))
 }
