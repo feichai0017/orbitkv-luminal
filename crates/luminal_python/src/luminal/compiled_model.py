@@ -1,5 +1,6 @@
 """CompiledModel wrapper for the Rust CompiledGraph."""
 
+import os
 from typing import List
 
 import torch
@@ -254,5 +255,37 @@ class CompiledModel:
             else:
                 out = _read_typed_output(name, shape, out_dtype)
             outputs.append(out)
+
+        # Counterpart to the translator's LUMINAL_PYTHON_DEBUG_OUTPUT_TENSORS
+        # hook: dump the extra debug outputs (raw f32, one file per output per
+        # call, mirroring the Rust Layer0Dump mechanism) and strip them from
+        # the returned tuple so callers see the original output contract.
+        # Assumes the requested names are interior FX nodes, never real graph
+        # outputs (the translator skips names already present as outputs).
+        extra_env = os.environ.get("LUMINAL_PYTHON_DEBUG_OUTPUT_TENSORS", "")
+        extra_names = {n.strip() for n in extra_env.split(",") if n.strip()}
+        if extra_names:
+            dump_dir = os.environ.get("LUMINAL_PYTHON_DEBUG_OUTPUT_DIR")
+            step = self._extra_output_step = getattr(self, "_extra_output_step", -1) + 1
+            kept = []
+            for name, out in zip(self._output_names, outputs):
+                if name not in extra_names:
+                    kept.append(out)
+                    continue
+                if not dump_dir:
+                    continue
+                os.makedirs(dump_dir, exist_ok=True)
+                fname = f"pt_step_{step:04d}_{name}.f32"
+                out.detach().to(torch.float32).cpu().numpy().tofile(
+                    os.path.join(dump_dir, fname)
+                )
+                with open(
+                    os.path.join(dump_dir, "manifest.txt"), "a", encoding="utf-8"
+                ) as fh:
+                    fh.write(
+                        f"step={step} name={name} shape={tuple(out.shape)} "
+                        f"dtype={out.dtype} file={fname}\n"
+                    )
+            outputs = kept
 
         return tuple(outputs)

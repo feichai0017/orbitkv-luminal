@@ -482,14 +482,80 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn translate_index_put(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
-        let index_names = node.inputs[1]
-            .arg
-            .as_tensors()
-            .context("index_put: indices not as_tensors")?;
+        // Advanced-indexing form `a[None, .., idx, .., None] = values` (e.g.
+        // HF StaticCache update `cache[:, :, cache_position] = key_states`):
+        // every None entry is a full slice and a single 1-D tensor indexes
+        // dim `axis`. Broadcast the index across the value shape and lower to
+        // scatter_elements along `axis` — the same flat-index scatter the
+        // plain tensor forms below use.
+        if let Some(entries) = node.inputs[1].arg.as_optional_tensors() {
+            let mut axis_and_name = None;
+            for (dim, entry) in entries.iter().enumerate() {
+                if let OptionalTensorEntry::Tensor(t) = entry {
+                    if axis_and_name.is_some() {
+                        bail!(
+                            "index_put: multiple tensor indices not supported: {:?}",
+                            node.inputs[1].arg
+                        );
+                    }
+                    axis_and_name = Some((dim, t.as_tensor.name.clone()));
+                }
+            }
+            let Some((axis, idx_name)) = axis_and_name else {
+                bail!(
+                    "index_put: optional_tensors indices contain no tensor: {:?}",
+                    node.inputs[1].arg
+                );
+            };
+            let values = self.get_input_tensor(node, 2)?;
+            let idx = self.get_tensor(&idx_name)?.cast(DType::Int);
+            if idx.shape.len() != 1 {
+                bail!(
+                    "index_put: only a 1-D tensor index is supported, got rank {}",
+                    idx.shape.len()
+                );
+            }
+            let val_dims = values.dims();
+            if val_dims.len() != a.dims().len() {
+                bail!(
+                    "index_put: values rank {} != data rank {} (broadcasting not supported)",
+                    val_dims.len(),
+                    a.dims().len()
+                );
+            }
+            if axis >= val_dims.len() {
+                bail!(
+                    "index_put: index dim {axis} out of range for values rank {}",
+                    val_dims.len()
+                );
+            }
+            let mut idx_full = idx;
+            for dim in 0..axis {
+                idx_full = idx_full.expand_dim(dim, val_dims[dim]);
+            }
+            for dim in axis + 1..val_dims.len() {
+                idx_full = idx_full.expand_dim(dim, val_dims[dim]);
+            }
+            let values = if values.dtype == a.dtype {
+                values
+            } else {
+                values.cast(a.dtype)
+            };
+            return Ok(super::movement_dynamic::pt2_scatter_elements(
+                a, idx_full, values, axis,
+            ));
+        }
+        let index_names = if let Some(names) = node.inputs[1].arg.as_tensors() {
+            names.iter().map(|name| name.name.clone()).collect::<Vec<_>>()
+        } else if let Some(name) = node.inputs[1].arg.as_tensor_name() {
+            vec![name.to_string()]
+        } else {
+            bail!("index_put: indices not tensor(s): {:?}", node.inputs[1].arg);
+        };
         let values = self.get_input_tensor(node, 2)?;
 
         if index_names.len() == 1 {
-            let idx_tensor = self.get_tensor(&index_names[0].name)?;
+            let idx_tensor = self.get_tensor(&index_names[0])?;
 
             // Boolean-mask index_put: when the only index is a Bool tensor whose
             // shape matches the data tensor, PyTorch semantics are
