@@ -112,6 +112,12 @@ impl<'a> Translator<'a> {
         } else {
             Expression::from(0usize)
         };
+        // aten.slice allows negative bounds (e.g. the `hidden_states[:, -1:]`
+        // last-token slice before lm_head). Normalize against the (possibly
+        // symbolic) dim size — an unnormalized negative start silently builds
+        // an out-of-range strided view (length a+1, negative offset) that
+        // reads garbage.
+        let start = normalize_slice_bound(start, a.shape.dims[dim]);
 
         if node.inputs.len() <= 3 {
             return Ok(a);
@@ -131,6 +137,7 @@ impl<'a> Translator<'a> {
         }
 
         let end: Expression = self.get_expr_arg(node, 3)?;
+        let end = normalize_slice_bound(end, a.shape.dims[dim]);
 
         if let Some(s) = start.to_usize()
             && let Some(e) = end.to_usize()
