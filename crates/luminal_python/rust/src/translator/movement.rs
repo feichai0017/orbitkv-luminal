@@ -548,9 +548,18 @@ impl<'a> Translator<'a> {
             } else {
                 values.cast(a.dtype)
             };
-            return Ok(super::movement_dynamic::pt2_scatter_elements(
-                a, idx_full, values, axis,
-            ));
+            let result = super::movement_dynamic::pt2_scatter_elements(a, idx_full, values, axis);
+            // A write into a graph input (HF StaticCache K/V buffer) is an
+            // in-place state update: remember the destination so a declared
+            // graph output of this result can alias the input buffer.
+            if self
+                .user_input_ids
+                .iter()
+                .any(|(_, input_id)| *input_id == a.id)
+            {
+                self.input_backed_write_backs.insert(result.id, a);
+            }
+            return Ok(result);
         }
         let index_names = if let Some(names) = node.inputs[1].arg.as_tensors() {
             names.iter().map(|name| name.name.clone()).collect::<Vec<_>>()

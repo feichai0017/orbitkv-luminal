@@ -55,6 +55,14 @@ pub(crate) struct Translator<'a> {
     pub(crate) output_ids: Vec<(String, NodeIndex)>,
     /// Extra tensor metadata from inlined subgraphs.
     pub(crate) extra_tensor_values: HashMap<String, TensorMeta>,
+    /// index_put results whose destination is a graph input (e.g. HF
+    /// StaticCache K/V buffers): result node id -> the destination input
+    /// tensor. Declared graph outputs matching these are emitted against the
+    /// input instead — the runtime owns that buffer as persistent state and
+    /// the fused kernels update it in place, so the output is a state read.
+    /// This also keeps loop-rolled graphs free of output edges into layer
+    /// bodies (see luminal_trainium docs/luminal_loop_rolling_issue.md).
+    pub(crate) input_backed_write_backs: HashMap<NodeIndex, GraphTensor>,
 }
 
 impl<'a> Translator<'a> {
@@ -68,6 +76,7 @@ impl<'a> Translator<'a> {
             user_input_ids: Vec::new(),
             output_ids: Vec::new(),
             extra_tensor_values: HashMap::new(),
+            input_backed_write_backs: HashMap::new(),
         })
     }
 
@@ -83,6 +92,14 @@ impl<'a> Translator<'a> {
         let output_names = self.parsed.output_names();
         for name in &output_names {
             let tensor = self.get_tensor(name)?;
+            // In-place write-backs into graph inputs (StaticCache updates)
+            // alias the runtime-owned buffer: emit the output against the
+            // input node itself so readback serves the post-run state bytes.
+            if let Some(dest) = self.input_backed_write_backs.get(&tensor.id) {
+                dest.output();
+                self.output_ids.push((name.clone(), dest.id));
+                continue;
+            }
             let tensor = if tensor.dtype == DType::Bool {
                 tensor.cast(DType::Int).cast(DType::Bool)
             } else if tensor.dtype == DType::Int {
