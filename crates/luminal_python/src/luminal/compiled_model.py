@@ -208,6 +208,14 @@ class CompiledModel:
                 )
             getter_name, read_dtype = entry
             data = getattr(self._graph, getter_name)(name)
+            if len(data) == 0 and (shape is None or all(d != 0 for d in shape)):
+                # Zero bytes for a non-empty declared output: the backend
+                # declined to materialize a host copy (e.g. trainium's
+                # device-resident cache write-backs under
+                # LUMINAL_TRAINIUM_SKIP_WRITEBACK_READBACK). Surface as None
+                # so callers can skip the host mirror instead of crashing on
+                # an impossible reshape.
+                return None
             if out_dtype in (torch.float16, torch.bfloat16):
                 # Getter returned an immutable `bytes` from Rust; wrap in
                 # `bytearray` to make the storage writable (suppresses
