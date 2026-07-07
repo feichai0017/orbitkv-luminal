@@ -46,6 +46,14 @@ class CompiledModel:
         self._has_dynamic_dims = getattr(graph_result, "has_dynamic_dims", False)
         self._weight_refs = weight_refs or []
         self._user_indices = user_indices
+        # Input names the embedder has declared safe to not (re)send: their
+        # bytes back device-resident state the backend updates in place and
+        # never reads from the host (e.g. trainium KV-cache write-back
+        # inputs, TensorRole::State — skipped in the per-execute upload
+        # loop). Set post-compile by the embedding runtime, which can only
+        # know the set once the backend has compiled and promoted state.
+        # Empty by default: every input is sent.
+        self.skip_input_names = frozenset()
         self._is_gpu = getattr(graph_result, "device_type", "cpu") != "cpu"
         self._supports_device_ptrs = getattr(
             graph_result, "supports_device_ptrs", False
@@ -114,6 +122,8 @@ class CompiledModel:
         for name, tensor, expected_dtype in zip(
             self._input_names, user_inputs, self._input_dtypes
         ):
+            if name in self.skip_input_names:
+                continue
             if tensor.dtype != expected_dtype:
                 raise DTypeBoundaryError(
                     f"Luminal compiled input '{name}' expects "
