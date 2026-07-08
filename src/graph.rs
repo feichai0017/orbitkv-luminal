@@ -2136,6 +2136,18 @@ fn rolling_op_signature(graph: &HLIRGraph, node: NodeIndex) -> String {
         return "Output".to_string();
     }
 
+    // CustomOpKind's derived Debug embeds its `id` (the index into the graph's
+    // custom_ops vec), which is unique per call-site — so two structurally
+    // identical custom ops in different loop iterations (e.g. a per-layer RoPE
+    // concat op) would sign differently and never be recognized as a repeating
+    // body. Normalize the id away, matching `hash_egglog_normalized` (which
+    // already strips CustomOpKind ids so window-hash candidate detection groups
+    // them). Without this the two mechanisms disagree: window-hash finds the
+    // repeat, canonicalize_occurrence rejects it, and the loop fails to roll.
+    if let Some(c) = graph[node].as_any().downcast_ref::<CustomOpKind>() {
+        return format!("CustomOpKind(dtype={:?})", c.dtype);
+    }
+
     // Use Debug, NOT Display — Display for many HLIR ops drops their
     // shape/stride metadata (e.g. `Display for Mul` emits just "Mul"), so
     // two structurally-different ops with the same kind would hash equal
