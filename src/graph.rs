@@ -102,6 +102,36 @@ pub struct DimBucket {
     representative_override: Option<usize>,
 }
 
+/// One explicitly valid combination of per-dimension bucket indices.
+///
+/// By default Luminal compiles the Cartesian product of every configured
+/// [`DimBucket`].  Some programs have correlated dynamic dimensions where only
+/// a subset of that product is semantically reachable (for example a
+/// single-token decode route versus multi-token prefill routes).  Supplying
+/// explicit routes keeps those correlations in the graph compiler instead of
+/// forcing runtimes to discard invalid compiled combinations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BucketRoute {
+    pub bucket_indices: FxHashMap<char, usize>,
+}
+
+impl BucketRoute {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Select one previously configured bucket index for `dimension`.
+    pub fn dim(mut self, dimension: char, bucket_index: usize) -> Self {
+        assert!(
+            self.bucket_indices
+                .insert(dimension, bucket_index)
+                .is_none(),
+            "BucketRoute repeats dimension '{dimension}'"
+        );
+        self
+    }
+}
+
 impl DimBucket {
     /// Create a new bucket covering `[min, max]` inclusive.
     /// For an exact value, pass `min == max`.
@@ -176,6 +206,9 @@ pub struct CompileOptions {
     /// Bucket definitions per dynamic dimension. Dimensions without buckets use
     /// a single implicit bucket.
     pub dim_buckets: FxHashMap<char, Vec<DimBucket>>,
+    /// Optional explicit subset of the Cartesian bucket product. Every route
+    /// must select exactly one bucket for every configured dimension.
+    pub bucket_routes: Option<Vec<BucketRoute>>,
     /// Enable egglog progress logging. Quiet by default; overridden by
     /// `EGGLOG_LOG=1` or `LUMINAL_LOG=1`.
     pub egglog_log: bool,
@@ -253,6 +286,26 @@ impl CompileOptions {
         self
     }
 
+    /// Restrict bucketed compilation to explicitly valid combinations.
+    ///
+    /// Dimensions and indices are validated after all builder calls, so this
+    /// method may appear before or after [`Self::dim_buckets`] in a chain.
+    pub fn bucket_routes(mut self, routes: &[BucketRoute]) -> Self {
+        assert!(
+            !routes.is_empty(),
+            "Explicit bucket routes must not be empty"
+        );
+        let mut unique = FxHashSet::default();
+        for route in routes {
+            assert!(
+                unique.insert(canonical_bucket_route(&route.bucket_indices)),
+                "Explicit bucket routes must not contain duplicates"
+            );
+        }
+        self.bucket_routes = Some(routes.to_vec());
+        self
+    }
+
     /// Enable or disable egglog progress logging.
     pub fn egglog_log(mut self, enabled: bool) -> Self {
         self.egglog_log = enabled;
@@ -297,9 +350,57 @@ impl Default for CompileOptions {
             execution_timeout: Some(std::time::Duration::from_secs(1)),
             profile_dims: FxHashMap::default(),
             dim_buckets: FxHashMap::default(),
+            bucket_routes: None,
             egglog_log: false,
             rolling_log: false,
             search_log: true,
+        }
+    }
+}
+
+fn canonical_bucket_route(indices: &FxHashMap<char, usize>) -> Vec<(char, usize)> {
+    let mut route = indices
+        .iter()
+        .map(|(&dimension, &index)| (dimension, index))
+        .collect::<Vec<_>>();
+    route.sort_unstable();
+    route
+}
+
+fn validate_bucket_routes(
+    dim_buckets: &FxHashMap<char, Vec<DimBucket>>,
+    routes: Option<&[BucketRoute]>,
+) {
+    let Some(routes) = routes else {
+        return;
+    };
+    assert!(
+        !dim_buckets.is_empty(),
+        "Explicit bucket routes require configured dimension buckets"
+    );
+    assert!(
+        !routes.is_empty(),
+        "Explicit bucket routes must not be empty"
+    );
+    let mut unique = FxHashSet::default();
+    for route in routes {
+        assert!(
+            unique.insert(canonical_bucket_route(&route.bucket_indices)),
+            "Explicit bucket routes must not contain duplicates"
+        );
+        assert_eq!(
+            route.bucket_indices.len(),
+            dim_buckets.len(),
+            "Each explicit bucket route must select every configured dimension"
+        );
+        for (&dimension, &index) in &route.bucket_indices {
+            let buckets = dim_buckets.get(&dimension).unwrap_or_else(|| {
+                panic!("Explicit bucket route references unknown dimension '{dimension}'")
+            });
+            assert!(
+                index < buckets.len(),
+                "Explicit bucket route index {index} is out of range for dimension '{dimension}'"
+            );
         }
     }
 }
@@ -441,6 +542,8 @@ pub struct Graph {
     pub custom_ops: Vec<Box<dyn CustomOp>>,
     /// Bucket definitions used by the currently built search space.
     search_space_dim_buckets: FxHashMap<char, Vec<DimBucket>>,
+    /// Explicit bucket routes used by the currently built search space.
+    search_space_bucket_routes: Option<Vec<BucketRoute>>,
     /// Optional graph-wide interval assumptions for dynamic dimensions.
     pub dim_intervals: DynDimIntervals,
     /// Metadata for Input nodes: NodeIndex -> (label, dtype).
@@ -1185,11 +1288,12 @@ impl Graph {
         ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
         let cleanup_hlir = TypeId::of::<Rt>() != TypeId::of::<ReferenceRuntime>();
         let dim_buckets = options.dim_buckets.clone();
+        validate_bucket_routes(&dim_buckets, options.bucket_routes.as_deref());
         let late_pass_dyn_map = self.late_pass_dyn_map(&dim_buckets);
         let late_passes = Rt::late_egglog_passes(&ops, &options, &late_pass_dyn_map);
 
         let (program, root) = hlir_to_egglog(self);
-        let contexts = self.search_space_contexts(&dim_buckets);
+        let contexts = self.search_space_contexts(&dim_buckets, options.bucket_routes.as_deref());
         self.egraphs = contexts
             .iter()
             .map(|context| {
@@ -1210,11 +1314,13 @@ impl Graph {
         self.egraph_contexts = contexts;
         self.ops = Some(ops);
         self.search_space_dim_buckets = dim_buckets;
+        self.search_space_bucket_routes = options.bucket_routes;
     }
 
     fn search_space_contexts(
         &self,
         dim_buckets: &FxHashMap<char, Vec<DimBucket>>,
+        bucket_routes: Option<&[BucketRoute]>,
     ) -> Vec<SearchSpaceContext> {
         if dim_buckets.is_empty() {
             return vec![SearchSpaceContext {
@@ -1224,7 +1330,7 @@ impl Graph {
             }];
         }
 
-        self.bucket_combinations(dim_buckets)
+        self.bucket_combinations(dim_buckets, bucket_routes)
             .into_iter()
             .map(|(bucket_indices, representative_dyn_map)| {
                 let mut intervals = self.dim_intervals.clone();
@@ -1284,11 +1390,12 @@ impl Graph {
         ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
         let cleanup_hlir = TypeId::of::<Rt>() != TypeId::of::<ReferenceRuntime>();
         let dim_buckets = options.dim_buckets.clone();
+        validate_bucket_routes(&dim_buckets, options.bucket_routes.as_deref());
         let late_pass_dyn_map = self.late_pass_dyn_map(&dim_buckets);
         let late_passes = Rt::late_egglog_passes(&ops, &options, &late_pass_dyn_map);
 
         let (program, root) = hlir_to_egglog(self);
-        let contexts = self.search_space_contexts(&dim_buckets);
+        let contexts = self.search_space_contexts(&dim_buckets, options.bucket_routes.as_deref());
         self.egraphs = contexts
             .iter()
             .map(|context| {
@@ -1309,6 +1416,7 @@ impl Graph {
         self.egraph_contexts = contexts;
         self.ops = Some(ops);
         self.search_space_dim_buckets = dim_buckets;
+        self.search_space_bucket_routes = options.bucket_routes;
     }
 
     /// Get a reference to the first e-graph search space (if built)
@@ -1357,8 +1465,10 @@ impl Graph {
         rng: &mut G,
     ) -> R {
         assert!(
-            options.dim_buckets.is_empty() || options.dim_buckets == self.search_space_dim_buckets,
-            "dim buckets must be configured in CompileOptions before build_search_space; search cannot change buckets after build",
+            (options.dim_buckets.is_empty() && options.bucket_routes.is_none())
+                || (options.dim_buckets == self.search_space_dim_buckets
+                    && options.bucket_routes == self.search_space_bucket_routes),
+            "dim buckets and routes must be configured in CompileOptions before build_search_space; search cannot change buckets after build",
         );
 
         let search_started_at = std::time::Instant::now();
@@ -1381,7 +1491,10 @@ impl Graph {
             runtime
         } else {
             // Bucketed search: compile one LLIR per bucket combination
-            let bucket_contexts = self.search_space_contexts(&self.search_space_dim_buckets);
+            let bucket_contexts = self.search_space_contexts(
+                &self.search_space_dim_buckets,
+                self.search_space_bucket_routes.as_deref(),
+            );
             let n_combos = bucket_contexts.len();
             let mut bucket_llirs: Vec<BucketLLIR> = Vec::with_capacity(n_combos);
             assert!(
@@ -1435,7 +1548,23 @@ impl Graph {
     fn bucket_combinations(
         &self,
         dim_buckets: &FxHashMap<char, Vec<DimBucket>>,
+        bucket_routes: Option<&[BucketRoute]>,
     ) -> Vec<(FxHashMap<char, usize>, FxHashMap<char, usize>)> {
+        if let Some(routes) = bucket_routes {
+            return routes
+                .iter()
+                .map(|route| {
+                    let mut dyn_map = self.dyn_map.clone();
+                    for (&dimension, &index) in &route.bucket_indices {
+                        dyn_map.insert(
+                            dimension,
+                            dim_buckets[&dimension][index].representative_value(),
+                        );
+                    }
+                    (route.bucket_indices.clone(), dyn_map)
+                })
+                .collect();
+        }
         let mut dims: Vec<(char, &Vec<DimBucket>)> =
             dim_buckets.iter().map(|(c, b)| (*c, b)).collect();
         dims.sort_by_key(|(c, _)| *c);
@@ -3185,6 +3314,55 @@ mod tests {
         assert_eq!(
             cx.egraph_contexts[1].intervals[&'s'],
             DimInterval::new(2, 4)
+        );
+    }
+
+    #[test]
+    fn explicit_bucket_routes_compile_only_reachable_combinations() {
+        let mut cx = Graph::new();
+        let _ = cx.tensor(('s', 'p')).output();
+        let routes = [
+            BucketRoute::new().dim('s', 0).dim('p', 0),
+            BucketRoute::new().dim('s', 1).dim('p', 1),
+        ];
+
+        cx.build_search_space::<TestFilterRuntime>(
+            CompileOptions::default()
+                .dim_buckets('s', &[DimBucket::new(1, 1), DimBucket::new(2, 8)])
+                .dim_buckets('p', &[DimBucket::new(0, 0), DimBucket::new(1, 7)])
+                .bucket_routes(&routes),
+        );
+
+        assert_eq!(cx.egraphs.len(), 2, "must not build the 2x2 product");
+        assert_eq!(cx.egraph_contexts.len(), 2);
+        assert_eq!(
+            cx.egraph_contexts[0].intervals[&'s'],
+            DimInterval::new(1, 1)
+        );
+        assert_eq!(
+            cx.egraph_contexts[0].intervals[&'p'],
+            DimInterval::new(0, 0)
+        );
+        assert_eq!(
+            cx.egraph_contexts[1].intervals[&'s'],
+            DimInterval::new(2, 8)
+        );
+        assert_eq!(
+            cx.egraph_contexts[1].intervals[&'p'],
+            DimInterval::new(1, 7)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must select every configured dimension")]
+    fn explicit_bucket_routes_require_complete_dimension_assignments() {
+        let mut cx = Graph::new();
+        let _ = cx.tensor(('s', 'p')).output();
+        cx.build_search_space::<TestFilterRuntime>(
+            CompileOptions::default()
+                .dim_buckets('s', &[DimBucket::new(1, 1)])
+                .dim_buckets('p', &[DimBucket::new(0, 0)])
+                .bucket_routes(&[BucketRoute::new().dim('s', 0)]),
         );
     }
 
