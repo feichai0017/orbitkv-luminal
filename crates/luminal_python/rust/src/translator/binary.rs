@@ -36,6 +36,33 @@ fn same_dims(
 }
 
 impl<'a> Translator<'a> {
+    pub(crate) fn translate_bitwise_and_tensor(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, 0)?;
+        let b = self.get_input_tensor(node, 1)?;
+        if a.dtype == DType::Bool && b.dtype == DType::Bool {
+            let (a, b) = broadcast_binary(a, b);
+            return Ok((a.cast(DType::F32) * b.cast(DType::F32)).cast(DType::Bool));
+        }
+        let (a, b) = ensure_same_dtype(a, b);
+        let (a, b) = broadcast_binary(a, b);
+        Ok(a.bitwise_and(b))
+    }
+
+    pub(crate) fn translate_bitwise_and_scalar(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, 0)?;
+        let value = self.get_int_arg(node, 1)?;
+        let scalar = self.graph.constant(value).cast(a.dtype).expand_rhs(a.shape);
+        Ok(a.bitwise_and(scalar))
+    }
+
+    pub(crate) fn translate_bitwise_right_shift(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, 0)?;
+        let b = self.get_input_tensor(node, 1)?;
+        let (a, b) = ensure_same_dtype(a, b);
+        let (a, b) = broadcast_binary(a, b);
+        Ok(a.bitwise_right_shift(b))
+    }
+
     pub(crate) fn translate_binary_op(&mut self, node: &Node, op: BinaryOp) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let arg1 = &node.inputs[1].arg;

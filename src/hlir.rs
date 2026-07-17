@@ -216,7 +216,7 @@ pub fn reduce_sort(name: &str) -> SortDef {
     )
 }
 
-pub type HLIROps = (
+pub type ArithmeticHLIROps = (
     Input,
     Output,
     CustomOpKind,
@@ -243,6 +243,12 @@ pub type HLIROps = (
     SumReduce,
     MaxReduce,
 );
+
+/// Core HLIR operations registered with every runtime.
+///
+/// Keep this nested so the tuple stays below the blanket `IntoEgglogOp`
+/// implementation's arity limit as new primitive operations are added.
+pub type HLIROps = (ArithmeticHLIROps, BitwiseAnd, BitwiseRightShift);
 
 #[derive(Default, Debug, Clone)]
 pub struct Input {
@@ -1237,6 +1243,42 @@ impl ReferenceOp for Cast {
                 ReferenceData::Bf16(f) => f.iter().map(|f| f.to_f32() as i64).collect(),
                 ReferenceData::Bool(b) => b.iter().map(|b| if *b { 1 } else { 0 }).collect(),
             }),
+            DType::I8 => ReferenceData::Int(match &input[0] {
+                ReferenceData::Int(i) => i.iter().map(|i| *i as i8 as i32).collect(),
+                ReferenceData::I64(i) => i.iter().map(|i| *i as i8 as i32).collect(),
+                ReferenceData::F32(f) => f.iter().map(|f| *f as i8 as i32).collect(),
+                ReferenceData::F64(f) => f.iter().map(|f| *f as i8 as i32).collect(),
+                ReferenceData::F16(f) => f.iter().map(|f| f.to_f32() as i8 as i32).collect(),
+                ReferenceData::Bf16(f) => f.iter().map(|f| f.to_f32() as i8 as i32).collect(),
+                ReferenceData::Bool(b) => b.iter().map(|b| if *b { 1 } else { 0 }).collect(),
+            }),
+            DType::U8 => ReferenceData::Int(match &input[0] {
+                ReferenceData::Int(i) => i.iter().map(|i| *i as u8 as i32).collect(),
+                ReferenceData::I64(i) => i.iter().map(|i| *i as u8 as i32).collect(),
+                ReferenceData::F32(f) => f.iter().map(|f| *f as u8 as i32).collect(),
+                ReferenceData::F64(f) => f.iter().map(|f| *f as u8 as i32).collect(),
+                ReferenceData::F16(f) => f.iter().map(|f| f.to_f32() as u8 as i32).collect(),
+                ReferenceData::Bf16(f) => f.iter().map(|f| f.to_f32() as u8 as i32).collect(),
+                ReferenceData::Bool(b) => b.iter().map(|b| if *b { 1 } else { 0 }).collect(),
+            }),
+            DType::I16 => ReferenceData::Int(match &input[0] {
+                ReferenceData::Int(i) => i.iter().map(|i| *i as i16 as i32).collect(),
+                ReferenceData::I64(i) => i.iter().map(|i| *i as i16 as i32).collect(),
+                ReferenceData::F32(f) => f.iter().map(|f| *f as i16 as i32).collect(),
+                ReferenceData::F64(f) => f.iter().map(|f| *f as i16 as i32).collect(),
+                ReferenceData::F16(f) => f.iter().map(|f| f.to_f32() as i16 as i32).collect(),
+                ReferenceData::Bf16(f) => f.iter().map(|f| f.to_f32() as i16 as i32).collect(),
+                ReferenceData::Bool(b) => b.iter().map(|b| if *b { 1 } else { 0 }).collect(),
+            }),
+            DType::U16 => ReferenceData::Int(match &input[0] {
+                ReferenceData::Int(i) => i.iter().map(|i| *i as u16 as i32).collect(),
+                ReferenceData::I64(i) => i.iter().map(|i| *i as u16 as i32).collect(),
+                ReferenceData::F32(f) => f.iter().map(|f| *f as u16 as i32).collect(),
+                ReferenceData::F64(f) => f.iter().map(|f| *f as u16 as i32).collect(),
+                ReferenceData::F16(f) => f.iter().map(|f| f.to_f32() as u16 as i32).collect(),
+                ReferenceData::Bf16(f) => f.iter().map(|f| f.to_f32() as u16 as i32).collect(),
+                ReferenceData::Bool(b) => b.iter().map(|b| if *b { 1 } else { 0 }).collect(),
+            }),
             DType::F16 => ReferenceData::F16(match &input[0] {
                 ReferenceData::F32(f) => f.iter().copied().map(f16::from_f32).collect(),
                 ReferenceData::F16(f) => f.clone(),
@@ -2031,6 +2073,203 @@ impl ReferenceOp for Mod {
             }
             (ReferenceData::Bool(_), ReferenceData::Bool(_)) => panic!("Cannot mod Bool tensors"),
             _ => panic!("Mod inputs must have the same dtype"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BitwiseAnd {
+    pub shape: Vec<Expression>,
+    pub a_strides: Vec<Expression>,
+    pub b_strides: Vec<Expression>,
+    pub input_shapes: Vec<ShapeTracker>,
+}
+
+impl Display for BitwiseAnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BitwiseAnd")
+    }
+}
+
+impl HLIROp for BitwiseAnd {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
+        format!(
+            "(Op (BitwiseAnd {} {} {} {}) {})",
+            elist_to_egglog(&self.input_shapes[0].dims),
+            elist_to_egglog(&self.input_shapes[0].strides),
+            elist_to_egglog(&self.input_shapes[1].strides),
+            elist_to_egglog(&self.input_shapes[0].contiguous().strides),
+            ilist_egglog(&[&inputs[0].1, &inputs[1].1]),
+        )
+    }
+}
+
+impl EgglogOp for BitwiseAnd {
+    fn sort(&self) -> SortDef {
+        binary_sort("BitwiseAnd")
+    }
+
+    fn cleanup(&self) -> bool {
+        true
+    }
+
+    fn n_inputs(&self) -> usize {
+        2
+    }
+
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![dtype_propagation_op(&self.sort())]
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn ReferenceOp>(Box::new(Self {
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                ..Default::default()
+            })),
+            input_enodes,
+        )
+    }
+}
+
+impl ReferenceOp for BitwiseAnd {
+    fn execute(
+        &self,
+        inputs: Vec<&ReferenceData>,
+        dyn_map: &FxHashMap<char, usize>,
+    ) -> ReferenceData {
+        let (a, b) = (inputs[0], inputs[1]);
+        let (a_ind, b_ind) = (
+            StridedIterator::new(&self.shape, &self.a_strides, dyn_map),
+            StridedIterator::new(&self.shape, &self.b_strides, dyn_map),
+        );
+        match (a, b) {
+            (ReferenceData::Int(a), ReferenceData::Int(b)) => {
+                ReferenceData::Int(bin_fn(a_ind, a, b_ind, b, |x, y| x & y))
+            }
+            (ReferenceData::I64(a), ReferenceData::I64(b)) => {
+                ReferenceData::I64(bin_fn(a_ind, a, b_ind, b, |x, y| x & y))
+            }
+            (ReferenceData::Bool(a), ReferenceData::Bool(b)) => {
+                ReferenceData::Bool(bin_fn(a_ind, a, b_ind, b, |x, y| x & y))
+            }
+            _ => panic!("BitwiseAnd inputs must have the same integer or Bool dtype"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BitwiseRightShift {
+    pub shape: Vec<Expression>,
+    pub a_strides: Vec<Expression>,
+    pub b_strides: Vec<Expression>,
+    pub input_shapes: Vec<ShapeTracker>,
+}
+
+impl Display for BitwiseRightShift {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BitwiseRightShift")
+    }
+}
+
+impl HLIROp for BitwiseRightShift {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
+        format!(
+            "(Op (BitwiseRightShift {} {} {} {}) {})",
+            elist_to_egglog(&self.input_shapes[0].dims),
+            elist_to_egglog(&self.input_shapes[0].strides),
+            elist_to_egglog(&self.input_shapes[1].strides),
+            elist_to_egglog(&self.input_shapes[0].contiguous().strides),
+            ilist_egglog(&[&inputs[0].1, &inputs[1].1]),
+        )
+    }
+}
+
+impl EgglogOp for BitwiseRightShift {
+    fn sort(&self) -> SortDef {
+        binary_sort("BitwiseRightShift")
+    }
+
+    fn cleanup(&self) -> bool {
+        true
+    }
+
+    fn n_inputs(&self) -> usize {
+        2
+    }
+
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![dtype_propagation_op(&self.sort())]
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn ReferenceOp>(Box::new(Self {
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                ..Default::default()
+            })),
+            input_enodes,
+        )
+    }
+}
+
+fn arithmetic_right_shift_i32(value: i32, shift: i32) -> i32 {
+    if !(0..i32::BITS as i32).contains(&shift) {
+        if value < 0 { -1 } else { 0 }
+    } else {
+        value >> shift
+    }
+}
+
+fn arithmetic_right_shift_i64(value: i64, shift: i64) -> i64 {
+    if !(0..i64::BITS as i64).contains(&shift) {
+        if value < 0 { -1 } else { 0 }
+    } else {
+        value >> shift
+    }
+}
+
+impl ReferenceOp for BitwiseRightShift {
+    fn execute(
+        &self,
+        inputs: Vec<&ReferenceData>,
+        dyn_map: &FxHashMap<char, usize>,
+    ) -> ReferenceData {
+        let (a, b) = (inputs[0], inputs[1]);
+        let (a_ind, b_ind) = (
+            StridedIterator::new(&self.shape, &self.a_strides, dyn_map),
+            StridedIterator::new(&self.shape, &self.b_strides, dyn_map),
+        );
+        match (a, b) {
+            (ReferenceData::Int(a), ReferenceData::Int(b)) => {
+                ReferenceData::Int(bin_fn(a_ind, a, b_ind, b, arithmetic_right_shift_i32))
+            }
+            (ReferenceData::I64(a), ReferenceData::I64(b)) => {
+                ReferenceData::I64(bin_fn(a_ind, a, b_ind, b, arithmetic_right_shift_i64))
+            }
+            _ => panic!("BitwiseRightShift inputs must have the same signed integer dtype"),
         }
     }
 }
