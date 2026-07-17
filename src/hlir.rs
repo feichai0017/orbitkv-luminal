@@ -240,7 +240,7 @@ pub fn reduce_sort(name: &str) -> SortDef {
     )
 }
 
-pub type ArithmeticHLIROps = (
+pub type HLIROps = (
     Input,
     Output,
     CustomOpKind,
@@ -266,13 +266,8 @@ pub type ArithmeticHLIROps = (
     Scatter,
     SumReduce,
     MaxReduce,
+    BitwiseRightShift,
 );
-
-/// Core HLIR operations registered with every runtime.
-///
-/// Keep this nested so the tuple stays below the blanket `IntoEgglogOp`
-/// implementation's arity limit as new primitive operations are added.
-pub type HLIROps = (ArithmeticHLIROps, BitwiseAnd, BitwiseRightShift);
 
 #[derive(Default, Debug, Clone)]
 pub struct Input {
@@ -2150,98 +2145,6 @@ impl ReferenceOp for Mod {
             }
             (ReferenceData::Bool(_), ReferenceData::Bool(_)) => panic!("Cannot mod Bool tensors"),
             _ => panic!("Mod inputs must have the same dtype"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct BitwiseAnd {
-    pub shape: Vec<Expression>,
-    pub a_strides: Vec<Expression>,
-    pub b_strides: Vec<Expression>,
-    pub input_shapes: Vec<ShapeTracker>,
-}
-
-impl Display for BitwiseAnd {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "BitwiseAnd")
-    }
-}
-
-impl HLIROp for BitwiseAnd {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
-        format!(
-            "(Op (BitwiseAnd {} {} {} {}) {})",
-            elist_to_egglog(&self.input_shapes[0].dims),
-            elist_to_egglog(&self.input_shapes[0].strides),
-            elist_to_egglog(&self.input_shapes[1].strides),
-            elist_to_egglog(&self.input_shapes[0].contiguous().strides),
-            ilist_egglog(&[&inputs[0].1, &inputs[1].1]),
-        )
-    }
-}
-
-impl EgglogOp for BitwiseAnd {
-    fn sort(&self) -> SortDef {
-        binary_sort("BitwiseAnd")
-    }
-
-    fn cleanup(&self) -> bool {
-        true
-    }
-
-    fn n_inputs(&self) -> usize {
-        2
-    }
-
-    fn rewrites(&self) -> Vec<Rule> {
-        vec![dtype_propagation_op(&self.sort())]
-    }
-
-    fn extract<'a>(
-        &'a self,
-        egraph: &'a SerializedEGraph,
-        kind_children: &[&'a ENodeId],
-        input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a ENodeId>) {
-        (
-            LLIROp::new::<dyn ReferenceOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
-                    .unwrap(),
-                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
-                    .unwrap(),
-                ..Default::default()
-            })),
-            input_enodes,
-        )
-    }
-}
-
-impl ReferenceOp for BitwiseAnd {
-    fn execute(
-        &self,
-        inputs: Vec<&ReferenceData>,
-        dyn_map: &FxHashMap<char, usize>,
-    ) -> ReferenceData {
-        let (a, b) = (inputs[0], inputs[1]);
-        let (a_ind, b_ind) = (
-            StridedIterator::new(&self.shape, &self.a_strides, dyn_map),
-            StridedIterator::new(&self.shape, &self.b_strides, dyn_map),
-        );
-        match (a, b) {
-            (ReferenceData::Int(a), ReferenceData::Int(b)) => {
-                ReferenceData::Int(bin_fn(a_ind, a, b_ind, b, |x, y| x & y))
-            }
-            (ReferenceData::I64(a), ReferenceData::I64(b)) => {
-                ReferenceData::I64(bin_fn(a_ind, a, b_ind, b, |x, y| x & y))
-            }
-            (ReferenceData::Bool(a), ReferenceData::Bool(b)) => {
-                ReferenceData::Bool(bin_fn(a_ind, a, b_ind, b, |x, y| x & y))
-            }
-            _ => panic!("BitwiseAnd inputs must have the same integer or Bool dtype"),
         }
     }
 }

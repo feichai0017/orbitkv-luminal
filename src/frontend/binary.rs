@@ -291,44 +291,6 @@ impl<S: Into<Expression>> Rem<S> for GraphTensor {
 }
 
 impl GraphTensor {
-    /// Elementwise bitwise AND for identically-shaped integer or Bool tensors.
-    pub fn bitwise_and(self, rhs: GraphTensor) -> GraphTensor {
-        assert_eq!(
-            self.dims(),
-            rhs.dims(),
-            "Dims must match to bitwise-and tensors."
-        );
-        assert_eq!(
-            self.dtype, rhs.dtype,
-            "Dtypes must match to bitwise-and tensors. Got {:?} and {:?}",
-            self.dtype, rhs.dtype
-        );
-        assert!(
-            matches!(
-                self.dtype,
-                DType::Int
-                    | DType::I64
-                    | DType::I8
-                    | DType::U8
-                    | DType::I16
-                    | DType::U16
-                    | DType::I4
-                    | DType::U4
-                    | DType::Bool
-            ),
-            "Bitwise AND requires integer or Bool tensors, got {:?}",
-            self.dtype
-        );
-        let new_id = self.graph().add_op(
-            BitwiseAnd {
-                input_shapes: vec![self.shape, rhs.shape],
-                ..Default::default()
-            },
-            &[self.id, rhs.id],
-        );
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
-    }
-
     /// Elementwise arithmetic right shift for identically-shaped signed integer tensors.
     pub fn bitwise_right_shift(self, rhs: GraphTensor) -> GraphTensor {
         assert_eq!(

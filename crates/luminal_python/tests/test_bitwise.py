@@ -2,8 +2,8 @@
 
 The GPTQ reference path unpacks int4 values from int32 storage with a
 broadcasted right shift, an internal int8 cast, and a scalar mask. Keep a
-regression test for that exact shape/layout sequence so those nodes remain
-visible to backend Egglog rewrites.
+regression test for that exact shape/layout sequence so the right shift and
+the mask's canonical normalized-Mod lowering remain visible to Egglog.
 """
 
 from typing import Callable
@@ -33,11 +33,6 @@ class GptqInt4DecodeFragment(torch.nn.Module):
         )
 
 
-class TensorBitwiseAnd(torch.nn.Module):
-    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        return torch.bitwise_and(a, b)
-
-
 def test_gptq_int4_decode_fragment_reaches_luminal(device: torch.device) -> None:
     if device.type != "cpu":
         pytest.skip("integer bitwise HLIR execution is currently reference-backend only")
@@ -54,25 +49,6 @@ def test_gptq_int4_decode_fragment_reaches_luminal(device: torch.device) -> None
 
     expected = model(qweight)
     actual = compiled(qweight)
-
-    assert actual.dtype == torch.int32
-    assert torch.equal(actual.cpu(), expected.cpu())
-
-
-def test_integer_bitwise_and_tensor_broadcast(device: torch.device) -> None:
-    if device.type != "cpu":
-        pytest.skip("integer bitwise HLIR execution is currently reference-backend only")
-    model = TensorBitwiseAnd().to(device)
-    compiled: Callable = torch.compile(model, backend=luminal_backend)
-    a = torch.tensor(
-        [[0x7FFFFFFF, -1, 0x12345678], [0, -2147483648, 0x76543210]],
-        dtype=torch.int32,
-        device=device,
-    )
-    b = torch.tensor([[15, 0x00FF00FF, -1]], dtype=torch.int32, device=device)
-
-    expected = model(a, b)
-    actual = compiled(a, b)
 
     assert actual.dtype == torch.int32
     assert torch.equal(actual.cpu(), expected.cpu())
