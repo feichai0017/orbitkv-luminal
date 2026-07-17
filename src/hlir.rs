@@ -85,6 +85,30 @@ fn dtype_fixed_op(kind_sort: &SortDef, dtype_sort: &SortDef) -> Rule {
         .ruleset("dtype_prop")
 }
 
+/// Dtype mapping for a normalized unary op. The rule only fires when the
+/// input has `input_dtype`, allowing operations with promotion semantics to
+/// define an explicit output dtype for every supported input dtype.
+fn dtype_map_unary_op(kind_sort: &SortDef, input_dtype: &SortDef, output_dtype: &SortDef) -> Rule {
+    let (_, kind_term) = kind_sort.new_call();
+    let e = v("__e");
+    let first_inp = v("__first_inp");
+    let tail = v("__tail");
+    Rule::new()
+        .fact(eq(
+            e.clone(),
+            op_term(
+                kind_term,
+                Term::App {
+                    variant: "ICons".to_string(),
+                    args: vec![first_inp.clone(), tail],
+                },
+            ),
+        ))
+        .fact(eq(dtype(first_inp), input_dtype.call(())))
+        .action(Action::Set(dtype(e), output_dtype.call(())))
+        .ruleset("dtype_prop")
+}
+
 /// Build an IList egglog string from input variable names.
 fn ilist_egglog(inputs: &[&str]) -> String {
     list_to_egglog(inputs, "ICons", "INil")
@@ -1461,7 +1485,46 @@ impl EgglogOp for Exp2 {
         1
     }
     fn rewrites(&self) -> Vec<Rule> {
-        vec![dtype_propagation_op(&self.sort())]
+        let sort = self.sort();
+        let mut rules = Vec::new();
+
+        // IEEE 754's exp2 semantics apply to floating formats; it does not
+        // define an integer-result exp2. Match PyTorch's integer-input
+        // behavior by promoting integer and Bool inputs to F32 rather than
+        // inventing shift, truncation, saturation, or wrapping semantics.
+        for input_dtype in [
+            &SORTS.int_dt,
+            &SORTS.int64_dt,
+            &SORTS.i4_dt,
+            &SORTS.u4_dt,
+            &SORTS.i8_dt,
+            &SORTS.u8_dt,
+            &SORTS.i16_dt,
+            &SORTS.u16_dt,
+            &SORTS.bool_dt,
+        ] {
+            rules.push(dtype_map_unary_op(&sort, input_dtype, &SORTS.f32_dt));
+        }
+
+        // Preserve the existing dtype-propagating behavior for floating
+        // formats. Spell these mappings out so the generic propagation rule
+        // cannot conflict with the integer-to-F32 promotion rules above.
+        for dtype_sort in [
+            &SORTS.f32_dt,
+            &SORTS.f64_dt,
+            &SORTS.f16_dt,
+            &SORTS.bf16_dt,
+            &SORTS.tf32_dt,
+            &SORTS.f4e2m1_dt,
+            &SORTS.f8e4m3_dt,
+            &SORTS.f8e5m2_dt,
+            &SORTS.f8ue8m0_dt,
+            &SORTS.f6e2m3_dt,
+            &SORTS.f6e3m2_dt,
+        ] {
+            rules.push(dtype_map_unary_op(&sort, dtype_sort, dtype_sort));
+        }
+        rules
     }
     fn extract<'a>(
         &'a self,
@@ -1488,15 +1551,29 @@ impl ReferenceOp for Exp2 {
         inputs: Vec<&ReferenceData>,
         dyn_map: &FxHashMap<char, usize>,
     ) -> ReferenceData {
-        unary_impl(
-            inputs[0],
-            &self.shape,
-            &self.strides,
-            dyn_map,
-            |f| f.exp2(),
-            |f| f.exp2(),
-            |f| f.exp2(),
-        )
+        match inputs[0] {
+            ReferenceData::Int(values) => {
+                let ind = StridedIterator::new(&self.shape, &self.strides, dyn_map);
+                ReferenceData::F32(ind.map(|i| (values[i] as f32).exp2()).collect())
+            }
+            ReferenceData::I64(values) => {
+                let ind = StridedIterator::new(&self.shape, &self.strides, dyn_map);
+                ReferenceData::F32(ind.map(|i| (values[i] as f32).exp2()).collect())
+            }
+            ReferenceData::Bool(values) => {
+                let ind = StridedIterator::new(&self.shape, &self.strides, dyn_map);
+                ReferenceData::F32(ind.map(|i| if values[i] { 2.0 } else { 1.0 }).collect())
+            }
+            input => unary_impl(
+                input,
+                &self.shape,
+                &self.strides,
+                dyn_map,
+                |f| f.exp2(),
+                |f| f.exp2(),
+                |f| f.exp2(),
+            ),
+        }
     }
 }
 
