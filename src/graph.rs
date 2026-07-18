@@ -2590,9 +2590,156 @@ fn grow_rolling_candidate(
 ///
 /// Incoming-edge ORDER is preserved for every affected node — ops read their
 /// inputs by edge-id order, so edges are rebuilt in position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PostOrigin {
+    Iteration(usize),
+    Multiple,
+}
+
+impl PostOrigin {
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Iteration(a), Self::Iteration(b)) if a == b => self,
+            (Self::Multiple, _) | (_, Self::Multiple) => Self::Multiple,
+            _ => Self::Multiple,
+        }
+    }
+}
+
+struct LoopRegions {
+    body_nodes: FxHashSet<NodeIndex>,
+    post_origins: FxHashMap<NodeIndex, PostOrigin>,
+}
+
+fn forward_from_loop_markers(
+    llir: &LLIRGraph,
+    markers: impl IntoIterator<Item = NodeIndex>,
+    loop_markers: &FxHashSet<NodeIndex>,
+) -> FxHashSet<NodeIndex> {
+    let mut reachable = FxHashSet::default();
+    let mut worklist: Vec<NodeIndex> = markers
+        .into_iter()
+        .flat_map(|marker| {
+            llir.neighbors_directed(marker, Direction::Outgoing)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    while let Some(node) = worklist.pop() {
+        if loop_markers.contains(&node) || !reachable.insert(node) {
+            continue;
+        }
+        if llir[node].to_op::<crate::hlir::Output>().is_some() {
+            continue;
+        }
+        worklist.extend(llir.neighbors_directed(node, Direction::Outgoing));
+    }
+
+    reachable
+}
+
+fn forward_from_loop_exits(
+    llir: &LLIRGraph,
+    exits: impl IntoIterator<Item = (NodeIndex, usize)>,
+    loop_markers: &FxHashSet<NodeIndex>,
+) -> FxHashMap<NodeIndex, PostOrigin> {
+    let mut reachable: FxHashMap<NodeIndex, PostOrigin> = FxHashMap::default();
+    let mut worklist: Vec<(NodeIndex, PostOrigin)> = exits
+        .into_iter()
+        .flat_map(|(marker, iteration)| {
+            llir.neighbors_directed(marker, Direction::Outgoing)
+                .map(move |node| (node, PostOrigin::Iteration(iteration)))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    while let Some((node, origin)) = worklist.pop() {
+        if loop_markers.contains(&node) {
+            continue;
+        }
+        let merged = reachable
+            .get(&node)
+            .copied()
+            .map_or(origin, |current| current.merge(origin));
+        if reachable.get(&node).copied() == Some(merged) {
+            continue;
+        }
+        reachable.insert(node, merged);
+        if llir[node].to_op::<crate::hlir::Output>().is_some() {
+            continue;
+        }
+        worklist.extend(
+            llir.neighbors_directed(node, Direction::Outgoing)
+                .map(|successor| (successor, merged)),
+        );
+    }
+
+    reachable
+}
+
+/// Partition the rolled LLIR around its marker boundary.
+///
+/// A node can be reachable from both an entry marker and an exit marker when
+/// extraction fuses across the loop boundary. Exit reachability wins: such a
+/// node executes after the loop and must not be cloned as part of the body.
+fn classify_loop_regions(
+    llir: &LLIRGraph,
+    entry_markers: impl IntoIterator<Item = NodeIndex>,
+    exits: impl IntoIterator<Item = (NodeIndex, usize)>,
+    loop_markers: &FxHashSet<NodeIndex>,
+) -> LoopRegions {
+    let post_origins = forward_from_loop_exits(llir, exits, loop_markers);
+    let mut body_nodes = forward_from_loop_markers(llir, entry_markers, loop_markers);
+    body_nodes.retain(|node| {
+        !post_origins.contains_key(node) && llir[*node].to_op::<crate::hlir::Output>().is_none()
+    });
+    LoopRegions {
+        body_nodes,
+        post_origins,
+    }
+}
+
+fn post_body_iteration(origin: PostOrigin, iters: usize, consumer: NodeIndex) -> usize {
+    match origin {
+        PostOrigin::Iteration(iteration) => {
+            assert!(
+                iteration < iters,
+                "post-loop node {} selects iteration {iteration}, but loop has only {iters} iterations",
+                consumer.index(),
+            );
+            iteration
+        }
+        PostOrigin::Multiple => panic!(
+            "post-loop node {} directly consumes a loop-body value but is reachable from multiple loop iterations",
+            consumer.index(),
+        ),
+    }
+}
+
+fn assert_loop_marker_edges_resolved(
+    llir: &LLIRGraph,
+    loop_markers: &FxHashSet<NodeIndex>,
+    transform: &str,
+) {
+    let unresolved = loop_markers.iter().find_map(|&marker| {
+        llir.edges_directed(marker, Direction::Outgoing)
+            .find(|edge| !loop_markers.contains(&edge.target()))
+            .map(|edge| (marker, edge.target()))
+    });
+    if let Some((marker, consumer)) = unresolved {
+        panic!(
+            "{transform} left an unresolved loop-marker edge: node {} ({:?}) -> node {} ({:?})",
+            marker.index(),
+            &llir[marker],
+            consumer.index(),
+            &llir[consumer],
+        );
+    }
+}
+
 pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
     use crate::hlir::{
-        LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopOutputSelect, LoopStart, Output,
+        LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopOutputSelect, LoopStart,
     };
     use petgraph::visit::EdgeRef;
     use std::collections::BTreeMap;
@@ -2645,37 +2792,23 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         .chain(output_selects.keys().copied())
         .collect();
 
-    let mut body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
-    let mut worklist: Vec<NodeIndex> = starts
-        .values()
-        .flat_map(|n| {
-            llir.neighbors_directed(*n, Direction::Outgoing)
-                .collect::<Vec<_>>()
-        })
-        .chain(inputs.values().flat_map(|n| {
-            llir.neighbors_directed(*n, Direction::Outgoing)
-                .collect::<Vec<_>>()
-        }))
-        .chain(static_inputs.iter().flat_map(|n| {
-            llir.neighbors_directed(*n, Direction::Outgoing)
-                .collect::<Vec<_>>()
-        }))
-        .collect();
-    while let Some(n) = worklist.pop() {
-        if body_nodes.contains(&n) || loop_markers.contains(&n) {
-            continue;
-        }
-        if llir[n].to_op::<Output>().is_some() {
-            continue;
-        }
-        body_nodes.insert(n);
-        for succ in llir
-            .neighbors_directed(n, Direction::Outgoing)
-            .collect::<Vec<_>>()
-        {
-            worklist.push(succ);
-        }
-    }
+    let LoopRegions {
+        body_nodes,
+        post_origins,
+    } = classify_loop_regions(
+        llir,
+        starts
+            .values()
+            .copied()
+            .chain(inputs.values().copied())
+            .chain(static_inputs.iter().copied()),
+        ends.values().copied().map(|node| (node, iters - 1)).chain(
+            output_selects
+                .iter()
+                .map(|(&node, &(_, iteration))| (node, iteration)),
+        ),
+        &loop_markers,
+    );
 
     // start_meta[loop_start] = (initial, body_producer):
     //   - `initial` = LoopStart's incoming (state at iter 0).
@@ -2817,15 +2950,6 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         }
     }
 
-    let post_loop_consumers: FxHashSet<NodeIndex> = loop_markers
-        .iter()
-        .flat_map(|n| {
-            llir.neighbors_directed(*n, Direction::Outgoing)
-                .collect::<Vec<_>>()
-        })
-        .filter(|n| !loop_markers.contains(n) && !body_nodes.contains(n))
-        .collect();
-
     // Resolve each LoopOutput stream's body producer (its single incoming
     // edge in the LLIR).
     let mut output_body_producer: FxHashMap<usize /*stream_id*/, NodeIndex> = FxHashMap::default();
@@ -2863,20 +2987,38 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         marker_post_sub.insert(select_node, sub);
     }
 
-    for &consumer in &post_loop_consumers {
-        // Per-edge replace to preserve edge-id ordering via LIFO reuse.
+    for (&consumer, &origin) in &post_origins {
+        // Per-edge replace to preserve edge-id ordering via LIFO reuse. A
+        // post-loop fusion may still read a body node directly; route that
+        // edge to the clone selected by the exit that reaches this node.
         let pairs: Vec<(NodeIndex, petgraph::graph::EdgeIndex)> = llir
             .edges_directed(consumer, Direction::Incoming)
             .sorted_by_key(|e| e.id())
             .map(|e| (e.source(), e.id()))
             .collect();
         for (src, eid) in pairs {
-            let new_src = marker_post_sub.get(&src).copied().unwrap_or(src);
+            let new_src = if let Some(&substitute) = marker_post_sub.get(&src) {
+                substitute
+            } else if let Some(&shared) = static_source.get(&src) {
+                shared
+            } else if start_meta.contains_key(&src)
+                || input_per_iter.contains_key(&src)
+                || body_nodes.contains(&src)
+            {
+                resolve_src(
+                    src,
+                    post_body_iteration(origin, iters, consumer),
+                    &clone_map,
+                )
+            } else {
+                src
+            };
             llir.remove_edge(eid);
             llir.add_edge(new_src, consumer, ());
         }
     }
 
+    assert_loop_marker_edges_resolved(llir, &loop_markers, "loop unroll");
     for &n in &loop_markers {
         llir.remove_node(n);
     }
@@ -2922,7 +3064,7 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
 /// exactly the iter-0 body plus the surrounding non-loop graph.
 pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
     use crate::hlir::{
-        LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopOutputSelect, LoopStart, Output,
+        LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopOutputSelect, LoopStart,
     };
     use petgraph::visit::EdgeRef;
     use std::collections::BTreeMap;
@@ -2932,20 +3074,24 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
     let mut inputs: BTreeMap<usize, NodeIndex> = BTreeMap::new();
     let mut static_inputs: FxHashSet<NodeIndex> = FxHashSet::default();
     let mut outputs: BTreeMap<usize, NodeIndex> = BTreeMap::new();
-    let mut output_selects: FxHashSet<NodeIndex> = FxHashSet::default();
+    let mut output_selects: FxHashMap<NodeIndex, (usize /*stream*/, usize /*iter*/)> =
+        FxHashMap::default();
+
+    let mut iters = 0usize;
 
     for n in llir.node_indices() {
         let op = &llir[n];
-        if op.to_op::<LoopStart>().is_some() {
-            starts.insert(op.to_op::<LoopStart>().unwrap().slot_idx, n);
+        if let Some(ls) = op.to_op::<LoopStart>() {
+            iters = iters.max(ls.iters.to_usize().unwrap_or(1));
+            starts.insert(ls.slot_idx, n);
         } else if let Some(le) = op.to_op::<LoopEnd>() {
             ends.insert(le.slot_idx, n);
         } else if op.to_op::<LoopInputStatic>().is_some() {
             static_inputs.insert(n);
         } else if let Some(li) = op.to_op::<LoopInput>() {
             inputs.insert(li.stream_id, n);
-        } else if op.to_op::<LoopOutputSelect>().is_some() {
-            output_selects.insert(n);
+        } else if let Some(los) = op.to_op::<LoopOutputSelect>() {
+            output_selects.insert(n, (los.stream_id, los.iter));
         } else if let Some(lo) = op.to_op::<LoopOutput>() {
             outputs.insert(lo.stream_id, n);
         }
@@ -2961,42 +3107,26 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
         .chain(inputs.values().copied())
         .chain(static_inputs.iter().copied())
         .chain(outputs.values().copied())
-        .chain(output_selects.iter().copied())
+        .chain(output_selects.keys().copied())
         .collect();
 
-    // body_nodes = forward-reachable from any marker outgoing, stopping at
-    // markers and Output ops. This matches `unroll_loops_in_llir`.
-    let mut body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
-    let mut worklist: Vec<NodeIndex> = starts
-        .values()
-        .flat_map(|n| {
-            llir.neighbors_directed(*n, Direction::Outgoing)
-                .collect::<Vec<_>>()
-        })
-        .chain(inputs.values().flat_map(|n| {
-            llir.neighbors_directed(*n, Direction::Outgoing)
-                .collect::<Vec<_>>()
-        }))
-        .chain(static_inputs.iter().flat_map(|n| {
-            llir.neighbors_directed(*n, Direction::Outgoing)
-                .collect::<Vec<_>>()
-        }))
-        .collect();
-    while let Some(n) = worklist.pop() {
-        if body_nodes.contains(&n) || loop_markers.contains(&n) {
-            continue;
-        }
-        if llir[n].to_op::<Output>().is_some() {
-            continue;
-        }
-        body_nodes.insert(n);
-        for succ in llir
-            .neighbors_directed(n, Direction::Outgoing)
-            .collect::<Vec<_>>()
-        {
-            worklist.push(succ);
-        }
-    }
+    let LoopRegions {
+        body_nodes,
+        post_origins,
+    } = classify_loop_regions(
+        llir,
+        starts
+            .values()
+            .copied()
+            .chain(inputs.values().copied())
+            .chain(static_inputs.iter().copied()),
+        ends.values().copied().map(|node| (node, iters - 1)).chain(
+            output_selects
+                .iter()
+                .map(|(&node, &(_, iteration))| (node, iteration)),
+        ),
+        &loop_markers,
+    );
 
     // Initial value per LoopStart, body producer per LoopEnd / LoopOutput.
     let mut start_initial: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
@@ -3078,36 +3208,37 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
             .expect("LoopEnd missing body producer during rewire");
         marker_post_sub.insert(end_node, body_producer);
     }
-    for &select_node in &output_selects {
-        let stream_id = llir[select_node]
-            .to_op::<LoopOutputSelect>()
-            .map(|s| s.stream_id)
-            .expect("output_selects entries must be LoopOutputSelect");
+    for (&select_node, &(stream_id, _)) in &output_selects {
         if let Some(&body_producer) = output_body_producer.get(&stream_id) {
             marker_post_sub.insert(select_node, body_producer);
         }
     }
-    let post_loop_consumers: FxHashSet<NodeIndex> = loop_markers
-        .iter()
-        .flat_map(|n| {
-            llir.neighbors_directed(*n, Direction::Outgoing)
-                .collect::<Vec<_>>()
-        })
-        .filter(|n| !loop_markers.contains(n) && !body_nodes.contains(n))
-        .collect();
-    for &consumer in &post_loop_consumers {
+    for (&consumer, &origin) in &post_origins {
         let pairs: Vec<(NodeIndex, petgraph::graph::EdgeIndex)> = llir
             .edges_directed(consumer, Direction::Incoming)
             .sorted_by_key(|e| e.id())
             .map(|e| (e.source(), e.id()))
             .collect();
         for (src, eid) in pairs {
-            let new_src = marker_post_sub.get(&src).copied().unwrap_or(src);
+            if start_initial.contains_key(&src)
+                || input_first_source.contains_key(&src)
+                || body_nodes.contains(&src)
+            {
+                // Collapse aliases all exits to iteration 0 for profiling,
+                // but reject a crossing whose full-unroll iteration would be
+                // ambiguous instead of ranking a candidate we cannot lower.
+                let _ = post_body_iteration(origin, iters, consumer);
+            }
+            let new_src = marker_post_sub
+                .get(&src)
+                .copied()
+                .unwrap_or_else(|| resolve_src(src));
             llir.remove_edge(eid);
             llir.add_edge(new_src, consumer, ());
         }
     }
 
+    assert_loop_marker_edges_resolved(llir, &loop_markers, "single-iteration loop collapse");
     for &n in &loop_markers {
         llir.remove_node(n);
     }
@@ -3157,6 +3288,10 @@ fn compact_llir_preserving_input_order(old: &LLIRGraph) -> LLIRGraph {
 mod tests {
     use super::*;
     use crate::egglog_utils::hash_egglog_normalized;
+    use crate::hlir::{
+        Input, LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopOutputSelect, LoopStart,
+        ReferenceData, ReferenceOp,
+    };
 
     // A rolling candidate is only collapsible if every non-state boundary input
     // is fed from OUTSIDE the candidate's occurrences. A non-state input produced
@@ -3190,6 +3325,311 @@ mod tests {
         // Fewer than two occurrences is never rollable.
         assert!(!candidate_is_rollable(&[occ(0, 100)], &[]));
     }
+
+    #[derive(Debug)]
+    struct TaggedOp(&'static str);
+
+    impl ReferenceOp for TaggedOp {
+        fn execute(&self, _: Vec<&ReferenceData>, _: &FxHashMap<char, usize>) -> ReferenceData {
+            unreachable!("TaggedOp is only used for LLIR topology tests")
+        }
+    }
+
+    fn tagged_op(name: &'static str) -> LLIROp {
+        LLIROp::new::<dyn ReferenceOp>(Box::new(TaggedOp(name)))
+    }
+
+    fn input_op(node: usize, label: &str) -> LLIROp {
+        LLIROp::new::<Input>(Box::new(Input {
+            node,
+            label: label.to_string(),
+            dtype: DType::F32,
+        }))
+    }
+
+    fn tagged_nodes(graph: &LLIRGraph, name: &str) -> Vec<NodeIndex> {
+        graph
+            .node_indices()
+            .filter(|&node| {
+                graph[node]
+                    .to_dialect::<dyn ReferenceOp>()
+                    .and_then(|op| {
+                        let op: &dyn ReferenceOp = op.as_ref().as_ref();
+                        op.as_any().downcast_ref::<TaggedOp>()
+                    })
+                    .is_some_and(|op| op.0 == name)
+            })
+            .collect()
+    }
+
+    fn labeled_input(graph: &LLIRGraph, label: &str) -> NodeIndex {
+        graph
+            .node_indices()
+            .find(|&node| {
+                graph[node]
+                    .to_op::<Input>()
+                    .is_some_and(|input| input.label == label)
+            })
+            .unwrap_or_else(|| panic!("missing test input {label}"))
+    }
+
+    fn incoming_nodes(graph: &LLIRGraph, node: NodeIndex) -> Vec<NodeIndex> {
+        graph
+            .edges_directed(node, Direction::Incoming)
+            .sorted_by_key(|edge| edge.id())
+            .map(|edge| edge.source())
+            .collect()
+    }
+
+    fn assert_no_loop_markers(graph: &LLIRGraph) {
+        assert!(graph.node_indices().all(|node| {
+            let op = &graph[node];
+            op.to_op::<LoopStart>().is_none()
+                && op.to_op::<LoopEnd>().is_none()
+                && op.to_op::<LoopInput>().is_none()
+                && op.to_op::<LoopInputStatic>().is_none()
+                && op.to_op::<LoopOutput>().is_none()
+                && op.to_op::<LoopOutputSelect>().is_none()
+        }));
+    }
+
+    #[derive(Clone, Copy)]
+    enum BoundaryExit {
+        End,
+        Select(usize),
+    }
+
+    #[derive(Clone, Copy)]
+    enum BoundarySide {
+        Body,
+        LoopInput,
+    }
+
+    /// Construct a post-loop operation that is reachable from both sides of
+    /// the marker boundary. This is the topology produced when extraction
+    /// fuses an operation consuming a loop exit with another body-side value.
+    fn boundary_overlap_llir(exit: BoundaryExit, side: BoundarySide) -> LLIRGraph {
+        let mut graph = LLIRGraph::default();
+        let initial = graph.add_node(input_op(0, "initial"));
+        let iter0 = graph.add_node(input_op(1, "iter0"));
+        let iter1 = graph.add_node(input_op(2, "iter1"));
+        let weight = graph.add_node(input_op(3, "weight"));
+        let start = graph.add_node(LLIROp::new::<LoopStart>(Box::new(LoopStart {
+            loop_id: 0,
+            slot_idx: 0,
+            iters: Expression::from(2_i32),
+            dtype: DType::F32,
+        })));
+        let input = graph.add_node(LLIROp::new::<LoopInput>(Box::new(LoopInput {
+            loop_id: 0,
+            stream_id: 0,
+            dtype: DType::F32,
+        })));
+        let body = graph.add_node(tagged_op("body"));
+        let end = graph.add_node(LLIROp::new::<LoopEnd>(Box::new(LoopEnd {
+            loop_id: 0,
+            slot_idx: 0,
+            dtype: DType::F32,
+        })));
+        let post = graph.add_node(tagged_op("post"));
+        let after = graph.add_node(tagged_op("after"));
+
+        graph.add_edge(initial, start, ());
+        graph.add_edge(iter0, input, ());
+        graph.add_edge(iter1, input, ());
+        graph.add_edge(start, body, ());
+        graph.add_edge(input, body, ());
+        graph.add_edge(body, end, ());
+        let exit = match exit {
+            BoundaryExit::End => end,
+            BoundaryExit::Select(iter) => {
+                let output = graph.add_node(LLIROp::new::<LoopOutput>(Box::new(LoopOutput {
+                    loop_id: 0,
+                    stream_id: 0,
+                    dtype: DType::F32,
+                })));
+                let select = graph.add_node(LLIROp::new::<LoopOutputSelect>(Box::new(
+                    LoopOutputSelect {
+                        loop_id: 0,
+                        stream_id: 0,
+                        iter,
+                        dtype: DType::F32,
+                    },
+                )));
+                graph.add_edge(body, output, ());
+                graph.add_edge(output, select, ());
+                select
+            }
+        };
+        let side = match side {
+            BoundarySide::Body => body,
+            BoundarySide::LoopInput => input,
+        };
+        // Preserve this input order through both transformations.
+        graph.add_edge(exit, post, ());
+        graph.add_edge(side, post, ());
+        graph.add_edge(weight, post, ());
+        // Also exercise a downstream post-loop node with a direct body edge.
+        graph.add_edge(post, after, ());
+        graph.add_edge(side, after, ());
+        graph
+    }
+
+    #[test]
+    fn collapse_preserves_inputs_for_boundary_overlapping_post_op() {
+        let mut graph = boundary_overlap_llir(BoundaryExit::End, BoundarySide::Body);
+        collapse_loops_to_first_iter(&mut graph);
+
+        let body = tagged_nodes(&graph, "body");
+        let post = tagged_nodes(&graph, "post");
+        let after = tagged_nodes(&graph, "after");
+        assert_eq!(body.len(), 1);
+        assert_eq!(post.len(), 1);
+        assert_eq!(after.len(), 1);
+
+        let weight = labeled_input(&graph, "weight");
+        assert_eq!(
+            incoming_nodes(&graph, post[0]),
+            vec![body[0], body[0], weight]
+        );
+        assert_eq!(incoming_nodes(&graph, after[0]), vec![post[0], body[0]]);
+        assert_eq!(
+            incoming_nodes(&graph, body[0]),
+            vec![
+                labeled_input(&graph, "initial"),
+                labeled_input(&graph, "iter0"),
+            ]
+        );
+        assert_no_loop_markers(&graph);
+    }
+
+    #[test]
+    fn unroll_routes_boundary_overlapping_post_op_to_final_body() {
+        let mut graph = boundary_overlap_llir(BoundaryExit::End, BoundarySide::Body);
+        unroll_loops_in_llir(&mut graph);
+
+        let bodies = tagged_nodes(&graph, "body");
+        let post = tagged_nodes(&graph, "post");
+        let after = tagged_nodes(&graph, "after");
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(post.len(), 1);
+        assert_eq!(after.len(), 1);
+
+        let initial = labeled_input(&graph, "initial");
+        let iter0 = labeled_input(&graph, "iter0");
+        let iter1 = labeled_input(&graph, "iter1");
+        let weight = labeled_input(&graph, "weight");
+        let body0 = *bodies
+            .iter()
+            .find(|&&body| incoming_nodes(&graph, body) == vec![initial, iter0])
+            .expect("missing iteration-0 body");
+        let body1 = *bodies
+            .iter()
+            .find(|&&body| incoming_nodes(&graph, body) == vec![body0, iter1])
+            .expect("missing iteration-1 body");
+
+        assert_eq!(incoming_nodes(&graph, post[0]), vec![body1, body1, weight]);
+        assert_eq!(incoming_nodes(&graph, after[0]), vec![post[0], body1]);
+        assert_no_loop_markers(&graph);
+    }
+
+    #[test]
+    fn unroll_routes_boundary_overlap_to_selected_iteration() {
+        let mut graph = boundary_overlap_llir(BoundaryExit::Select(0), BoundarySide::Body);
+        unroll_loops_in_llir(&mut graph);
+
+        let bodies = tagged_nodes(&graph, "body");
+        let post = tagged_nodes(&graph, "post");
+        let after = tagged_nodes(&graph, "after");
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(post.len(), 1);
+        assert_eq!(after.len(), 1);
+
+        let initial = labeled_input(&graph, "initial");
+        let iter0 = labeled_input(&graph, "iter0");
+        let body0 = *bodies
+            .iter()
+            .find(|&&body| incoming_nodes(&graph, body) == vec![initial, iter0])
+            .expect("missing iteration-0 body");
+        let weight = labeled_input(&graph, "weight");
+
+        assert_eq!(incoming_nodes(&graph, post[0]), vec![body0, body0, weight]);
+        assert_eq!(incoming_nodes(&graph, after[0]), vec![post[0], body0]);
+        assert_no_loop_markers(&graph);
+    }
+
+    #[test]
+    #[should_panic(expected = "reachable from multiple loop iterations")]
+    fn collapse_rejects_ambiguous_boundary_overlap() {
+        let mut graph = boundary_overlap_llir(BoundaryExit::Select(0), BoundarySide::Body);
+        let output = graph
+            .node_indices()
+            .find(|&node| graph[node].to_op::<LoopOutput>().is_some())
+            .expect("missing loop output");
+        let post = tagged_nodes(&graph, "post")[0];
+        let select1 = graph.add_node(LLIROp::new::<LoopOutputSelect>(Box::new(
+            LoopOutputSelect {
+                loop_id: 0,
+                stream_id: 0,
+                iter: 1,
+                dtype: DType::F32,
+            },
+        )));
+        graph.add_edge(output, select1, ());
+        graph.add_edge(select1, post, ());
+
+        collapse_loops_to_first_iter(&mut graph);
+    }
+
+    #[test]
+    fn boundary_overlap_resolves_direct_loop_input() {
+        let mut collapsed = boundary_overlap_llir(BoundaryExit::End, BoundarySide::LoopInput);
+        collapse_loops_to_first_iter(&mut collapsed);
+        let collapsed_body = tagged_nodes(&collapsed, "body")[0];
+        let collapsed_post = tagged_nodes(&collapsed, "post")[0];
+        let collapsed_after = tagged_nodes(&collapsed, "after")[0];
+        let collapsed_iter0 = labeled_input(&collapsed, "iter0");
+        let collapsed_weight = labeled_input(&collapsed, "weight");
+        assert_eq!(
+            incoming_nodes(&collapsed, collapsed_post),
+            vec![collapsed_body, collapsed_iter0, collapsed_weight]
+        );
+        assert_eq!(
+            incoming_nodes(&collapsed, collapsed_after),
+            vec![collapsed_post, collapsed_iter0]
+        );
+        assert_no_loop_markers(&collapsed);
+
+        let mut unrolled = boundary_overlap_llir(BoundaryExit::End, BoundarySide::LoopInput);
+        unroll_loops_in_llir(&mut unrolled);
+        let unrolled_bodies = tagged_nodes(&unrolled, "body");
+        let unrolled_post = tagged_nodes(&unrolled, "post")[0];
+        let unrolled_after = tagged_nodes(&unrolled, "after")[0];
+        let unrolled_initial = labeled_input(&unrolled, "initial");
+        let unrolled_iter0 = labeled_input(&unrolled, "iter0");
+        let unrolled_iter1 = labeled_input(&unrolled, "iter1");
+        let unrolled_weight = labeled_input(&unrolled, "weight");
+        let unrolled_body0 = *unrolled_bodies
+            .iter()
+            .find(|&&body| {
+                incoming_nodes(&unrolled, body) == vec![unrolled_initial, unrolled_iter0]
+            })
+            .expect("missing iteration-0 body");
+        let unrolled_body1 = *unrolled_bodies
+            .iter()
+            .find(|&&body| incoming_nodes(&unrolled, body) == vec![unrolled_body0, unrolled_iter1])
+            .expect("missing iteration-1 body");
+        assert_eq!(
+            incoming_nodes(&unrolled, unrolled_post),
+            vec![unrolled_body1, unrolled_iter1, unrolled_weight]
+        );
+        assert_eq!(
+            incoming_nodes(&unrolled, unrolled_after),
+            vec![unrolled_post, unrolled_iter1]
+        );
+        assert_no_loop_markers(&unrolled);
+    }
+
     use crate::tests::{assert_close, random_vec};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
