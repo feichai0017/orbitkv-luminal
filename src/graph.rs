@@ -2498,19 +2498,9 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
             .neighbors_directed(end_node, Direction::Incoming)
             .next()
             .expect("LoopEnd missing body producer during rewire");
-        // Full per-iteration resolution: the body producer may be a body node
-        // (→ last clone), an iteration-invariant external value (→ itself,
-        // the gemma RoPE-constant case), or — when egglog proves a loop
-        // output aliases loop-carried state — a loop marker, which must
-        // resolve to that iteration's concrete source rather than the marker
-        // (markers are deleted below; the old fallback left dangling edges).
         let sub = resolve_src(body_producer, iters - 1, &clone_map);
         marker_post_sub.insert(end_node, sub);
     }
-    // Each LoopOutputSelect(stream, iter) routes to iter's resolution of that
-    // stream's body producer — same rules as body-edge rewiring, so a
-    // marker-aliased output stream (e.g. a cache write-back unioned with its
-    // cache input) picks up iteration `iter`'s own source.
     for (&select_node, &(stream_id, iter)) in &output_selects {
         let body_producer = output_body_producer[&stream_id];
         let sub = resolve_src(body_producer, iter, &clone_map);

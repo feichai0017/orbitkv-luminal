@@ -112,11 +112,6 @@ impl<'a> Translator<'a> {
         } else {
             Expression::from(0usize)
         };
-        // aten.slice allows negative bounds (e.g. the `hidden_states[:, -1:]`
-        // last-token slice before lm_head). Normalize against the (possibly
-        // symbolic) dim size — an unnormalized negative start silently builds
-        // an out-of-range strided view (length a+1, negative offset) that
-        // reads garbage.
         let start = normalize_slice_bound(start, a.shape.dims[dim]);
 
         if node.inputs.len() <= 3 {
@@ -489,12 +484,6 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn translate_index_put(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
-        // Advanced-indexing form `a[None, .., idx, .., None] = values` (e.g.
-        // HF StaticCache update `cache[:, :, cache_position] = key_states`):
-        // every None entry is a full slice and a single 1-D tensor indexes
-        // dim `axis`. Broadcast the index across the value shape and lower to
-        // scatter_elements along `axis` — the same flat-index scatter the
-        // plain tensor forms below use.
         if let Some(entries) = node.inputs[1].arg.as_optional_tensors() {
             let mut axis_and_name = None;
             for (dim, entry) in entries.iter().enumerate() {
@@ -537,11 +526,11 @@ impl<'a> Translator<'a> {
                 );
             }
             let mut idx_full = idx;
-            for dim in 0..axis {
-                idx_full = idx_full.expand_dim(dim, val_dims[dim]);
+            for (dim, &size) in val_dims.iter().enumerate().take(axis) {
+                idx_full = idx_full.expand_dim(dim, size);
             }
-            for dim in axis + 1..val_dims.len() {
-                idx_full = idx_full.expand_dim(dim, val_dims[dim]);
+            for (dim, &size) in val_dims.iter().enumerate().skip(axis + 1) {
+                idx_full = idx_full.expand_dim(dim, size);
             }
             let values = if values.dtype == a.dtype {
                 values
@@ -549,9 +538,6 @@ impl<'a> Translator<'a> {
                 values.cast(a.dtype)
             };
             let result = super::movement_dynamic::pt2_scatter_elements(a, idx_full, values, axis);
-            // A write into a graph input (HF StaticCache K/V buffer) is an
-            // in-place state update: remember the destination so a declared
-            // graph output of this result can alias the input buffer.
             if self
                 .user_input_ids
                 .iter()
@@ -562,7 +548,10 @@ impl<'a> Translator<'a> {
             return Ok(result);
         }
         let index_names = if let Some(names) = node.inputs[1].arg.as_tensors() {
-            names.iter().map(|name| name.name.clone()).collect::<Vec<_>>()
+            names
+                .iter()
+                .map(|name| name.name.clone())
+                .collect::<Vec<_>>()
         } else if let Some(name) = node.inputs[1].arg.as_tensor_name() {
             vec![name.to_string()]
         } else {

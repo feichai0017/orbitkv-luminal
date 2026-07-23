@@ -13,9 +13,6 @@ mod tensor;
 mod unary;
 
 use std::collections::HashMap;
-use std::env;
-use std::fs::OpenOptions;
-use std::io::Write;
 
 use anyhow::{Context, Result};
 use luminal::graph::Graph;
@@ -55,13 +52,6 @@ pub(crate) struct Translator<'a> {
     pub(crate) output_ids: Vec<(String, NodeIndex)>,
     /// Extra tensor metadata from inlined subgraphs.
     pub(crate) extra_tensor_values: HashMap<String, TensorMeta>,
-    /// index_put results whose destination is a graph input (e.g. HF
-    /// StaticCache K/V buffers): result node id -> the destination input
-    /// tensor. Declared graph outputs matching these are emitted against the
-    /// input instead — the runtime owns that buffer as persistent state and
-    /// the fused kernels update it in place, so the output is a state read.
-    /// This also keeps loop-rolled graphs free of output edges into layer
-    /// bodies (see luminal_trainium docs/luminal_loop_rolling_issue.md).
     pub(crate) input_backed_write_backs: HashMap<NodeIndex, GraphTensor>,
 }
 
@@ -92,9 +82,6 @@ impl<'a> Translator<'a> {
         let output_names = self.parsed.output_names();
         for name in &output_names {
             let tensor = self.get_tensor(name)?;
-            // In-place write-backs into graph inputs (StaticCache updates)
-            // alias the runtime-owned buffer: emit the output against the
-            // input node itself so readback serves the post-run state bytes.
             if let Some(dest) = self.input_backed_write_backs.get(&tensor.id) {
                 dest.output();
                 self.output_ids.push((name.clone(), dest.id));
@@ -110,10 +97,6 @@ impl<'a> Translator<'a> {
             tensor.output();
             self.output_ids.push((name.clone(), tensor.id));
         }
-        self.debug_dump_translated_tensors()?;
-        self.debug_mark_translated_outputs()?;
-        self.debug_write_node_manifest()?;
-
         Ok(())
     }
 
@@ -193,100 +176,6 @@ impl<'a> Translator<'a> {
             .get(name)
             .copied()
             .with_context(|| format!("Unknown tensor: {name}"))
-    }
-
-    fn debug_dump_translated_tensors(&self) -> Result<()> {
-        let Some(path) = env::var_os("LUMINAL_PYTHON_DEBUG_TENSOR_NAMES_FILE") else {
-            return Ok(());
-        };
-        let mut names: Vec<&String> = self.tensors.keys().collect();
-        names.sort();
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("open {:?}", path))?;
-        writeln!(file, "translated_tensors={}", names.len())?;
-        for name in names {
-            if let Some(tensor) = self.tensors.get(name) {
-                let has_meta = self.parsed.tensor_meta(name).is_some();
-                writeln!(
-                    file,
-                    "{name}\tdtype={:?}\tshape={:?}\tpt2_meta={has_meta}",
-                    tensor.dtype, tensor.shape.dims
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn debug_mark_translated_outputs(&mut self) -> Result<()> {
-        let Ok(raw_names) = env::var("LUMINAL_PYTHON_DEBUG_OUTPUT_TENSORS") else {
-            return Ok(());
-        };
-        let names: Vec<String> = raw_names
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-        for name in names {
-            if self.output_ids.iter().any(|(existing, _)| existing == &name) {
-                continue;
-            }
-            let tensor = self.get_tensor(&name)?;
-            if self.parsed.tensor_meta(&name).is_none() {
-                anyhow::bail!(
-                    "debug output tensor {name:?} has no PT2 tensor metadata; choose a PT2 tensor name from LUMINAL_PYTHON_DEBUG_TENSOR_NAMES_FILE"
-                );
-            }
-            let tensor = tensor.output();
-            self.output_ids.push((name, tensor.id));
-        }
-        Ok(())
-    }
-
-    /// LUMINAL_PYTHON_DEBUG_NODE_MANIFEST=<path> writes one line per
-    /// translated FX node (name, target, input tensor names, dtype, shape) so
-    /// debug taps can be located by graph structure without re-exporting.
-    fn debug_write_node_manifest(&self) -> Result<()> {
-        let Some(path) = env::var_os("LUMINAL_PYTHON_DEBUG_NODE_MANIFEST") else {
-            return Ok(());
-        };
-        use std::fmt::Write as _;
-        let mut out = String::new();
-        for node in &self.parsed.program.graph_module.graph.nodes {
-            let input_names: Vec<&str> = node
-                .inputs
-                .iter()
-                .filter_map(|input| match &input.arg {
-                    Argument::Tensor(t) => Some(t.as_tensor.name.as_str()),
-                    _ => None,
-                })
-                .collect();
-            for output in &node.outputs {
-                let Some(name) = output.as_tensor.as_ref().map(|t| t.name.as_str()) else {
-                    continue;
-                };
-                let (dtype, shape) = match self.tensors.get(name) {
-                    Some(tensor) => (
-                        format!("{:?}", tensor.dtype),
-                        format!("{:?}", tensor.shape.dims),
-                    ),
-                    None => ("?".to_string(), "?".to_string()),
-                };
-                writeln!(
-                    out,
-                    "{name}\t{target}\t[{inputs}]\t{dtype}\t{shape}",
-                    target = node.target,
-                    inputs = input_names.join(",")
-                )
-                .expect("write to string");
-            }
-        }
-        std::fs::write(&path, out)
-            .with_context(|| format!("write node manifest to {path:?}"))?;
-        Ok(())
     }
 
     pub(crate) fn get_input_tensor(&self, node: &Node, idx: usize) -> Result<GraphTensor> {

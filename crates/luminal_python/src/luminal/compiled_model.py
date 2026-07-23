@@ -1,6 +1,5 @@
 """CompiledModel wrapper for the Rust CompiledGraph."""
 
-import os
 from typing import List
 
 import torch
@@ -46,13 +45,6 @@ class CompiledModel:
         self._has_dynamic_dims = getattr(graph_result, "has_dynamic_dims", False)
         self._weight_refs = weight_refs or []
         self._user_indices = user_indices
-        # Input names the embedder has declared safe to not (re)send: their
-        # bytes back device-resident state the backend updates in place and
-        # never reads from the host (e.g. trainium KV-cache write-back
-        # inputs, TensorRole::State — skipped in the per-execute upload
-        # loop). Set post-compile by the embedding runtime, which can only
-        # know the set once the backend has compiled and promoted state.
-        # Empty by default: every input is sent.
         self.skip_input_names = frozenset()
         self._is_gpu = getattr(graph_result, "device_type", "cpu") != "cpu"
         self._supports_device_ptrs = getattr(
@@ -218,13 +210,7 @@ class CompiledModel:
                 )
             getter_name, read_dtype = entry
             data = getattr(self._graph, getter_name)(name)
-            if len(data) == 0 and (shape is None or all(d != 0 for d in shape)):
-                # Zero bytes for a non-empty declared output: the backend
-                # declined to materialize a host copy (e.g. trainium's
-                # device-resident cache write-backs under
-                # LUMINAL_TRAINIUM_SKIP_WRITEBACK_READBACK). Surface as None
-                # so callers can skip the host mirror instead of crashing on
-                # an impossible reshape.
+            if len(data) == 0 and all(d != 0 for d in shape):
                 return None
             if out_dtype in (torch.float16, torch.bfloat16):
                 # Getter returned an immutable `bytes` from Rust; wrap in
@@ -234,12 +220,7 @@ class CompiledModel:
                 tensor = torch.frombuffer(bytearray(data), dtype=out_dtype)
             else:
                 tensor = torch.tensor(data, dtype=read_dtype)
-            if shape is not None:
-                # `shape is None` = debug-tap read: interior FX nodes may
-                # carry sym-dim names absent from the input-derived symbol
-                # map, so their declared shapes resolve wrong; the raw flat
-                # buffer is what the dump wants anyway.
-                tensor = tensor.reshape(tuple(shape))
+            tensor = tensor.reshape(tuple(shape))
             return tensor.to(input_device)
 
         # Pre-allocation is GPU-only: the CUDA kernel needs the
@@ -265,78 +246,9 @@ class CompiledModel:
 
         self._graph.run()
 
-        # Counterpart to the translator's LUMINAL_PYTHON_DEBUG_OUTPUT_TENSORS
-        # hook: read the extra debug outputs as raw flat buffers (their
-        # declared shapes may not resolve — interior sym-dim names can be
-        # absent from the input-derived symbol map), dump them as f32 (one
-        # file per output per call, mirroring the Rust Layer0Dump mechanism),
-        # and strip them from the returned tuple so callers see the original
-        # output contract. Assumes the requested names are interior FX nodes,
-        # never real graph outputs (the translator skips names already
-        # present as outputs).
-        extra_env = os.environ.get("LUMINAL_PYTHON_DEBUG_OUTPUT_TENSORS", "")
-        _extra_names = {n.strip() for n in extra_env.split(",") if n.strip()}
-        _extra_dump_dir = os.environ.get("LUMINAL_PYTHON_DEBUG_OUTPUT_DIR")
-        # The translator appends the requested debug outputs AFTER the real
-        # graph outputs (skipping names that already are outputs). Strip only
-        # that trailing appended run — a requested name that happens to be a
-        # real output is dumped but kept, so the caller-visible contract is
-        # untouched.
-        n_out = len(self._output_names)
-        _strip_from = n_out
-        while _strip_from > 0 and self._output_names[_strip_from - 1] in _extra_names:
-            _strip_from -= 1
-        if _extra_names and _extra_dump_dir:
-            step = self._extra_output_step = (
-                getattr(self, "_extra_output_step", -1) + 1
-            )
-            os.makedirs(_extra_dump_dir, exist_ok=True)
-            if step == 0:
-                with open(
-                    os.path.join(_extra_dump_dir, "manifest.txt"),
-                    "a",
-                    encoding="utf-8",
-                ) as fh:
-                    fh.write(f"output_names={list(self._output_names)}\n")
-
         outputs = []
-        for i, name in enumerate(self._output_names):
+        for i, (name, shape) in enumerate(zip(self._output_names, output_shapes)):
             out_dtype = output_torch_dtypes[i]
-            # Appended debug outputs have no reliable resolved shape (interior
-            # sym-dim names may be absent from the input-derived symbol map).
-            shape = output_shapes[i] if i < len(output_shapes) else None
-            if name in _extra_names and _extra_dump_dir:
-                step = self._extra_output_step
-                try:
-                    flat = _read_typed_output(name, None, out_dtype)
-                except ValueError:
-                    # Empty buffer: the tap's output node was absorbed by a
-                    # fusion (e.g. the RMS folded into fused attention/MoE)
-                    # and never materialized. Record it and keep going —
-                    # which taps go missing is itself diagnostic.
-                    flat = None
-                fname = f"pt_step_{step:04d}_{name}.f32"
-                if flat is not None:
-                    flat.detach().to(torch.float32).cpu().numpy().tofile(
-                        os.path.join(_extra_dump_dir, fname)
-                    )
-                with open(
-                    os.path.join(_extra_dump_dir, "manifest.txt"),
-                    "a",
-                    encoding="utf-8",
-                ) as fh:
-                    if flat is None:
-                        fh.write(
-                            f"step={step} name={name} MISSING "
-                            f"(buffer empty: output fused/pruned)\n"
-                        )
-                    else:
-                        fh.write(
-                            f"step={step} name={name} numel={flat.numel()} "
-                            f"dtype={out_dtype} file={fname}\n"
-                        )
-            if i >= _strip_from:
-                continue
             if _use_zero_copy and out_dtype in _zero_copy_native_floats:
                 out = output_tensors[i]
                 if not self._graph.output_is_zero_copy(name):

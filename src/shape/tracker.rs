@@ -136,10 +136,6 @@ impl ShapeTracker {
                 *dim = size;
                 *stride = 0.into();
             } else {
-                // Sym-int chains from PT2 graphs can leave a dim unsimplified
-                // but equal (e.g. (2048*a)/2048 vs a). Only fall back to the
-                // (cached) simplifier on the mismatch path, and canonicalize
-                // to the requested form so downstream comparisons stay clean.
                 let (dim_simplified, size_simplified) = (dim.simplify(), size.simplify());
                 if dim_simplified == size_simplified {
                     *dim = size;

@@ -32,10 +32,6 @@ pub fn normalize_dim(dim: i64, ndim: usize) -> usize {
     }
 }
 
-/// Normalize a potentially negative `aten.slice` bound against the (possibly
-/// symbolic) dimension size, following PyTorch semantics: `-k` means
-/// `dim_size - k`. Symbolic bounds pass through untouched — PT2 graphs emit
-/// literal ints for negative bounds.
 pub fn normalize_slice_bound(bound: Expression, dim_size: Expression) -> Expression {
     match bound.as_num() {
         Some(n) if n < 0 => (dim_size + Expression::from(n as i32)).simplify(),
