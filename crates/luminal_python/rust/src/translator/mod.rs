@@ -390,3 +390,105 @@ impl<'a> Translator<'a> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn input_backed_index_put_program() -> ParsedPT2 {
+        let program = serde_json::from_value(json!({
+            "graph_module": {
+                "graph": {
+                    "inputs": [
+                        {"as_tensor": {"name": "cache"}},
+                        {"as_tensor": {"name": "positions"}},
+                        {"as_tensor": {"name": "values"}}
+                    ],
+                    "outputs": [{"as_tensor": {"name": "updated_cache"}}],
+                    "nodes": [{
+                        "target": "torch.ops.aten.index_put.default",
+                        "inputs": [
+                            {
+                                "name": "self",
+                                "arg": {"as_tensor": {"name": "cache"}},
+                                "kind": 1
+                            },
+                            {
+                                "name": "indices",
+                                "arg": {
+                                    "as_optional_tensors": [
+                                        {"as_none": null},
+                                        {"as_tensor": {"name": "positions"}}
+                                    ]
+                                },
+                                "kind": 1
+                            },
+                            {
+                                "name": "values",
+                                "arg": {"as_tensor": {"name": "values"}},
+                                "kind": 1
+                            },
+                            {
+                                "name": "accumulate",
+                                "arg": {"as_bool": false},
+                                "kind": 1
+                            }
+                        ],
+                        "outputs": [{"as_tensor": {"name": "updated_cache"}}]
+                    }],
+                    "tensor_values": {
+                        "cache": {
+                            "dtype": 7,
+                            "sizes": [{"as_int": 2}, {"as_int": 4}]
+                        },
+                        "positions": {
+                            "dtype": 4,
+                            "sizes": [{"as_int": 1}]
+                        },
+                        "values": {
+                            "dtype": 7,
+                            "sizes": [{"as_int": 2}, {"as_int": 1}]
+                        },
+                        "updated_cache": {
+                            "dtype": 7,
+                            "sizes": [{"as_int": 2}, {"as_int": 4}]
+                        }
+                    }
+                },
+                "signature": {
+                    "input_specs": [
+                        {"user_input": {"arg": {"as_tensor": {"name": "cache"}}}},
+                        {"user_input": {"arg": {"as_tensor": {"name": "positions"}}}},
+                        {"user_input": {"arg": {"as_tensor": {"name": "values"}}}}
+                    ]
+                }
+            }
+        }))
+        .expect("synthetic PT2 program should deserialize");
+
+        ParsedPT2 {
+            program,
+            constants_config: None,
+            archive_prefix: String::new(),
+            pt2_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn input_backed_index_put_output_aliases_destination_input() {
+        let translated = translate(&input_backed_index_put_program())
+            .expect("input-backed index_put should translate");
+
+        let (input_name, input_id) = &translated.user_input_ids[0];
+        let (output_name, output_id) = &translated.output_ids[0];
+
+        assert_eq!(input_name, "cache");
+        assert_eq!(output_name, "updated_cache");
+        assert_eq!(
+            output_id, input_id,
+            "an index_put write-back into a user input must expose that input as its output"
+        );
+    }
+}
