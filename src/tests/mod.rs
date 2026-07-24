@@ -173,6 +173,41 @@ pub fn random_vec_rng<R: Rng>(n: usize, rng: &mut R) -> Vec<f32> {
     (0..n).map(|_| rng.random_range(-0.5..0.5)).collect()
 }
 
+#[test]
+fn frontend_input_shape_survives_hlir_to_llir_extraction() {
+    use crate::egglog_utils::egglog_to_llir;
+
+    let mut cx = Graph::new();
+    let input = cx.named_tensor("input", ('s', 4));
+    input.exp2().output();
+    cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+
+    let egraph = cx.egraph().unwrap();
+    let ops = cx.egglog_ops().unwrap();
+    let mut rng = rng();
+    let choice = random_initial_choice(egraph, &mut rng);
+    let mut list_cache = FxHashMap::default();
+    let mut expr_cache = FxHashMap::default();
+    let llir = egglog_to_llir(
+        egraph,
+        choice,
+        ops,
+        &cx.custom_ops,
+        &mut list_cache,
+        &mut expr_cache,
+        None,
+    );
+    let extracted = llir
+        .node_weights()
+        .find_map(|op| op.to_op::<crate::hlir::Input>())
+        .expect("selected LLIR must retain the frontend input");
+    assert_eq!(extracted.label, "input");
+    assert_eq!(
+        extracted.shape,
+        [Expression::from('s'), Expression::from(4_usize)]
+    );
+}
+
 /// Fuzz test to verify all genomes in the search space produce valid graphs.
 /// This tests the genetic algorithm by generating many random genomes and mutations,
 /// validating each one, and checking that extraction doesn't panic.

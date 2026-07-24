@@ -250,6 +250,11 @@ pub struct Input {
     pub node: usize,
     pub label: String,
     pub dtype: DType,
+    /// Logical tensor dimensions declared by the frontend.
+    ///
+    /// This belongs to the input itself: backends must not reconstruct an
+    /// input's shape from whichever consumer happens to survive extraction.
+    pub shape: Vec<Expression>,
 }
 
 impl Display for Input {
@@ -272,7 +277,12 @@ impl EgglogOp for Input {
         sort(
             IR,
             "Input",
-            &[("node", I64), ("label", STRING), ("dtype", DTYPE)],
+            &[
+                ("node", I64),
+                ("label", STRING),
+                ("dtype", DTYPE),
+                ("shape", ELIST),
+            ],
         )
     }
 
@@ -289,8 +299,8 @@ impl EgglogOp for Input {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        _: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let node = egraph.enodes[kind_children[0]]
             .0
@@ -303,6 +313,7 @@ impl EgglogOp for Input {
                 node,
                 label,
                 dtype: extract_dtype(egraph, kind_children[2]),
+                shape: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
             })),
             vec![],
         )
@@ -312,8 +323,11 @@ impl EgglogOp for Input {
 impl HLIROp for Input {
     fn to_egglog(&self, _: &[(NodeIndex, String)]) -> String {
         format!(
-            "(Input {} \"{}\" ({:?}))",
-            self.node, self.label, self.dtype
+            "(Input {} \"{}\" ({:?}) {})",
+            self.node,
+            self.label,
+            self.dtype,
+            elist_to_egglog(&self.shape)
         )
     }
 }

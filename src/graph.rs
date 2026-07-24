@@ -1187,17 +1187,19 @@ impl Graph {
     /// Create a new tensor with shape S and a name. This name will show up on the graph when displayed
     pub fn named_tensor(&mut self, name: impl ToString, shape: impl ToShape) -> GraphTensor {
         let name = name.to_string();
+        let shape = ShapeTracker::new(shape);
         let id = self.graph.add_node(Box::new(crate::hlir::Input {
             node: 0,
             label: name.clone(),
             dtype: DType::default(),
+            shape: shape.dims.to_vec(),
         }));
         self.get_op_mut::<crate::hlir::Input>(id).node = id.index();
         self.input_meta.insert(id, (name.clone(), DType::default()));
         GraphTensor {
             id,
             graph_ref: self,
-            shape: ShapeTracker::new(shape),
+            shape,
             dtype: DType::default(),
         }
     }
