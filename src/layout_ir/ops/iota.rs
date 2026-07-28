@@ -17,8 +17,69 @@ use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMa
 /// Reference semantics: `out[c0..ck] = expr(c0..ck)` evaluated in the
 /// canonical right-major order, Int element type (the value IS an index
 /// expression, never a float; the dtype rule pins this in egglog).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Iota;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Iota {
+    /// The window expression, numerically — `None` for forms beyond the
+    /// parsed subset (extraction stays infallible; the reference kernel
+    /// refuses loudly instead).
+    pub expr: Option<IotaExpr>,
+}
+
+/// A numeric IntExpr tree for reference evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IotaExpr {
+    Lit(i64),
+    /// CoordVar axis, zero-based from the END over the OUT coordinates.
+    Coord(usize),
+    Add(Box<IotaExpr>, Box<IotaExpr>),
+    Mul(Box<IotaExpr>, Box<IotaExpr>),
+}
+
+impl IotaExpr {
+    /// Evaluate at the given OUT coordinates (front-indexed).
+    pub fn eval(&self, coords: &[usize]) -> i64 {
+        match self {
+            IotaExpr::Lit(value) => *value,
+            IotaExpr::Coord(axis_from_end) => coords[coords.len() - 1 - axis_from_end] as i64,
+            IotaExpr::Add(a, b) => a.eval(coords) + b.eval(coords),
+            IotaExpr::Mul(a, b) => a.eval(coords) * b.eval(coords),
+        }
+    }
+}
+
+/// Parse one IntExpr class into an [`IotaExpr`], preferring folded literals;
+/// depth-guarded (saturated classes hold many equal representations — any
+/// one denotes the same function). `None` = unsupported constructors.
+pub(crate) fn parse_int_expr(
+    site: &ExtractionSite<'_>,
+    class: &egraph_serialize::ClassId,
+    depth: usize,
+) -> Option<IotaExpr> {
+    if depth == 0 {
+        return None;
+    }
+    if let Some(lit) = site.node_in_class(class, "IntLit") {
+        let value_class = site.class_of_child(lit, 0)?;
+        return Some(IotaExpr::Lit(site.node_in_class_parse_i64(&value_class)?));
+    }
+    if let Some(coord) = site.node_in_class(class, "CoordVar") {
+        let axis_class = site.class_of_child(coord, 0)?;
+        return Some(IotaExpr::Coord(
+            site.node_in_class_parse_i64(&axis_class)? as usize,
+        ));
+    }
+    if let Some(add) = site.node_in_class(class, "IntAdd") {
+        let lhs = parse_int_expr(site, &site.class_of_child(add, 0)?, depth - 1)?;
+        let rhs = parse_int_expr(site, &site.class_of_child(add, 1)?, depth - 1)?;
+        return Some(IotaExpr::Add(Box::new(lhs), Box::new(rhs)));
+    }
+    if let Some(mul) = site.node_in_class(class, "IntMul") {
+        let lhs = parse_int_expr(site, &site.class_of_child(mul, 0)?, depth - 1)?;
+        let rhs = parse_int_expr(site, &site.class_of_child(mul, 1)?, depth - 1)?;
+        return Some(IotaExpr::Mul(Box::new(lhs), Box::new(rhs)));
+    }
+    None
+}
 
 impl OpSlotNames for Iota {}
 
@@ -32,7 +93,7 @@ impl Bufferizable for Iota {}
 
 impl ToDps for Iota {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(IotaDps))
+        Some(Box::new(IotaDps { expr: self.expr.clone() }))
     }
 }
 
@@ -46,8 +107,11 @@ impl LayoutIrOp for Iota {}
 ///
 /// The destination is the op's ONLY operand — the zero-input source's DPS
 /// form is pure write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IotaDps;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IotaDps {
+    /// See [`Iota::expr`].
+    pub expr: Option<IotaExpr>,
+}
 
 impl OpSlotNames for IotaDps {
     fn operand_name(&self, operand: usize) -> String {
@@ -59,6 +123,27 @@ impl OpSlotNames for IotaDps {
 }
 
 impl BufferTensorIrOp for IotaDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        let Some(expr) = &self.expr else {
+            anyhow::bail!("iota reference kernel supports Lit/Coord/Add/Mul expressions only");
+        };
+        let out_dims = ctx.operand_dims.last().cloned().unwrap_or_default();
+        let rank = out_dims.len();
+        for flat in 0..ctx.dests[0].len() {
+            let mut remainder = flat;
+            let mut coords = vec![0usize; rank];
+            for axis in (0..rank).rev() {
+                coords[axis] = remainder % out_dims[axis];
+                remainder /= out_dims[axis];
+            }
+            ctx.dests[0][flat] = expr.eval(&coords) as f32;
+        }
+        Ok(())
+    }
+
     fn label(&self) -> &str {
         "IotaGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
@@ -124,7 +209,7 @@ impl OpMatcher for IotaMatcher {
     /// missing-bounds iota unimplementable (fail-open), and the
     /// fixpoint-invariants stratum panics on a PROVEN violation. An enode
     /// reaching this matcher is certified by construction.
-    fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(Iota)
+    fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
+        Box::new(Iota { expr: parse_int_expr(site, &site.child_class(0), 64) })
     }
 }

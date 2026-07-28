@@ -415,6 +415,41 @@ mod tests {
         }
     }
 
+    /// SLICE differential: their nonzero-start slice lowers to
+    /// iota(z + start) + flat gather — the general-iota expression walker,
+    /// the coordinate-form gather bridge (rank-1 data), and both kernels,
+    /// against their runtime.
+    #[test]
+    fn differential_slice_against_reference_runtime() {
+        let build = || {
+            let mut cx = Graph::new();
+            let x = cx.tensor(8);
+            let out = (x.slice(2..6) + x.slice(1..5)).output();
+            (cx, x, out)
+        };
+        let x_data: Vec<f32> = (0..8).map(|v| (v * v) as f32).collect();
+
+        let (mut cx, x, out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(x.id, x_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(out.id).clone();
+
+        let (cx2, x2, out2) = build();
+        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+        assert!(
+            program.text.contains("LogicalGather"),
+            "the slice must arrive as a gather:\n{}",
+            program.text
+        );
+        let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
+        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+    }
+
     /// Reduction differential: sum over the front axis of a [2, 3] tensor,
     /// crossing the axis-convention flip and the reduce kernel.
     #[test]

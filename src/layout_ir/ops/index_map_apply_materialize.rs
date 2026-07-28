@@ -12,20 +12,11 @@ use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 /// egglog name has no `Generic` suffix, so neither does the op.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexMapApplyMaterialize {
-    /// The index map, numerically — one entry per PARENT axis (outermost
-    /// inward). `None` = entries beyond the affine CoordVar/IntLit forms
-    /// (arithmetic maps): extraction stays infallible, and the reference
-    /// KERNEL refuses loudly instead.
-    pub entries: Option<Vec<MapEntry>>,
-}
-
-/// One numeric index-map entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MapEntry {
-    /// A CoordVar over the OUT coordinates (axis zero-based from the END).
-    Coord(usize),
-    /// A constant index.
-    Lit(i64),
+    /// The index map, numerically — one full expression tree per PARENT
+    /// axis (outermost inward), evaluated at the OUT coordinates. `None` =
+    /// entries beyond the parsed expression subset: extraction stays
+    /// infallible, and the reference KERNEL refuses loudly instead.
+    pub entries: Option<Vec<super::iota::IotaExpr>>,
 }
 
 impl OpSlotNames for IndexMapApplyMaterialize {
@@ -62,7 +53,7 @@ impl LayoutIrOp for IndexMapApplyMaterialize {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexMapApplyMaterializeDps {
     /// See [`IndexMapApplyMaterialize::entries`].
-    pub entries: Option<Vec<MapEntry>>,
+    pub entries: Option<Vec<super::iota::IotaExpr>>,
 }
 
 impl OpSlotNames for IndexMapApplyMaterializeDps {
@@ -82,7 +73,7 @@ impl BufferTensorIrOp for IndexMapApplyMaterializeDps {
     ) -> anyhow::Result<()> {
         let Some(entries) = &self.entries else {
             anyhow::bail!(
-                "materialize reference kernel supports affine CoordVar/IntLit maps only"
+                "materialize reference kernel: index map beyond the parsed expression subset"
             );
         };
         let parent_dims = &ctx.operand_dims[0];
@@ -109,11 +100,13 @@ impl BufferTensorIrOp for IndexMapApplyMaterializeDps {
             }
             let mut parent_flat = 0usize;
             for (k, entry) in entries.iter().enumerate() {
-                let index = match entry {
-                    MapEntry::Coord(axis_from_end) => coords[out_rank - 1 - axis_from_end],
-                    MapEntry::Lit(value) => *value as usize,
-                };
-                parent_flat += index * parent_strides[k];
+                let index = entry.eval(&coords);
+                anyhow::ensure!(
+                    index >= 0 && (index as usize) < parent_dims[k],
+                    "materialize index {index} out of bounds for parent axis {k} (extent {})",
+                    parent_dims[k]
+                );
+                parent_flat += index as usize * parent_strides[k];
             }
             ctx.dests[0][flat] = parent[parent_flat];
         }
@@ -189,7 +182,7 @@ impl OpMatcher for IndexMapApplyMaterializeMatcher {
 /// (axis primitive at child 0) or an IntLit. Anything else (arithmetic
 /// entries) yields `None` — the kernel's loud refusal carries the burden,
 /// extraction never fails.
-fn parse_map_entries(site: &ExtractionSite<'_>) -> Option<Vec<MapEntry>> {
+fn parse_map_entries(site: &ExtractionSite<'_>) -> Option<Vec<super::iota::IotaExpr>> {
     let map_class = site.child_class(1);
     let map_node = site.node_in_class(&map_class, "IndexMapLit")?;
     let mut current = site.class_of_child(map_node, 0)?;
@@ -198,17 +191,7 @@ fn parse_map_entries(site: &ExtractionSite<'_>) -> Option<Vec<MapEntry>> {
         if let Some(cons) = site.node_in_class(&current, "IntExprCons") {
             let element = site.class_of_child(cons, 0)?;
             let tail = site.class_of_child(cons, 1)?;
-            if let Some(coord) = site.node_in_class(&element, "CoordVar") {
-                let axis_class = site.class_of_child(coord, 0)?;
-                let axis = site
-                    .node_in_class_parse_i64(&axis_class)?;
-                entries.push(MapEntry::Coord(axis as usize));
-            } else if let Some(lit) = site.node_in_class(&element, "IntLit") {
-                let value_class = site.class_of_child(lit, 0)?;
-                entries.push(MapEntry::Lit(site.node_in_class_parse_i64(&value_class)?));
-            } else {
-                return None;
-            }
+            entries.push(super::iota::parse_int_expr(site, &element, 64)?);
             current = tail;
         } else if site.node_in_class(&current, "IntExprNil").is_some() {
             return Some(entries);

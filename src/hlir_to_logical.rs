@@ -24,8 +24,8 @@ use rustc_hash::FxHashMap;
 use crate::dtype::DType;
 use crate::graph::Graph;
 use crate::hlir::{
-    Add, Constant, Exp2, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip, Sin, Sqrt,
-    SumReduce,
+    Add, Constant, Exp2, Gather, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip, Sin,
+    Sqrt, SumReduce,
 };
 use crate::shape::{Expression, Term};
 use std::collections::BTreeMap;
@@ -220,6 +220,9 @@ fn op_input_trackers(op: &dyn crate::op::HLIROp) -> Option<Vec<ShapeTracker>> {
     if let Some(op) = op.downcast_ref::<Log2>() {
         return Some(vec![op.input_shape]);
     }
+    if let Some(op) = op.downcast_ref::<Gather>() {
+        return Some(op.input_shapes.clone());
+    }
     if let Some(op) = op.downcast_ref::<SumReduce>() {
         return Some(vec![op.input_shape]);
     }
@@ -330,6 +333,46 @@ fn shape_term_of(dims: &[String]) -> String {
     format!("(ShapeLit {term})")
 }
 
+/// Their RPN index expression rendered as OUR IntExpr term, with `z`
+/// replaced by the given coordinate term and dyn vars resolved via the
+/// pins. Add/Mul only for now (their slice path is affine); anything else
+/// bails loudly.
+fn int_expr_term(
+    expr: &Expression,
+    coord_term: &str,
+    dyn_map: &FxHashMap<char, usize>,
+    at: &str,
+) -> Result<String> {
+    let mut stack: Vec<String> = Vec::new();
+    for term in expr.terms.read().iter() {
+        match term {
+            Term::Num(n) => stack.push(format!("(IntLit {n})")),
+            Term::Var('z') => stack.push(coord_term.to_string()),
+            Term::Var(c) => {
+                let value = dyn_map.get(c).ok_or_else(|| {
+                    anyhow!("hlir_to_logical: unpinned var '{c}' in index expression at {at}")
+                })?;
+                stack.push(format!("(IntLit {value})"));
+            }
+            Term::Add | Term::Mul => {
+                let top = stack.pop();
+                let (Some(a), Some(b)) = (top, stack.pop()) else {
+                    bail!("hlir_to_logical: malformed index expression at {at}");
+                };
+                let op = if matches!(term, Term::Add) { "IntAdd" } else { "IntMul" };
+                stack.push(format!("({op} {b} {a})"));
+            }
+            other => bail!(
+                "hlir_to_logical: index-expression term {other:?} at {at} — later slice"
+            ),
+        }
+    }
+    match (stack.pop(), stack.is_empty()) {
+        (Some(result), true) => Ok(result),
+        _ => bail!("hlir_to_logical: malformed index expression at {at}"),
+    }
+}
+
 fn dtype_term(dtype: DType) -> String {
     format!("({dtype:?})")
 }
@@ -410,6 +453,48 @@ pub fn hlir_to_logical_with_dims(
                 anyhow!("hlir_to_logical: Output at t{idx} has no source")
             })?;
             output_nodes.push((node, source, output.node));
+        } else if dyn_op.downcast_ref::<Gather>().is_some() {
+            // Their gather: sources [indexes, data]; out[i] = data_view[idx[i]]
+            // with idx FLAT into the data view. Our coordinate-form gather
+            // coincides exactly when the data view is RANK 1 (the slice
+            // lowering's shape); higher ranks need flat→coordinate div/mod
+            // decomposition — a later slice, refused loudly.
+            let gather = dyn_op.downcast_ref::<Gather>().unwrap();
+            ensure!(
+                sources.len() == 2,
+                "hlir_to_logical: gather at t{idx} has {} sources",
+                sources.len()
+            );
+            let trackers = &gather.input_shapes;
+            ensure!(trackers.len() == 2, "gather at t{idx} missing trackers");
+            let index_source = values.get(&sources[0]).ok_or_else(|| {
+                anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", sources[0].index())
+            })?;
+            let data_source = values.get(&sources[1]).ok_or_else(|| {
+                anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", sources[1].index())
+            })?;
+            let (index_name, index_dims) =
+                lift_operand(&mut ops_text, &trackers[0], index_source, dyn_map, idx, 0)?;
+            let (data_name, data_dims) =
+                lift_operand(&mut ops_text, &trackers[1], data_source, dyn_map, idx, 1)?;
+            ensure!(
+                data_dims.len() == 1,
+                "hlir_to_logical: gather at t{idx} over rank-{} data — flat→coordinate \
+                 decomposition is a later slice",
+                data_dims.len()
+            );
+            ops_text.push_str(&format!(
+                "(let t{idx}_logical (LogicalGather {data_name} \
+                 (LogicalTensorCons {index_name} (LogicalTensorNil))))\n"
+            ));
+            values.insert(
+                node,
+                ValueInfo {
+                    let_name: format!("t{idx}_logical"),
+                    dims: index_dims,
+                    dtype: data_source.dtype,
+                },
+            );
         } else if let Some(constant) = dyn_op.downcast_ref::<Constant>() {
             // Rank-0 logical constant; consumers broadcast it through lifted
             // views (an empty index map — every consuming axis reads it).
@@ -426,24 +511,24 @@ pub fn hlir_to_logical_with_dims(
                 },
             );
         } else if let Some(iota) = dyn_op.downcast_ref::<Iota>() {
-            if iota.0.to_egglog() != "(MVar \"z\")" {
-                bail!(
-                    "hlir_to_logical slice 1: iota at t{idx} has a non-arange index expression"
-                );
-            }
             let extent = iota
                 .1
                 .exec(dyn_map)
                 .with_context(|| format!("hlir_to_logical: unpinned iota range at t{idx}"))?;
+            // Their iota is a flat generator: value at flat index i is
+            // expr(z = i) over `range` = the shape product. Rank-1 [range]
+            // here; consumers' trackers reshape as needed.
+            let coord = format!("(CoordVar 0 (IntLit {extent}))");
+            let expr = int_expr_term(&iota.0, &coord, dyn_map, &format!("iota t{idx}"))?;
             let shape = shape_term(&[extent]);
             ops_text.push_str(&format!(
-                "(let t{idx}_logical (LogicalIota (CoordVar 0 (IntLit {extent})) {shape}))\n"
+                "(let t{idx}_logical (LogicalIota {expr} {shape}))\n"
             ));
             // The iota authoring contract: every construction site demands
             // its expression's bounds at the fixpoint.
             post_checks.push_str(&format!(
-                "(check (= ?lo{idx} (lower-bound-of (CoordVar 0 (IntLit {extent})))))\n\
-                 (check (= ?hi{idx} (upper-bound-of (CoordVar 0 (IntLit {extent})))))\n"
+                "(check (= ?lo{idx} (lower-bound-of {expr})))\n\
+                 (check (= ?hi{idx} (upper-bound-of {expr})))\n"
             ));
             values.insert(
                 node,
