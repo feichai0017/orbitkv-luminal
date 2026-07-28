@@ -79,6 +79,10 @@ pub fn dps_rewrite(graph: &ExtractedGraph) -> ExtractedGraph {
                 tooltip: "poison destination (contents undefined)".to_string(),
                 shape: result.shape.clone(),
                 dtype: result.dtype.clone(),
+                // The poison destination is physically coincident with its
+                // tied result, geometry included.
+                dims: result.dims.clone(),
+                element_bits: result.element_bits,
                 logical: LogicalInfo {
                     eclass: ClassId::from(format!("dps$poison_logical${synth}")),
                     // Display label only — identity lives in the eclass, so

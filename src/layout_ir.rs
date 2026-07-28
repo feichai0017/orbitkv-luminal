@@ -367,6 +367,12 @@ pub struct LayoutTensorInfo {
     pub tooltip: String,
     pub shape: Option<String>,
     pub dtype: Option<String>,
+    /// The layout's extents as literals, walked off the e-graph terms —
+    /// `None` when symbolic or underivable. The executor/translator surface;
+    /// numeric consumers bail loudly on `None` rather than parse strings.
+    pub dims: Option<Vec<i64>>,
+    /// The layout's element bit width as a literal (same contract as `dims`).
+    pub element_bits: Option<i64>,
     pub logical: LogicalInfo,
     pub layout: LayoutInfo,
 }

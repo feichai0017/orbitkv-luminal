@@ -196,6 +196,8 @@ impl TestGraph {
             tooltip: String::new(),
             shape: None,
             dtype: None,
+            dims: None,
+            element_bits: None,
             logical: LogicalInfo {
                 eclass: ClassId::from(format!("logical${name}")),
                 label: name.to_string(),
@@ -1207,6 +1209,28 @@ mod harness_tests {
         g.output(&x, "B");
         let plan = bufferize::bufferize(&g.build()).expect("pass-through is legal");
         assert!(plan.summary().contains("ops (0):"), "{}", plan.summary());
+    }
+
+    /// Numeric geometry rides extraction: literal dims and bit widths are
+    /// walked off the e-graph terms onto every value info — the surface the
+    /// SsaReferenceRuntime sizes its buffers from.
+    #[test]
+    fn extraction_carries_numeric_dims_and_bits() {
+        use crate::layout_ir::ExtractedNode;
+
+        let graph = extract_fixture("matmul_fused_example.egg");
+        let matmul_out = graph
+            .dag
+            .node_weights()
+            .find_map(|node| match node {
+                ExtractedNode::LayoutOp(op) if op.op.label() == "MatMulFusedGeneric" => {
+                    Some(op.outputs[0].clone())
+                }
+                _ => None,
+            })
+            .expect("fused matmul extracted");
+        assert_eq!(matmul_out.dims.as_deref(), Some(&[2, 4][..]));
+        assert_eq!(matmul_out.element_bits, Some(32));
     }
 
     /// GENOME WALK, consistent-fused: both boundary classes choose the SAME

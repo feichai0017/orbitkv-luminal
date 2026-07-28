@@ -1468,6 +1468,90 @@ impl<'a> ClassRenderer<'a> {
         None
     }
 
+    // ---- numeric geometry (the executor/translator surface): literal shapes
+    // walked straight off the e-graph terms, never parsed from rendered
+    // strings. `None` = symbolic or absent — consumers bail loudly.
+
+    /// A primitive i64 class: any member node whose op parses as an integer.
+    fn numeric_i64(&self, class: &ClassId) -> Option<i64> {
+        for node_id in self.class_nodes.get(class)? {
+            let node = self.egraph.nodes.get(node_id)?;
+            if let Ok(value) = node.op.parse::<i64>() {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// An IntExpr class holding a literal: the IntLit member's value.
+    fn numeric_int_expr(&self, class: &ClassId) -> Option<i64> {
+        let node_id = self.node_with_op(class, "IntLit")?;
+        let node = self.egraph.nodes.get(node_id)?;
+        let value_class = child_class(self.egraph, node, 0)?;
+        self.numeric_i64(&value_class)
+    }
+
+    /// A fully-literal IntExprList, walked cons-by-cons BY E-CLASS (a class's
+    /// serialized representative may be a function node — the R8 lesson).
+    fn numeric_expr_list(&self, class: &ClassId) -> Option<Vec<i64>> {
+        let mut dims = Vec::new();
+        let mut current = class.clone();
+        loop {
+            if let Some(node_id) = self.node_with_op(&current, "IntExprCons").cloned() {
+                let node = self.egraph.nodes.get(&node_id)?;
+                dims.push(self.numeric_int_expr(&child_class(self.egraph, node, 0)?)?);
+                current = child_class(self.egraph, node, 1)?;
+            } else if self.node_with_op(&current, "IntExprNil").is_some() {
+                return Some(dims);
+            } else {
+                return None;
+            }
+        }
+    }
+
+    /// A Shape class with fully-literal dims.
+    fn numeric_shape(&self, class: &ClassId) -> Option<Vec<i64>> {
+        let node_id = self.node_with_op(class, "ShapeLit")?;
+        let node = self.egraph.nodes.get(node_id)?;
+        self.numeric_expr_list(&child_class(self.egraph, node, 0)?)
+    }
+
+    /// The layout class's extents, numerically (mirrors [`Self::layout_shape`]).
+    fn numeric_layout_dims(&self, class: &ClassId) -> Option<Vec<i64>> {
+        for node_id in self.class_nodes.get(class)? {
+            let node = self.egraph.nodes.get(node_id)?;
+            let shape_child = match node.op.as_str() {
+                "RightMajorContiguousElementLayoutLit"
+                | "LeftMajorContiguousElementLayoutLit"
+                | "StridedElementLayoutLit" => 0,
+                "ElementOffsetExpressionLayoutLit" | "BitOffsetExpressionLayoutLit" => 1,
+                _ => continue,
+            };
+            let shape_class = child_class(self.egraph, node, shape_child)?;
+            return self.numeric_shape(&shape_class);
+        }
+        None
+    }
+
+    /// The layout class's element bit width, numerically (mirrors
+    /// [`Self::layout_dtype`]'s constructor positions).
+    fn numeric_layout_bits(&self, class: &ClassId) -> Option<i64> {
+        for node_id in self.class_nodes.get(class)? {
+            let node = self.egraph.nodes.get(node_id)?;
+            let bits_child = match node.op.as_str() {
+                "RightMajorContiguousElementLayoutLit" | "LeftMajorContiguousElementLayoutLit" => 1,
+                "StridedElementLayoutLit" | "ElementOffsetExpressionLayoutLit"
+                | "BitOffsetExpressionLayoutLit" => 2,
+                _ => continue,
+            };
+            let bits_class = child_class(self.egraph, node, bits_child)?;
+            let lit = self.node_with_op(&bits_class, "BitWidthLit")?;
+            let lit_node = self.egraph.nodes.get(lit)?;
+            return self.numeric_i64(&child_class(self.egraph, lit_node, 0)?);
+        }
+        None
+    }
+
     fn layout_shape(&self, class: &ClassId) -> Option<String> {
         for node_id in self.class_nodes.get(class)? {
             let node = self.egraph.nodes.get(node_id)?;
@@ -1563,12 +1647,25 @@ impl<'a> Extractor<'a> {
             ),
         };
 
+        let (dims, element_bits) = match self.layout_tensor_parts(class) {
+            Some((_, layout_class)) => {
+                let renderer = self.renderer();
+                (
+                    renderer.numeric_layout_dims(&layout_class),
+                    renderer.numeric_layout_bits(&layout_class),
+                )
+            }
+            None => (None, None),
+        };
+
         LayoutTensorInfo {
             eclass: class.clone(),
             label,
             tooltip,
             shape,
             dtype,
+            dims,
+            element_bits,
             logical,
             layout,
         }
