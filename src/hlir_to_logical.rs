@@ -27,7 +27,8 @@ use crate::hlir::{
     Add, Constant, Exp2, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip, Sin, Sqrt,
     SumReduce,
 };
-use crate::shape::Expression;
+use crate::shape::{Expression, Term};
+use std::collections::BTreeMap;
 use crate::shape::ShapeTracker;
 
 /// The translated program plus the I/O binding tables the runtime needs.
@@ -67,14 +68,17 @@ fn stride_coefficient(stride: &Expression) -> Option<usize> {
 /// unobservable through strides and semantically inert) from one consumer's
 /// tracker: contiguous trackers answer directly; affine views reconstruct
 /// by sorting real axes' coefficients into a telescoping contiguous ladder.
-fn parent_dims_from_tracker(tracker: &ShapeTracker, at: &str) -> Result<Vec<usize>> {
-    let empty = FxHashMap::default();
+fn parent_dims_from_tracker(
+    tracker: &ShapeTracker,
+    dyn_map: &FxHashMap<char, usize>,
+    at: &str,
+) -> Result<Vec<usize>> {
     let dims: Vec<usize> = tracker
         .dims
         .iter()
         .map(|dim| {
-            dim.exec(&empty)
-                .with_context(|| format!("hlir_to_logical: symbolic dim at {at}"))
+            dim.exec(dyn_map)
+                .with_context(|| format!("hlir_to_logical: unpinned symbolic dim at {at}"))
         })
         .collect::<Result<_>>()?;
     if tracker.is_contiguous() {
@@ -82,7 +86,8 @@ fn parent_dims_from_tracker(tracker: &ShapeTracker, at: &str) -> Result<Vec<usiz
     }
     let mut real: Vec<(usize, usize)> = Vec::new(); // (coefficient, extent)
     for (stride, &dim) in tracker.strides.iter().zip(&dims) {
-        let c = stride_coefficient(stride).ok_or_else(|| {
+        let stride = stride.resolve_vars(dyn_map);
+        let c = stride_coefficient(&stride).ok_or_else(|| {
             anyhow!("hlir_to_logical slice 2: non-affine stride at {at} (repeat/slice — later slice)")
         })?;
         if c > 0 && dim > 1 {
@@ -110,17 +115,17 @@ fn lift_operand(
     ops_text: &mut String,
     tracker: &ShapeTracker,
     source: &ValueInfo,
+    dyn_map: &FxHashMap<char, usize>,
     node_index: usize,
     position: usize,
 ) -> Result<(String, Vec<usize>)> {
     let at = format!("t{node_index} operand {position}");
-    let empty = FxHashMap::default();
     let view_dims: Vec<usize> = tracker
         .dims
         .iter()
         .map(|dim| {
-            dim.exec(&empty)
-                .with_context(|| format!("hlir_to_logical: symbolic dim at {at}"))
+            dim.exec(dyn_map)
+                .with_context(|| format!("hlir_to_logical: unpinned symbolic dim at {at}"))
         })
         .collect::<Result<_>>()?;
     if tracker.is_contiguous() && view_dims == source.dims {
@@ -131,7 +136,7 @@ fn lift_operand(
         .strides
         .iter()
         .map(|stride| {
-            stride_coefficient(stride).ok_or_else(|| {
+            stride_coefficient(&stride.resolve_vars(dyn_map)).ok_or_else(|| {
                 anyhow!("hlir_to_logical slice 2: non-affine stride at {at} (repeat/slice — later slice)")
             })
         })
@@ -227,8 +232,13 @@ fn op_input_trackers(op: &dyn crate::op::HLIROp) -> Option<Vec<ShapeTracker>> {
 /// An Input's dims, recovered from its consumers' ShapeTracker snapshots
 /// (Input ops carry no shape). Every consuming snapshot must be slice-1
 /// admissible and they must all agree.
-fn input_dims_from_consumers(graph: &Graph, input: NodeIndex) -> Result<Vec<usize>> {
+fn input_dims_from_consumers(
+    graph: &Graph,
+    input: NodeIndex,
+    dyn_map: &FxHashMap<char, usize>,
+) -> Result<(Vec<usize>, Option<Vec<Expression>>)> {
     let mut derived: Option<Vec<usize>> = None;
+    let mut dim_exprs: Option<Vec<Expression>> = None;
     for consumer in graph.graph.neighbors_directed(input, Direction::Outgoing) {
         let op = &graph.graph[consumer];
         if op.as_ref().downcast_ref::<Output>().is_some() {
@@ -251,23 +261,31 @@ fn input_dims_from_consumers(graph: &Graph, input: NodeIndex) -> Result<Vec<usiz
                     consumer.index()
                 )
             })?;
-            let dims = parent_dims_from_tracker(tracker, &format!("input t{}", input.index()))?;
+            let dims =
+                parent_dims_from_tracker(tracker, dyn_map, &format!("input t{}", input.index()))?;
+            if tracker.is_contiguous() && dim_exprs.is_none() {
+                // A contiguous snapshot preserves the input's own dim
+                // EXPRESSIONS — the symbolic terms the declaration should
+                // carry (size-1 dims included; they resolve identically).
+                dim_exprs = Some(tracker.dims.iter().copied().filter(|d| d.exec(dyn_map) != Some(1)).collect());
+            }
             match &derived {
                 None => derived = Some(dims),
                 Some(existing) if *existing == dims => {}
                 Some(existing) => bail!(
-                    "hlir_to_logical slice 1: input t{} consumers disagree on shape ({existing:?} vs {dims:?})",
+                    "hlir_to_logical: input t{} consumers disagree on shape ({existing:?} vs {dims:?})",
                     input.index()
                 ),
             }
         }
     }
-    derived.ok_or_else(|| {
+    let dims = derived.ok_or_else(|| {
         anyhow!(
-            "hlir_to_logical slice 1: input t{} has no shape-bearing consumer",
+            "hlir_to_logical: input t{} has no shape-bearing consumer",
             input.index()
         )
-    })
+    })?;
+    Ok((dims, dim_exprs))
 }
 
 /// `[2, 3]` → `(ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil))))`
@@ -275,6 +293,39 @@ fn shape_term(dims: &[usize]) -> String {
     let mut term = "(IntExprNil)".to_string();
     for dim in dims.iter().rev() {
         term = format!("(IntExprCons (IntLit {dim}) {term})");
+    }
+    format!("(ShapeLit {term})")
+}
+
+/// One dim as an egglog term: literals stay literals; a bare symbolic var
+/// becomes `(IntVar "c")` and RECORDS its pin — execution requires every
+/// var pinned via `set_dim` (the binding then seeds tight bounds and the
+/// [n,n] collapse delivers the literal to every user by congruence).
+fn dim_term(
+    expr: &Expression,
+    dyn_map: &FxHashMap<char, usize>,
+    vars: &mut BTreeMap<char, usize>,
+    at: &str,
+) -> Result<String> {
+    let terms = expr.terms.read();
+    match &terms[..] {
+        [Term::Num(n)] => Ok(format!("(IntLit {n})")),
+        [Term::Var(c)] => {
+            let Some(value) = dyn_map.get(c) else {
+                bail!("hlir_to_logical: dim '{c}' at {at} needs set_dim (execution requires a pin)");
+            };
+            vars.insert(*c, *value);
+            Ok(format!("(IntVar \"{c}\")"))
+        }
+        _ => bail!("hlir_to_logical: arithmetic dim expression at {at} — later slice"),
+    }
+}
+
+/// A shape term from per-dim terms.
+fn shape_term_of(dims: &[String]) -> String {
+    let mut term = "(IntExprNil)".to_string();
+    for dim in dims.iter().rev() {
+        term = format!("(IntExprCons {dim} {term})");
     }
     format!("(ShapeLit {term})")
 }
@@ -287,6 +338,8 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
     let order = toposort(&graph.graph, None)
         .map_err(|_| anyhow!("hlir_to_logical: HLIR graph has a cycle"))?;
 
+    let dyn_map = &graph.dyn_map;
+    let mut pinned_vars: BTreeMap<char, usize> = BTreeMap::new();
     let mut values: FxHashMap<NodeIndex, ValueInfo> = FxHashMap::default();
     let mut inputs_text = String::new();
     let mut ops_text = String::new();
@@ -302,8 +355,22 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
         let dyn_op = op.as_ref();
 
         if let Some(input) = dyn_op.downcast_ref::<Input>() {
-            let dims = input_dims_from_consumers(graph, node)?;
-            let shape = shape_term(&dims);
+            let (dims, dim_exprs) = input_dims_from_consumers(graph, node, dyn_map)?;
+            let shape = match &dim_exprs {
+                Some(exprs) => {
+                    let parts = exprs
+                        .iter()
+                        .map(|expr| {
+                            dim_term(expr, dyn_map, &mut pinned_vars, &format!("input t{idx}"))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    shape_term_of(&parts)
+                }
+                // Reconstructed-through-views inputs fall back to resolved
+                // literals — the [n,n] collapse keeps them congruent with any
+                // symbolic mention elsewhere.
+                None => shape_term(&dims),
+            };
             let dtype = dtype_term(input.dtype);
             let label = format!("{}_{idx}", input.label);
             inputs_text.push_str(&format!(
@@ -352,8 +419,8 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
             }
             let extent = iota
                 .1
-                .exec(&FxHashMap::default())
-                .with_context(|| format!("hlir_to_logical slice 1: symbolic iota range at t{idx}"))?;
+                .exec(dyn_map)
+                .with_context(|| format!("hlir_to_logical: unpinned iota range at t{idx}"))?;
             let shape = shape_term(&[extent]);
             ops_text.push_str(&format!(
                 "(let t{idx}_logical (LogicalIota (CoordVar 0 (IntLit {extent})) {shape}))\n"
@@ -412,7 +479,7 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
                         anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
                     })?;
                     let (operand_name, operand_dims) =
-                        lift_operand(&mut ops_text, tracker, source_value, idx, position)?;
+                        lift_operand(&mut ops_text, tracker, source_value, dyn_map, idx, position)?;
                     match &dims {
                         None => dims = Some(operand_dims),
                         Some(existing) if *existing == operand_dims => {}
@@ -458,7 +525,7 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
                     anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
                 })?;
                 let (operand_name, tracker_dims) =
-                    lift_operand(&mut ops_text, &tracker, source_value, idx, 0)?;
+                    lift_operand(&mut ops_text, &tracker, source_value, dyn_map, idx, 0)?;
                 let rank = tracker_dims.len();
                 if dim >= rank {
                     bail!("hlir_to_logical: t{idx} reduces axis {dim} of rank-{rank} input");
@@ -543,9 +610,21 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
         .map(|(_, _, key)| format!("out{key}_buffer_tensor"))
         .collect();
 
+    // BINDING pins: a binding never writes a union — tight bounds ARE the
+    // pin, and the [n,n] collapse rule delivers var ≡ literal to every user
+    // by congruence (including the numeric-geometry walk, which finds the
+    // literal in the collapsed class).
+    let mut seeds_text = String::new();
+    for (var, value) in &pinned_vars {
+        seeds_text.push_str(&format!(
+            "(set (lower-bound-of (IntVar \"{var}\")) (bigint {value}))\n\
+             (set (upper-bound-of (IntVar \"{var}\")) (bigint {value}))\n"
+        ));
+    }
+
     let text = format!(
         "; hlir_to_logical (slice 1: contiguous, static) — {} nodes\n\n\
-         {inputs_text}{ops_text}\n{outputs_text}\
+         {seeds_text}\n{inputs_text}{ops_text}\n{outputs_text}\
          (let model_inputs (LogicalInputLit {model_inputs}))\n\
          (let model_outputs (LogicalOutputLit {model_outputs}))\n\
          (let input_boundary (BufferInputLit {input_boundary}))\n\

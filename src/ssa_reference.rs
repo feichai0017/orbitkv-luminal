@@ -369,6 +369,52 @@ mod tests {
         assert_close(ours.get_f32(c2.id.index() as i64).unwrap(), &expected);
     }
 
+    /// DYNAMIC DIMS over the bounds interface: the model declares
+    /// `(IntVar "a")`, the binding seeds tight bounds from set_dim, the
+    /// [n,n] collapse delivers the literal to the geometry walk — and the
+    /// SAME symbolic graph shape re-renders per pin (the per-bucket model).
+    #[test]
+    fn differential_dynamic_dim_against_reference_runtime() {
+        for pin in [3usize, 5usize] {
+            let build = |dim: usize| {
+                let mut cx = Graph::new();
+                cx.set_dim('a', dim);
+                let x = cx.tensor(('a', 2));
+                let y = cx.tensor(('a', 2));
+                let out = (x * y).output();
+                (cx, x, y, out)
+            };
+            let data_x: Vec<f32> = (0..pin * 2).map(|v| v as f32 + 1.0).collect();
+            let data_y: Vec<f32> = (0..pin * 2).map(|v| (v as f32) * 0.5 - 1.0).collect();
+
+            let (mut cx, x, y, out) = build(pin);
+            cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+            let mut theirs = cx.search(
+                ReferenceRuntime::default(),
+                CompileOptions::default().search_graph_limit(1),
+            );
+            theirs.set_data(x.id, data_x.clone());
+            theirs.set_data(y.id, data_y.clone());
+            theirs.execute(&cx.dyn_map);
+            let expected = theirs.get_f32(out.id).clone();
+
+            let (cx2, x2, y2, out2) = build(pin);
+            let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+            assert!(
+                program.text.contains("(IntVar \"a\")"),
+                "the model must stay symbolic:\n{}",
+                program.text
+            );
+            assert!(
+                program.text.contains(&format!("(bigint {pin})")),
+                "the binding must pin via tight bounds:\n{}",
+                program.text
+            );
+            let ours = run_ssa(&cx2, &[(x2.id, data_x), (y2.id, data_y)]);
+            assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        }
+    }
+
     /// Reduction differential: sum over the front axis of a [2, 3] tensor,
     /// crossing the axis-convention flip and the reduce kernel.
     #[test]
