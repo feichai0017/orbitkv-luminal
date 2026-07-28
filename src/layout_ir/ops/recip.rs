@@ -56,6 +56,13 @@ impl OpSlotNames for RecipFunctionalDps {
 }
 
 impl BufferTensorIrOp for RecipFunctionalDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        ctx.unary_elementwise(|x| x.recip())
+    }
+
     fn label(&self) -> &str {
         "RecipFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

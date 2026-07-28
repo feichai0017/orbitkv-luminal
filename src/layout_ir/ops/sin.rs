@@ -56,6 +56,13 @@ impl OpSlotNames for SinFunctionalDps {
 }
 
 impl BufferTensorIrOp for SinFunctionalDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        ctx.unary_elementwise(|x| x.sin())
+    }
+
     fn label(&self) -> &str {
         "SinFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

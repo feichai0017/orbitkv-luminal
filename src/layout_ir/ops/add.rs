@@ -58,6 +58,13 @@ impl OpSlotNames for AddFunctionalDps {
 }
 
 impl BufferTensorIrOp for AddFunctionalDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        ctx.binary_elementwise(|a, b| a + b)
+    }
+
     fn label(&self) -> &str {
         "AddFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

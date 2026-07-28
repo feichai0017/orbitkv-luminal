@@ -64,6 +64,31 @@ impl OpSlotNames for MatMulFusedDps {
 }
 
 impl BufferTensorIrOp for MatMulFusedDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        let lhs_dims = &ctx.operand_dims[0];
+        let rhs_dims = &ctx.operand_dims[1];
+        anyhow::ensure!(
+            lhs_dims.len() == 2 && rhs_dims.len() == 2 && lhs_dims[1] == rhs_dims[0],
+            "matmul kernel geometry mismatch: {lhs_dims:?} x {rhs_dims:?}"
+        );
+        let (m, k, n) = (lhs_dims[0], lhs_dims[1], rhs_dims[1]);
+        anyhow::ensure!(ctx.dests[0].len() == m * n, "matmul dest length mismatch");
+        let (lhs, rhs) = (&ctx.operands[0], &ctx.operands[1]);
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = 0.0;
+                for kk in 0..k {
+                    acc += lhs[i * k + kk] * rhs[kk * n + j];
+                }
+                ctx.dests[0][i * n + j] = acc;
+            }
+        }
+        Ok(())
+    }
+
     fn label(&self) -> &str {
         "MatMulFusedGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

@@ -56,6 +56,13 @@ impl OpSlotNames for Log2FunctionalDps {
 }
 
 impl BufferTensorIrOp for Log2FunctionalDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        ctx.unary_elementwise(|x| x.log2())
+    }
+
     fn label(&self) -> &str {
         "Log2FunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

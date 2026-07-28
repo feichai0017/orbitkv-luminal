@@ -8,7 +8,10 @@ use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 /// Functional form: pure dataflow, conservative [`Bufferizable`] defaults
 /// (every operand read, the result freshly allocated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReduceSum;
+pub struct ReduceSum {
+    /// Reduction axis, zero-based FROM THE END (the term's i64 metadata).
+    pub axis: i64,
+}
 
 impl OpSlotNames for ReduceSum {
     fn operand_name(&self, operand: usize) -> String {
@@ -29,7 +32,7 @@ impl Bufferizable for ReduceSum {}
 
 impl ToDps for ReduceSum {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(ReduceSumDps))
+        Some(Box::new(ReduceSumDps { axis: self.axis }))
     }
 }
 
@@ -41,7 +44,10 @@ impl LayoutIrOp for ReduceSum {}
 /// ReduceSumGeneric(input: read, dest0: write-only ↔ out0) -> out0
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReduceSumDps;
+pub struct ReduceSumDps {
+    /// Reduction axis, zero-based FROM THE END (the term's i64 metadata).
+    pub axis: i64,
+}
 
 impl OpSlotNames for ReduceSumDps {
     fn operand_name(&self, operand: usize) -> String {
@@ -54,6 +60,13 @@ impl OpSlotNames for ReduceSumDps {
 }
 
 impl BufferTensorIrOp for ReduceSumDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        ctx.reduce_axis(self.axis, 0.0, |acc, x| acc + x)
+    }
+
     fn label(&self) -> &str {
         "ReduceSumGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
@@ -113,7 +126,7 @@ impl OpMatcher for ReduceSumMatcher {
         &[("axis", 1), ("out_layout", 2)]
     }
 
-    fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ReduceSum)
+    fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
+        Box::new(ReduceSum { axis: site.child_i64(1) })
     }
 }

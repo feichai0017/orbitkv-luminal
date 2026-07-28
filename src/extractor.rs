@@ -1516,6 +1516,13 @@ impl<'a> ClassRenderer<'a> {
         self.numeric_expr_list(&child_class(self.egraph, node, 0)?)
     }
 
+    /// The numeric `BufferLit` value of a BufferId class, when literal.
+    fn numeric_buffer_lit(&self, class: &ClassId) -> Option<i64> {
+        let node_id = self.node_with_op(class, "BufferLit")?;
+        let node = self.egraph.nodes.get(node_id)?;
+        self.numeric_i64(&child_class(self.egraph, node, 0)?)
+    }
+
     /// The layout class's extents, numerically (mirrors [`Self::layout_shape`]).
     fn numeric_layout_dims(&self, class: &ClassId) -> Option<Vec<i64>> {
         for node_id in self.class_nodes.get(class)? {
@@ -1734,6 +1741,7 @@ impl<'a> Extractor<'a> {
             None => rendered,
         };
         let id_tooltip = self.buffer_id_tooltip(buffer_id_class);
+        let lit = self.renderer().numeric_buffer_lit(buffer_id_class);
         BufferInfo {
             tensor_eclass: buffer_tensor_class.clone(),
             tensor_label,
@@ -1743,6 +1751,7 @@ impl<'a> Extractor<'a> {
             id_tooltip,
             access: self.buffer_access(buffer_id_class),
             freed_by: self.buffer_freed_by(buffer_id_class),
+            lit,
         }
     }
 

@@ -72,6 +72,85 @@ impl<T: BufferTensorIrOp + Clone + 'static> CloneBufferTensorIrOp for T {
 /// supertrait); planner-synthesized ops like [`BufferCopy`] implement ONLY
 /// this trait — they have no logical semantics, no egglog constructor, and
 /// never meet the analyzer.
+
+/// One reference-kernel invocation's storage view: alias-safe by
+/// construction — operand contents are CLONED before any destination is
+/// written, so in-place forms read consistent pre-op data; the runtime
+/// writes `dests` back to the result buffers afterwards. f32 only for now
+/// (slice 1); geometry comes from the plan's annotated buffers.
+#[derive(Debug)]
+pub struct ReferenceKernelCtx {
+    /// Operand contents in slot order (destinations included, pre-op).
+    pub operands: Vec<Vec<f32>>,
+    /// Per-operand dims, from the operand buffers' annotated geometry.
+    pub operand_dims: Vec<Vec<usize>>,
+    /// Result contents to fill, in result order (zero-initialized).
+    pub dests: Vec<Vec<f32>>,
+}
+
+impl ReferenceKernelCtx {
+    /// dest0[i] = f(operand0[i])
+    pub fn unary_elementwise(&mut self, f: impl Fn(f32) -> f32) -> Result<()> {
+        anyhow::ensure!(
+            self.operands[0].len() == self.dests[0].len(),
+            "unary kernel length mismatch"
+        );
+        for (out, x) in self.dests[0].iter_mut().zip(&self.operands[0]) {
+            *out = f(*x);
+        }
+        Ok(())
+    }
+
+    /// dest0[i] = f(operand0[i], operand1[i])
+    pub fn binary_elementwise(&mut self, f: impl Fn(f32, f32) -> f32) -> Result<()> {
+        anyhow::ensure!(
+            self.operands[0].len() == self.operands[1].len()
+                && self.operands[0].len() == self.dests[0].len(),
+            "binary kernel length mismatch"
+        );
+        let (lhs, rhs) = (&self.operands[0], &self.operands[1]);
+        for (index, out) in self.dests[0].iter_mut().enumerate() {
+            *out = f(lhs[index], rhs[index]);
+        }
+        Ok(())
+    }
+
+    /// Contiguous fold over one axis (zero-based FROM THE END — the house
+    /// nth-from-end convention, matching the reduce ops' metadata).
+    pub fn reduce_axis(
+        &mut self,
+        axis_from_end: i64,
+        init: f32,
+        fold: impl Fn(f32, f32) -> f32,
+    ) -> Result<()> {
+        let dims = &self.operand_dims[0];
+        let rank = dims.len();
+        anyhow::ensure!(
+            (axis_from_end as usize) < rank,
+            "reduce axis {axis_from_end} out of rank {rank}"
+        );
+        let axis = rank - 1 - axis_from_end as usize;
+        let reduced = dims[axis];
+        let inner: usize = dims[axis + 1..].iter().product();
+        let outer: usize = dims[..axis].iter().product();
+        anyhow::ensure!(
+            self.dests[0].len() == outer * inner && self.operands[0].len() == outer * reduced * inner,
+            "reduce kernel geometry mismatch"
+        );
+        let input = &self.operands[0];
+        for o in 0..outer {
+            for i in 0..inner {
+                let mut acc = init;
+                for r in 0..reduced {
+                    acc = fold(acc, input[o * reduced * inner + r * inner + i]);
+                }
+                self.dests[0][o * inner + i] = acc;
+            }
+        }
+        Ok(())
+    }
+}
+
 pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + Debug {
     /// The op's IR name (see the label policy in [`crate::layout_ir::ops`]).
     fn label(&self) -> &str;
@@ -84,6 +163,14 @@ pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + Debug {
     /// Is this result's buffer written? (Outputs are written.)
     fn result_writes_memory(&self, _result: usize) -> bool {
         true
+    }
+
+    /// Execute this op on raw f32 storage — the `SsaReferenceRuntime`
+    /// kernel. Ops without one refuse LOUDLY (never silently skip); kernels
+    /// live beside their op in its module, registry-style.
+    fn reference_execute(&self, ctx: &mut ReferenceKernelCtx) -> Result<()> {
+        let _ = ctx;
+        anyhow::bail!("no reference kernel for {}", self.label())
     }
 
     /// Does this result start as undefined CONTENTS (like `tensor.empty` /
@@ -149,6 +236,11 @@ impl OpSlotNames for BufferAlloc {
 }
 
 impl BufferTensorIrOp for BufferAlloc {
+    fn reference_execute(&self, _ctx: &mut ReferenceKernelCtx) -> Result<()> {
+        // No computation: storage is pre-materialized; contents start undefined (zeros here).
+        Ok(())
+    }
+
     fn label(&self) -> &str {
         "BufferAlloc"
     }
@@ -176,6 +268,11 @@ impl OpSlotNames for BufferFree {
 }
 
 impl BufferTensorIrOp for BufferFree {
+    fn reference_execute(&self, _ctx: &mut ReferenceKernelCtx) -> Result<()> {
+        // No computation: liveness bookkeeping only; the reference executor keeps storage.
+        Ok(())
+    }
+
     fn label(&self) -> &str {
         "BufferFree"
     }
@@ -1654,6 +1751,9 @@ mod tests {
                     freed_by,
                     owner: crate::bufferize::Owner::Caller,
                     label: name.to_string(),
+                    dims: None,
+                    element_bits: None,
+                    lit: None,
                 },
             );
         }

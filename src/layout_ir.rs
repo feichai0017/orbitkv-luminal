@@ -249,6 +249,24 @@ pub struct ExtractionSite<'a> {
 }
 
 impl ExtractionSite<'_> {
+    /// The matched enode's child at `index` as a literal i64. Panics when it
+    /// is not one — for a constructor whose schema declares a primitive i64
+    /// child, anything else is schema drift (see the validity contract).
+    pub fn child_i64(&self, index: usize) -> i64 {
+        let class = self.child_class(index);
+        for node in self.egraph.nodes.values() {
+            if node.eclass == class {
+                if let Ok(value) = node.op.parse::<i64>() {
+                    return value;
+                }
+            }
+        }
+        panic!(
+            "schema drift: {} child {index} is not a literal i64",
+            self.node.op
+        );
+    }
+
     /// The e-class of the matched enode's child at `index`. Panics on a
     /// missing child — a matched enode's arity is fixed by its constructor,
     /// so a short child list is schema drift (see the validity contract).
@@ -439,6 +457,9 @@ pub struct BufferInfo {
     /// The declared deallocation responsibility — `None` when the program
     /// omits it, which input-program validation rejects for EVERY buffer.
     pub freed_by: Option<FreedBy>,
+    /// The numeric `BufferLit` value when the id is a literal — the key
+    /// runtimes bind caller data by (`None` for non-literal ids).
+    pub lit: Option<i64>,
 }
 
 impl BufferInfo {

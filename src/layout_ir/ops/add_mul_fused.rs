@@ -63,6 +63,24 @@ impl OpSlotNames for AddMulFusedDps {
 }
 
 impl BufferTensorIrOp for AddMulFusedDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        let (lhs, rhs) = (&ctx.operands[0], &ctx.operands[1]);
+        anyhow::ensure!(
+            lhs.len() == rhs.len()
+                && ctx.dests[0].len() == lhs.len()
+                && ctx.dests[1].len() == lhs.len(),
+            "fused add/mul kernel length mismatch"
+        );
+        for index in 0..lhs.len() {
+            ctx.dests[0][index] = lhs[index] + rhs[index];
+            ctx.dests[1][index] = lhs[index] * rhs[index];
+        }
+        Ok(())
+    }
+
     fn label(&self) -> &str {
         "AddMulFusedGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

@@ -58,6 +58,13 @@ impl OpSlotNames for ModFunctionalDps {
 }
 
 impl BufferTensorIrOp for ModFunctionalDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        ctx.binary_elementwise(|a, b| a % b)
+    }
+
     fn label(&self) -> &str {
         "ModFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

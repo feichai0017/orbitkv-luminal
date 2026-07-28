@@ -21,6 +21,7 @@ pub mod extractor;
 pub mod hlir_to_logical;
 pub mod layout_ir;
 pub mod logical_op;
+pub mod ssa_reference;
 #[cfg(test)]
 pub mod test_support;
 

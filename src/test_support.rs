@@ -224,6 +224,7 @@ impl TestGraph {
     ) -> BufferInfo {
         let n = self.fresh();
         BufferInfo {
+            lit: None,
             tensor_eclass: ClassId::from(format!("buftensor${n}")),
             tensor_label: buffer.to_string(),
             tensor_tooltip: String::new(),

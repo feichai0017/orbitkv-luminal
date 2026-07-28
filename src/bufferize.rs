@@ -114,6 +114,14 @@ pub struct Buffer {
     pub freed_by: FreedBy,
     pub owner: Owner,
     pub label: String,
+    /// Numeric extents of the values this buffer backs (annotated after
+    /// lowering from the extraction's literal geometry; `None` = symbolic).
+    pub dims: Option<Vec<i64>>,
+    /// Element bit width (same provenance and contract as `dims`).
+    pub element_bits: Option<i64>,
+    /// The numeric `BufferLit` id for boundary buffers — the key runtimes
+    /// bind caller data by.
+    pub lit: Option<i64>,
 }
 
 /// Where a program output value ends up: its value and the pinned buffer it was
@@ -1294,7 +1302,62 @@ fn validate_input_program(graph: &ExtractedGraph) -> Result<()> {
 /// [`BufferIrGraph`] whose values are buffers and whose copies are real nodes. The
 /// source `graph` is borrowed and left untouched.
 pub fn bufferize(graph: &ExtractedGraph) -> Result<BufferIrGraph> {
-    lower(buffer_tensor_plan(graph)?)
+    let mut plan = lower(buffer_tensor_plan(graph)?)?;
+    annotate_buffer_geometry(&mut plan, graph);
+    Ok(plan)
+}
+
+/// Thread the extraction's literal geometry (dims, element bits) and the
+/// boundary `BufferLit` keys onto the plan's buffers — the sizing/binding
+/// surface the `SsaReferenceRuntime` executes from. Purely additive; `None`
+/// stays `None` for symbolic geometry, and numeric consumers bail loudly.
+fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) {
+    use std::collections::HashMap as Map;
+    let mut value_geometry: Map<ClassId, (Option<Vec<i64>>, Option<i64>)> = Map::new();
+    let mut boundary_lits: Map<ClassId, i64> = Map::new();
+    for node in graph.dag.node_weights() {
+        match node {
+            ExtractedNode::BufferInput(input) => {
+                value_geometry
+                    .entry(input.value.eclass.clone())
+                    .or_insert((input.value.dims.clone(), input.value.element_bits));
+                if let Some(lit) = input.buffer.lit {
+                    boundary_lits.insert(input.buffer.id_eclass.clone(), lit);
+                }
+            }
+            ExtractedNode::LayoutOp(op) => {
+                for output in &op.outputs {
+                    value_geometry
+                        .entry(output.eclass.clone())
+                        .or_insert((output.dims.clone(), output.element_bits));
+                }
+            }
+            ExtractedNode::BufferOutput(output) => {
+                for slot in &output.slots {
+                    if let Some(lit) = slot.buffer.lit {
+                        boundary_lits.insert(slot.buffer.id_eclass.clone(), lit);
+                    }
+                }
+            }
+        }
+    }
+    for (value, id) in &plan.value_buffer {
+        if let Some((dims, bits)) = value_geometry.get(value) {
+            if let Some(buffer) = plan.buffers.get_mut(id) {
+                if buffer.dims.is_none() {
+                    buffer.dims = dims.clone();
+                }
+                if buffer.element_bits.is_none() {
+                    buffer.element_bits = *bits;
+                }
+            }
+        }
+    }
+    for buffer in plan.buffers.values_mut() {
+        if let BufferId::Boundary(eclass) = &buffer.id {
+            buffer.lit = boundary_lits.get(eclass).copied();
+        }
+    }
 }
 
 /// The PLANNING half of [`bufferize`]: validate the input program, analyze,
@@ -1530,6 +1593,9 @@ impl Bufferizer {
             freed_by,
             owner: Owner::Caller,
             label,
+            dims: None,
+            element_bits: None,
+            lit: None,
         });
         id
     }
@@ -1547,6 +1613,9 @@ impl Bufferizer {
                 freed_by: FreedBy::Program,
                 owner: Owner::System,
                 label,
+                dims: None,
+                element_bits: None,
+                lit: None,
             },
         );
         id
@@ -2128,7 +2197,7 @@ mod tests {
         let ops: Vec<Box<dyn LayoutIrOp>> = vec![
             Box::new(AddFunctional),
             Box::new(SqrtFunctional),
-            Box::new(ReduceSum),
+            Box::new(ReduceSum { axis: 0 }),
             Box::new(IndexMapApplyMaterialize),
         ];
         for op in &ops {
@@ -2592,8 +2661,8 @@ mod tests {
             Box::new(AddMutating),
             Box::new(AddMulFused),
             Box::new(MaterializeLayoutCopy),
-            Box::new(ReduceSum),
-            Box::new(ReduceMax),
+            Box::new(ReduceSum { axis: 0 }),
+            Box::new(ReduceMax { axis: 0 }),
             Box::new(IndexMapApplyMaterialize),
         ];
         for op in &ops {

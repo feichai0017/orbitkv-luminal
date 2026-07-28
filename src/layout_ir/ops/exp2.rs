@@ -56,6 +56,13 @@ impl OpSlotNames for Exp2FunctionalDps {
 }
 
 impl BufferTensorIrOp for Exp2FunctionalDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        ctx.unary_elementwise(|x| x.exp2())
+    }
+
     fn label(&self) -> &str {
         "Exp2FunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
