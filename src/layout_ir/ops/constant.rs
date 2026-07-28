@@ -17,7 +17,10 @@ use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMa
 /// Reference semantics: write the value (F32 — the dtype rule pins this
 /// in egglog) into the single element the layout addresses.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Constant;
+pub struct Constant {
+    /// The literal value (the term's f64 metadata).
+    pub value: f64,
+}
 
 impl OpSlotNames for Constant {}
 
@@ -31,7 +34,7 @@ impl Bufferizable for Constant {}
 
 impl ToDps for Constant {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(ConstantDps))
+        Some(Box::new(ConstantDps { value: self.value }))
     }
 }
 
@@ -43,7 +46,10 @@ impl LayoutIrOp for Constant {}
 /// ConstantGeneric(dest0: write-only ↔ out0) -> out0
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ConstantDps;
+pub struct ConstantDps {
+    /// The literal value (the term's f64 metadata).
+    pub value: f64,
+}
 
 impl OpSlotNames for ConstantDps {
     fn operand_name(&self, operand: usize) -> String {
@@ -55,6 +61,14 @@ impl OpSlotNames for ConstantDps {
 }
 
 impl BufferTensorIrOp for ConstantDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        ctx.dests[0].fill(self.value as f32);
+        Ok(())
+    }
+
     fn label(&self) -> &str {
         "ConstantGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
@@ -114,7 +128,7 @@ impl OpMatcher for ConstantMatcher {
         &[("value", 0), ("out_layout", 1)]
     }
 
-    fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(Constant)
+    fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
+        Box::new(Constant { value: site.child_f64(0) })
     }
 }

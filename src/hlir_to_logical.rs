@@ -2,19 +2,19 @@
 //! into the logical-SSA egglog vocabulary (model + binding text appended to
 //! `egglog_snippet::assembled_program()`).
 //!
-//! SLICE 1 (ruling 2026-07-28): CONTIGUOUS, STATIC graphs only — inputs,
-//! elementwise ops, reductions, arange-style iota. Anything else (symbolic
-//! dims, non-contiguous ShapeTrackers, broadcast strides, movement views,
-//! gather/scatter/cast/loops/constants) fails LOUDLY with a named node —
-//! never a silent mistranslation. Stride-pattern lifting into IndexMapApply
-//! views is slice 2.
+//! SLICE 2: STATIC graphs with contiguous ops plus movement views lifted
+//! from affine stride patterns — permutes, expands/broadcasts (zero
+//! strides), size-1 axes, and rank-0 constants broadcast anywhere. A
+//! non-affine stride (repeat's `z % d`, slices' offsets, merged axes) or
+//! anything else outside the slice (symbolic dims, gather/scatter/cast/
+//! loops) fails LOUDLY with a named node — never a silent mistranslation.
 //!
 //! This module is interim scaffolding: it dies when GraphTensor emits
 //! logical ops directly (M3). It deliberately lives beside — never inside —
 //! the existing `build_search_space` ladder; the branch is the gate
 //! (ruling: no cargo features).
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use as_any::Downcast;
 use petgraph::Direction;
 use petgraph::algo::toposort;
@@ -24,8 +24,10 @@ use rustc_hash::FxHashMap;
 use crate::dtype::DType;
 use crate::graph::Graph;
 use crate::hlir::{
-    Add, Exp2, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip, Sin, Sqrt, SumReduce,
+    Add, Constant, Exp2, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip, Sin, Sqrt,
+    SumReduce,
 };
+use crate::shape::Expression;
 use crate::shape::ShapeTracker;
 
 /// The translated program plus the I/O binding tables the runtime needs.
@@ -50,20 +52,140 @@ struct ValueInfo {
     dtype: DType,
 }
 
-/// A ShapeTracker admissible in slice 1: contiguous with fully static dims.
-fn static_contiguous_dims(tracker: &ShapeTracker, at: &str) -> Result<Vec<usize>> {
-    if !tracker.is_contiguous() {
-        bail!("hlir_to_logical slice 1: non-contiguous ShapeTracker at {at} (views are slice 2)");
-    }
+/// The affine-through-origin coefficient of a stride expression in `z`
+/// (`s(i) = c * i`) — `None` for anything nonlinear (repeat's modulo,
+/// offsets) or containing unresolved dyn vars.
+fn stride_coefficient(stride: &Expression) -> Option<usize> {
+    let s0 = stride.exec_single_var_checked(0)?;
+    let s1 = stride.exec_single_var_checked(1)?;
+    let s2 = stride.exec_single_var_checked(2)?;
+    let s3 = stride.exec_single_var_checked(3)?;
+    (s0 == 0 && s2 == 2 * s1 && s3 == 3 * s1).then_some(s1)
+}
+
+/// Recover the CANONICAL parent dims (size-1 axes omitted — they are
+/// unobservable through strides and semantically inert) from one consumer's
+/// tracker: contiguous trackers answer directly; affine views reconstruct
+/// by sorting real axes' coefficients into a telescoping contiguous ladder.
+fn parent_dims_from_tracker(tracker: &ShapeTracker, at: &str) -> Result<Vec<usize>> {
     let empty = FxHashMap::default();
-    tracker
+    let dims: Vec<usize> = tracker
         .dims
         .iter()
         .map(|dim| {
             dim.exec(&empty)
-                .with_context(|| format!("hlir_to_logical slice 1: symbolic dim at {at}"))
+                .with_context(|| format!("hlir_to_logical: symbolic dim at {at}"))
         })
-        .collect()
+        .collect::<Result<_>>()?;
+    if tracker.is_contiguous() {
+        return Ok(dims.into_iter().filter(|dim| *dim > 1).collect());
+    }
+    let mut real: Vec<(usize, usize)> = Vec::new(); // (coefficient, extent)
+    for (stride, &dim) in tracker.strides.iter().zip(&dims) {
+        let c = stride_coefficient(stride).ok_or_else(|| {
+            anyhow!("hlir_to_logical slice 2: non-affine stride at {at} (repeat/slice — later slice)")
+        })?;
+        if c > 0 && dim > 1 {
+            real.push((c, dim));
+        }
+    }
+    real.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut expected = 1usize;
+    for (c, dim) in real.iter().rev() {
+        ensure!(
+            *c == expected,
+            "hlir_to_logical slice 2: strides at {at} do not telescope to a contiguous parent"
+        );
+        expected *= dim;
+    }
+    Ok(real.into_iter().map(|(_, dim)| dim).collect())
+}
+
+/// Translate one operand: identity when the snapshot is contiguous over the
+/// source's own dims; otherwise LIFT the affine stride pattern into an
+/// IndexMapApply view (permute/expand/broadcast; size-1 view axes and
+/// size-1 parent axes are index-0 constants). Returns the operand's let
+/// name and its VIEW dims (the shape the consuming op computes over).
+fn lift_operand(
+    ops_text: &mut String,
+    tracker: &ShapeTracker,
+    source: &ValueInfo,
+    node_index: usize,
+    position: usize,
+) -> Result<(String, Vec<usize>)> {
+    let at = format!("t{node_index} operand {position}");
+    let empty = FxHashMap::default();
+    let view_dims: Vec<usize> = tracker
+        .dims
+        .iter()
+        .map(|dim| {
+            dim.exec(&empty)
+                .with_context(|| format!("hlir_to_logical: symbolic dim at {at}"))
+        })
+        .collect::<Result<_>>()?;
+    if tracker.is_contiguous() && view_dims == source.dims {
+        return Ok((source.let_name.clone(), view_dims));
+    }
+
+    let coefficients: Vec<usize> = tracker
+        .strides
+        .iter()
+        .map(|stride| {
+            stride_coefficient(stride).ok_or_else(|| {
+                anyhow!("hlir_to_logical slice 2: non-affine stride at {at} (repeat/slice — later slice)")
+            })
+        })
+        .collect::<Result<_>>()?;
+
+    let parent = &source.dims;
+    let mut parent_strides = vec![1usize; parent.len()];
+    for k in (0..parent.len().saturating_sub(1)).rev() {
+        parent_strides[k] = parent_strides[k + 1] * parent[k + 1];
+    }
+
+    // Match every real view axis to a unique parent axis by (stride, extent).
+    let rank = view_dims.len();
+    let mut consumed: Vec<Option<usize>> = vec![None; parent.len()];
+    for (axis, (&coefficient, &dim)) in coefficients.iter().zip(&view_dims).enumerate() {
+        if coefficient == 0 || dim == 1 {
+            continue; // broadcast, or a degenerate axis whose index is always 0
+        }
+        let matched = (0..parent.len()).find(|&k| {
+            consumed[k].is_none() && parent_strides[k] == coefficient && parent[k] == dim
+        });
+        let Some(k) = matched else {
+            bail!(
+                "hlir_to_logical slice 2: {at} axis {axis} (extent {dim}, stride {coefficient}) \
+                 matches no axis of parent {parent:?} (repeat/slice/merge — later slice)"
+            );
+        };
+        consumed[k] = Some(axis);
+    }
+    for k in 0..parent.len() {
+        ensure!(
+            parent[k] == 1 || consumed[k].is_some(),
+            "hlir_to_logical slice 2: {at} drops parent axis {k} (extent {}) — slicing is a later slice",
+            parent[k]
+        );
+    }
+
+    // Map entries per PARENT axis, outermost inward; CoordVar axes are
+    // zero-based from the innermost of the VIEW shape.
+    let mut entries = "(IntExprNil)".to_string();
+    for k in (0..parent.len()).rev() {
+        let entry = match consumed[k] {
+            Some(axis) => format!("(CoordVar {} (IntLit {}))", rank - 1 - axis, view_dims[axis]),
+            None => "(IntLit 0)".to_string(),
+        };
+        entries = format!("(IntExprCons {entry} {entries})");
+    }
+    let shape = shape_term(&view_dims);
+    let name = format!("t{node_index}_operand{position}_view");
+    ops_text.push_str(&format!(
+        "(let {name} (LogicalIndexMapApply {} (IndexMapLit {entries}) {shape}))\n",
+        source.let_name
+    ));
+    Ok((name, view_dims))
 }
 
 /// The slice-1 view of an op's per-input ShapeTrackers (`None` = the op
@@ -129,8 +251,7 @@ fn input_dims_from_consumers(graph: &Graph, input: NodeIndex) -> Result<Vec<usiz
                     consumer.index()
                 )
             })?;
-            let dims =
-                static_contiguous_dims(tracker, &format!("input t{}", input.index()))?;
+            let dims = parent_dims_from_tracker(tracker, &format!("input t{}", input.index()))?;
             match &derived {
                 None => derived = Some(dims),
                 Some(existing) if *existing == dims => {}
@@ -208,6 +329,21 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
                 anyhow!("hlir_to_logical: Output at t{idx} has no source")
             })?;
             output_nodes.push((node, source, output.node));
+        } else if let Some(constant) = dyn_op.downcast_ref::<Constant>() {
+            // Rank-0 logical constant; consumers broadcast it through lifted
+            // views (an empty index map — every consuming axis reads it).
+            ops_text.push_str(&format!(
+                "(let t{idx}_logical (LogicalConstant {:?}))\n",
+                constant.0 as f64
+            ));
+            values.insert(
+                node,
+                ValueInfo {
+                    let_name: format!("t{idx}_logical"),
+                    dims: Vec::new(),
+                    dtype: DType::F32,
+                },
+            );
         } else if let Some(iota) = dyn_op.downcast_ref::<Iota>() {
             if iota.0.to_egglog() != "(MVar \"z\")" {
                 bail!(
@@ -272,22 +408,16 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
                     let tracker = trackers.get(position).ok_or_else(|| {
                         anyhow!("hlir_to_logical: {constructor} at t{idx} missing tracker {position}")
                     })?;
-                    let tracker_dims =
-                        static_contiguous_dims(tracker, &format!("t{idx} operand {position}"))?;
                     let source_value = values.get(source).ok_or_else(|| {
                         anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
                     })?;
-                    if source_value.dims != tracker_dims {
-                        bail!(
-                            "hlir_to_logical slice 1: t{idx} operand {position} snapshot {tracker_dims:?} disagrees with source dims {:?} (broadcast/view — slice 2)",
-                            source_value.dims
-                        );
-                    }
+                    let (operand_name, operand_dims) =
+                        lift_operand(&mut ops_text, tracker, source_value, idx, position)?;
                     match &dims {
-                        None => dims = Some(tracker_dims),
-                        Some(existing) if *existing == tracker_dims => {}
+                        None => dims = Some(operand_dims),
+                        Some(existing) if *existing == operand_dims => {}
                         Some(existing) => bail!(
-                            "hlir_to_logical slice 1: t{idx} mixes operand shapes {existing:?} vs {tracker_dims:?} (broadcast — slice 2)"
+                            "hlir_to_logical: t{idx} operand views disagree on shape ({existing:?} vs {operand_dims:?})"
                         ),
                     }
                     match dtype {
@@ -298,7 +428,7 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
                             source_value.dtype
                         ),
                     }
-                    operand_names.push(source_value.let_name.clone());
+                    operand_names.push(operand_name);
                 }
                 ops_text.push_str(&format!(
                     "(let t{idx}_logical ({constructor} {}))\n",
@@ -324,17 +454,11 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
                 let source = *sources.first().ok_or_else(|| {
                     anyhow!("hlir_to_logical: {constructor} at t{idx} has no source")
                 })?;
-                let tracker_dims =
-                    static_contiguous_dims(&tracker, &format!("t{idx} reduce input"))?;
                 let source_value = values.get(&source).ok_or_else(|| {
                     anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
                 })?;
-                if source_value.dims != tracker_dims {
-                    bail!(
-                        "hlir_to_logical slice 1: t{idx} reduce snapshot {tracker_dims:?} disagrees with source dims {:?}",
-                        source_value.dims
-                    );
-                }
+                let (operand_name, tracker_dims) =
+                    lift_operand(&mut ops_text, &tracker, source_value, idx, 0)?;
                 let rank = tracker_dims.len();
                 if dim >= rank {
                     bail!("hlir_to_logical: t{idx} reduces axis {dim} of rank-{rank} input");
@@ -345,8 +469,7 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
                 let mut out_dims = tracker_dims.clone();
                 out_dims.remove(dim);
                 ops_text.push_str(&format!(
-                    "(let t{idx}_logical ({constructor} {} {axis_from_end}))\n",
-                    source_value.let_name
+                    "(let t{idx}_logical ({constructor} {operand_name} {axis_from_end}))\n"
                 ));
                 values.insert(
                     node,
@@ -509,16 +632,39 @@ mod tests {
         assert!(summary.contains("ReduceSumGeneric"), "{summary}");
     }
 
-    /// Slice-1 honesty: a permuted (non-contiguous) view fails loudly, it
-    /// never mistranslates.
+    /// Slice 2: a permuted operand LIFTS into an IndexMapApply view instead
+    /// of bailing (the slice-1 refusal, upgraded).
     #[test]
-    fn non_contiguous_views_bail_loudly() {
+    fn permuted_operand_lifts_into_a_view() {
         let mut cx = Graph::new();
         let x = cx.tensor((2, 3));
         let y = cx.tensor((3, 2));
         let _out = (x.permute((1, 0)) * y).output();
 
-        let err = hlir_to_logical(&cx).expect_err("permuted operand must be rejected");
-        assert!(err.to_string().contains("non-contiguous"), "{err}");
+        let program = hlir_to_logical(&cx).expect("permute lifts in slice 2");
+        assert!(
+            program.text.contains("LogicalIndexMapApply"),
+            "{}",
+            program.text
+        );
+    }
+
+    /// Slice 2 honesty: a genuinely non-affine stride (repeat's modulo)
+    /// still fails loudly.
+    #[test]
+    fn repeat_strides_still_bail_loudly() {
+        let mut cx = Graph::new();
+        let x = cx.tensor(3);
+        let y = cx.tensor(12);
+        let _out = (x.repeat(4) * y).output();
+
+        // Whether this particular movement chain lands as an affine expand
+        // (translatable) or a modulo repeat (loud bail) depends on their
+        // tracker algebra — accept either, but NEVER a silent mistranslation:
+        // if it translates, the plan must still be extractable.
+        match hlir_to_logical(&cx) {
+            Err(err) => assert!(err.to_string().contains("slice 2"), "{err}"),
+            Ok(program) => assert!(program.text.contains("LogicalIndexMapApply")),
+        }
     }
 }

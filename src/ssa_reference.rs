@@ -18,6 +18,19 @@ use rustc_hash::FxHashMap;
 use crate::buffer_tensor_ir::ReferenceKernelCtx;
 use crate::bufferize::{BufferId, BufferIrGraph, BufferNode};
 
+/// The reference backend's implementation inventory: every registered op
+/// EXCEPT the zero-copy view (ruling 2026-07-28: the reference runtime
+/// implements views by literally materializing into contiguous layout —
+/// the kernels are layout-blind, so every operand buffer must be its own
+/// contiguous home).
+pub fn reference_allow_list() -> Vec<&'static str> {
+    crate::layout_ir::ops::built_in_matchers()
+        .iter()
+        .map(|matcher| matcher.egglog_constructor())
+        .filter(|constructor| *constructor != "LayoutTensorOpIndexMapApplyViewGeneric")
+        .collect()
+}
+
 #[derive(Default)]
 pub struct SsaReferenceRuntime {
     plan: Option<BufferIrGraph>,
@@ -189,7 +202,8 @@ mod tests {
         let mut egraph = crate::egglog_snippet::new_egraph();
         egraph.parse_and_run_program(None, &text).expect("program runs");
         let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-        let extracted = crate::extractor::extract_layout_ir(&serialized)
+        let allow = reference_allow_list();
+        let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))
             .expect("extracts")
             .expect("plan");
         let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))
@@ -262,6 +276,97 @@ mod tests {
         );
         assert_close(ours.get_f32(a2.id.index() as i64).unwrap(), &their_a);
         assert_close(ours.get_f32(d2.id.index() as i64).unwrap(), &their_d);
+    }
+
+    /// Slice-2 differential: a permuted operand (transpose view) through
+    /// both pipelines.
+    #[test]
+    fn differential_permuted_mul_against_reference_runtime() {
+        let build = || {
+            let mut cx = Graph::new();
+            let x = cx.tensor((2, 3));
+            let y = cx.tensor((3, 2));
+            let out = (x.permute((1, 0)) * y).output();
+            (cx, x, y, out)
+        };
+        let x_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let y_data = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+
+        let (mut cx, x, y, out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(x.id, x_data.clone());
+        theirs.set_data(y.id, y_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(out.id).clone();
+
+        let (cx2, x2, y2, out2) = build();
+        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+    }
+
+    /// Slice-2 differential: subtraction routes through their Neg (a
+    /// broadcast constant) — rank-0 LogicalConstant + lifted broadcast view.
+    #[test]
+    fn differential_subtraction_against_reference_runtime() {
+        let build = || {
+            let mut cx = Graph::new();
+            let x = cx.tensor(4);
+            let y = cx.tensor(4);
+            let out = (x - y).output();
+            (cx, x, y, out)
+        };
+        let x_data = vec![10.0, 20.0, 30.0, 40.0];
+        let y_data = vec![1.0, 2.0, 3.0, 4.0];
+
+        let (mut cx, x, y, out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(x.id, x_data.clone());
+        theirs.set_data(y.id, y_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(out.id).clone();
+
+        let (cx2, x2, y2, out2) = build();
+        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+    }
+
+    /// THE MATMUL DIFFERENTIAL: their fully-decomposed frontend matmul
+    /// (movement views + Mul + SumReduce) through our whole pipeline —
+    /// slice-2 lifting translating their expand/permute stride patterns.
+    #[test]
+    fn differential_matmul_against_reference_runtime() {
+        let build = || {
+            let mut cx = Graph::new();
+            let a = cx.tensor((2, 3));
+            let b = cx.tensor((3, 4));
+            let c = a.matmul(b).output();
+            (cx, a, b, c)
+        };
+        let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let b_data: Vec<f32> = (1..=12).map(|v| v as f32).collect();
+
+        let (mut cx, a, b, c) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(a.id, a_data.clone());
+        theirs.set_data(b.id, b_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(c.id).clone();
+
+        let (cx2, a2, b2, c2) = build();
+        let ours = run_ssa(&cx2, &[(a2.id, a_data), (b2.id, b_data)]);
+        assert_close(ours.get_f32(c2.id.index() as i64).unwrap(), &expected);
     }
 
     /// Reduction differential: sum over the front axis of a [2, 3] tensor,

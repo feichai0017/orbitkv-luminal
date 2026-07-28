@@ -64,12 +64,13 @@ pub fn search_logical(
     input_data: &FxHashMap<i64, Vec<f32>>,
     options: &LogicalSearchOptions,
 ) -> Result<SearchOutcome> {
-    let index = extractor::producer_index(egraph);
+    let allow = crate::ssa_reference::reference_allow_list();
+    let index = extractor::producer_index_with_ops(egraph, Some(&allow));
     ensure!(!index.is_empty(), "no producer classes to search over");
     let classes: Vec<_> = index.keys().cloned().collect();
     let mut rng = StdRng::seed_from_u64(options.seed);
 
-    let mut random_genome = |rng: &mut StdRng| {
+    let random_genome = |rng: &mut StdRng| {
         let mut genome = Genome::default();
         for (class, candidates) in &index {
             let pick = &candidates[rng.random_range(0..candidates.len())];
@@ -94,7 +95,7 @@ pub fn search_logical(
     let mut fingerprint_hits = 0usize;
     let mut best: Option<(u128, Genome, BufferIrGraph)> = None;
 
-    let mut profile_plan = |plan: &BufferIrGraph, trials: usize| -> Result<u128> {
+    let profile_plan = |plan: &BufferIrGraph, trials: usize| -> Result<u128> {
         let mut runtime = SsaReferenceRuntime::default();
         runtime.load_plan(plan.clone());
         for (id, data) in input_data {
@@ -129,7 +130,8 @@ pub fn search_logical(
         for genome in candidates {
             // Extraction failure = invalid genome (cycle, contract breach):
             // discard; the next generation's fresh mutations are the repair.
-            let Ok(Some(graph)) = extractor::extract_layout_ir_with_genome(egraph, &genome)
+            let Ok(Some(graph)) =
+                extractor::extract_layout_ir_with_genome_and_ops(egraph, &genome, Some(&allow))
             else {
                 continue;
             };
