@@ -1151,6 +1151,86 @@ mod harness_tests {
         assert!(plan.summary().contains("ops (0):"), "{}", plan.summary());
     }
 
+    /// CHAIN FUSION, fused route: selecting MatMulFusedGeneric demands
+    /// neither the broadcast views nor the [M, N, K] product — their genome
+    /// rows are dead, and NO intermediate buffer exists. One kernel, three
+    /// caller buffers, zero allocations, zero copies.
+    #[test]
+    fn matmul_fused_route_swallows_the_intermediate() {
+        use crate::bufferize::{BufferId, BufferNode};
+        use crate::layout_ir::ExtractedNode;
+
+        let graph = extract_fixture_with_ops(
+            "matmul_fused_example.egg",
+            &["LayoutTensorOpMatMulFusedGeneric"],
+        );
+        let computes = graph
+            .dag
+            .node_weights()
+            .filter(|node| matches!(node, ExtractedNode::LayoutOp(_)))
+            .count();
+        assert_eq!(computes, 1, "one fused kernel, nothing else");
+
+        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let summary = plan.summary();
+        assert!(summary.contains("MatMulFusedGeneric"), "{summary}");
+        let allocs = plan
+            .buffers
+            .keys()
+            .filter(|id| matches!(id, BufferId::Allocated(_)))
+            .count();
+        assert_eq!(allocs, 0, "the product is never materialized:\n{summary}");
+        let copies = plan
+            .dag
+            .node_indices()
+            .filter(|&idx| matches!(&plan.dag[idx], BufferNode::BufferCopy { .. }))
+            .count();
+        assert_eq!(copies, 0, "zero-copy:\n{summary}");
+    }
+
+    /// CHAIN FUSION, unfused route: the SAME e-graph, restricted to the
+    /// decomposed implementations, materializes the [2, 4, 3] product into a
+    /// fresh allocation that the reduce consumes — the buffer the fused route
+    /// proves unnecessary.
+    #[test]
+    fn matmul_unfused_route_materializes_the_intermediate() {
+        use crate::bufferize::BufferId;
+
+        let graph = extract_fixture_with_ops(
+            "matmul_fused_example.egg",
+            &[
+                "LayoutTensorOpIndexMapApplyViewGeneric",
+                "LayoutTensorOpMulFunctionalGeneric",
+                "LayoutTensorOpReduceSumGeneric",
+            ],
+        );
+        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let summary = plan.summary();
+        assert!(summary.contains("MulFunctionalGeneric"), "{summary}");
+        assert!(summary.contains("ReduceSumGeneric"), "{summary}");
+        let allocs = plan
+            .buffers
+            .keys()
+            .filter(|id| matches!(id, BufferId::Allocated(_)))
+            .count();
+        assert_eq!(allocs, 1, "exactly the product buffer:\n{summary}");
+    }
+
+    /// Cost sanity: with every implementation available, the deterministic
+    /// extractor prefers the fused kernel (3 slots) over the decomposed
+    /// route (product write + reduce read make it strictly costlier).
+    #[test]
+    fn matmul_default_extraction_prefers_the_fused_kernel() {
+        let graph = extract_fixture("matmul_fused_example.egg");
+        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let summary = plan.summary();
+        assert!(summary.contains("MatMulFusedGeneric"), "{summary}");
+        assert!(
+            !summary.contains("ReduceSumGeneric"),
+            "the decomposed route must lose on cost:\n{summary}"
+        );
+    }
+
     /// RANK 3: the goldens are ENFORCED pins, not documentation. Every boundary
     /// script's plan summary must match the checked-in output/<stem>.bufferized.txt
     /// byte for byte. Workflow: `cargo run` regenerates the goldens; this test
@@ -1160,6 +1240,7 @@ mod harness_tests {
         let scripts = [
             "add_mul_fused",
             "basic_program",
+            "matmul_fused_example",
             "boundary_aliased_views",
             "boundary_donated_input",
             "boundary_gather",

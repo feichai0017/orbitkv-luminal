@@ -36,6 +36,7 @@ mod iota;
 mod less_than;
 mod log2;
 mod materialize_layout_copy;
+mod matmul_fused;
 mod modulo;
 mod mul;
 mod poison;
@@ -94,6 +95,7 @@ pub use less_than::LessThanMatcher;
 pub use log2::{Log2FunctionalMatcher, Log2MutatingMatcher};
 pub use modulo::{ModFunctionalMatcher, ModMutatingMatcher};
 pub use materialize_layout_copy::MaterializeLayoutCopyMatcher;
+pub use matmul_fused::MatMulFusedMatcher;
 pub use mul::{MulFunctionalMatcher, MulMutatingMatcher};
 pub use recip::{RecipFunctionalMatcher, RecipMutatingMatcher};
 pub use reduce_max::ReduceMaxMatcher;
@@ -144,5 +146,6 @@ pub fn built_in_matchers() -> Vec<Box<dyn crate::layout_ir::OpMatcher>> {
         Box::new(IndexMapApplyMaterializeMatcher),
         Box::new(IndexMapApplyViewMatcher),
         Box::new(AddMulFusedMatcher),
+        Box::new(MatMulFusedMatcher),
     ]
 }

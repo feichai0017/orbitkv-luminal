@@ -1,0 +1,107 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Chain fusion: C[i,j] = sum_k A[i,k] * B[k,j] via the CANONICAL decomposition
+;   expand A and B to [M, N, K] (K innermost), multiply elementwise, reduce
+;   axis 0 (the innermost = K).
+; TWO routes to the same value live in one e-graph:
+;   unfused: view(A), view(B) -> Mul -> [M,N,K] product buffer -> ReduceSum
+;   fused:   MatMulFusedGeneric(A, B) -> C   (the product is never an op
+;            input or output — selecting this route demands neither the views
+;            nor the product, so no intermediate buffer ever exists)
+; A[2,3] x B[3,4] = C[2,4]; expanded product [2,4,3].
+
+(let m_dim (IntLit 2))
+(let n_dim (IntLit 4))
+(let k_dim (IntLit 3))
+
+(let lhs_shape (ShapeLit (IntExprCons m_dim (IntExprCons k_dim (IntExprNil)))))
+(let rhs_shape (ShapeLit (IntExprCons k_dim (IntExprCons n_dim (IntExprNil)))))
+(let expanded_shape
+  (ShapeLit (IntExprCons m_dim (IntExprCons n_dim (IntExprCons k_dim (IntExprNil))))))
+(let out_shape (ShapeLit (IntExprCons m_dim (IntExprCons n_dim (IntExprNil)))))
+
+(let data_dtype (F32))
+(let lhs_logical (LogicalTensorInputLit (LogicalIdLit "matmul_lhs") lhs_shape data_dtype))
+(let rhs_logical (LogicalTensorInputLit (LogicalIdLit "matmul_rhs") rhs_shape data_dtype))
+
+; Broadcast views over the expanded coordinate space (k = axis 0 innermost,
+; j = axis 1, i = axis 2; view entries listed from the parent's outermost
+; axis inward): A[i,k] and B[k,j].
+(let lhs_map
+  (IndexMapLit (IntExprCons (CoordVar 2 m_dim) (IntExprCons (CoordVar 0 k_dim) (IntExprNil)))))
+(let rhs_map
+  (IndexMapLit (IntExprCons (CoordVar 0 k_dim) (IntExprCons (CoordVar 1 n_dim) (IntExprNil)))))
+(let lhs_expanded (LogicalIndexMapApply lhs_logical lhs_map expanded_shape))
+(let rhs_expanded (LogicalIndexMapApply rhs_logical rhs_map expanded_shape))
+(let product_logical (LogicalMul lhs_expanded rhs_expanded))
+(let matmul_logical (LogicalReduceSum product_logical 0))
+
+; MODEL SIGNATURE: output named by union with the name-only lit; ordered
+; signature lists.
+(union matmul_logical (LogicalTensorOutputLit (LogicalIdLit "matmul_out")))
+(let model_inputs
+  (LogicalInputLit
+    (LogicalTensorCons lhs_logical (LogicalTensorCons rhs_logical (LogicalTensorNil)))))
+(let model_outputs
+  (LogicalOutputLit (LogicalTensorCons matmul_logical (LogicalTensorNil))))
+
+; BINDING: contiguous inputs in caller buffers, output into a caller buffer.
+(let lhs_layout (RightMajorContiguousElementLayoutLit lhs_shape (bits-of data_dtype)))
+(let rhs_layout (RightMajorContiguousElementLayoutLit rhs_shape (bits-of data_dtype)))
+(let lhs_layout_tensor (LayoutTensorLit lhs_logical lhs_layout))
+(let rhs_layout_tensor (LayoutTensorLit rhs_logical rhs_layout))
+
+(let lhs_buffer_id (BufferLit 20))
+(set (buffer-access-of lhs_buffer_id) (ReadOnly))
+(set (buffer-freed-by lhs_buffer_id) (CallerFrees))
+(let rhs_buffer_id (BufferLit 21))
+(set (buffer-access-of rhs_buffer_id) (ReadOnly))
+(set (buffer-freed-by rhs_buffer_id) (CallerFrees))
+(let lhs_buffer_tensor (BufferTensorLit lhs_layout_tensor lhs_buffer_id))
+(let rhs_buffer_tensor (BufferTensorLit rhs_layout_tensor rhs_buffer_id))
+
+; The UNFUSED route's intermediate, declared so both routes are extractable:
+; a contiguous [M, N, K] home for the product.
+(let product_layout (RightMajorContiguousElementLayoutLit expanded_shape (bits-of data_dtype)))
+(let product_layout_tensor (LayoutTensorLit product_logical product_layout))
+
+(let out_layout (RightMajorContiguousElementLayoutLit out_shape (bits-of data_dtype)))
+(let matmul_layout_tensor (LayoutTensorLit matmul_logical out_layout))
+(let out_buffer_id (BufferLit 22))
+(set (buffer-access-of out_buffer_id) (ReadWrite))
+(set (buffer-freed-by out_buffer_id) (CallerFrees))
+(let matmul_buffer_tensor (BufferTensorLit matmul_layout_tensor out_buffer_id))
+
+(let input_boundary
+  (BufferInputLit
+    (BufferTensorCons lhs_buffer_tensor (BufferTensorCons rhs_buffer_tensor (BufferTensorNil)))))
+(let output
+  (BufferOutputLit (BufferTensorCons matmul_buffer_tensor (BufferTensorNil))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; Shape pins: the decomposition derives exactly the declared geometry.
+(check (= (shape-of product_logical) expanded_shape))
+(check (= (shape-of matmul_logical) out_shape))
+
+; The naming union held.
+(check (= matmul_logical (LogicalTensorOutputLit (LogicalIdLit "matmul_out"))))
+
+; FUSED route matched: inputs are the ORIGINAL operands, output the result —
+; views and product absent from both lists.
+(check
+  (= (input-layout-tensor-list-of
+       (LayoutTensorOpMatMulFusedGeneric lhs_layout_tensor rhs_layout_tensor out_layout))
+     (LayoutTensorCons lhs_layout_tensor
+       (LayoutTensorCons rhs_layout_tensor (LayoutTensorNil)))))
+(check
+  (= (output-layout-tensor-list-of
+       (LayoutTensorOpMatMulFusedGeneric lhs_layout_tensor rhs_layout_tensor out_layout))
+     (LayoutTensorCons matmul_layout_tensor (LayoutTensorNil))))
+
+; UNFUSED route also live in the same e-graph: the reduce implementation is
+; matched over the declared product tensor.
+(check
+  (= (LayoutTensorOpReduceSumGeneric product_layout_tensor 0 out_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorCons product_layout_tensor (LayoutTensorNil))
+       (LayoutTensorCons matmul_layout_tensor (LayoutTensorNil)))))
