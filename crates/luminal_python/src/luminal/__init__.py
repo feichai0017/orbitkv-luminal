@@ -2,6 +2,7 @@
 
 # Import Python components
 # Register DynamicCache pytree serialization once at import time
+from .backend_hooks import BackendHooks, register_backend_hooks
 from .cache_utils import _register_cache_serialization
 from .compiled_model import CompiledModel
 
@@ -13,9 +14,11 @@ _register_cache_serialization()
 
 # Re-export everything for clean package interface
 __all__ = [
+    "BackendHooks",
     "CompiledModel",
     "luminal_backend",
     "register_backend",
+    "register_backend_hooks",
     "CompiledGraph",
     "process_pt2",
 ]
