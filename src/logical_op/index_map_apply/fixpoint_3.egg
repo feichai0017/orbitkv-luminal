@@ -1,0 +1,9 @@
+(rule
+  (
+    (= ?out_logical (LogicalIndexMapApply ?in_logical (IndexMapLit ?entry_list) ?out_shape))
+  )
+  (
+    (extent-lock-list-demand ?entry_list ?out_shape)
+  )
+  :ruleset fixpoint-invariants
+)

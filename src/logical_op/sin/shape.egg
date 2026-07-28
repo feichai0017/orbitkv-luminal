@@ -1,0 +1,10 @@
+; Shape Propagation : LogicalSin
+(rule
+  (
+    (= ?out_logical (LogicalSin ?in_logical))
+    (= ?shape (shape-of ?in_logical))
+  )
+  (
+    (set (shape-of ?out_logical) ?shape)
+  )
+)

@@ -1,0 +1,7 @@
+; Logical Constant : ONE scalar value — a true RANK-0 tensor (shape is
+; the empty list), never a length-1 vector (user ruling 2026-07-22).
+; Full-sized constant tensors are broadcast VIEWS of this: the empty
+; index map (IndexMapLit (IntExprNil)) applied at the target shape.
+; Congruence dedupes: every (LogicalConstant 1.5) in a program IS one
+; e-class. F32 by the dtype rule (luminal parity).
+(constructor LogicalConstant (f64) LogicalTensor)

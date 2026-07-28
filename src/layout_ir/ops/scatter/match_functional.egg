@@ -1,0 +1,27 @@
+; Layout Tensor Op Scatter Functional — variable arity: init and src
+; first (fixed slots), then one coordinate layout tensor per init axis,
+; one fresh written output. WELL-FORMEDNESS is a positive premise: the
+; coordinates' common shape and src's shape bind to ONE variable, so the
+; match waits for the proof (never optimistic). The write gate is the
+; usual injectivity of the destination.
+(rule
+  (
+    (= ?out_logical (LogicalScatter ?init_logical ?coordinate_list ?src_logical))
+    (= ?init_layout_tensor (LayoutTensorLit ?init_logical ?init_layout))
+    (= ?src_layout_tensor (LayoutTensorLit ?src_logical ?src_layout))
+    (coordinate-layout-tensors ?coordinate_list ?coordinate_layout_tensors)
+    (= ?src_shape (shape-of ?src_logical))
+    (= ?src_shape (coords-common-shape ?coordinate_list))
+    (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    (= (injectivity-of ?out_layout_tensor) (Injective))
+  )
+  (
+    (let ?layout_tensor_op
+      (LayoutTensorOpLit
+        (LayoutTensorCons ?init_layout_tensor
+          (LayoutTensorCons ?src_layout_tensor ?coordinate_layout_tensors))
+        (LayoutTensorCons ?out_layout_tensor (LayoutTensorNil))))
+    (union ?layout_tensor_op
+      (LayoutTensorOpScatterFunctionalGeneric ?init_layout_tensor ?src_layout_tensor ?coordinate_layout_tensors ?out_layout))
+  )
+)

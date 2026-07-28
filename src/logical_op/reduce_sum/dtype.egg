@@ -1,0 +1,10 @@
+;Dtype Propagation : LogicalReduceSum
+(rule
+  (
+    (= ?out_logical_tensor (LogicalReduceSum ?in_logical ?reduction_index))
+    (= ?in_dtype (dtype-of ?in_logical))
+  )
+  (
+    (set (dtype-of ?out_logical_tensor) ?in_dtype)
+  )
+)

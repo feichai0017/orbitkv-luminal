@@ -1,0 +1,702 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Simple transformer layer shape/dataflow example.
+;
+; Shape lists are outer-to-inner, and reduction axis 0 is the rightmost dimension.
+; Matmul-like contractions are represented as:
+;   IndexMapApply(lhs, product_shape)
+;   IndexMapApply(rhs, product_shape)
+;   LogicalMul
+;   LogicalReduceSum(contracted_axis)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Shapes
+
+(let model_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 3)     ; seq
+        (IntExprCons (IntLit 4)   ; d_model
+          (IntExprNil))))))
+
+(let qkv_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 2)     ; heads
+        (IntExprCons (IntLit 3)   ; seq
+          (IntExprCons (IntLit 2) ; d_head
+            (IntExprNil)))))))
+
+(let projection_weight_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; heads
+      (IntExprCons (IntLit 2)     ; d_head
+        (IntExprCons (IntLit 4)   ; d_model
+          (IntExprNil))))))
+
+(let projection_product_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 2)     ; heads
+        (IntExprCons (IntLit 3)   ; seq
+          (IntExprCons (IntLit 2) ; d_head
+            (IntExprCons (IntLit 4) ; d_model
+              (IntExprNil))))))))
+
+(let attn_scores_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 2)     ; heads
+        (IntExprCons (IntLit 3)   ; query_seq
+          (IntExprCons (IntLit 3) ; key_seq
+            (IntExprNil)))))))
+
+(let attn_scores_product_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 2)     ; heads
+        (IntExprCons (IntLit 3)   ; query_seq
+          (IntExprCons (IntLit 3) ; key_seq
+            (IntExprCons (IntLit 2) ; d_head
+              (IntExprNil))))))))
+
+(let attn_row_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 2)     ; heads
+        (IntExprCons (IntLit 3)   ; query_seq
+          (IntExprNil))))))
+
+(let output_projection_weight_shape
+  (ShapeLit
+    (IntExprCons (IntLit 4)       ; d_model
+      (IntExprCons (IntLit 2)     ; heads
+        (IntExprCons (IntLit 2)   ; d_head
+          (IntExprNil))))))
+
+(let output_projection_product_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 3)     ; seq
+        (IntExprCons (IntLit 4)   ; d_model
+          (IntExprCons (IntLit 2) ; heads
+            (IntExprCons (IntLit 2) ; d_head
+              (IntExprNil))))))))
+
+(let output_projection_partial_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 3)     ; seq
+        (IntExprCons (IntLit 4)   ; d_model
+          (IntExprCons (IntLit 2) ; heads
+            (IntExprNil)))))))
+
+(let ff_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 3)     ; seq
+        (IntExprCons (IntLit 8)   ; d_ff
+          (IntExprNil))))))
+
+(let ff_up_weight_shape
+  (ShapeLit
+    (IntExprCons (IntLit 8)       ; d_ff
+      (IntExprCons (IntLit 4)     ; d_model
+        (IntExprNil)))))
+
+(let ff_up_product_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 3)     ; seq
+        (IntExprCons (IntLit 8)   ; d_ff
+          (IntExprCons (IntLit 4) ; d_model
+            (IntExprNil)))))))
+
+(let ff_down_weight_shape
+  (ShapeLit
+    (IntExprCons (IntLit 4)       ; d_model
+      (IntExprCons (IntLit 8)     ; d_ff
+        (IntExprNil)))))
+
+(let ff_down_product_shape
+  (ShapeLit
+    (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 3)     ; seq
+        (IntExprCons (IntLit 4)   ; d_model
+          (IntExprCons (IntLit 8) ; d_ff
+            (IntExprNil)))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Logical inputs
+
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "x") model_shape (F32)))
+
+(let wq_logical (LogicalTensorInputLit (LogicalIdLit "w_q") projection_weight_shape (F32)))
+(let wk_logical (LogicalTensorInputLit (LogicalIdLit "w_k") projection_weight_shape (F32)))
+(let wv_logical (LogicalTensorInputLit (LogicalIdLit "w_v") projection_weight_shape (F32)))
+
+; Masking inputs for the causal softmax. SelectWhere is gone (R6: luminal
+; parity), so masking is STRICT mask arithmetic:
+;   masked = scores * keep_mask + fill * (1 - keep_mask)
+; with the complement supplied as its own input (the logical op set has no
+; subtraction or scalar constants). The fill tensor must be a FINITE
+; sentinel (f32::MIN-style), never a true -inf: the arithmetic form
+; multiplies the untaken branch by zero, and 0 * (-inf) = NaN in IEEE 754 —
+; a genuine -inf fill would NaN-poison every KEPT position. A finite
+; sentinel is numerically exact for softmax (exp(sentinel - row_max)
+; underflows to zero).
+(let causal_mask_logical (LogicalTensorInputLit (LogicalIdLit "causal_mask") attn_scores_shape (F32)))
+(let inverted_causal_mask_logical (LogicalTensorInputLit (LogicalIdLit "inverted_causal_mask") attn_scores_shape (F32)))
+(let masked_fill_scores_logical (LogicalTensorInputLit (LogicalIdLit "masked_fill_scores") attn_scores_shape (F32)))
+
+(let wo_logical (LogicalTensorInputLit (LogicalIdLit "w_o") output_projection_weight_shape (F32)))
+(let wff_up_logical (LogicalTensorInputLit (LogicalIdLit "w_ff_up") ff_up_weight_shape (F32)))
+(let wff_down_logical (LogicalTensorInputLit (LogicalIdLit "w_ff_down") ff_down_weight_shape (F32)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Input maps for q/k/v projection products:
+;   x: [batch, seq, d_model] -> [batch, heads, seq, d_head, d_model]
+;   w: [heads, d_head, d_model] -> [batch, heads, seq, d_head, d_model]
+
+(let x_to_projection_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 4 (IntLit 2))
+      (IntExprCons (CoordVar 2 (IntLit 3))
+        (IntExprCons (CoordVar 0 (IntLit 4))
+          (IntExprNil))))))
+
+(let weight_to_projection_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 3 (IntLit 2))
+      (IntExprCons (CoordVar 1 (IntLit 2))
+        (IntExprCons (CoordVar 0 (IntLit 4))
+          (IntExprNil))))))
+
+(let x_for_q_logical
+  (LogicalIndexMapApply x_logical x_to_projection_product_map projection_product_shape))
+(let wq_for_q_logical
+  (LogicalIndexMapApply wq_logical weight_to_projection_product_map projection_product_shape))
+(let q_product_logical
+  (LogicalMul x_for_q_logical wq_for_q_logical))
+(let q_logical
+  (LogicalReduceSum q_product_logical 0))
+
+(let x_for_k_logical
+  (LogicalIndexMapApply x_logical x_to_projection_product_map projection_product_shape))
+(let wk_for_k_logical
+  (LogicalIndexMapApply wk_logical weight_to_projection_product_map projection_product_shape))
+(let k_product_logical
+  (LogicalMul x_for_k_logical wk_for_k_logical))
+(let k_logical
+  (LogicalReduceSum k_product_logical 0))
+
+(let x_for_v_logical
+  (LogicalIndexMapApply x_logical x_to_projection_product_map projection_product_shape))
+(let wv_for_v_logical
+  (LogicalIndexMapApply wv_logical weight_to_projection_product_map projection_product_shape))
+(let v_product_logical
+  (LogicalMul x_for_v_logical wv_for_v_logical))
+(let v_logical
+  (LogicalReduceSum v_product_logical 0))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Attention scores:
+;   q: [batch, heads, query_seq, d_head]
+;   k: [batch, heads, key_seq, d_head]
+;   product: [batch, heads, query_seq, key_seq, d_head]
+;   reduce d_head -> [batch, heads, query_seq, key_seq]
+
+(let q_to_scores_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 4 (IntLit 2))
+      (IntExprCons (CoordVar 3 (IntLit 2))
+        (IntExprCons (CoordVar 2 (IntLit 3))
+          (IntExprCons (CoordVar 0 (IntLit 2))
+            (IntExprNil)))))))
+
+(let k_to_scores_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 4 (IntLit 2))
+      (IntExprCons (CoordVar 3 (IntLit 2))
+        (IntExprCons (CoordVar 1 (IntLit 3))
+          (IntExprCons (CoordVar 0 (IntLit 2))
+            (IntExprNil)))))))
+
+(let q_for_scores_logical
+  (LogicalIndexMapApply q_logical q_to_scores_product_map attn_scores_product_shape))
+(let k_for_scores_logical
+  (LogicalIndexMapApply k_logical k_to_scores_product_map attn_scores_product_shape))
+(let attn_scores_product_logical
+  (LogicalMul q_for_scores_logical k_for_scores_logical))
+(let attn_scores_logical
+  (LogicalReduceSum attn_scores_product_logical 0))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Masked softmax over key_seq.
+
+(let kept_scores_logical
+  (LogicalMul attn_scores_logical causal_mask_logical))
+(let masked_fill_term_logical
+  (LogicalMul masked_fill_scores_logical inverted_causal_mask_logical))
+(let masked_scores_logical
+  (LogicalAdd kept_scores_logical masked_fill_term_logical))
+
+(let attn_row_max_logical
+  (LogicalReduceMax masked_scores_logical 0))
+
+(let attn_exp_logical
+  (LogicalExp masked_scores_logical))
+
+(let attn_row_sum_logical
+  (LogicalReduceSum attn_exp_logical 0))
+
+; Broadcast [batch, heads, query_seq] back to [batch, heads, query_seq, key_seq].
+(let row_sum_to_scores_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 3 (IntLit 2))
+      (IntExprCons (CoordVar 2 (IntLit 2))
+        (IntExprCons (CoordVar 1 (IntLit 3))
+          (IntExprNil))))))
+
+(let attn_row_sum_bcast_logical
+  (LogicalIndexMapApply attn_row_sum_logical row_sum_to_scores_map attn_scores_shape))
+
+(let attn_probs_logical
+  (LogicalDiv attn_exp_logical attn_row_sum_bcast_logical))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Attention value contraction:
+;   probs: [batch, heads, query_seq, key_seq]
+;   v:     [batch, heads, key_seq, d_head]
+;   product: [batch, heads, query_seq, key_seq, d_head]
+;   reduce key_seq -> [batch, heads, query_seq, d_head]
+
+(let probs_to_value_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 4 (IntLit 2))
+      (IntExprCons (CoordVar 3 (IntLit 2))
+        (IntExprCons (CoordVar 2 (IntLit 3))
+          (IntExprCons (CoordVar 1 (IntLit 3))
+            (IntExprNil)))))))
+
+(let v_to_value_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 4 (IntLit 2))
+      (IntExprCons (CoordVar 3 (IntLit 2))
+        (IntExprCons (CoordVar 1 (IntLit 3))
+          (IntExprCons (CoordVar 0 (IntLit 2))
+            (IntExprNil)))))))
+
+(let probs_for_value_logical
+  (LogicalIndexMapApply attn_probs_logical probs_to_value_product_map attn_scores_product_shape))
+(let v_for_value_logical
+  (LogicalIndexMapApply v_logical v_to_value_product_map attn_scores_product_shape))
+(let value_product_logical
+  (LogicalMul probs_for_value_logical v_for_value_logical))
+(let context_logical
+  (LogicalReduceSum value_product_logical 1))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Output projection:
+;   context: [batch, heads, seq, d_head]
+;   w_o:     [d_model, heads, d_head]
+;   product: [batch, seq, d_model, heads, d_head]
+;   reduce d_head, then heads -> [batch, seq, d_model]
+
+(let context_to_output_projection_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 4 (IntLit 2))
+      (IntExprCons (CoordVar 1 (IntLit 2))
+        (IntExprCons (CoordVar 3 (IntLit 3))
+          (IntExprCons (CoordVar 0 (IntLit 2))
+            (IntExprNil)))))))
+
+(let wo_to_output_projection_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 2 (IntLit 4))
+      (IntExprCons (CoordVar 1 (IntLit 2))
+        (IntExprCons (CoordVar 0 (IntLit 2))
+          (IntExprNil))))))
+
+(let context_for_output_projection_logical
+  (LogicalIndexMapApply context_logical context_to_output_projection_product_map output_projection_product_shape))
+(let wo_for_output_projection_logical
+  (LogicalIndexMapApply wo_logical wo_to_output_projection_product_map output_projection_product_shape))
+(let output_projection_product_logical
+  (LogicalMul context_for_output_projection_logical wo_for_output_projection_logical))
+(let output_projection_partial_logical
+  (LogicalReduceSum output_projection_product_logical 0))
+(let output_projection_logical
+  (LogicalReduceSum output_projection_partial_logical 0))
+
+(let attn_residual_logical
+  (LogicalAdd x_logical output_projection_logical))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Feed-forward block:
+;   up:   [batch, seq, d_model] x [d_ff, d_model] -> [batch, seq, d_ff]
+;   act:  exp(up), as a small stand-in for a nonlinear activation
+;   down: [batch, seq, d_ff] x [d_model, d_ff] -> [batch, seq, d_model]
+
+(let hidden_to_ff_up_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 3 (IntLit 2))
+      (IntExprCons (CoordVar 2 (IntLit 3))
+        (IntExprCons (CoordVar 0 (IntLit 4))
+          (IntExprNil))))))
+
+(let wff_up_to_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 1 (IntLit 8))
+      (IntExprCons (CoordVar 0 (IntLit 4))
+        (IntExprNil)))))
+
+(let hidden_for_ff_up_logical
+  (LogicalIndexMapApply attn_residual_logical hidden_to_ff_up_product_map ff_up_product_shape))
+(let wff_up_for_product_logical
+  (LogicalIndexMapApply wff_up_logical wff_up_to_product_map ff_up_product_shape))
+(let ff_up_product_logical
+  (LogicalMul hidden_for_ff_up_logical wff_up_for_product_logical))
+(let ff_up_logical
+  (LogicalReduceSum ff_up_product_logical 0))
+(let ff_activation_logical
+  (LogicalExp ff_up_logical))
+
+(let ff_activation_to_down_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 3 (IntLit 2))
+      (IntExprCons (CoordVar 2 (IntLit 3))
+        (IntExprCons (CoordVar 0 (IntLit 8))
+          (IntExprNil))))))
+
+(let wff_down_to_product_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 1 (IntLit 4))
+      (IntExprCons (CoordVar 0 (IntLit 8))
+        (IntExprNil)))))
+
+(let ff_activation_for_down_logical
+  (LogicalIndexMapApply ff_activation_logical ff_activation_to_down_product_map ff_down_product_shape))
+(let wff_down_for_product_logical
+  (LogicalIndexMapApply wff_down_logical wff_down_to_product_map ff_down_product_shape))
+(let ff_down_product_logical
+  (LogicalMul ff_activation_for_down_logical wff_down_for_product_logical))
+(let ff_down_logical
+  (LogicalReduceSum ff_down_product_logical 0))
+
+(let y_logical
+  (LogicalAdd attn_residual_logical ff_down_logical))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Layout definitions.
+
+(let model_layout (RightMajorContiguousElementLayoutLit model_shape (bits-of (F32))))
+(let qkv_layout (RightMajorContiguousElementLayoutLit qkv_shape (bits-of (F32))))
+(let projection_weight_layout (RightMajorContiguousElementLayoutLit projection_weight_shape (bits-of (F32))))
+(let projection_product_layout (RightMajorContiguousElementLayoutLit projection_product_shape (bits-of (F32))))
+(let attn_scores_layout (RightMajorContiguousElementLayoutLit attn_scores_shape (bits-of (F32))))
+(let attn_scores_product_layout (RightMajorContiguousElementLayoutLit attn_scores_product_shape (bits-of (F32))))
+(let attn_row_layout (RightMajorContiguousElementLayoutLit attn_row_shape (bits-of (F32))))
+(let output_projection_weight_layout (RightMajorContiguousElementLayoutLit output_projection_weight_shape (bits-of (F32))))
+(let output_projection_product_layout (RightMajorContiguousElementLayoutLit output_projection_product_shape (bits-of (F32))))
+(let output_projection_partial_layout (RightMajorContiguousElementLayoutLit output_projection_partial_shape (bits-of (F32))))
+(let ff_layout (RightMajorContiguousElementLayoutLit ff_shape (bits-of (F32))))
+(let ff_up_weight_layout (RightMajorContiguousElementLayoutLit ff_up_weight_shape (bits-of (F32))))
+(let ff_up_product_layout (RightMajorContiguousElementLayoutLit ff_up_product_shape (bits-of (F32))))
+(let ff_down_weight_layout (RightMajorContiguousElementLayoutLit ff_down_weight_shape (bits-of (F32))))
+(let ff_down_product_layout (RightMajorContiguousElementLayoutLit ff_down_product_shape (bits-of (F32))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Input Layout / Buffer Definition.
+
+(let x_layout_tensor (LayoutTensorLit x_logical model_layout))
+(let wq_layout_tensor (LayoutTensorLit wq_logical projection_weight_layout))
+(let wk_layout_tensor (LayoutTensorLit wk_logical projection_weight_layout))
+(let wv_layout_tensor (LayoutTensorLit wv_logical projection_weight_layout))
+(let causal_mask_layout_tensor (LayoutTensorLit causal_mask_logical attn_scores_layout))
+(let inverted_causal_mask_layout_tensor (LayoutTensorLit inverted_causal_mask_logical attn_scores_layout))
+(let masked_fill_scores_layout_tensor (LayoutTensorLit masked_fill_scores_logical attn_scores_layout))
+(let wo_layout_tensor (LayoutTensorLit wo_logical output_projection_weight_layout))
+(let wff_up_layout_tensor (LayoutTensorLit wff_up_logical ff_up_weight_layout))
+(let wff_down_layout_tensor (LayoutTensorLit wff_down_logical ff_down_weight_layout))
+
+(let x_input_buffer_id (BufferLit 1))
+(set (buffer-access-of x_input_buffer_id) (ReadWrite))
+(set (buffer-freed-by x_input_buffer_id) (CallerFrees))
+(let x_input_buffer_tensor (BufferTensorLit x_layout_tensor x_input_buffer_id))
+
+(let wq_input_buffer_id (BufferLit 2))
+(set (buffer-access-of wq_input_buffer_id) (ReadOnly))
+(set (buffer-freed-by wq_input_buffer_id) (CallerFrees))
+(let wq_input_buffer_tensor (BufferTensorLit wq_layout_tensor wq_input_buffer_id))
+
+(let wk_input_buffer_id (BufferLit 3))
+(set (buffer-access-of wk_input_buffer_id) (ReadOnly))
+(set (buffer-freed-by wk_input_buffer_id) (CallerFrees))
+(let wk_input_buffer_tensor (BufferTensorLit wk_layout_tensor wk_input_buffer_id))
+
+(let wv_input_buffer_id (BufferLit 4))
+(set (buffer-access-of wv_input_buffer_id) (ReadOnly))
+(set (buffer-freed-by wv_input_buffer_id) (CallerFrees))
+(let wv_input_buffer_tensor (BufferTensorLit wv_layout_tensor wv_input_buffer_id))
+
+(let causal_mask_input_buffer_id (BufferLit 5))
+(set (buffer-access-of causal_mask_input_buffer_id) (ReadOnly))
+(set (buffer-freed-by causal_mask_input_buffer_id) (CallerFrees))
+(let causal_mask_input_buffer_tensor
+  (BufferTensorLit causal_mask_layout_tensor causal_mask_input_buffer_id))
+
+(let masked_fill_scores_input_buffer_id (BufferLit 6))
+(set (buffer-access-of masked_fill_scores_input_buffer_id) (ReadOnly))
+(set (buffer-freed-by masked_fill_scores_input_buffer_id) (CallerFrees))
+(let masked_fill_scores_input_buffer_tensor
+  (BufferTensorLit masked_fill_scores_layout_tensor masked_fill_scores_input_buffer_id))
+
+(let inverted_causal_mask_input_buffer_id (BufferLit 10))
+(set (buffer-access-of inverted_causal_mask_input_buffer_id) (ReadOnly))
+(set (buffer-freed-by inverted_causal_mask_input_buffer_id) (CallerFrees))
+(let inverted_causal_mask_input_buffer_tensor
+  (BufferTensorLit inverted_causal_mask_layout_tensor inverted_causal_mask_input_buffer_id))
+
+(let wo_input_buffer_id (BufferLit 7))
+(set (buffer-access-of wo_input_buffer_id) (ReadOnly))
+(set (buffer-freed-by wo_input_buffer_id) (CallerFrees))
+(let wo_input_buffer_tensor (BufferTensorLit wo_layout_tensor wo_input_buffer_id))
+
+(let wff_up_input_buffer_id (BufferLit 8))
+(set (buffer-access-of wff_up_input_buffer_id) (ReadOnly))
+(set (buffer-freed-by wff_up_input_buffer_id) (CallerFrees))
+(let wff_up_input_buffer_tensor
+  (BufferTensorLit wff_up_layout_tensor wff_up_input_buffer_id))
+
+(let wff_down_input_buffer_id (BufferLit 9))
+(set (buffer-access-of wff_down_input_buffer_id) (ReadOnly))
+(set (buffer-freed-by wff_down_input_buffer_id) (CallerFrees))
+(let wff_down_input_buffer_tensor
+  (BufferTensorLit wff_down_layout_tensor wff_down_input_buffer_id))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Intermediate layout tensors are deliberately NOT declared here. The logical
+; dataflow above is the full specification of the interior; the preamble's
+; forward layout-propagation rules derive a layout tensor for every
+; intermediate logical tensor, starting from the input layout tensors. Only
+; the boundary stays explicit: input and output layout tensors are contracts
+; that pin both the logical value and the layout the caller provides/receives.
+; The "Derived layout tensor checks" section at the bottom asserts that
+; propagation produced every layout tensor this script used to declare by hand.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Output Spec Definition.
+
+(let y_layout_tensor (LayoutTensorLit y_logical model_layout))
+(let attn_probs_layout_tensor (LayoutTensorLit attn_probs_logical attn_scores_layout))
+(let attn_row_sum_layout_tensor (LayoutTensorLit attn_row_sum_logical attn_row_layout))
+(let context_layout_tensor (LayoutTensorLit context_logical qkv_layout))
+(let ff_activation_layout_tensor (LayoutTensorLit ff_activation_logical ff_layout))
+
+; y output specs
+(let y_output_buffer_id (BufferLit 100))
+(set (buffer-access-of y_output_buffer_id) (ReadWrite))
+(set (buffer-freed-by y_output_buffer_id) (CallerFrees))
+(let y_buffer_tensor (BufferTensorLit y_layout_tensor y_output_buffer_id))
+
+; attention probabilities output specs
+(let attn_probs_output_buffer_id (BufferLit 101))
+(set (buffer-access-of attn_probs_output_buffer_id) (ReadWrite))
+(set (buffer-freed-by attn_probs_output_buffer_id) (CallerFrees))
+(let attn_probs_buffer_tensor
+  (BufferTensorLit attn_probs_layout_tensor attn_probs_output_buffer_id))
+
+; softmax row sum output specs
+(let row_sum_output_buffer_id (BufferLit 102))
+(set (buffer-access-of row_sum_output_buffer_id) (ReadWrite))
+(set (buffer-freed-by row_sum_output_buffer_id) (CallerFrees))
+(let row_sum_buffer_tensor
+  (BufferTensorLit attn_row_sum_layout_tensor row_sum_output_buffer_id))
+
+; attention context output specs
+(let context_output_buffer_id (BufferLit 103))
+(set (buffer-access-of context_output_buffer_id) (ReadWrite))
+(set (buffer-freed-by context_output_buffer_id) (CallerFrees))
+(let context_buffer_tensor
+  (BufferTensorLit context_layout_tensor context_output_buffer_id))
+
+; feed-forward activation output specs
+(let ff_activation_output_buffer_id (BufferLit 104))
+(set (buffer-access-of ff_activation_output_buffer_id) (ReadWrite))
+(set (buffer-freed-by ff_activation_output_buffer_id) (CallerFrees))
+(let ff_activation_buffer_tensor
+  (BufferTensorLit ff_activation_layout_tensor ff_activation_output_buffer_id))
+
+; output join
+(let output
+  (BufferOutputLit
+    (BufferTensorCons y_buffer_tensor
+      (BufferTensorCons attn_probs_buffer_tensor
+        (BufferTensorCons row_sum_buffer_tensor
+          (BufferTensorCons context_buffer_tensor
+            (BufferTensorCons ff_activation_buffer_tensor
+              (BufferTensorNil))))))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Shape checks.
+
+(check (= (shape-of q_logical) qkv_shape))
+(check (= (shape-of k_logical) qkv_shape))
+(check (= (shape-of v_logical) qkv_shape))
+(check (= (shape-of attn_scores_logical) attn_scores_shape))
+(check (= (shape-of masked_scores_logical) attn_scores_shape))
+(check (= (shape-of attn_row_max_logical) attn_row_shape))
+(check (= (shape-of attn_row_sum_logical) attn_row_shape))
+(check (= (shape-of attn_row_sum_bcast_logical) attn_scores_shape))
+(check (= (shape-of attn_probs_logical) attn_scores_shape))
+(check (= (shape-of context_logical) qkv_shape))
+(check (= (shape-of output_projection_partial_logical) output_projection_partial_shape))
+(check (= (shape-of output_projection_logical) model_shape))
+(check (= (shape-of ff_up_logical) ff_shape))
+(check (= (shape-of ff_activation_logical) ff_shape))
+(check (= (shape-of ff_down_logical) model_shape))
+(check (= (shape-of y_logical) model_shape))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Derived layout tensor checks.
+;
+; Each LayoutTensorLit below is a ground pattern in a query: the check FAILS if
+; forward propagation did not derive that exact term. Together these cover every
+; intermediate layout tensor this script used to declare by hand (the five
+; output-spec layout tensors above are declared, so they are not checked here).
+
+(check (= (layout-of (LayoutTensorLit q_product_logical projection_product_layout)) projection_product_layout))
+(check (= (layout-of (LayoutTensorLit k_product_logical projection_product_layout)) projection_product_layout))
+(check (= (layout-of (LayoutTensorLit v_product_logical projection_product_layout)) projection_product_layout))
+(check (= (layout-of (LayoutTensorLit q_logical qkv_layout)) qkv_layout))
+(check (= (layout-of (LayoutTensorLit k_logical qkv_layout)) qkv_layout))
+(check (= (layout-of (LayoutTensorLit v_logical qkv_layout)) qkv_layout))
+
+(check (= (layout-of (LayoutTensorLit attn_scores_product_logical attn_scores_product_layout)) attn_scores_product_layout))
+(check (= (layout-of (LayoutTensorLit attn_scores_logical attn_scores_layout)) attn_scores_layout))
+(check (= (layout-of (LayoutTensorLit masked_scores_logical attn_scores_layout)) attn_scores_layout))
+(check (= (layout-of (LayoutTensorLit attn_row_max_logical attn_row_layout)) attn_row_layout))
+(check (= (layout-of (LayoutTensorLit attn_exp_logical attn_scores_layout)) attn_scores_layout))
+(check (= (layout-of (LayoutTensorLit attn_row_sum_bcast_logical attn_scores_layout)) attn_scores_layout))
+
+(check (= (layout-of (LayoutTensorLit value_product_logical attn_scores_product_layout)) attn_scores_product_layout))
+
+(check (= (layout-of (LayoutTensorLit output_projection_product_logical output_projection_product_layout)) output_projection_product_layout))
+(check (= (layout-of (LayoutTensorLit output_projection_partial_logical output_projection_partial_layout)) output_projection_partial_layout))
+(check (= (layout-of (LayoutTensorLit output_projection_logical model_layout)) model_layout))
+(check (= (layout-of (LayoutTensorLit attn_residual_logical model_layout)) model_layout))
+
+(check (= (layout-of (LayoutTensorLit ff_up_product_logical ff_up_product_layout)) ff_up_product_layout))
+(check (= (layout-of (LayoutTensorLit ff_up_logical ff_layout)) ff_layout))
+(check (= (layout-of (LayoutTensorLit ff_down_product_logical ff_down_product_layout)) ff_down_product_layout))
+(check (= (layout-of (LayoutTensorLit ff_down_logical model_layout)) model_layout))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; A few layout lowering checks for the matmul pattern.
+;
+; Names for the derived tensors the checks below reference. Safe to bind AFTER
+; the existence checks above: each let resolves to the already-derived e-class
+; instead of silently creating a term propagation failed to produce.
+
+(let q_product_layout_tensor (LayoutTensorLit q_product_logical projection_product_layout))
+(let q_layout_tensor (LayoutTensorLit q_logical qkv_layout))
+(let attn_scores_product_layout_tensor (LayoutTensorLit attn_scores_product_logical attn_scores_product_layout))
+(let attn_scores_layout_tensor (LayoutTensorLit attn_scores_logical attn_scores_layout))
+(let value_product_layout_tensor (LayoutTensorLit value_product_logical attn_scores_product_layout))
+(let output_projection_partial_layout_tensor (LayoutTensorLit output_projection_partial_logical output_projection_partial_layout))
+(let output_projection_layout_tensor (LayoutTensorLit output_projection_logical model_layout))
+
+(check
+  (= (input-layout-tensor-list-of
+       (LayoutTensorOpReduceSumGeneric q_product_layout_tensor 0 qkv_layout))
+     (LayoutTensorCons q_product_layout_tensor (LayoutTensorNil))))
+
+(check
+  (= (output-layout-tensor-list-of
+       (LayoutTensorOpReduceSumGeneric q_product_layout_tensor 0 qkv_layout))
+     (LayoutTensorCons q_layout_tensor (LayoutTensorNil))))
+
+(check
+  (= (input-layout-tensor-list-of
+       (LayoutTensorOpReduceSumGeneric attn_scores_product_layout_tensor 0 attn_scores_layout))
+     (LayoutTensorCons attn_scores_product_layout_tensor (LayoutTensorNil))))
+
+(check
+  (= (output-layout-tensor-list-of
+       (LayoutTensorOpReduceSumGeneric attn_scores_product_layout_tensor 0 attn_scores_layout))
+     (LayoutTensorCons attn_scores_layout_tensor (LayoutTensorNil))))
+
+(check
+  (= (input-layout-tensor-list-of
+       (LayoutTensorOpReduceSumGeneric value_product_layout_tensor 1 qkv_layout))
+     (LayoutTensorCons value_product_layout_tensor (LayoutTensorNil))))
+
+(check
+  (= (output-layout-tensor-list-of
+       (LayoutTensorOpReduceSumGeneric value_product_layout_tensor 1 qkv_layout))
+     (LayoutTensorCons context_layout_tensor (LayoutTensorNil))))
+
+(check
+  (= (input-layout-tensor-list-of
+       (LayoutTensorOpReduceSumGeneric output_projection_partial_layout_tensor 0 model_layout))
+     (LayoutTensorCons output_projection_partial_layout_tensor (LayoutTensorNil))))
+
+(check
+  (= (output-layout-tensor-list-of
+       (LayoutTensorOpReduceSumGeneric output_projection_partial_layout_tensor 0 model_layout))
+     (LayoutTensorCons output_projection_layout_tensor (LayoutTensorNil))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; COMPOSITION ACCEPTANCE (Step 2): composed view layouts equal hand-computed
+; strided forms. The expected layouts are let-bound AFTER the run, so they
+; never feed saturation: the LayoutTensorLit lookup in each check succeeds
+; only if composition + downward discovery derived a layout in the expected
+; class on that view logical (check-time lookups never create terms — the
+; self-equality is an existence probe).
+
+; x -> projection product: x [2,3,4] contiguous, strides [12,4,1]; heads and
+; d_head are broadcast (stride 0) in the [2,2,3,2,4] product domain.
+(let expected_x_proj_view_layout
+  (StridedElementLayoutLit projection_product_shape
+    (IntExprCons (IntLit 12)
+      (IntExprCons (IntLit 0)
+        (IntExprCons (IntLit 4)
+          (IntExprCons (IntLit 0)
+            (IntExprCons (IntLit 1)
+              (IntExprNil))))))
+    (bits-of (F32))))
+(check
+  (= (LayoutTensorLit x_for_q_logical expected_x_proj_view_layout)
+     (LayoutTensorLit x_for_q_logical expected_x_proj_view_layout)))
+
+; w_q -> projection product: w [2,2,4] contiguous, strides [8,4,1]; batch and
+; seq are broadcast in the product domain.
+(let expected_w_proj_view_layout
+  (StridedElementLayoutLit projection_product_shape
+    (IntExprCons (IntLit 0)
+      (IntExprCons (IntLit 8)
+        (IntExprCons (IntLit 0)
+          (IntExprCons (IntLit 4)
+            (IntExprCons (IntLit 1)
+              (IntExprNil))))))
+    (bits-of (F32))))
+(check
+  (= (LayoutTensorLit wq_for_q_logical expected_w_proj_view_layout)
+     (LayoutTensorLit wq_for_q_logical expected_w_proj_view_layout)))
+
+; row sums broadcast back over scores: parent [2,2,3] contiguous [6,3,1];
+; key_seq is broadcast — the canonical stride-0 read-only view.
+(let expected_row_sum_bcast_layout
+  (StridedElementLayoutLit attn_scores_shape
+    (IntExprCons (IntLit 6)
+      (IntExprCons (IntLit 3)
+        (IntExprCons (IntLit 1)
+          (IntExprCons (IntLit 0)
+            (IntExprNil)))))
+    (bits-of (F32))))
+(check
+  (= (LayoutTensorLit attn_row_sum_bcast_logical expected_row_sum_bcast_layout)
+     (LayoutTensorLit attn_row_sum_bcast_logical expected_row_sum_bcast_layout)))
+

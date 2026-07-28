@@ -1,0 +1,9 @@
+(rule
+  (
+    (= ?out_logical (LogicalScatter ?init_logical ?coordinate_list ?src_logical))
+    (= ?init_layout_tensor (LayoutTensorLit ?init_logical ?init_layout))
+  )
+  (
+    (let out_in_init_layout_tensor (LayoutTensorLit ?out_logical ?init_layout))
+  )
+)

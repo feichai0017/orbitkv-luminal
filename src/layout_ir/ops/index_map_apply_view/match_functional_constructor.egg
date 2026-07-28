@@ -1,0 +1,6 @@
+; The VIEW form of index-map application: the output value is the
+; parent's own storage reinterpreted through the composed offset
+; function, so no bytes move. Matched only where the Layout field IS
+; the composed layout (parent offset precomposed with the index map);
+; materializing into any other layout is the op above.
+(constructor LayoutTensorOpIndexMapApplyViewGeneric (LayoutTensor IndexMap Shape Layout) LayoutTensorOp)

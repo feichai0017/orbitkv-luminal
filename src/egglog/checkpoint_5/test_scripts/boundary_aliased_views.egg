@@ -1,0 +1,151 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: two inputs are aliased views of the same tensor.
+;
+; Semantics:
+; - each input has a distinct logical/layout view
+; - both inputs share the same runtime buffer
+; - both views are passed through to the output unaltered
+
+(let storage_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 2) (IntExprNil)))))
+(let view_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprNil))))
+(let view_dtype (F32))
+
+(let storage_logical
+  (LogicalTensorInputLit (LogicalIdLit "aliased_storage") storage_shape view_dtype))
+
+(let row0_index_map
+  (IndexMapLit
+    (IntExprCons (IntLit 0)
+      (IntExprCons (CoordVar 0 (IntLit 2))
+        (IntExprNil)))))
+
+(let row1_index_map
+  (IndexMapLit
+    (IntExprCons (IntLit 1)
+      (IntExprCons (CoordVar 0 (IntLit 2))
+        (IntExprNil)))))
+
+(let row0_view_logical
+  (LogicalIndexMapApply storage_logical row0_index_map view_shape))
+
+(let row1_view_logical
+  (LogicalIndexMapApply storage_logical row1_index_map view_shape))
+
+(let row0_element_offset
+  (CoordVar 0 (IntLit 2)))
+
+(let row1_element_offset
+  (IntAdd (IntLit 2) (CoordVar 0 (IntLit 2))))
+
+(let row0_view_layout
+  (ElementOffsetExpressionLayoutLit row0_element_offset view_shape (bits-of view_dtype)))
+
+(let row1_view_layout
+  (ElementOffsetExpressionLayoutLit row1_element_offset view_shape (bits-of view_dtype)))
+
+; The storage tensor is real caller storage: declare its LayoutTensor so
+; composition has a parent to derive the views' layouts from.
+(let storage_layout
+  (RightMajorContiguousElementLayoutLit storage_shape (bits-of view_dtype)))
+(let storage_layout_tensor (LayoutTensorLit storage_logical storage_layout))
+
+; The storage tensor's contiguous [2,2] offset (the form the strides fold
+; derives), used to pin substitution: composing it with each row map must
+; reproduce the hand-written view offsets — constant map entries (the row
+; selectors) exercise the IntLit-entry path.
+(let storage_contig_offset
+  (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 2)) (CoordVar 0 (IntLit 2))))
+(subst-demand storage_contig_offset row0_index_map)
+(subst-demand storage_contig_offset row1_index_map)
+
+(let row0_view_layout_tensor
+  (LayoutTensorLit row0_view_logical row0_view_layout))
+
+(let row1_view_layout_tensor
+  (LayoutTensorLit row1_view_logical row1_view_layout))
+
+(let shared_buffer_id (BufferLit 220))
+(set (buffer-access-of shared_buffer_id) (ReadWrite))
+(set (buffer-freed-by shared_buffer_id) (CallerFrees))
+
+(let row0_input_buffer_tensor
+  (BufferTensorLit row0_view_layout_tensor shared_buffer_id))
+
+(let row1_input_buffer_tensor
+  (BufferTensorLit row1_view_layout_tensor shared_buffer_id))
+
+; Both aliases are returned unchanged.
+(let row0_output_buffer_tensor
+  (BufferTensorLit row0_view_layout_tensor shared_buffer_id))
+
+(let row1_output_buffer_tensor
+  (BufferTensorLit row1_view_layout_tensor shared_buffer_id))
+
+(let input_boundary
+  (BufferInputLit
+    (BufferTensorCons row0_input_buffer_tensor
+      (BufferTensorCons row1_input_buffer_tensor
+        (BufferTensorNil)))))
+
+(let output
+  (BufferOutputLit
+    (BufferTensorCons row0_output_buffer_tensor
+      (BufferTensorCons row1_output_buffer_tensor
+        (BufferTensorNil)))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; Each view is passed through without changing its boundary object.
+(check (= row0_input_buffer_tensor row0_output_buffer_tensor))
+(check (= row1_input_buffer_tensor row1_output_buffer_tensor))
+
+; The two inputs are distinct views backed by the same storage.
+(check (= (buffer-id-of row0_input_buffer_tensor)
+          (buffer-id-of row1_input_buffer_tensor)))
+
+(check (= (layout-tensor-of row0_input_buffer_tensor)
+          row0_view_layout_tensor))
+
+(check (= (layout-tensor-of row1_input_buffer_tensor)
+          row1_view_layout_tensor))
+
+; Both views are derived from the same storage logical tensor.
+(check (= (shape-of row0_view_logical) view_shape))
+(check (= (shape-of row1_view_logical) view_shape))
+
+; The view layouts describe distinct regions of the shared storage.
+(check
+  (= row0_view_layout
+     (BitOffsetExpressionLayoutLit
+       (IntMul row0_element_offset (IntLit 32))
+       view_shape
+       (bits-of view_dtype))))
+
+(check
+  (= row1_view_layout
+     (BitOffsetExpressionLayoutLit
+       (IntMul row1_element_offset (IntLit 32))
+       view_shape
+       (bits-of view_dtype))))
+
+; Substitution pins: composing the storage's contiguous offset with each
+; row map reproduces the hand-written view offsets (constant entries fold:
+; row0 selects row 0, row1 lands on 2 + v0).
+(check (= (subst-of storage_contig_offset row0_index_map) row0_element_offset))
+(check (= (subst-of storage_contig_offset row1_index_map) row1_element_offset))
+
+; COMPOSITION ACCEPTANCE (Step 2): the DERIVED view layouts — composed at
+; the bit level through the storage's minted contiguous layout — land in
+; the hand-written view layout classes.
+(check
+  (= row0_view_layout
+     (BitOffsetExpressionLayoutLit
+       (subst-of (IntMul storage_contig_offset (IntLit 32)) row0_index_map)
+       view_shape
+       (bits-of view_dtype))))
+(check
+  (= row1_view_layout
+     (BitOffsetExpressionLayoutLit
+       (subst-of (IntMul storage_contig_offset (IntLit 32)) row1_index_map)
+       view_shape
+       (bits-of view_dtype))))

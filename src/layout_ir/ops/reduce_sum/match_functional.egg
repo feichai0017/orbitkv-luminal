@@ -1,0 +1,17 @@
+; Layout Tensor Op Reduce Sum Generic
+(rule
+  (
+    (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?in_layout))
+    (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    (= ?out_logical (LogicalReduceSum ?in_logical ?reduction_dim))
+    (= (injectivity-of ?out_layout_tensor) (Injective))
+  )
+  (
+    (let ?layout_tensor_op
+      (LayoutTensorOpLit
+        (LayoutTensorCons ?in_layout_tensor (LayoutTensorNil))
+        (LayoutTensorCons ?out_layout_tensor (LayoutTensorNil))))
+    (union ?layout_tensor_op
+      (LayoutTensorOpReduceSumGeneric ?in_layout_tensor ?reduction_dim ?out_layout))
+  )
+)

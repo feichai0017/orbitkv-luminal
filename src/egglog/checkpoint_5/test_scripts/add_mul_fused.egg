@@ -1,0 +1,91 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Simple multi-output LayoutTensorOp example.
+;
+; This program requests both:
+;   add_out = input_0 + input_1
+;   mul_out = input_0 * input_1
+;
+; The checkpoint 5 preamble can match these two logical outputs into a single
+; LayoutTensorOpAddMulFusedGeneric implementation with two output layout tensors.
+
+; Logical Program Definition
+
+(let data_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprCons (IntLit 2) (IntExprNil)))))
+(let data_dtype (F32))
+
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "input_0") data_shape data_dtype))
+(let y_logical (LogicalTensorInputLit (LogicalIdLit "input_1") data_shape data_dtype))
+
+(let add_logical (LogicalAdd x_logical y_logical))
+(let mul_logical (LogicalMul x_logical y_logical))
+
+; Input Layout / Buffer Definition
+
+(let data_layout (RightMajorContiguousElementLayoutLit data_shape (bits-of data_dtype)))
+
+(let x_layout_tensor (LayoutTensorLit x_logical data_layout))
+(let y_layout_tensor (LayoutTensorLit y_logical data_layout))
+
+(let x_input_buffer_id (BufferLit 10))
+(set (buffer-access-of x_input_buffer_id) (ReadWrite))
+(set (buffer-freed-by x_input_buffer_id) (CallerFrees))
+(let y_input_buffer_id (BufferLit 11))
+(set (buffer-access-of y_input_buffer_id) (ReadWrite))
+(set (buffer-freed-by y_input_buffer_id) (CallerFrees))
+
+(let x_input_buffer_tensor (BufferTensorLit x_layout_tensor x_input_buffer_id))
+(let y_input_buffer_tensor (BufferTensorLit y_layout_tensor y_input_buffer_id))
+
+; Output Spec Definition
+
+(let add_layout_tensor (LayoutTensorLit add_logical data_layout))
+(let mul_layout_tensor (LayoutTensorLit mul_logical data_layout))
+
+(let add_output_buffer_id (BufferLit 12))
+(set (buffer-access-of add_output_buffer_id) (ReadWrite))
+(set (buffer-freed-by add_output_buffer_id) (CallerFrees))
+(let mul_output_buffer_id (BufferLit 13))
+(set (buffer-access-of mul_output_buffer_id) (ReadWrite))
+(set (buffer-freed-by mul_output_buffer_id) (CallerFrees))
+
+(let add_output_buffer_tensor (BufferTensorLit add_layout_tensor add_output_buffer_id))
+(let mul_output_buffer_tensor (BufferTensorLit mul_layout_tensor mul_output_buffer_id))
+
+; Output join
+
+(let output
+  (BufferOutputLit
+    (BufferTensorCons add_output_buffer_tensor
+      (BufferTensorCons mul_output_buffer_tensor
+        (BufferTensorNil)))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; The input-alias-safe mutating add is offered: x, y, and the add output all
+; share data_layout (the match precondition) and the written tensor is
+; provably injective (contiguous), so both preconditions hold at match time.
+(check (= (injectivity-of add_layout_tensor) (Injective)))
+(check
+  (= (input-layout-tensor-list-of
+       (LayoutTensorOpAddMutatingInputAliasSafeGeneric x_layout_tensor y_layout_tensor))
+     (LayoutTensorCons x_layout_tensor (LayoutTensorCons y_layout_tensor (LayoutTensorNil)))))
+(check
+  (= (output-layout-tensor-list-of
+       (LayoutTensorOpAddMutatingInputAliasSafeGeneric x_layout_tensor y_layout_tensor))
+     (LayoutTensorCons add_layout_tensor (LayoutTensorNil))))
+
+; Fused op shape checks.
+
+(check
+  (= (input-layout-tensor-list-of
+       (LayoutTensorOpAddMulFusedGeneric x_layout_tensor y_layout_tensor data_layout data_layout))
+     (LayoutTensorCons x_layout_tensor
+       (LayoutTensorCons y_layout_tensor
+         (LayoutTensorNil)))))
+
+(check
+  (= (output-layout-tensor-list-of
+       (LayoutTensorOpAddMulFusedGeneric x_layout_tensor y_layout_tensor data_layout data_layout))
+     (LayoutTensorCons add_layout_tensor
+       (LayoutTensorCons mul_layout_tensor
+         (LayoutTensorNil)))))

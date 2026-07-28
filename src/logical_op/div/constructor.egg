@@ -1,0 +1,1 @@
+(constructor LogicalDiv (LogicalTensor LogicalTensor) LogicalTensor)

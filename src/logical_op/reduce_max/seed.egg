@@ -1,0 +1,12 @@
+; Shape Propagation : LogicalReduceMax
+
+; Trigger analysis
+(rule
+  (
+    (= ?out_logical (LogicalReduceMax ?in_logical ?reduction_index))
+    (= (shape-of ?in_logical) (ShapeLit ?dims))
+  )
+  (
+    (expr-list-remove-axis-root-demand ?dims ?reduction_index)
+  )
+)

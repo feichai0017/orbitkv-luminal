@@ -1,0 +1,4048 @@
+; THINGS THAT ARE MISSING
+; ☑ Tensors, shapes - INCLUDED!
+; ☑ Bitwise Expression Layouts - INCLUDED!
+; ☑ Strided Layout Constructors
+; ☑ Multiple Output Selection
+; ☑ IndexMap - INCLUDED!
+; ☑ IndexMap function composition... In egglog - INCLUDED! (subst-of + the
+;   composition rules beside it; composed layouts rejoin the constructor
+;   ladder via Downwards Layout Discovery)
+; ☑ dtypes - INCLUDED!
+; ☑ Downwards Layout Discovery:
+;      ☑ BitOffsetExpression discovers ElementOffsetExpression when applicable (dtype-gated)
+;      ☑ ElementOffsetExpression discovers StridedElement when applicable (zero-offset only)
+;      ☑ StridedElement discovers RightMajorContiguousElement when applicable
+;      ☑ StridedElement discovers LeftMajorContiguousElement when applicable
+
+(datatype*
+  ; This is system for doing math it probably eventually
+  ; should be split into like an integer expr system, and different one? maybe?
+  (IntExpr
+    (IntLit i64)
+    ; A symbolic integer: a compile-time UNKNOWN (batch size, sequence
+    ; length, a stride, a divisor). We are at compile time: anything KNOWN
+    ; is a literal (or pinned to one — the pin merges the classes and the
+    ; unknown becomes known); anything else is a variable about which we
+    ; will learn nothing beyond its seeded RANGE until runtime. Quantified
+    ; over that range like any variable — see the possible-valuations
+    ; contract.
+(IntVar String)
+    ; A tensor coordinate variable: (axis-from-end, extent of that axis).
+    ; Axis is a de Bruijn LEVEL counted from the innermost (last) dimension
+    ; — the same convention as the strided-indexing fold that mints these.
+    ; Carrying the extent makes the variable's range a function of the term
+    ; (future int-min-of/int-max-of key on it soundly: two index variables
+    ; over same-size dimensions can only ever carry identical range facts)
+    ; and gives layout classes extent-true identity: same-strides layouts
+    ; over DIFFERENT shapes no longer share an offset-expression class,
+    ; while all same-geometry tensors still share everything.
+    (CoordVar i64 IntExpr)
+    (IntAdd IntExpr IntExpr)
+    (IntMul IntExpr IntExpr)
+    ; THE DIVISION FAMILY (Stage D1). Semantics live in the constructor
+    ; NAME — there is no bare "IntDiv", so a rule can never be ambiguous
+    ; about which rounding it rewrites. Field order is (dividend, divisor).
+    ; Division is PARTIAL: every rule that unions through one of these
+    ; carries a divisor premise from VALUE-LEVEL BOUNDS (lower >= 1 or
+    ; upper <= -1) — never the cannot-union-with-zero certificate, which
+    ; certifies classes (like CoordVars) whose VALUE still passes through
+    ; zero at some point of the box.
+    ;   IntTruncDiv / IntTruncRem: quotient rounds TOWARD ZERO; remainder
+    ;     carries the DIVIDEND's sign. This is C and Rust (/ and %), LLVM
+    ;     sdiv/srem, and every hardware ISA — the device operation.
+    ;   IntCeilDiv: quotient rounds toward +infinity — the tile-count
+    ;     operator. ceil = trunc + 1 exactly when the division is inexact
+    ;     AND the true quotient is positive (operand signs agree).
+    ;   Future, entering ONLY with a named consumer and only as separate
+    ;   constructors with certified bridges (never shared rules):
+    ;   IntFloorDiv / IntFloorRem — quotient toward -infinity, remainder
+    ;     carries the DIVISOR's sign (Python // and %); floor = Euclidean
+    ;     on positive divisors. IntCeilRem likewise.
+    (IntTruncDiv IntExpr IntExpr)
+    (IntTruncRem IntExpr IntExpr)
+    (IntCeilDiv IntExpr IntExpr)
+    ; THE LATTICE PAIR (Stage M1): pointwise minimum and maximum — the
+    ; boundary-tile operators (the last tile of a ragged dim is
+    ; min(tile_size, remaining) wide). TOTAL functions: no partiality,
+    ; and no distinguished finite elements over the integers (their
+    ; identities and absorbers are +/- infinity, which do not exist
+    ; here), so no ideal fences apply at all. They are idempotent
+    ; OPERATIONS (min(x, x) = x — a collapsing identity), which is
+    ; distinct from ring idempotent ELEMENTS (L4 audit: no new e*e = e
+    ; elements arise; no min/max distributivity rules are added, and the
+    ; lattice has no inverses to cancel — no stream material).
+    (IntMin IntExpr IntExpr)
+    (IntMax IntExpr IntExpr)
+  )
+
+  ; Expression List
+  (IntExprList
+    (IntExprCons IntExpr IntExprList)
+    (IntExprNil)
+  )
+
+  ; Logical ID : This is just how we tag inputs, it could be a number, this is just for legibility
+  (LogicalId
+    (LogicalIdLit String)
+  )
+
+  ; fundamental shape type
+  (Shape
+    (ShapeLit IntExprList)
+  )
+
+  ; Logical Tensor : this is the logical dataflow object described by HLIR.
+  ; The two boundary constructors (naming: LogicalTensor*Lit = ONE tensor;
+  ; the plain LogicalInputLit/LogicalOutputLit below wrap the signature
+  ; LISTS — same split as BufferTensorLit vs BufferInputLit):
+  ; LogicalTensorInputLit DECLARES one input — the shape/dtype ARE the
+  ; declaration, and every dataflow leaf is one. LogicalTensorOutputLit is
+  ; a pure NAME — no shape, no dtype (ruling 2026-07-27): the model unions
+  ; it with the value it designates, whose own derivation supplies both,
+  ; so nothing is restated and nothing can disagree.
+  (LogicalTensor
+    (LogicalTensorInputLit LogicalId Shape Dtype)
+    (LogicalTensorOutputLit LogicalId)
+  )
+
+  ; A list of logical tensors — gather's per-axis coordinate suppliers.
+  (LogicalTensorList
+    (LogicalTensorCons LogicalTensor LogicalTensorList)
+    (LogicalTensorNil)
+  )
+
+  ; IndexMap : this is the logical object for views and similar
+  ; It is a list of expressions.
+  ; it is a function f(output_logical_index) -> input_logical_index
+  ; The length of the list is the rank of the input tensor
+  ; The number of variables possibly present in each expression is the rank of the output tensor
+  (IndexMap
+    (IndexMapLit IntExprList)
+  )
+
+  ; A bit width is ITS OWN SORT, not a bare i64: layout constructors also
+  ; take ranks, axes, and buffer numbers as i64, and the type checker can
+  ; only catch a transposed argument if widths are distinguishable. Wrap
+  ; at construction (bits-of returns BitWidth); rules that need the raw
+  ; integer unwrap with a (= ?bit_width (BitWidthLit ?bits)) premise.
+  (BitWidth
+    (BitWidthLit i64)
+  )
+
+  ; Layout : This will eventually become a more complex and complete system
+  (Layout
+    ; Layouts are PHYSICAL interpretation maps: an offset function (over
+    ; extent-carrying CoordVars) and an element access WIDTH (BitWidth) —
+    ; never a dtype. Element meaning lives on the logical tensor
+    ; (dtype-of); two dtypes of one width share layouts because they ARE
+    ; the same byte map (F32 and Int layouts cons — correctly).
+    ; Construct widths with (bits-of <dtype>) — eagerly set below, so
+    ; fixture lets can evaluate it.
+    ; EVERY constructor carries domain Shape AND width: an offset
+    ; expression alone says where an access STARTS, not how many bits it
+    ; covers, and a domain-blind form under-determines the function: a
+    ; broadcast view's offset expression never mentions the broadcast
+    ; axes (Zucker's f(x,y)=sin(x) vs f(x)=sin(x)), so identity-composed
+    ; views hash-cons into their PARENT's layout class — the confirmed
+    ; false cross-rank union. Layout identity = domain x interpretation.
+    (BitOffsetExpressionLayoutLit IntExpr Shape BitWidth)
+    (ElementOffsetExpressionLayoutLit IntExpr Shape BitWidth)
+    (StridedElementLayoutLit Shape IntExprList BitWidth)
+    (RightMajorContiguousElementLayoutLit Shape BitWidth)
+    (LeftMajorContiguousElementLayoutLit Shape BitWidth)
+  )
+
+  (RightMajorStridesFoldState
+    ; (rank, total-elements, element-strides)
+    (RightMajorStridesFoldStateLit i64 IntExpr IntExprList)
+  )
+
+  (StridedIndexingFoldRState
+    ; (next-axis, linear-element-index-so-far)
+    (StridedIndexingFoldRStateLit i64 IntExpr)
+  )
+
+  (LeftMajorStridesFoldState
+    ; (rank, total-elements, element-strides)
+    (LeftMajorStridesFoldStateLit i64 IntExpr IntExprList)
+  )
+
+  (ExprListRemoveAxisState
+    ; (next-axis-from-end, removed-flag, kept-dims)
+    (ExprListRemoveAxisStateLit i64 i64 IntExprList)
+  )
+
+  ; Layout Tensor : Core concept in the dataflow system Value and Layout semantically separate
+
+  (LayoutTensor
+    (LayoutTensorLit LogicalTensor Layout)
+  )
+
+  ; This is a type that LayoutTensorOps aka actual implementations will interact with
+  ; Enough information must be provided to prevent false consing.
+  ; The implication of this is that generics MUST have output Layouts
+  (LayoutTensorOp
+    ; This is the literal for layout tensor ops
+    ; The fields are:
+    ; Input - the list of layout tensors consumed
+    ; Output - the list of layout tensor produced
+    ;                      Input              Output
+    (LayoutTensorOpLit LayoutTensorList LayoutTensorList)
+
+  
+  )
+
+
+  ; Layout Tensor List
+  ; This will be used for lists of inputs and outputs
+  (LayoutTensorList
+    (LayoutTensorCons LayoutTensor LayoutTensorList)
+    (LayoutTensorNil)
+  )
+
+  ; CONTENTS permission: may the graph overwrite a buffer's bytes?
+  ;   ReadOnly  : the graph may only load (weights / constants / masks).
+  ;               Holding it is also the framing guarantee: nobody mutates the
+  ;               storage for the plan's duration.
+  ;   ReadWrite : exclusive — the graph may read and write (and scribble
+  ;               transiently). Preserving a value across the boundary is an
+  ;               *obligation* (an exit binding in Output), never an access
+  ;               property.
+  (Access
+    (ReadOnly)
+    (ReadWrite)
+  )
+
+  ; STORAGE deallocation responsibility — deliberately orthogonal to Access:
+  ; permission to clobber bytes never implies responsibility to destroy
+  ; storage (a read-write workspace stays the caller's allocation; a read-only
+  ; tensor can still be donated for destruction).
+  ;   CallerFrees  : the storage outlives the call; the program must never
+  ;                  free it.
+  ;   ProgramFrees : donated — the program must free it exactly once, after
+  ;                  its last use; the storage must not outlive the call.
+  ; There are NO undeclared defaults: input-program validation requires every
+  ; buffer to declare BOTH its Access and its FreedBy explicitly.
+  (FreedBy
+    (CallerFrees)
+    (ProgramFrees)
+  )
+
+  ; A simple label: pure identity. The grant is deliberately NOT a field of the
+  ; literal — a fielded literal would make two contradictory grants two silently
+  ; DISTINCT buffer e-classes (an identity fork). As a separate :no-merge
+  ; function (see buffer-access-of below), a contradiction panics instead.
+  (BufferId
+    (BufferLit i64)
+  )
+
+  ; This is the runtime level, necessary for expressing aliasing, mutation
+  (BufferTensor
+    (BufferTensorLit LayoutTensor BufferId)
+  )
+
+  ; Buffer Tensor List : This list is so that we can give an output list (maybe input list )
+  (BufferTensorList
+    (BufferTensorCons BufferTensor BufferTensorList)
+    (BufferTensorNil)
+  )
+
+  ; MODEL SIGNATURE (boundary-free, ruling 2026-07-24): a model designates
+  ; its inputs and outputs as LOGICAL tensors only — no layouts, no
+  ; buffers. Each input is a declared LogicalTensorInputLit; each output
+  ; VALUE gets its name by union with a LogicalTensorOutputLit. These
+  ; wrappers hold the ORDERED signature lists, and they exist as dedicated
+  ; sorts (rather than bare LogicalTensorLists) to be FINDABLE TAGS in the
+  ; e-graph (ruling 2026-07-27) — the affordance module composition needs:
+  ; grabbing a model's output list to splice it into a larger program,
+  ; without consulting frontend state. The BINDING (below) attaches buffer
+  ; conditions to the designated tensors in the language of a backend.
+  (LogicalInput
+    (LogicalInputLit LogicalTensorList)
+  )
+
+  (LogicalOutput
+    (LogicalOutputLit LogicalTensorList)
+  )
+
+  ; BINDING: the buffer-level input boundary — backend-vocabulary
+  ; conditions attached to the model's designated inputs.
+  (BufferInput
+    (BufferInputLit BufferTensorList)
+  )
+
+  ; BINDING: the buffer-level output boundary — the root extraction
+  ; anchor: extraction plans exactly what these buffer tensors demand.
+  (BufferOutput
+    (BufferOutputLit BufferTensorList)
+  )
+
+  ; Fake placeholder dtypes
+  ; The dtype vocabulary is LUMINAL'S, verbatim (all 20 variants, their
+  ; exact egglog names — Int64 spelled out to dodge egglog's builtin I64;
+  ; user ruling 2026-07-24: merge-ready alignment). Bit widths below match
+  ; luminal's DType::bits() exactly, including byte-backed Bool (8) and
+  ; the sub-byte quantized tail.
+  (Dtype
+    (F32)
+    (F64)
+    (F16)
+    (Bf16)
+    (Int)
+    (Int64)
+    (Bool)
+    (F4E2M1)
+    (F8E4M3)
+    (F8E5M2)
+    (F8UE8M0)
+    (I4)
+    (U4)
+    (I8)
+    (U8)
+    (I16)
+    (U16)
+    (TF32)
+    (F6E2M3)
+    (F6E3M2)
+  )
+
+) ; End of datatype*
+
+;; @SPLICE logical-constructors
+
+;; @SPLICE layout-op-constructors
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; The purpose of these functions it to cause runtime errors in the face of bad unions.
+; This is essentially enforcing invariants at runtime
+
+(function rank-of (Shape) i64 :no-merge)
+(function shape-of (LogicalTensor) Shape :no-merge)
+(function dtype-of (LogicalTensor) Dtype :no-merge)
+(function bits-of (Dtype) BitWidth :no-merge)
+(function logical-of (LayoutTensor) LogicalTensor :no-merge)
+(function layout-of (LayoutTensor) Layout :no-merge)
+(function input-layout-tensor-list-of (LayoutTensorOp) LayoutTensorList :no-merge) ; These are just convenience functions
+(function output-layout-tensor-list-of (LayoutTensorOp) LayoutTensorList :no-merge) ; These are just convenience functions
+(function layout-tensor-of (BufferTensor) LayoutTensor :no-merge) ; This doesn't seem like it does much
+(function buffer-id-of (BufferTensor) BufferId :no-merge)
+; The contents permission for each buffer (see the Access datatype). REQUIRED
+; for every buffer (input-program validation rejects omission). :no-merge
+; makes a contradictory declaration on one BufferId a panic at saturation —
+; the same runtime-invariant-check pattern as rank-of / dtype-of.
+(function buffer-access-of (BufferId) Access :no-merge)
+; Storage deallocation responsibility (see the FreedBy datatype). REQUIRED for
+; every buffer (input-program validation rejects omission); only boundary
+; buffers are nameable here, so program-minted storage can never be declared
+; caller-freed (no escape by construction).
+(function buffer-freed-by (BufferId) FreedBy :no-merge)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Helper Functions For IntExpr Lists
+(ruleset layout-tensor-op-metadata)
+
+(function expr-list-length-of (IntExprList) i64 :no-merge) ; I think these can be no merge
+(function expr-list-nth-from-end (IntExprList i64) IntExpr :no-merge) ; I think these can be no merge
+(relation expr-list-scale-demand (IntExpr IntExprList))
+(function expr-list-scale-of (IntExpr IntExprList) IntExprList :no-merge)
+
+; Zero length list -> length = 0
+(rule
+  (
+    (= ?nil (IntExprNil))
+  )
+  ((set (expr-list-length-of ?nil) 0))
+)
+
+; Increase length for each element
+(rule
+  (
+    (= ?cons (IntExprCons ?item ?list))
+    (= ?prev_length (expr-list-length-of ?list))
+  )
+  (
+    (set (expr-list-length-of ?cons) (+ ?prev_length 1))
+  )
+)
+
+; nth from end : ZERO-BASED (user ruling 2026-07-24, luminal alignment):
+; the index is the TAIL's length — the last item is index 0, the first
+; item of a length-n list is index n-1. CoordVar axes (0-based de Bruijn
+; levels) now index dim lists DIRECTLY, no +1 bridge anywhere.
+(rule
+  (
+    (= ?cons (IntExprCons ?item ?list))
+    (= ?tail_length (expr-list-length-of ?list))
+  )
+  (
+    (set (expr-list-nth-from-end ?cons ?tail_length) ?item)
+  )
+)
+
+; nth from end : set for the next cons node in the list, heading up only
+(rule
+  (
+    (= ?cons (IntExprCons ?item ?list))
+    (= ?tail_length (expr-list-length-of ?list))
+    (= ?prior_cons (IntExprCons ?prior_item ?cons))
+  )
+  (
+    (set (expr-list-nth-from-end ?prior_cons ?tail_length) ?item)
+  )
+)
+
+; nth from end : an entry visible at a suffix is visible at every longer
+; list (the from-END index is suffix-invariant). Without this, only the
+; top two indices of a list resolve — rank>=3 index maps need them all.
+(rule
+  (
+    (= ?prior_cons (IntExprCons ?prior_item ?cons))
+    (= ?item (expr-list-nth-from-end ?cons ?index))
+  )
+  (
+    (set (expr-list-nth-from-end ?prior_cons ?index) ?item)
+  )
+)
+
+; Demand scaling for the tail first.
+(rule
+  (
+    (expr-list-scale-demand ?factor (IntExprCons ?item ?tail))
+  )
+  (
+    (expr-list-scale-demand ?factor ?tail)
+  )
+)
+
+; Scaling an empty list is empty.
+(rule
+  (
+    (expr-list-scale-demand ?factor (IntExprNil))
+  )
+  (
+    (set (expr-list-scale-of ?factor (IntExprNil)) (IntExprNil))
+  )
+)
+
+; Scale each expression in a list by the same factor.
+(rule
+  (
+    (expr-list-scale-demand ?factor ?list)
+    (= ?list (IntExprCons ?item ?tail))
+    (= ?scaled_tail (expr-list-scale-of ?factor ?tail))
+  )
+  (
+    (set
+      (expr-list-scale-of ?factor ?list)
+      (IntExprCons (IntMul ?factor ?item) ?scaled_tail))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Helper Functions For Layout Tensor Lists
+
+(function layout-tensor-list-length-of (LayoutTensorList) i64 :no-merge) ; I think these can be no merge
+(function layout-tensor-list-nth-from-end (LayoutTensorList i64) LayoutTensor :no-merge) ; I think these can be no merge
+
+; Zero length list -> length = 0
+(rule
+  (
+    (= ?nil (LayoutTensorNil))
+  )
+  ((set (layout-tensor-list-length-of ?nil) 0))
+)
+
+; Increase length for each element
+(rule
+  (
+    (= ?cons (LayoutTensorCons ?layout_tensor ?list))
+    (= ?prev_length (layout-tensor-list-length-of ?list))
+  )
+  (
+    (set (layout-tensor-list-length-of ?cons) (+ ?prev_length 1))
+  )
+)
+
+; nth from end : ZERO-BASED (see the expr-list twin above).
+(rule
+  (
+    (= ?cons (LayoutTensorCons ?layout_tensor ?layout_Tensor_list))
+    (= ?tail_length (layout-tensor-list-length-of ?layout_Tensor_list))
+  )
+  (
+    (set (layout-tensor-list-nth-from-end ?cons ?tail_length) ?layout_tensor)
+  )
+)
+
+; nth from end : set for the next cons node in the list, heading up only
+(rule
+  (
+    (= ?cons (LayoutTensorCons ?layout_tensor ?layout_tensor_list))
+    (= ?tail_length (layout-tensor-list-length-of ?layout_tensor_list))
+    (= ?prior_cons (LayoutTensorCons ?prior_layout_tensor ?cons))
+  )
+  (
+    (set (layout-tensor-list-nth-from-end ?prior_cons ?tail_length) ?layout_tensor)
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Helper Functions For Removing One Axis From IntExpr Lists
+
+(relation expr-list-remove-axis-root-demand (IntExprList i64))
+(relation expr-list-remove-axis-demand (IntExprList i64))
+(function expr-list-remove-axis-state-of (IntExprList i64) ExprListRemoveAxisState :no-merge)
+(function expr-list-remove-axis-from-end (IntExprList i64) IntExprList :no-merge)
+
+; Axis numbering follows the layout fold: axis 0 is the rightmost dimension.
+(rule
+  (
+    (expr-list-remove-axis-root-demand ?dims ?axis)
+  )
+  (
+    (expr-list-remove-axis-demand ?dims ?axis)
+  )
+)
+
+; Propagate demand towards nil.
+(rule
+  (
+    (expr-list-remove-axis-demand (IntExprCons ?dim ?tail) ?axis_to_remove)
+  )
+  (
+    (expr-list-remove-axis-demand ?tail ?axis_to_remove)
+  )
+)
+
+; Empty suffix: no axis consumed, no dimension removed, empty kept list.
+(rule
+  (
+    (expr-list-remove-axis-demand (IntExprNil) ?axis_to_remove)
+  )
+  (
+    (set (expr-list-remove-axis-state-of (IntExprNil) ?axis_to_remove)
+      (ExprListRemoveAxisStateLit 0 0 (IntExprNil)))
+  )
+)
+
+; Current dimension is the reduction axis, so drop it.
+(rule
+  (
+    (expr-list-remove-axis-demand ?list ?axis_to_remove)
+    (= ?list (IntExprCons ?dim ?tail))
+    (= (expr-list-remove-axis-state-of ?tail ?axis_to_remove)
+      (ExprListRemoveAxisStateLit ?axis_from_end ?removed ?kept_tail))
+    (= ?axis_from_end ?axis_to_remove)
+  )
+  (
+    (set (expr-list-remove-axis-state-of ?list ?axis_to_remove)
+      (ExprListRemoveAxisStateLit (+ ?axis_from_end 1) 1 ?kept_tail))
+  )
+)
+
+; Current dimension is not the reduction axis, so copy it.
+(rule
+  (
+    (expr-list-remove-axis-demand ?list ?axis_to_remove)
+    (= ?list (IntExprCons ?dim ?tail))
+    (= (expr-list-remove-axis-state-of ?tail ?axis_to_remove)
+      (ExprListRemoveAxisStateLit ?axis_from_end ?removed ?kept_tail))
+    (!= ?axis_from_end ?axis_to_remove)
+  )
+  (
+    (set (expr-list-remove-axis-state-of ?list ?axis_to_remove)
+      (ExprListRemoveAxisStateLit
+        (+ ?axis_from_end 1)
+        ?removed
+        (IntExprCons ?dim ?kept_tail)))
+  )
+)
+
+; Publish the filtered list only if the requested axis was actually removed.
+(rule
+  (
+    (expr-list-remove-axis-demand ?dims ?axis_to_remove)
+    (= (expr-list-remove-axis-state-of ?dims ?axis_to_remove)
+      (ExprListRemoveAxisStateLit ?rank 1 ?kept_dims))
+  )
+  (
+    (set (expr-list-remove-axis-from-end ?dims ?axis_to_remove) ?kept_dims)
+  )
+)
+
+; Only root demands are invalid-axis errors; recursive suffixes may not remove anything.
+(rule
+  (
+    (expr-list-remove-axis-root-demand ?dims ?axis_to_remove)
+    (= (expr-list-remove-axis-state-of ?dims ?axis_to_remove)
+      (ExprListRemoveAxisStateLit ?rank 0 ?kept_dims))
+  )
+  (
+    (panic "reduction axis out of bounds")
+  )
+)
+
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Propagate thing-of functions from Literals
+
+; Propagate rank-of
+(rule
+  (
+    (= ?shape (ShapeLit ?expr_list))
+    (= ?rank (expr-list-length-of ?expr_list))
+  )
+  (
+    (set (rank-of ?shape) ?rank)
+  )
+)
+
+; Propagate dtype-of , shape-of
+(rule
+  (
+    (= ?logical_tensor (LogicalTensorInputLit ?var ?shape ?dtype))
+  )
+  (
+    (set (dtype-of ?logical_tensor) ?dtype)
+    (set (shape-of ?logical_tensor) ?shape)
+  )
+)
+
+; Eager bits-of entries: top-level SETS, not rules — fixture lets evaluate
+; (bits-of <dtype>) at load time, before any (run), and an unset function
+; lookup in an action is a loud panic. Bool is ONE bit — a dtype's width is
+; its information content; a target that stores bools byte-per-bool says so
+; with a LAYOUT (an 8-bit-strided map, offered by a rewrite rule when such
+; a target exists), never by widening the dtype.
+(set (bits-of (F32)) (BitWidthLit 32))
+(set (bits-of (F64)) (BitWidthLit 64))
+(set (bits-of (F16)) (BitWidthLit 16))
+(set (bits-of (Bf16)) (BitWidthLit 16))
+(set (bits-of (Int)) (BitWidthLit 32))
+(set (bits-of (Int64)) (BitWidthLit 64))
+(set (bits-of (Bool)) (BitWidthLit 1)) ; DELIBERATE DIVERGENCE from luminal's byte-backed bools (user ruling 2026-07-24: bit-packed Bool is an update we will persist and see through the integration)
+(set (bits-of (F4E2M1)) (BitWidthLit 4))
+(set (bits-of (F8E4M3)) (BitWidthLit 8))
+(set (bits-of (F8E5M2)) (BitWidthLit 8))
+(set (bits-of (F8UE8M0)) (BitWidthLit 8))
+(set (bits-of (I4)) (BitWidthLit 4))
+(set (bits-of (U4)) (BitWidthLit 4))
+(set (bits-of (I8)) (BitWidthLit 8))
+(set (bits-of (U8)) (BitWidthLit 8))
+(set (bits-of (I16)) (BitWidthLit 16))
+(set (bits-of (U16)) (BitWidthLit 16))
+(set (bits-of (TF32)) (BitWidthLit 19))
+(set (bits-of (F6E2M3)) (BitWidthLit 6))
+(set (bits-of (F6E3M2)) (BitWidthLit 6))
+
+; Propagate logical-of , layout-of
+(rule
+  (
+    (= m (LayoutTensorLit ?logical ?layout))
+  )
+  (
+    (set (logical-of m) ?logical)
+    (set (layout-of m) ?layout)
+  )
+)
+
+; Propagate input-layout-tensor-list-of, output-layout-tensor-list-of
+(rule
+  (
+    (= ?layout_tensor_op (LayoutTensorOpLit ?input_list ?output_list))
+  )
+  (
+    (set (input-layout-tensor-list-of ?layout_tensor_op) ?input_list)
+    (set (output-layout-tensor-list-of ?layout_tensor_op) ?output_list)
+  )
+  :ruleset layout-tensor-op-metadata
+)
+
+
+; Propagate layout-tensor-of
+(rule
+  (
+    (= ?buffer_tensor (BufferTensorLit ?layout_tensor ?buffer_id))
+  )
+  (
+    (set (layout-tensor-of ?buffer_tensor) ?layout_tensor)
+    (set (buffer-id-of ?buffer_tensor) ?buffer_id)
+  )
+)
+
+
+;; @SPLICE dtype
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+; Every list that supplies coordinates — to a gather OR a scatter — and
+; every suffix of one: the demand token the coordinate machinery below is
+; gated on, so list traversal work happens only for lists an op uses.
+(relation coordinate-tensor-list (LogicalTensorList))
+(rule
+  (
+    (coordinate-tensor-list (LogicalTensorCons ?head_logical ?rest_list))
+  )
+  (
+    (coordinate-tensor-list ?rest_list)
+  )
+)
+
+
+;Dtype Checking : LogicalGather — coordinate tensors are Int index data.
+(rule
+  (
+    (coordinate-tensor-list (LogicalTensorCons ?head_logical ?rest_list))
+    (!= (dtype-of ?head_logical) (Int))
+  )
+  (
+    (panic "gather/scatter coordinate tensors must be Int")
+  )
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+; The one shape every coordinate tensor in the list shares — gather's
+; output shape. POSITIVELY GATED (user ruling 2026-07-23: never introduce
+; an invalid unification and rely on :no-merge to catch it — that is
+; optimistic merging, and it panics on PENDING-equal classes, i.e. shapes
+; that are provably equal but whose proof is still in flight; demonstrated
+; by gather_pending_union_example.egg, and the same discipline as the
+; stride fold's design b1). The step rule binds the head's shape and the
+; rest's common shape to ONE variable, so it fires only once their
+; equality has LANDED. Monotone and fail-open: unproven-equal coordinate
+; shapes propagate nothing, the gather derives no shape, no op match ever
+; fires, and extraction fails loudly at the root — conservative silence,
+; never a false panic. :no-merge stays as the backstop it was meant to be.
+(function coords-common-shape (LogicalTensorList) Shape :no-merge)
+(rule
+  (
+    (coordinate-tensor-list ?coordinate_list)
+    (= ?coordinate_list (LogicalTensorCons ?only_logical (LogicalTensorNil)))
+    (= ?only_shape (shape-of ?only_logical))
+  )
+  (
+    (set (coords-common-shape ?coordinate_list) ?only_shape)
+  )
+)
+(rule
+  (
+    (coordinate-tensor-list ?coordinate_list)
+    (= ?coordinate_list (LogicalTensorCons ?head_logical ?rest_list))
+    (= ?shape (shape-of ?head_logical))
+    (= ?shape (coords-common-shape ?rest_list))
+  )
+  (
+    (set (coords-common-shape ?coordinate_list) ?shape)
+  )
+)
+
+; The coordinate LAYOUT-tensor lists for a gather's coordinate list: one
+; LayoutTensorList per choice of layout tensor for each coordinate. Gated
+; on the gather demand token; the minted list count is the product of the
+; per-coordinate layout-tensor counts — small (each logical carries its
+; propagated layouts plus the canonical mint), and only for lists a gather
+; actually uses.
+(relation coordinate-layout-tensors (LogicalTensorList LayoutTensorList))
+(rule
+  (
+    (coordinate-tensor-list ?coordinate_list)
+    (= ?coordinate_list (LogicalTensorNil))
+  )
+  (
+    (coordinate-layout-tensors ?coordinate_list (LayoutTensorNil))
+  )
+)
+(rule
+  (
+    (coordinate-tensor-list ?coordinate_list)
+    (= ?coordinate_list (LogicalTensorCons ?head_logical ?rest_list))
+    (= ?head_layout_tensor (LayoutTensorLit ?head_logical ?head_layout))
+    (coordinate-layout-tensors ?rest_list ?rest_layout_tensors)
+  )
+  (
+    (coordinate-layout-tensors ?coordinate_list
+      (LayoutTensorCons ?head_layout_tensor ?rest_layout_tensors))
+  )
+)
+
+;; @SPLICE seed
+
+;; @SPLICE shape
+
+
+
+
+
+
+
+
+
+
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Expression Simplification Rules
+;
+; THE FUNCTION-IDENTITY CONTRACT (load-bearing for every IntExpr consumer).
+; An IntExpr e-class denotes ONE function of the coordinate variables. Every
+; union between IntExpr terms therefore asserts equality AS FUNCTIONS, valid
+; for every POSSIBLE VALUATION — where "possible" means consistent with the
+; currently known monotone facts: each CoordVar ranges over the box its own
+; TERM-CARRIED extent allows ([0, extent-1] for every extent value the
+; extent's bounds admit), and each IntVar ranges over its seeded bounds
+; (narrowed by pins). Discovery only ADDS facts, so the possible-valuation
+; set only SHRINKS, and a union that was ever justified stays justified —
+; unions and facts are never reverted. Two obligations keep that sound:
+;   - THE STABILITY CLAUSE: a permanent fact may only be justified by
+;     premises that survive domain shrinkage — "big-enough" claims gate on
+;     LOWER bounds (which only rise), "small-enough" claims on UPPER bounds
+;     (which only fall). A fact justified by "some large valuation exists
+;     today" is forbidden: a later pin could remove that valuation, and
+;     nothing can be reverted.
+;   - NO rule may conclude from the ABSENCE of a fact (negation-as-failure
+;     breaks monotonicity — the class-level != forensics, as contract law).
+; The TWO-SORTED structure:
+;   - CoordVars are UNIVERSALLY QUANTIFIED over their boxes. A union may be
+;     justified by the coordinate's OWN TERM CONTENT (its extent field and
+;     that extent's global bounds — e.g. an extent provably exactly 1 makes
+;     the coordinate identically zero over every possible valuation, and
+;     the union with (IntLit 0) below is sanctioned). What remains BANNED is
+;     any union justified by TENSOR-CONTEXT premises — shape-of or dtype-of
+;     can never justify an IntExpr union, because an IntExpr class is
+;     shared by every tensor whose arithmetic mentions it, and a fact about
+;     one user of the class silently rewrites all the others (the reproduced
+;     Step-2 and broadcast collapses).
+;   - Vars are COMPILE-TIME UNKNOWNS, quantified over their seeded
+;     ranges like any variable (user ruling 2026-07-20: NOT "per-run
+;     constants" — known things are literals; unknown things are
+;     variables we learn nothing more about until runtime). A pin
+;     ((union (IntVar "n") (IntLit k))) is the moment an unknown becomes
+;     known: the classes merge and the range collapses. Bounds are
+;     seeded exactly once at program start; a pin is the only later
+;     movement, and the crossed-bounds tripwire panics on any pin
+;     inconsistent with the seed. (Ruling 2026-07-27: a BINDING never
+;     writes that union — its whole interface is bounds-on-vars, and a
+;     tight seed [k, k] IS the pin, delivered as the union by the
+;     pin-collapse rule in the bounds section.) CONSEQUENCE for future certificates
+;     (refutes an earlier carve-out): a never-zero Var cofactor does NOT
+;     preserve non-constancy through products — m * tdiv(6, m) over
+;     m in [1, 3] is identically 6 with both factors varying — so a
+;     non-constant lattice's product route must gate on ring-built
+;     factors (or a nonzero LITERAL cofactor), never on mere
+;     Var-ness.
+;     Congruence consequence, accepted deliberately: pinning n = k merges
+;     CoordVar(j, IntVar "n") with CoordVar(j, IntLit k) and therefore every
+;     same-geometry layout class built over them.
+; This contract is what makes substitution (subst-of) well-defined on
+; classes: substitution images of different representatives of one class
+; are unioned, which is sound only because the representatives are equal
+; functions.
+;
+; THE ALGEBRAIC FENCE DOCTRINE (the organizing principle behind every
+; guard in this file). IntExpr denotes the polynomial ring ZZ[coords][dims].
+; Every divergence engine ever found here is driven by one of the ring's
+; DISTINGUISHED ELEMENTS, through one of two mechanisms:
+;
+;   ABSORPTION (the element 0): zero is the absorbing element of IntMul
+;   (x*0 = 0), which is exactly what makes its class an IDEAL — a class
+;   with unbounded natural membership (every product with it, every
+;   folded inverse pair c + (-c) lands there). Any generative rule that
+;   can match INTO or bind THROUGH that class finds unboundedly many
+;   sound facts:
+;     - factoring bound to a zero factor  = fresh-constant factory
+;       (Engine A) -> fenced by the factor rule's matched-term guard;
+;     - associativity through zero-class residents = constant pump
+;       (Engine B) -> fenced by the assoc inner guard;
+;     - expansion onto zero-class summands/transients = resident factory
+;       feeding both (the t7j window) -> fenced by the expand operand
+;       guards (+ matched-term insurance);
+;     - absorption AS A UNION (x*0 joining zero's class) is LIVE since
+;       the 2026-07-20 study (user-directed): an enlarged ideal is INERT
+;       CARGO behind the full fence — the engines above are what ignite,
+;       and they are guard-starved (zero-class residents are uncertified
+;       by the certificate's own meaning, and the width gates exclude
+;       the [0, 0]-bounded zero class from every minting identity). The
+;       study's ablation is the proof shape: stripping one guard
+;       detonates the FACT-ONLY configuration identically — residency,
+;       not size, is the fuel. The ladder re-verifies on every change.
+;
+;   IDENTITY ELIMINATION (the elements 0 for IntAdd, 1 for IntMul): the
+;   identity rules below merge a COMPOUND representative into a busy
+;   class (x+0 into x's class; x*1 into x's class). The merge is sound
+;   and necessary — but a compound representative planted in a heavily
+;   referenced class turns every reference into a generative-rule firing
+;   site (class-level matching sees every representative). Verified
+;   minimal case: factoring a same-axis sum whose constants fold to the
+;   MULTIPLICATIVE IDENTITY (2 + (-1) = 1) plants an IntAdd-of-products
+;   representative into the coordinate's own class via x*1, after which
+;   every multiple of that coordinate expands forever (Engine C,
+;   self-sustaining); constants folding to a non-identity (3 + (-1) = 2)
+;   plant into an ordinary class and fire at most once per external
+;   wrapper (verified convergent). Fences: the identity rules :subsume
+;   their matches (the fat representative dies — see the termination
+;   discipline), and the factor rule's matched-term guard refuses
+;   same-axis sums, so the planting never happens. Any future rule that
+;   unions a compound form into an identity-adjacent class MUST subsume
+;   its match (the like-term combiner rule below complies).
+;
+;   Elements that DON'T stream, and why: the units (1 and -1) form a
+;   FINITE group ((-1)*(-1) folds to 1; unit chains collapse), so unit
+;   products cannot generate; ZZ[v] has no idempotents besides 0 and 1
+;   and no zero divisors (the certificate's product route leans on this).
+;
+;   LAWS for future operators (Div/Mod/Min/Max carry their own
+;   distinguished elements — e.g. x mod x = 0 and x mod 1 = 0 are ROADS
+;   INTO the zero ideal; min/max are idempotent):
+;     LAW 1: an absorbing element's class is an ideal — no generative
+;            rule may bind into or through it; guard on the certificate.
+;            When a future operator makes some OTHER element absorbing
+;            (Pow makes 1 absorbing in base position: 1^x = 1; Mod makes
+;            1 absorbing-into-zero in modulus position: x mod 1 = 0),
+;            mint the analogous not-<element> certificate from existing
+;            machinery: axis-in-support already implies "not equal to
+;            ANY constant polynomial" (nonconstant), and the bounds
+;            lattice excludes specific constants for constant classes.
+;            No such certificate is needed for 1 under IntAdd/IntMul alone:
+;            1 is only an IDENTITY there, its hazards are planting
+;            hazards (fenced by :subsume + the same-axis refusal), and
+;            every product node over 1's class is itself collapsed and
+;            subsumed by x*1 elimination — the identity rule is its own
+;            element's consumption fence.
+;     LAW 2: identity-elimination rules must :subsume, and no rule may
+;            replant compound representatives into identity-adjacent
+;            classes without subsuming its match.
+;     LAW 3: ROADS into distinguished classes (inverse-pair folding,
+;            future mod rules) stay unfenced — completeness lives there;
+;            every fence sits at a CONSUMPTION site (a generative rule).
+;     LAW 4: check that the unit group stays finite and that no new
+;            idempotents appear before trusting chain/collapse behavior.
+;
+; THE TERMINATION DISCIPLINE. Any COLLAPSING rewrite — one that unions a
+; variable-containing term into a smaller class (x*0 -> 0 is the canonical
+; future case) — MUST be :subsume. Demand-driven recursion (subst-of,
+; discovery folds) walks every matchable representative of a class; a
+; non-subsumed collapsed representative re-enters the class after each
+; substitution and spawns an unbounded orbit (IntMul(v,0) in the zero class
+; plus a slice entry v+c demands v+c, v+2c, ... — every union sound,
+; saturation never terminating). :subsume removes the fat representative
+; from matching and breaks the loop. The IDENTITY rules below comply;
+; keep it that way.
+;
+; CONSTANT FOLDING deliberately does NOT subsume (Stage I4 amendment,
+; user-directed): a live IntMul(IntLit 2, IntLit 32) node in 64's class is a
+; PRESERVED FACTORIZATION that the guarded factoring direction can see —
+; subsuming it made derived constants forget their factors. This is safe
+; ONLY behind the full fence: pre-fence, live fold-residents in the zero
+; class fed the assoc pump and no-subsume folding was nonterminating
+; (forensics, 2026-07-15); post-fence, every engine that consumed those
+; residents is certificate-starved. Do not copy this exception to the
+; identity rules without re-running the attack ladder.
+
+; Additive Identity
+(rewrite (IntAdd ?expr (IntLit 0)) ?expr :subsume)
+(rewrite (IntAdd (IntLit 0) ?expr) ?expr :subsume)
+
+; Multiplicative Identity
+(rewrite (IntMul ?expr (IntLit 1)) ?expr :subsume)
+(rewrite (IntMul (IntLit 1) ?expr) ?expr :subsume)
+
+; Constant Folding (no :subsume — see the discipline note above)
+(rewrite (IntAdd (IntLit ?lhs) (IntLit ?rhs)) (IntLit (+ ?lhs ?rhs)))
+(rewrite (IntMul (IntLit ?lhs) (IntLit ?rhs)) (IntLit (* ?lhs ?rhs)))
+
+; Division constant folding (Stage D1; no :subsume, same discipline).
+; Every fold is gated on the LITERAL divisor being nonzero — a primitive
+; i64 comparison on a bound value (timing-independent), never a class
+; test. THE METALEVEL TRAP, handled: the builtin / and % ARE truncating
+; division, so the trunc folds are the primitives verbatim; the ceil
+; folds are trunc PLUS ONE exactly when the division is inexact and the
+; operand signs agree (positive true quotient) — the sign-gated rule
+; family, verified over the full mixed-sign grid. Custom rounding
+; primitives can replace this split later without changing any meaning.
+(rule
+  ((= ?expr (IntTruncDiv (IntLit ?dividend) (IntLit ?divisor))) (!= ?divisor 0))
+  ((union ?expr (IntLit (/ ?dividend ?divisor))))
+)
+(rule
+  ((= ?expr (IntTruncRem (IntLit ?dividend) (IntLit ?divisor))) (!= ?divisor 0))
+  ((union ?expr (IntLit (% ?dividend ?divisor))))
+)
+; ceil, exact division: the trunc quotient is already the ceiling...
+(rule
+  (
+    (= ?expr (IntCeilDiv (IntLit ?dividend) (IntLit ?divisor)))
+    (!= ?divisor 0)
+    (= 0 (% ?dividend ?divisor))
+  )
+  ((union ?expr (IntLit (/ ?dividend ?divisor))))
+)
+; ...inexact with agreeing signs (positive true quotient): trunc + 1...
+(rule
+  (
+    (= ?expr (IntCeilDiv (IntLit ?dividend) (IntLit ?divisor)))
+    (!= ?divisor 0)
+    (!= 0 (% ?dividend ?divisor))
+    (> ?dividend 0) (> ?divisor 0)
+  )
+  ((union ?expr (IntLit (+ (/ ?dividend ?divisor) 1))))
+)
+(rule
+  (
+    (= ?expr (IntCeilDiv (IntLit ?dividend) (IntLit ?divisor)))
+    (!= ?divisor 0)
+    (!= 0 (% ?dividend ?divisor))
+    (< ?dividend 0) (< ?divisor 0)
+  )
+  ((union ?expr (IntLit (+ (/ ?dividend ?divisor) 1))))
+)
+; Lattice-pair constant folding (Stage M1; total, no gates needed).
+(rule
+  ((= ?expr (IntMin (IntLit ?lhs) (IntLit ?rhs))))
+  ((union ?expr (IntLit (min ?lhs ?rhs))))
+)
+(rule
+  ((= ?expr (IntMax (IntLit ?lhs) (IntLit ?rhs))))
+  ((union ?expr (IntLit (max ?lhs ?rhs))))
+)
+
+; ...inexact with opposing signs (negative true quotient): truncation
+; already rounded toward zero, which IS up for a negative quotient.
+(rule
+  (
+    (= ?expr (IntCeilDiv (IntLit ?dividend) (IntLit ?divisor)))
+    (!= ?divisor 0)
+    (!= 0 (% ?dividend ?divisor))
+    (> ?dividend 0) (< ?divisor 0)
+  )
+  ((union ?expr (IntLit (/ ?dividend ?divisor))))
+)
+(rule
+  (
+    (= ?expr (IntCeilDiv (IntLit ?dividend) (IntLit ?divisor)))
+    (!= ?divisor 0)
+    (!= 0 (% ?dividend ?divisor))
+    (< ?dividend 0) (> ?divisor 0)
+  )
+  ((union ?expr (IntLit (/ ?dividend ?divisor))))
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Commutativity
+
+; Commutativity : IntAdd
+(rewrite
+  (IntAdd ?lhs ?rhs)
+  (IntAdd ?rhs ?lhs)
+)
+
+; Commutativity : IntMul
+(rewrite
+  (IntMul ?lhs ?rhs)
+  (IntMul ?rhs ?lhs)
+)
+
+; Commutativity : IntMin / IntMax (permutation-only, hash-cons bounded)
+(rewrite
+  (IntMin ?lhs ?rhs)
+  (IntMin ?rhs ?lhs)
+)
+(rewrite
+  (IntMax ?lhs ?rhs)
+  (IntMax ?rhs ?lhs)
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Associativity: CERTIFICATE-GUARDED (Stage I3) — the rules live after
+; the nonzero-certificate section below, which they consume (egglog
+; requires declaration before use). Commutativity above stays unguarded:
+; it only permutes existing structure and hash-consing bounds it.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Distributivity: UNGUARDED FORMS REFUTED (forensic record, kept in full
+; below — it justifies every guard); the CERTIFICATE-GUARDED forms are
+; RESTORED in the Stage I4 section after the nonzero certificate. Root
+; cause pinned by minimization + ablation (2026-07-13). THE ZERO E-CLASS
+; IS THE ENGINE; distributivity is the only ring rule that ignites it.
+;
+; One-line repro (this rule set + the birewrite, nothing else):
+;   (IntMul (IntAdd v (IntLit 0)) (IntLit 32))    — the strided foldr's base-case
+;                                       tail under the ladder's bit lift.
+; Every union stays sound (all pump terms equal 0 or 32*v); saturation
+; never terminates and constant folding panics on i64 overflow in ~10
+; iterations. Replace the 0 with any nonzero constant and it converges:
+; slice/offset constants are innocent, only zero ignites.
+;
+; Why zero, and only under distributivity: comm/assoc only PERMUTE
+; existing structure — hash-consing dedupes their output, so cyclic
+; classes born from the x+0/x*1 collapses (X contains IntAdd(X,0)) stay
+; inert. Distributivity MANUFACTURES structure (fresh IntMul nodes per
+; firing), so each one-iteration-live view of a cyclic class mints new
+; live nodes faster than :subsume retires them. In the zero class the
+; orbit also grows CONSTANTS: x*0 = y*0 = 0 for ALL x,y, so factoring
+; (the backward direction) "discovers" (x+y)*0 = 0 — a sound zero whose
+; subterm x+y is a fresh constant, immediately re-offered as a new
+; cofactor: 32 -> 64 -> 64^2 -> (64^2)^2, exponent doubling per round.
+; Forward-only swaps that engine for a self-referential-class pump
+; (constants 32^k, one power per iteration) fed by the IntAdd-orbit; without
+; IntMul-assoc it degrades to a SILENT structural hang (IntAdd nodes 40 -> 427
+; -> 21525 over 3 iterations, constants frozen). Zeros are endemic to an
+; indexing IR (fold base accumulators, zero map entries, folded IntMul(0,c)
+; images), so the seed cannot be starved; ignition is race-sensitive
+; (the same redex one level deeper may or may not fire before subsume
+; buries it), which makes any surviving configuration a landmine, not a
+; proof of safety.
+;
+; Refuted by deterministic i64-overflow, minimal repro or fixture level:
+;   1. birewrite in the saturating set;
+;   2. forward-only (converges on the minimal seed, overflows with the
+;      fold/ladder machinery);
+;   3. birewrite + x*0 -> 0 :subsume annihilator;
+;   4. forward-only + annihilator (saves the minimal seed, dies on
+;      boundary_aliased_views);
+;   5. as a BOUNDED single stroke between saturations.
+; Backward-only (pure factoring) survives all fixtures but does not
+; deliver distribution. If a consumer ever needs distributed forms, do it
+; the coeff-of way: a demand-driven fold computing PRIMITIVE values,
+; never IntExpr-level rewrites in the saturating soup.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; INTEGER BOUNDS LATTICE (Stage I0 of the Option C plan).
+;
+; Every IntExpr class gets optional BigInt range bounds: lower-bound-of only
+; ever RISES (:merge max), upper-bound-of only ever FALLS (:merge min) —
+; monotone tightening, so a bound is a POSITIVE certificate and rules
+; reading bounds as premises are fail-closed (no fact -> no fire; a fresh
+; term simply waits for its bounds). Bounds are BigInt so deep stride /
+; bit-offset products can never overflow the ANALYSIS (the value world
+; stays i64; conversion in via (bigint n) only — the sole way back OUT
+; is the harness-registered PARTIAL primitive (bigint-to-i64 z), which is
+; simply unmatched outside i64 range, and whose one sanctioned rule-side
+; use is the [n,n] pin-collapse rule below; ruling 2026-07-27).
+;
+; These rules only `set` lattice facts — they never union Exprs — so they
+; cannot move an extraction or a golden.
+;
+; TRIPWIRE TRIAGE: crossed bounds (lower > upper) mean exactly one of
+;   (a) an UNSOUND UNION merged two function-unequal classes,
+;   (b) an inconsistent seed (e.g. hi set below a pinned value),
+;   (c) an empty axis (extent < 1 — separately trapped below).
+; Never silence it; identify the arm first.
+(function lower-bound-of (IntExpr) BigInt :merge (max old new))
+(function upper-bound-of (IntExpr) BigInt :merge (min old new))
+
+; A literal is exactly itself.
+(rule
+  ((= ?expr (IntLit ?value)))
+  (
+    (set (lower-bound-of ?expr) (bigint ?value))
+    (set (upper-bound-of ?expr) (bigint ?value))
+  )
+)
+
+; THE CONVERSE — the [n,n] pin collapse (ruling 2026-07-27). Bounds
+; [n, n] admit exactly one valuation, so the class denotes the constant
+; function n and unioning it with (IntLit n) is a FUNCTION-EQUALITY
+; union, justified purely by the class's OWN lattice row (never tensor
+; context — the fence doctrine's own carve-out). Monotone-stable: bounds
+; only tighten, so [n, n] can never widen — the premise, once true, is
+; true forever, making the rule sound mid-saturation. This is how a
+; BINDING pins a symbolic dim: it seeds tight bounds on the var, and
+; saturation delivers var = literal to every user by congruence.
+; (bigint-to-i64 z) is the harness-registered PARTIAL primitive: bounds
+; pinned outside i64 range simply never match (fail-open) and such a pin
+; remains a BigInt-lattice fact only.
+(rule
+  (
+    (= ?bound (lower-bound-of ?expr))
+    (= ?bound (upper-bound-of ?expr))
+    (= ?value (bigint-to-i64 ?bound))
+  )
+  ((union ?expr (IntLit ?value)))
+)
+
+; A coordinate ranges over [0, extent-1]. Reading the EXTENT's bounds
+; (rather than demanding a literal) keeps this rule uniform for symbolic
+; (IntVar) extents: the ceiling is the extent's own upper bound. GATED on
+; the extent being provably nonempty (hi >= 1): a possibly-empty axis
+; (size-0 tensors are legal) would otherwise mint the crossed interval
+; [0, -1] — the coordinate of an empty axis has NO values, and the
+; fail-closed representation of that is ABSENT bounds, not crossed ones.
+; The gate also preserves the tripwire below as an unsound-union
+; detector: legal emptiness can never reach it.
+(rule
+  (
+    (= ?coord (CoordVar ?axis ?extent))
+    (= ?extent_upper (upper-bound-of ?extent))
+    (>= ?extent_upper (bigint 1))
+  )
+  (
+    (set (lower-bound-of ?coord) (bigint 0))
+    (set (upper-bound-of ?coord) (- ?extent_upper (bigint 1)))
+  )
+)
+
+; Interval addition.
+(rule
+  (
+    (= ?sum (IntAdd ?lhs ?rhs))
+    (= ?lhs_lower (lower-bound-of ?lhs))
+    (= ?rhs_lower (lower-bound-of ?rhs))
+  )
+  ((set (lower-bound-of ?sum) (+ ?lhs_lower ?rhs_lower)))
+)
+(rule
+  (
+    (= ?sum (IntAdd ?lhs ?rhs))
+    (= ?lhs_upper (upper-bound-of ?lhs))
+    (= ?rhs_upper (upper-bound-of ?rhs))
+  )
+  ((set (upper-bound-of ?sum) (+ ?lhs_upper ?rhs_upper)))
+)
+
+; Interval multiplication: four-corner min/max (sound for mixed signs).
+(rule
+  (
+    (= ?product (IntMul ?lhs ?rhs))
+    (= ?lhs_lower (lower-bound-of ?lhs))
+    (= ?lhs_upper (upper-bound-of ?lhs))
+    (= ?rhs_lower (lower-bound-of ?rhs))
+    (= ?rhs_upper (upper-bound-of ?rhs))
+  )
+  (
+    (set (lower-bound-of ?product)
+      (min (min (* ?lhs_lower ?rhs_lower) (* ?lhs_lower ?rhs_upper))
+           (min (* ?lhs_upper ?rhs_lower) (* ?lhs_upper ?rhs_upper))))
+    (set (upper-bound-of ?product)
+      (max (max (* ?lhs_lower ?rhs_lower) (* ?lhs_lower ?rhs_upper))
+           (max (* ?lhs_upper ?rhs_lower) (* ?lhs_upper ?rhs_upper))))
+  )
+)
+
+; Interval division (Stage D1). The divisor's bounds must EXCLUDE zero —
+; the fail-closed partiality gate: a divisor whose bounds admit zero
+; mints NO facts at all. Two gates (lower >= 1, upper <= -1), one corner
+; body: the truncating quotient is monotone in the dividend and monotone
+; in the divisor over any zero-free divisor range (anti-monotone
+; directions are handled by taking min/max over all four corners, exactly
+; like interval multiplication; verified over the mixed-sign grid).
+; BigInt / is truncating (num::BigInt), which is exactly IntTruncDiv.
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?dividend ?divisor))
+    (= ?dividend_lower (lower-bound-of ?dividend))
+    (= ?dividend_upper (upper-bound-of ?dividend))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  (
+    (set (lower-bound-of ?quotient)
+      (min (min (/ ?dividend_lower ?divisor_lower) (/ ?dividend_lower ?divisor_upper))
+           (min (/ ?dividend_upper ?divisor_lower) (/ ?dividend_upper ?divisor_upper))))
+    (set (upper-bound-of ?quotient)
+      (max (max (/ ?dividend_lower ?divisor_lower) (/ ?dividend_lower ?divisor_upper))
+           (max (/ ?dividend_upper ?divisor_lower) (/ ?dividend_upper ?divisor_upper))))
+  )
+)
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?dividend ?divisor))
+    (= ?dividend_lower (lower-bound-of ?dividend))
+    (= ?dividend_upper (upper-bound-of ?dividend))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (<= ?divisor_upper (bigint -1))
+  )
+  (
+    (set (lower-bound-of ?quotient)
+      (min (min (/ ?dividend_lower ?divisor_lower) (/ ?dividend_lower ?divisor_upper))
+           (min (/ ?dividend_upper ?divisor_lower) (/ ?dividend_upper ?divisor_upper))))
+    (set (upper-bound-of ?quotient)
+      (max (max (/ ?dividend_lower ?divisor_lower) (/ ?dividend_lower ?divisor_upper))
+           (max (/ ?dividend_upper ?divisor_lower) (/ ?dividend_upper ?divisor_upper))))
+  )
+)
+
+; Ceiling quotient bounds ride the truncating corners: ceil is within
+; [trunc, trunc + 1] universally, so the upper end widens by one. Loose
+; by that one exactly on inexact endpoints — sound, and tightened at
+; D2's exactness certificate if a consumer ever needs it.
+(rule
+  (
+    (= ?quotient (IntCeilDiv ?dividend ?divisor))
+    (= ?dividend_lower (lower-bound-of ?dividend))
+    (= ?dividend_upper (upper-bound-of ?dividend))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  (
+    (set (lower-bound-of ?quotient)
+      (min (min (/ ?dividend_lower ?divisor_lower) (/ ?dividend_lower ?divisor_upper))
+           (min (/ ?dividend_upper ?divisor_lower) (/ ?dividend_upper ?divisor_upper))))
+    (set (upper-bound-of ?quotient)
+      (+ (bigint 1)
+         (max (max (/ ?dividend_lower ?divisor_lower) (/ ?dividend_lower ?divisor_upper))
+              (max (/ ?dividend_upper ?divisor_lower) (/ ?dividend_upper ?divisor_upper)))))
+  )
+)
+(rule
+  (
+    (= ?quotient (IntCeilDiv ?dividend ?divisor))
+    (= ?dividend_lower (lower-bound-of ?dividend))
+    (= ?dividend_upper (upper-bound-of ?dividend))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (<= ?divisor_upper (bigint -1))
+  )
+  (
+    (set (lower-bound-of ?quotient)
+      (min (min (/ ?dividend_lower ?divisor_lower) (/ ?dividend_lower ?divisor_upper))
+           (min (/ ?dividend_upper ?divisor_lower) (/ ?dividend_upper ?divisor_upper))))
+    (set (upper-bound-of ?quotient)
+      (+ (bigint 1)
+         (max (max (/ ?dividend_lower ?divisor_lower) (/ ?dividend_lower ?divisor_upper))
+              (max (/ ?dividend_upper ?divisor_lower) (/ ?dividend_upper ?divisor_upper)))))
+  )
+)
+
+; Truncating remainder bounds: magnitude strictly below the divisor's
+; largest magnitude, sign following the dividend.
+(rule
+  (
+    (= ?remainder (IntTruncRem ?dividend ?divisor))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  (
+    (set (lower-bound-of ?remainder) (- (bigint 1) ?divisor_upper))
+    (set (upper-bound-of ?remainder) (- ?divisor_upper (bigint 1)))
+  )
+)
+(rule
+  (
+    (= ?remainder (IntTruncRem ?dividend ?divisor))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (<= ?divisor_upper (bigint -1))
+  )
+  (
+    (set (lower-bound-of ?remainder) (+ ?divisor_lower (bigint 1)))
+    (set (upper-bound-of ?remainder) (- (bigint -1) ?divisor_lower))
+  )
+)
+; The nonnegative-dividend refinement — THE tile-coordinate fact: for a
+; nonnegative dividend and positive divisor, the remainder sits in
+; [0, min(hi(dividend), hi(divisor) - 1)] — a legal coordinate of the
+; divisor-sized box.
+(rule
+  (
+    (= ?remainder (IntTruncRem ?dividend ?divisor))
+    (= ?dividend_lower (lower-bound-of ?dividend))
+    (>= ?dividend_lower (bigint 0))
+    (= ?dividend_upper (upper-bound-of ?dividend))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+    (= ?divisor_upper (upper-bound-of ?divisor))
+  )
+  (
+    (set (lower-bound-of ?remainder) (bigint 0))
+    (set (upper-bound-of ?remainder)
+      (min ?dividend_upper (- ?divisor_upper (bigint 1))))
+  )
+)
+
+; Lattice-pair bounds (Stage M1): min/max are monotone in both
+; arguments, so the interval arithmetic is the pointwise lattice
+; operation on each endpoint.
+(rule
+  (
+    (= ?minimum (IntMin ?lhs ?rhs))
+    (= ?lhs_lower (lower-bound-of ?lhs))
+    (= ?rhs_lower (lower-bound-of ?rhs))
+  )
+  ((set (lower-bound-of ?minimum) (min ?lhs_lower ?rhs_lower)))
+)
+(rule
+  (
+    (= ?minimum (IntMin ?lhs ?rhs))
+    (= ?lhs_upper (upper-bound-of ?lhs))
+    (= ?rhs_upper (upper-bound-of ?rhs))
+  )
+  ((set (upper-bound-of ?minimum) (min ?lhs_upper ?rhs_upper)))
+)
+(rule
+  (
+    (= ?maximum (IntMax ?lhs ?rhs))
+    (= ?lhs_lower (lower-bound-of ?lhs))
+    (= ?rhs_lower (lower-bound-of ?rhs))
+  )
+  ((set (lower-bound-of ?maximum) (max ?lhs_lower ?rhs_lower)))
+)
+(rule
+  (
+    (= ?maximum (IntMax ?lhs ?rhs))
+    (= ?lhs_upper (upper-bound-of ?lhs))
+    (= ?rhs_upper (upper-bound-of ?rhs))
+  )
+  ((set (upper-bound-of ?maximum) (max ?lhs_upper ?rhs_upper)))
+)
+
+; Tripwire (see triage above; the CoordVar gate keeps legal empty axes
+; from ever reaching it, so both remaining arms are authoring/soundness
+; bugs).
+(rule
+  (
+    (= ?lower (lower-bound-of ?expr))
+    (= ?upper (upper-bound-of ?expr))
+    (> ?lower ?upper)
+  )
+  ((panic "crossed IntExpr bounds: unsound union or inconsistent seed"))
+)
+
+; Negative-extent trap: size ZERO is a legal empty tensor, but a negative
+; size is always a malformed shape. Two arms: a literal negative extent,
+; and a symbolic extent whose bounds PROVE it negative (Stage D1 — IntVars
+; are general symbolic integers now, divisors and strides may be negative,
+; so nonnegativity is enforced HERE at the size use site, not at the
+; variable).
+(rule
+  (
+    (= ?coord (CoordVar ?axis (IntLit ?extent_value)))
+    (< ?extent_value 0)
+  )
+  ((panic "CoordVar with negative extent: malformed shape"))
+)
+(rule
+  (
+    (= ?coord (CoordVar ?axis ?extent))
+    (= ?extent_upper (upper-bound-of ?extent))
+    (<= ?extent_upper (bigint -1))
+  )
+  ((panic "CoordVar with provably negative extent: malformed shape"))
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; THE CANNOT-UNION-WITH-ZERO CERTIFICATE (Stage I2; regated Stage C1). The
+; relation provably-cannot-union-with-zero is the ONE sanctioned way to
+; condition a rule on nonzero-ness. Its invariant is exactly its name:
+;
+;   certified  =>  the class is NOT identically zero over ANY possible
+;                  valuation set the future can bring (the stability
+;                  clause: every route's premises survive domain
+;                  shrinkage)  =>  no sound rule can EVER union the
+;                  class into the zero class, no matter what is pinned
+;                  or discovered later.
+;
+; Its consumers are the TERMINATION FENCES on the ring rules (assoc, both
+; dist directions, foldr form-selection) — the certificate is never a
+; soundness premise for the unions those rules perform (which are function
+; identities on their own), it decides WHERE generative rules may bind.
+; It is a MONOTONE POSITIVE fact: rules that read it are fail-closed
+; (no certificate -> no fire -> conservative silence), and its meaning
+; never depends on WHEN a rule runs — unlike a (!= ?x (IntLit 0)) premise,
+; which tests "not in the zero class AT MATCH TIME" and silently flips
+; meaning as derivations land. Do not add new !=-zero guards; consume
+; this relation.
+;
+; Routes, each with its soundness argument:
+;   THE VALUE ROUTE: bounds strictly exclude zero. Sound because every
+;      axis a bounded expression mentions has a provably nonempty range
+;      (the CoordVar bounds rule is gated on extent-upper >= 1), so the
+;      evaluation domain over mentioned axes is nonempty and lower > 0
+;      (or upper < 0) witnesses an actually-attained nonzero value.
+;      Stable: lower bounds only rise, upper bounds only fall.
+;   THE COORDINATE ROUTE (regated Stage C1, user ruling: NO certificate
+;      by default): a CoordVar is certified only when its extent's LOWER
+;      bound is >= 2 — then every possible extent gives the coordinate a
+;      nonzero point, and lower bounds only rise, so the justification
+;      can never be invalidated. A coordinate whose extent bounds span
+;      {1, 2+} (a dynamic dim seeded [1, N]) gets NO certificate: whether
+;      it is identically zero depends on a pin that has not happened, and
+;      certifying on "the extent COULD be >= 2" would be an unstable
+;      exists-claim (upper bounds fall — the decode-phase pin to 1 is the
+;      realistic killer). THE BUCKETING DOCTRINE: the remedy for dynamic
+;      dims lives UPSTREAM of egglog — split dynamic ranges into buckets
+;      {0}, {1}, [2, N] and compile each separately; the [2, N] bucket
+;      seeds lower >= 2 and gets full ring optimization; sizes 0 and 1
+;      are degenerate geometries that deserve their own kernels anyway.
+;      An extent provably EXACTLY 1 makes the coordinate identically
+;      zero — see THE EXTENT-1 COLLAPSE rule below the coordinate route.
+;      NOTE: Vars get NO categorical route — an empty-instance pin
+;      ((union (IntVar "n") (IntLit 0))) legally puts a IntVar in the zero class,
+;      so a maybe-zero IntVar must stay uncertified (the value route certifies Vars
+;      whose seeded lower bound is >= 1).
+;   THE PRODUCT ROUTE: ZZ[v...] is an integral domain — a product of two
+;      nonzero polynomials is nonzero. OPERATOR-EXTENSION OBLIGATION
+;      (discharged for the Stage D1 division family, re-audit per new
+;      operator): the integral-domain argument is POLYNOMIAL-SPECIFIC —
+;      general integer functions have zero divisors ((v rem 2) and
+;      ((v+1) rem 2) are each not identically zero, yet their product is
+;      identically zero). The route stays SOUND with division present
+;      because of a route-strength invariant: the ONLY route that can
+;      certify a non-ring-built class (one whose function involves
+;      IntTruncDiv/IntTruncRem/IntCeilDiv/IntMin/IntMax) is the VALUE route, whose
+;      certificates mean NEVER-zero — and never-zero times
+;      not-identically-zero is not-identically-zero, no algebra needed.
+;      The sometimes-zero routes are structurally confined to ring terms:
+;      the coordinate route certifies only CoordVars, and the sum route
+;      cannot reach division-built summands (division nodes get no
+;      axis-in-support base and no axis-free recursion — fail-closed by
+;      constructor structure). INVARIANT FOR FUTURE ROUTES: any new route
+;      that can certify a SOMETIMES-zero non-ring class (e.g. a rem-aware
+;      route) re-arms the zero-divisor hazard and requires this route to
+;      be gated on ring-built factors first.
+;   THE SUM ROUTE (support disjointness): if axis k occurs in lhs's
+;      polynomial and provably does not occur in rhs's, then lhs + rhs
+;      is nonzero (were lhs + rhs = 0, rhs = -lhs would mention k).
+;      Deliberately CONSERVATIVE when both summands share every axis
+;      (v*2 + v*(-2) really is zero; v*2 + v*1 is not, but stays
+;      uncertified — sound silence, not error).
+;
+; Support facts for the sum route:
+;   axis-in-support(expr, axis): v_axis provably occurs in the class's
+;     polynomial. Derived bottom-up: CoordVar itself; through IntMul by a
+;     certified-nonzero cofactor (the degree-in-v_axis part survives, by
+;     the integral domain); through IntAdd against an axis-free partner
+;     (nothing to cancel it). NEVER by bare union of children supports —
+;     addition can cancel.
+;   axis-free(expr, axis): v_axis provably absent. Demand-driven
+;     structural recursion; syntactic absence in ANY representative
+;     over-approximates polynomial support, so one clean representative
+;     is a sound witness. A CoordVar's extent is size metadata, not a
+;     polynomial variable — CoordVar(j, extent) is axis-free of k for
+;     every k != j without recursing into the extent.
+(relation provably-cannot-union-with-zero (IntExpr))
+(relation axis-in-support (IntExpr i64))
+(relation axis-free-demand (IntExpr i64))
+(relation axis-free (IntExpr i64))
+
+; --- R1: value route ---
+(rule
+  ((= ?lower (lower-bound-of ?expr)) (> ?lower (bigint 0)))
+  ((provably-cannot-union-with-zero ?expr))
+)
+(rule
+  ((= ?upper (upper-bound-of ?expr)) (< ?upper (bigint 0)))
+  ((provably-cannot-union-with-zero ?expr))
+)
+
+; --- the coordinate route (regated Stage C1: certificate only when the
+; extent's lower bound proves a nonzero point exists in EVERY possible
+; box — the stability clause in premise form) ---
+(rule
+  (
+    (= ?coord (CoordVar ?axis ?extent))
+    (= ?extent_lower (lower-bound-of ?extent))
+    (>= ?extent_lower (bigint 2))
+  )
+  ((provably-cannot-union-with-zero ?coord))
+)
+
+; Support is a CLASS-LEVEL SEMANTIC claim ("the axis occurs in this
+; class's function"), so its base case carries the SAME stability gate as
+; the certificate: a coordinate whose extent could be 1 may later BE the
+; zero function (the extent-1 collapse below unions it into the zero
+; class), and axis-in-support must never meet the literal-zero rule's
+; axis-free grant on a merged class — the support tripwire is kept sharp
+; by gating, not weakened. Consequence, accepted under the BUCKETING
+; DOCTRINE: coordinates of dims seeded [1, N] carry no support facts, so
+; sum-route witnesses and symbolic-stride discovery stall on those axes
+; until the dim is bucketed ([2, N] seeds) or pinned; a dim pinned to 1
+; collapses instead, and the broadcast-zero discovery route covers its
+; axis exactly.
+(rule
+  (
+    (= ?coord (CoordVar ?axis ?extent))
+    (= ?extent_lower (lower-bound-of ?extent))
+    (>= ?extent_lower (bigint 2))
+  )
+  ((axis-in-support ?coord ?axis))
+)
+
+; --- THE EXTENT-1 COLLAPSE (Stage C1, user-ratified): a coordinate whose
+; extent is provably EXACTLY 1 is identically zero over every possible
+; valuation — its box is {0} in every use, because the extent rides in the
+; coordinate's own term (term-carried content, not tensor context). Both
+; premises are shrink-stable (lower bounds only rise, upper bounds only
+; fall), so the union can never be invalidated. A provably-EMPTY extent
+; (upper 0) deliberately gets NOTHING: over an empty valuation domain
+; every equation is vacuously true, and vacuous truth is a union factory
+; — fail-closed silence is the only hygienic stance (matches the
+; empty-dim doctrine at the CoordVar bounds gate). The zero certificate
+; picks the collapsed coordinate up through its zero-class base route;
+; the eliminations and zero-aware substitution then simplify through it.
+(rule
+  (
+    (= ?coord (CoordVar ?axis ?extent))
+    (= ?extent_lower (lower-bound-of ?extent))
+    (>= ?extent_lower (bigint 1))
+    (= ?extent_upper (upper-bound-of ?extent))
+    (<= ?extent_upper (bigint 1))
+  )
+  ((union ?coord (IntLit 0)))
+)
+
+; --- R3: product route ---
+(rule
+  (
+    (= ?product (IntMul ?lhs ?rhs))
+    (provably-cannot-union-with-zero ?lhs)
+    (provably-cannot-union-with-zero ?rhs)
+  )
+  ((provably-cannot-union-with-zero ?product))
+)
+
+; --- R4: sum route, plus the support propagation it rides on ---
+; A support witness on one side demands an absence proof on the other.
+(rule
+  ((= ?sum (IntAdd ?lhs ?rhs)) (axis-in-support ?lhs ?axis))
+  ((axis-free-demand ?rhs ?axis))
+)
+(rule
+  ((= ?sum (IntAdd ?lhs ?rhs)) (axis-in-support ?rhs ?axis))
+  ((axis-free-demand ?lhs ?axis))
+)
+(rule
+  (
+    (= ?sum (IntAdd ?lhs ?rhs))
+    (axis-in-support ?lhs ?axis)
+    (axis-free ?rhs ?axis)
+  )
+  (
+    (provably-cannot-union-with-zero ?sum)
+    (axis-in-support ?sum ?axis)
+  )
+)
+(rule
+  (
+    (= ?sum (IntAdd ?lhs ?rhs))
+    (axis-in-support ?rhs ?axis)
+    (axis-free ?lhs ?axis)
+  )
+  (
+    (provably-cannot-union-with-zero ?sum)
+    (axis-in-support ?sum ?axis)
+  )
+)
+; Support survives multiplication by a certified cofactor.
+(rule
+  (
+    (= ?product (IntMul ?lhs ?rhs))
+    (axis-in-support ?lhs ?axis)
+    (provably-cannot-union-with-zero ?rhs)
+  )
+  ((axis-in-support ?product ?axis))
+)
+(rule
+  (
+    (= ?product (IntMul ?lhs ?rhs))
+    (axis-in-support ?rhs ?axis)
+    (provably-cannot-union-with-zero ?lhs)
+  )
+  ((axis-in-support ?product ?axis))
+)
+
+; --- axis-free: demand-driven structural recursion ---
+(rule
+  ((axis-free-demand ?expr ?axis) (= ?expr (IntLit ?value)))
+  ((axis-free ?expr ?axis))
+)
+(rule
+  ((axis-free-demand ?expr ?axis) (= ?expr (IntVar ?dim_name)))
+  ((axis-free ?expr ?axis))
+)
+; Primitive axis disequality is stable (primitives never merge).
+(rule
+  (
+    (axis-free-demand ?expr ?axis)
+    (= ?expr (CoordVar ?other_axis ?extent))
+    (!= ?other_axis ?axis)
+  )
+  ((axis-free ?expr ?axis))
+)
+(rule
+  ((axis-free-demand ?expr ?axis) (= ?expr (IntAdd ?lhs ?rhs)))
+  ((axis-free-demand ?lhs ?axis) (axis-free-demand ?rhs ?axis))
+)
+(rule
+  (
+    (axis-free-demand ?expr ?axis)
+    (= ?expr (IntAdd ?lhs ?rhs))
+    (axis-free ?lhs ?axis)
+    (axis-free ?rhs ?axis)
+  )
+  ((axis-free ?expr ?axis))
+)
+(rule
+  ((axis-free-demand ?expr ?axis) (= ?expr (IntMul ?lhs ?rhs)))
+  ((axis-free-demand ?lhs ?axis) (axis-free-demand ?rhs ?axis))
+)
+(rule
+  (
+    (axis-free-demand ?expr ?axis)
+    (= ?expr (IntMul ?lhs ?rhs))
+    (axis-free ?lhs ?axis)
+    (axis-free ?rhs ?axis)
+  )
+  ((axis-free ?expr ?axis))
+)
+
+; --- certificate tripwires (LOUD, never silence them) ---
+; A certified class holding the zero literal means a certificate route
+; or an upstream union is unsound.
+(rule
+  ((provably-cannot-union-with-zero ?expr) (= ?expr (IntLit 0)))
+  ((panic "provably-cannot-union-with-zero certified the zero class: certificate or union unsound"))
+)
+; Contradictory support facts mean a support rule or a union lied.
+(rule
+  ((axis-in-support ?expr ?axis) (axis-free ?expr ?axis))
+  ((panic "axis support contradiction: unsound union or broken support rule"))
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; ZERO IS A CLASS (Stage Z3: the provably-zero relation is RETIRED —
+; membership in the literal's class, reached by union actions that mint
+; the literal, carries the entire closure; consumers use the POSITIVE
+; membership premise (= ?x (IntLit 0)), which is monotone — the banned
+; pattern was always the NEGATIVE class test). Roads into the class:
+; folding; the combiner's sum-to-zero branch; the extent-1 collapse; the
+; division remainder eliminations; the BOUNDS-ZERO UNION below ([0, 0]
+; bounds prove identically-zero over every possible valuation — the old
+; extent-1 counterexample dissolved with the possible-valuations
+; contract); and the ABSORPTION UNIONS below (Stage Z1, study-validated:
+; an enlarged ideal is inert cargo behind the full fence — residency,
+; not size, is the fuel, and the residents are uncertified so every
+; engine is guard-starved). The old zero-summand elimination is retired
+; with the relation: the additive-identity rewrites collapse
+; IntAdd(x, <zero-class>) class-level, with :subsume.
+
+; The zero literal's class (grows only through sound roads: folding,
+; the combiner's sum-to-zero branch, subsumed identity roads).
+; A product with a provably-zero factor is the zero polynomial.
+; A sum of two provably-zeros is provably zero.
+
+; THE BOUNDS-ZERO UNION (Stage Z3): [0, 0] bounds prove identically
+; zero; both premises shrink-stable.
+(rule
+  (
+    (= ?lower (lower-bound-of ?expr))
+    (>= ?lower (bigint 0))
+    (= ?upper (upper-bound-of ?expr))
+    (<= ?upper (bigint 0))
+  )
+  ((union ?expr (IntLit 0)))
+)
+
+; THE ABSORPTION UNION (Stage Z1): a product with a provably-zero
+; factor IS zero — as a class. No subsume (user decision, per the
+; recomposition lesson: the matched product node can be a shared
+; class-structural representative other machinery still matches; live
+; residents of the zero class are inert under the fence).
+(rule
+  ((= ?product (IntMul ?lhs ?rhs)) (= ?lhs (IntLit 0)))
+  ((union ?product (IntLit 0)))
+)
+(rule
+  ((= ?product (IntMul ?lhs ?rhs)) (= ?rhs (IntLit 0)))
+  ((union ?product (IntLit 0)))
+)
+
+; Tripwire: the two certificates are mutually exclusive by construction;
+; a class holding both means a route or a union is unsound.
+(rule
+  (
+    (= ?expr (IntLit 0))
+    (provably-cannot-union-with-zero ?expr)
+  )
+  ((panic "zero and nonzero certificates on one class: route or union unsound"))
+)
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; THE EXACT-DIVISION CERTIFICATE (Stage D2).
+; (provably-exact-division-expression ?dividend ?divisor) — argument
+; order matches the division constructors — asserts: the remainder of
+; ?dividend by ?divisor is ZERO wherever the division is defined, so
+; every rounding mode's quotient is the SAME function there. Exactness
+; is where all four division semantics collapse into one. The relation
+; asserts exactness ONLY — never definedness: every consumer that unions
+; through a division node pairs it with the value-level divisor gates.
+; Routes are structural (intervals cannot see divisibility; syntax can);
+; the zero and self routes are demand-driven off actual division nodes
+; (the relation needs both arguments bound, and use sites are where the
+; fact pays).
+(relation provably-exact-division-expression (IntExpr IntExpr))
+
+; The literal route (subsumes luminal's (= 0 (% a b)) guards).
+(rule
+  (
+    (= ?dividend (IntLit ?dividend_value))
+    (= ?divisor (IntLit ?divisor_value))
+    (!= ?divisor_value 0)
+    (= 0 (% ?dividend_value ?divisor_value))
+  )
+  ((provably-exact-division-expression ?dividend ?divisor))
+)
+; The multiple route: a dividend whose class contains IntMul(x, d) is
+; divisible by d as a function — for SYMBOLIC x, where intervals know
+; nothing (commutativity supplies the other operand order).
+(rule
+  ((= ?dividend (IntMul ?x ?divisor)))
+  ((provably-exact-division-expression ?dividend ?divisor))
+)
+; The self route: x divides x wherever the division is defined. Driven
+; from the division nodes that make the fact consumable.
+(rule
+  ((= ?quotient (IntTruncDiv ?x ?x)))
+  ((provably-exact-division-expression ?x ?x))
+)
+(rule
+  ((= ?remainder (IntTruncRem ?x ?x)))
+  ((provably-exact-division-expression ?x ?x))
+)
+(rule
+  ((= ?quotient (IntCeilDiv ?x ?x)))
+  ((provably-exact-division-expression ?x ?x))
+)
+; The zero route: a provably-zero dividend is divisible by anything;
+; driven from division nodes.
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?dividend ?divisor))
+    (= ?dividend (IntLit 0))
+  )
+  ((provably-exact-division-expression ?dividend ?divisor))
+)
+(rule
+  (
+    (= ?remainder (IntTruncRem ?dividend ?divisor))
+    (= ?dividend (IntLit 0))
+  )
+  ((provably-exact-division-expression ?dividend ?divisor))
+)
+(rule
+  (
+    (= ?quotient (IntCeilDiv ?dividend ?divisor))
+    (= ?dividend (IntLit 0))
+  )
+  ((provably-exact-division-expression ?dividend ?divisor))
+)
+; The sum route: divisibility is closed under addition.
+(rule
+  (
+    (= ?sum (IntAdd ?lhs ?rhs))
+    (provably-exact-division-expression ?lhs ?divisor)
+    (provably-exact-division-expression ?rhs ?divisor)
+  )
+  ((provably-exact-division-expression ?sum ?divisor))
+)
+
+; REMAINDER ELIMINATION: an exact remainder is the zero function. The
+; union needs definedness (the divisor gates); the matched node is
+; subsumed — it merges into the busy zero class, and a live compound
+; resident there is exactly what the fence doctrine retires at birth.
+; This is "x rem x = 0" (self route), "(x*d) rem d = 0" (multiple
+; route), and every literal case in one rule.
+(rule
+  (
+    (= ?remainder (IntTruncRem ?dividend ?divisor))
+    (provably-exact-division-expression ?dividend ?divisor)
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  (
+    (union ?remainder (IntLit 0))
+    (subsume (IntTruncRem ?dividend ?divisor))
+  )
+)
+(rule
+  (
+    (= ?remainder (IntTruncRem ?dividend ?divisor))
+    (provably-exact-division-expression ?dividend ?divisor)
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (<= ?divisor_upper (bigint -1))
+  )
+  (
+    (union ?remainder (IntLit 0))
+    (subsume (IntTruncRem ?dividend ?divisor))
+  )
+)
+
+; QUOTIENT COLLAPSE: (x * d) divided by d is x — the tiling round-trip
+; and the de-linearization fact. Needs the WITNESS x, so it matches the
+; multiple structure directly (commutativity supplies the other operand
+; order); exactness makes trunc and ceil the same function, so both
+; collapse. The matched division node merges into x's busy class and is
+; subsumed at the same action.
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?dividend ?divisor))
+    (= ?dividend (IntMul ?x ?divisor))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  (
+    (union ?quotient ?x)
+    (subsume (IntTruncDiv ?dividend ?divisor))
+  )
+)
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?dividend ?divisor))
+    (= ?dividend (IntMul ?x ?divisor))
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (<= ?divisor_upper (bigint -1))
+  )
+  (
+    (union ?quotient ?x)
+    (subsume (IntTruncDiv ?dividend ?divisor))
+  )
+)
+(rule
+  (
+    (= ?quotient (IntCeilDiv ?dividend ?divisor))
+    (= ?dividend (IntMul ?x ?divisor))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  (
+    (union ?quotient ?x)
+    (subsume (IntCeilDiv ?dividend ?divisor))
+  )
+)
+(rule
+  (
+    (= ?quotient (IntCeilDiv ?dividend ?divisor))
+    (= ?dividend (IntMul ?x ?divisor))
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (<= ?divisor_upper (bigint -1))
+  )
+  (
+    (union ?quotient ?x)
+    (subsume (IntCeilDiv ?dividend ?divisor))
+  )
+)
+
+; EXACT AGREEMENT: where the division is exact and defined, the trunc
+; and ceil quotients are one function — a pure lookup bridge (both nodes
+; must already exist; nothing is minted).
+(rule
+  (
+    (= ?trunc_quotient (IntTruncDiv ?dividend ?divisor))
+    (= ?ceil_quotient (IntCeilDiv ?dividend ?divisor))
+    (provably-exact-division-expression ?dividend ?divisor)
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  ((union ?trunc_quotient ?ceil_quotient))
+)
+(rule
+  (
+    (= ?trunc_quotient (IntTruncDiv ?dividend ?divisor))
+    (= ?ceil_quotient (IntCeilDiv ?dividend ?divisor))
+    (provably-exact-division-expression ?dividend ?divisor)
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (<= ?divisor_upper (bigint -1))
+  )
+  ((union ?trunc_quotient ?ceil_quotient))
+)
+
+; DIVISOR-ONE IDENTITIES: dividing by the literal 1 is the identity,
+; the remainder by 1 is zero — unconditional (the divisor is literally
+; nonzero) and subsumed (identity eliminations merge compound
+; representatives into busy classes; they die at birth, L2).
+(rule
+  ((= ?quotient (IntTruncDiv ?operand (IntLit 1))))
+  (
+    (union ?quotient ?operand)
+    (subsume (IntTruncDiv ?operand (IntLit 1)))
+  )
+)
+(rule
+  ((= ?quotient (IntCeilDiv ?operand (IntLit 1))))
+  (
+    (union ?quotient ?operand)
+    (subsume (IntCeilDiv ?operand (IntLit 1)))
+  )
+)
+(rule
+  ((= ?remainder (IntTruncRem ?operand (IntLit 1))))
+  (
+    (union ?remainder (IntLit 0))
+    (subsume (IntTruncRem ?operand (IntLit 1)))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; ONE IS A CLASS (Stage Z3, 2026-07-20, user-directed: the provably-one
+; relation is RETIRED — bounds and class membership carry everything).
+; Two roads into the literal's class, both minting the literal in their
+; ACTIONS (actions construct, premises look up — so no seed literal is
+; ever needed: the membership a consumer premise asks about exists
+; exactly when some union put it there):
+;   - THE BOUNDS-ONE UNION: [1, 1] bounds prove the constant-one
+;     function over every possible valuation (both premises
+;     shrink-stable). The old counterexample against a bounds route
+;     (v + 1 over an extent-1 coordinate) DISSOLVED with the
+;     possible-valuations contract: that coordinate collapses to 0, so
+;     v + 1 genuinely IS the constant 1.
+;   - THE DIVISION PRODUCERS: x / x under the value-level divisor gates.
+; Consumers need no relation: the multiplicative-identity rewrites
+; collapse every Mul-by-1-class redex (with :subsume), the divisor-one
+; identities class-match, a product of ones folds into the class by
+; congruence, and the nonzero certificate's value route certifies the
+; class automatically (bounds [1, 1] exclude zero) — arming zero/one
+; mutual exclusion through the membership tripwire.
+; Containment (the one-union study): identity-rewrite subsumes + the
+; width gates (a [1, 1] class is zero-width, excluded from every minting
+; identity) + the combiner + hash-consing — NOT guard starvation (1's
+; residents are certified). STANDING RE-AUDIT OBLIGATION: when a future
+; Pow lands, 1 becomes ABSORBING in base position (1^x) and these unions
+; must be re-verified with Pow seeds in the ladder.
+(rule
+  (
+    (= ?lower (lower-bound-of ?expr))
+    (>= ?lower (bigint 1))
+    (= ?upper (upper-bound-of ?expr))
+    (<= ?upper (bigint 1))
+  )
+  ((union ?expr (IntLit 1)))
+)
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?x ?x))
+    (= ?x_lower (lower-bound-of ?x))
+    (>= ?x_lower (bigint 1))
+  )
+  ((union ?quotient (IntLit 1)))
+)
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?x ?x))
+    (= ?x_upper (upper-bound-of ?x))
+    (<= ?x_upper (bigint -1))
+  )
+  ((union ?quotient (IntLit 1)))
+)
+(rule
+  (
+    (= ?quotient (IntCeilDiv ?x ?x))
+    (= ?x_lower (lower-bound-of ?x))
+    (>= ?x_lower (bigint 1))
+  )
+  ((union ?quotient (IntLit 1)))
+)
+(rule
+  (
+    (= ?quotient (IntCeilDiv ?x ?x))
+    (= ?x_upper (upper-bound-of ?x))
+    (<= ?x_upper (bigint -1))
+  )
+  ((union ?quotient (IntLit 1)))
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; DIVISION IDENTITIES AND BRIDGES (Stage D3). Every rule's premises were
+; brute-force verified over the full mixed-sign grid; every identity is
+; stated for the SEMANTICS IN ITS CONSTRUCTOR NAMES (a floor identity
+; may not be borrowed by trunc and vice versa — the divergence cases are
+; one off exactly where the premises below exclude). All bounds premises
+; are shrink-stable.
+;
+; THE CONSTANT-OPERAND GATE (found by this stage's first hang): every
+; rule below that MINTS terms is gated on a non-constant key operand —
+; (< lower upper) on the dividend or matched sum. On literal operands
+; constant folding is already complete, and the no-subsume discipline
+; keeps folded representatives LIVE inside literal classes (Add(7,1) in
+; 8's class, unit products Mul(1,d) in d's class) — so an ungated
+; minting identity treats every literal class as an infinite
+; decomposition space (8 = 6 + 1*2 = 4 + 2*2 = ...) and manufactures
+; fresh literal structure forever (reproduced: IntAdd doubling per
+; iteration on the division fixture). The width gate is an OPERATIONAL
+; fence, not a soundness premise: fired unions are identities and
+; survive later pins that shrink widths to zero. Collapsing rules
+; (small-dividend, recomposition, divisor-one) stay ungated — they mint
+; nothing and agree with folding on literals.
+
+; TRANSLATION (the tiled-offset decomposition, div side): a multiple of
+; the divisor shifts out of the dividend. TRUNC-ONLY CONDITION: both
+; dividends nonnegative (truncation and floor agree there; the identity
+; is unconditional for floor but FALSE for trunc across zero — the
+; recorded counterexample tdiv(-11+12, 12) != tdiv(-11,12) + 1).
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?sum ?divisor))
+    (= ?sum (IntAdd ?offset (IntMul ?scale ?divisor)))
+    (= ?offset_lower (lower-bound-of ?offset))
+    (>= ?offset_lower (bigint 0))
+    (= ?sum_lower (lower-bound-of ?sum))
+    (>= ?sum_lower (bigint 0))
+    (= ?sum_upper (upper-bound-of ?sum))
+    (< ?sum_lower ?sum_upper)
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  ((union ?quotient (IntAdd (IntTruncDiv ?offset ?divisor) ?scale)))
+)
+; ...and the rem side: the remainder is periodic in divisor-multiples.
+(rule
+  (
+    (= ?remainder (IntTruncRem ?sum ?divisor))
+    (= ?sum (IntAdd ?offset (IntMul ?scale ?divisor)))
+    (= ?offset_lower (lower-bound-of ?offset))
+    (>= ?offset_lower (bigint 0))
+    (= ?sum_lower (lower-bound-of ?sum))
+    (>= ?sum_lower (bigint 0))
+    (= ?sum_upper (upper-bound-of ?sum))
+    (< ?sum_lower ?sum_upper)
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  ((union ?remainder (IntTruncRem ?offset ?divisor)))
+)
+
+; SMALL DIVIDEND: a dividend provably inside [0, divisor) divides to
+; zero and survives the remainder whole — the other half of the tiled
+; recovery ((64t + u) tdiv 64 collapses to t through translation THEN
+; this). Premises stable: hi(dividend) < lo(divisor).
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?dividend ?divisor))
+    (= ?dividend_lower (lower-bound-of ?dividend))
+    (>= ?dividend_lower (bigint 0))
+    (= ?dividend_upper (upper-bound-of ?dividend))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (< ?dividend_upper ?divisor_lower)
+  )
+  (
+    (union ?quotient (IntLit 0))
+    (subsume (IntTruncDiv ?dividend ?divisor))
+  )
+)
+(rule
+  (
+    (= ?remainder (IntTruncRem ?dividend ?divisor))
+    (= ?dividend_lower (lower-bound-of ?dividend))
+    (>= ?dividend_lower (bigint 0))
+    (= ?dividend_upper (upper-bound-of ?dividend))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (< ?dividend_upper ?divisor_lower)
+  )
+  (
+    (union ?remainder ?dividend)
+    (subsume (IntTruncRem ?dividend ?divisor))
+  )
+)
+
+; RECOMPOSITION (the pairing law read as a collapse): d*(n tdiv d) plus
+; (n trem d) IS n — the inverse of the tiled decomposition, and what
+; makes a decompose-then-recompose view pair compose to the identity.
+; Valid for every nonzero divisor (both gates).
+;
+; DELIBERATELY NOT SUBSUMED — a hard-won exception to the collapse
+; discipline (found by this rule's own first firing): e-node children
+; are CLASSES, so the matched sum can be THE SAME NODE as a plain ring
+; sum — deriving w1 = tdiv(recomp, d) puts division nodes into a
+; coordinate's class, after which the innocent fold offset 64*w1 + w0
+; itself matches this pattern (a sound self-union). Subsuming it would
+; kill the shared canonical representative that substitution descent and
+; every other structural consumer still needs. The live fat rep's
+; termination is governed by the standard fence: expansion through it
+; binds certified operands only — the sanctioned, ladder-proven
+; configuration — and no rule manufactures new div-pair sums.
+(rule
+  (
+    (= ?sum (IntAdd (IntMul ?divisor (IntTruncDiv ?n ?divisor)) (IntTruncRem ?n ?divisor)))
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  ((union ?sum ?n))
+)
+(rule
+  (
+    (= ?sum (IntAdd (IntMul ?divisor (IntTruncDiv ?n ?divisor)) (IntTruncRem ?n ?divisor)))
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (<= ?divisor_upper (bigint -1))
+  )
+  ((union ?sum ?n))
+)
+
+; FUSION: dividing twice by positive divisors is dividing once by the
+; product (verified for truncation over ALL dividends — no dividend
+; premise needed).
+(rule
+  (
+    (= ?outer_quotient (IntTruncDiv (IntTruncDiv ?n ?inner_divisor) ?outer_divisor))
+    (= ?n_lower (lower-bound-of ?n))
+    (= ?n_upper (upper-bound-of ?n))
+    (< ?n_lower ?n_upper)
+    (= ?inner_lower (lower-bound-of ?inner_divisor))
+    (>= ?inner_lower (bigint 1))
+    (= ?outer_lower (lower-bound-of ?outer_divisor))
+    (>= ?outer_lower (bigint 1))
+  )
+  ((union ?outer_quotient (IntTruncDiv ?n (IntMul ?inner_divisor ?outer_divisor))))
+)
+
+; CEIL -> TRUNC BRIDGES: every ceiling term earns a truncating (device-
+; honest) representative wherever bounds decide the dividend's sign.
+; Nonnegative dividend: the classic shifted form ceil(n/d) =
+; trunc((n + d - 1)/d)...
+(rule
+  (
+    (= ?quotient (IntCeilDiv ?dividend ?divisor))
+    (= ?dividend_lower (lower-bound-of ?dividend))
+    (>= ?dividend_lower (bigint 0))
+    (= ?dividend_upper (upper-bound-of ?dividend))
+    (< ?dividend_lower ?dividend_upper)
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  ((union ?quotient
+     (IntTruncDiv (IntAdd ?dividend (IntAdd ?divisor (IntLit -1))) ?divisor)))
+)
+; ...nonpositive dividend: truncation already rounds up.
+(rule
+  (
+    (= ?quotient (IntCeilDiv ?dividend ?divisor))
+    (= ?dividend_upper (upper-bound-of ?dividend))
+    (<= ?dividend_upper (bigint 0))
+    (= ?dividend_lower (lower-bound-of ?dividend))
+    (< ?dividend_lower ?dividend_upper)
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  ((union ?quotient (IntTruncDiv ?dividend ?divisor)))
+)
+
+; DIVIDEND NEGATION: truncation is sign-symmetric in the dividend (both
+; divisor signs; the remainder follows the dividend). Negation is pushed
+; OUT of the division, normalizing toward positive-dividend forms.
+(rule
+  (
+    (= ?quotient (IntTruncDiv (IntMul (IntLit -1) ?n) ?divisor))
+    (= ?n_lower (lower-bound-of ?n))
+    (= ?n_upper (upper-bound-of ?n))
+    (< ?n_lower ?n_upper)
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  ((union ?quotient (IntMul (IntLit -1) (IntTruncDiv ?n ?divisor))))
+)
+(rule
+  (
+    (= ?quotient (IntTruncDiv (IntMul (IntLit -1) ?n) ?divisor))
+    (= ?n_lower (lower-bound-of ?n))
+    (= ?n_upper (upper-bound-of ?n))
+    (< ?n_lower ?n_upper)
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (<= ?divisor_upper (bigint -1))
+  )
+  ((union ?quotient (IntMul (IntLit -1) (IntTruncDiv ?n ?divisor))))
+)
+(rule
+  (
+    (= ?remainder (IntTruncRem (IntMul (IntLit -1) ?n) ?divisor))
+    (= ?n_lower (lower-bound-of ?n))
+    (= ?n_upper (upper-bound-of ?n))
+    (< ?n_lower ?n_upper)
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  ((union ?remainder (IntMul (IntLit -1) (IntTruncRem ?n ?divisor))))
+)
+(rule
+  (
+    (= ?remainder (IntTruncRem (IntMul (IntLit -1) ?n) ?divisor))
+    (= ?n_lower (lower-bound-of ?n))
+    (= ?n_upper (upper-bound-of ?n))
+    (< ?n_lower ?n_upper)
+    (= ?divisor_upper (upper-bound-of ?divisor))
+    (<= ?divisor_upper (bigint -1))
+  )
+  ((union ?remainder (IntMul (IntLit -1) (IntTruncRem ?n ?divisor))))
+)
+
+; DIVISOR NEGATION (the normalization that makes the negative-divisor
+; story one bridge per constructor): a negative literal divisor rewrites
+; to the positive twin — trunc flips the quotient's sign and keeps the
+; remainder; ceil negates the DIVIDEND (ceil(n/-d) = ceil(-n/d), the
+; floor-free form). Symbolic IntMul(-1, d) divisors likewise for the
+; trunc pair.
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?n (IntLit ?negative_divisor)))
+    (< ?negative_divisor 0)
+    (= ?n_lower (lower-bound-of ?n))
+    (= ?n_upper (upper-bound-of ?n))
+    (< ?n_lower ?n_upper)
+  )
+  ((union ?quotient
+     (IntMul (IntLit -1) (IntTruncDiv ?n (IntLit (- 0 ?negative_divisor))))))
+)
+(rule
+  (
+    (= ?remainder (IntTruncRem ?n (IntLit ?negative_divisor)))
+    (< ?negative_divisor 0)
+    (= ?n_lower (lower-bound-of ?n))
+    (= ?n_upper (upper-bound-of ?n))
+    (< ?n_lower ?n_upper)
+  )
+  ((union ?remainder (IntTruncRem ?n (IntLit (- 0 ?negative_divisor)))))
+)
+(rule
+  (
+    (= ?quotient (IntCeilDiv ?n (IntLit ?negative_divisor)))
+    (< ?negative_divisor 0)
+    (= ?n_lower (lower-bound-of ?n))
+    (= ?n_upper (upper-bound-of ?n))
+    (< ?n_lower ?n_upper)
+  )
+  ((union ?quotient
+     (IntCeilDiv (IntMul (IntLit -1) ?n) (IntLit (- 0 ?negative_divisor)))))
+)
+(rule
+  (
+    (= ?quotient (IntTruncDiv ?n (IntMul (IntLit -1) ?divisor)))
+    (= ?n_lower (lower-bound-of ?n))
+    (= ?n_upper (upper-bound-of ?n))
+    (< ?n_lower ?n_upper)
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  ((union ?quotient (IntMul (IntLit -1) (IntTruncDiv ?n ?divisor))))
+)
+(rule
+  (
+    (= ?remainder (IntTruncRem ?n (IntMul (IntLit -1) ?divisor)))
+    (= ?n_lower (lower-bound-of ?n))
+    (= ?n_upper (upper-bound-of ?n))
+    (< ?n_lower ?n_upper)
+    (= ?divisor_lower (lower-bound-of ?divisor))
+    (>= ?divisor_lower (bigint 1))
+  )
+  ((union ?remainder (IntTruncRem ?n ?divisor)))
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; LATTICE-PAIR IDENTITIES (Stage M1). All collapsing (union existing
+; classes, mint nothing — no width gates needed); matched nodes subsume
+; with both orientations where a comm twin exists (the combiner
+; discipline).
+
+; Idempotency: min(x, x) = x, max(x, x) = x.
+(rule
+  ((= ?minimum (IntMin ?x ?x)))
+  (
+    (union ?minimum ?x)
+    (subsume (IntMin ?x ?x))
+  )
+)
+(rule
+  ((= ?maximum (IntMax ?x ?x)))
+  (
+    (union ?maximum ?x)
+    (subsume (IntMax ?x ?x))
+  )
+)
+
+; BOUNDS-DECIDED COLLAPSES — the rule family the lattice makes possible:
+; when the intervals are disjoint-or-touching, the winner is decided
+; pointwise at compile time. hi(a) <= lo(b) means a <= b at every
+; possible valuation (both premises shrink-stable), so min is a and max
+; is b. One premise direction suffices: commutativity presents the
+; other operand order. This is the boundary-tile collapse:
+; min(tile_size, remaining) folds away wherever bounds prove which side
+; wins.
+(rule
+  (
+    (= ?minimum (IntMin ?lhs ?rhs))
+    (= ?lhs_upper (upper-bound-of ?lhs))
+    (= ?rhs_lower (lower-bound-of ?rhs))
+    (<= ?lhs_upper ?rhs_lower)
+  )
+  (
+    (union ?minimum ?lhs)
+    (subsume (IntMin ?lhs ?rhs))
+    (subsume (IntMin ?rhs ?lhs))
+  )
+)
+(rule
+  (
+    (= ?maximum (IntMax ?lhs ?rhs))
+    (= ?lhs_upper (upper-bound-of ?lhs))
+    (= ?rhs_lower (lower-bound-of ?rhs))
+    (<= ?lhs_upper ?rhs_lower)
+  )
+  (
+    (union ?maximum ?rhs)
+    (subsume (IntMax ?lhs ?rhs))
+    (subsume (IntMax ?rhs ?lhs))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; ASSOCIATIVITY, CERTIFICATE-GUARDED (Stage I3). Regrouping THROUGH a
+; zero-equivalent inner node is the divergence move of the recorded
+; cancellation-pair hang (a folded pair like 3 + (-3) joins the zero
+; class; unguarded associativity then re-associates every sum through
+; that class's briefly-live views forever — the base system diverges
+; with NO distributivity involved, forensics record). The guard requires
+; the matched INNER node's class to carry the nonzero certificate:
+; monotone, fail-closed, and semantically free — regrouping through a
+; genuinely-zero inner is exactly the move with no derivational value
+; (the collapse rules already decide everything in the zero cone).
+; Uncertified-unknown inners stall conservatively.
+;
+; Empirical note (review record): today's fixtures pass byte-identically
+; with associativity DELETED — its only real consumer is future
+; distributivity normalization — so the guard cannot regress the suite;
+; the positive merge pins in the fence fixture keep it honest instead.
+
+; Associativity : IntAdd
+(rule
+  (
+    (= ?expr (IntAdd ?inner ?outer))
+    (= ?inner (IntAdd ?lhs ?rhs))
+    (provably-cannot-union-with-zero ?inner)
+  )
+  ((union ?expr (IntAdd ?lhs (IntAdd ?rhs ?outer))))
+)
+
+; Associativity : IntMul
+(rule
+  (
+    (= ?expr (IntMul ?inner ?outer))
+    (= ?inner (IntMul ?lhs ?rhs))
+    (provably-cannot-union-with-zero ?inner)
+  )
+  ((union ?expr (IntMul ?lhs (IntMul ?rhs ?outer))))
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; DISTRIBUTIVITY, CERTIFICATE-GUARDED (Stage I4 — the Option C payoff).
+; Both directions, restored after the unguarded refutations (see the
+; forensic epitaph above). The guard set is MINIMAL BY ABLATION: every
+; premise below has a named fixture that hangs without it, and every
+; guard not present is provably redundant. Three engines to starve:
+;
+;   ENGINE A (zero-factor factoring): backward with the shared factor in
+;   the zero class mints fresh constant sums forever ((x+y)*0 = 0 for
+;   ALL x,y). Blocked by the backward MATCHED-TERM guard: the matched
+;   sum sits in the zero class, and the zero class is never certified.
+;
+;   ENGINE B (assoc pump through zero residents): blocked at Stage I3
+;   (guarded associativity), not here.
+;
+;   ENGINE C (same-factor constant-sum pump): commutativity presents
+;   IntMul(v, c) as IntMul(c, v), so backward can bind a CERTIFIED coordinate
+;   as the shared factor of two constant multiples (2v + (-1)v) and mint
+;   IntAdd(c_i, c_j) — a fresh constant whose folded product with v pairs
+;   again, unboundedly. No per-operand certificate refuses this (every
+;   participant is nonzero!). Blocked by the backward MATCHED-TERM
+;   guard: the pump's matched terms are same-axis sums, which the
+;   certificate deliberately refuses (the sum route cannot exclude cancellation
+;   between same-axis summands, and value-route bounds span zero).
+;
+;   Forward needs BOTH the matched term and all three operands:
+;   - matched term: certified operands can still form a zero-polynomial
+;     product through a cancelling sum (IntMul(IntAdd(3,-3), 32) — operands
+;     3, -3, 32 all certified); firing on it folds images into the zero
+;     class and makes it self-referential (the t7j engine).
+;   - operands: without them, forward fires on transient zero summands
+;     (the one-iteration x+0 window) and continuously mints zero-class
+;     IntMul residents (boundary_aliased_views diverges, matched-term
+;     guard notwithstanding).
+;
+; Same-axis constant multiples (2v + (-1)v = v) are NOT derived by
+; factoring — the matched-term guard refuses them, and that refusal is
+; what starves the constant-sum pump. The reduction itself is delivered
+; by the LIKE-TERM COMBINER below (atomic, dual-orientation :subsume);
+; the bridge fixture pins both halves: the reduction holds AND the
+; factoring route to it never fires.
+
+; Distributivity : expand
+(rule
+  (
+    (= ?expr (IntMul ?summands ?factor))
+    (= ?summands (IntAdd ?lhs ?rhs))
+    (provably-cannot-union-with-zero ?expr)
+    (provably-cannot-union-with-zero ?lhs)
+    (provably-cannot-union-with-zero ?rhs)
+    (provably-cannot-union-with-zero ?factor)
+  )
+  ((union ?expr (IntAdd (IntMul ?lhs ?factor) (IntMul ?rhs ?factor))))
+)
+
+; Distributivity : factor
+(rule
+  (
+    (= ?expr (IntAdd ?lhs_product ?rhs_product))
+    (= ?lhs_product (IntMul ?lhs ?factor))
+    (= ?rhs_product (IntMul ?rhs ?factor))
+    (provably-cannot-union-with-zero ?expr)
+  )
+  ((union ?expr (IntMul (IntAdd ?lhs ?rhs) ?factor)))
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; LIKE-TERM COMBINER: c1*x + c2*x -> (c1+c2)*x, decided ATOMICALLY.
+; The coefficient sum is computed as PRIMITIVE i64 arithmetic inside the
+; rule — it never exists as an e-graph term — so the identity trichotomy
+; (sum = 0 / sum = 1 / anything else) is decided BEFORE anything is
+; minted, and only the final form is ever constructed. The staged route
+; to the same fact (factor, fold, identity-eliminate) is the verified
+; representative-planting sequence; this rule exists so the reduction
+; happens without it.
+;
+; BOTH OPERAND ORIENTATIONS are subsumed in each firing. Validation
+; lesson: subsuming only the matched node leaves commutativity's
+; operand-swapped twin live for an iteration inside the union target's
+; class — a transiently planted compound representative that expansion
+; fires through, regenerating one constant-doubling level per cycle
+; (the reproducer hung). Subsume of a constructed node creates it
+; already unmatchable, so the twin is dead at birth.
+;
+; NOTE on (!= ?coefficient_sum 0/1): these are PRIMITIVE i64
+; comparisons on a value bound in this rule — primitives never merge,
+; so the comparison is timing-independent and fail-safe, unlike a
+; CLASS-level (!= ?class (IntLit 0)) test (banned; that meaning shifts as
+; unions land — consume provably-cannot-union-with-zero instead). The
+; certificate relations are over IntExpr classes and do not apply to
+; primitive values; wrapping the primitive in (IntLit ...) just to query a
+; certificate would mint a term and add a lattice-propagation delay for
+; zero safety gain.
+
+; coefficient sum = 0: the sum IS the zero expression — a sound road
+; into the zero ideal; both orientations of the matched node die.
+(rule
+  (
+    (= ?sum (IntAdd ?lhs_product ?rhs_product))
+    (= ?lhs_product (IntMul ?x (IntLit ?lhs_coeff)))
+    (= ?rhs_product (IntMul ?x (IntLit ?rhs_coeff)))
+    (= ?coefficient_sum (+ ?lhs_coeff ?rhs_coeff))
+    (= ?coefficient_sum 0)
+  )
+  (
+    (union ?sum (IntLit 0))
+    (subsume (IntAdd ?lhs_product ?rhs_product))
+    (subsume (IntAdd ?rhs_product ?lhs_product))
+  )
+)
+; coefficient sum = 1: the sum IS x — IntMul(x, 1) is never materialized.
+(rule
+  (
+    (= ?sum (IntAdd ?lhs_product ?rhs_product))
+    (= ?lhs_product (IntMul ?x (IntLit ?lhs_coeff)))
+    (= ?rhs_product (IntMul ?x (IntLit ?rhs_coeff)))
+    (= ?coefficient_sum (+ ?lhs_coeff ?rhs_coeff))
+    (= ?coefficient_sum 1)
+  )
+  (
+    (union ?sum ?x)
+    (subsume (IntAdd ?lhs_product ?rhs_product))
+    (subsume (IntAdd ?rhs_product ?lhs_product))
+  )
+)
+; any other sum: the combined multiple.
+(rule
+  (
+    (= ?sum (IntAdd ?lhs_product ?rhs_product))
+    (= ?lhs_product (IntMul ?x (IntLit ?lhs_coeff)))
+    (= ?rhs_product (IntMul ?x (IntLit ?rhs_coeff)))
+    (= ?coefficient_sum (+ ?lhs_coeff ?rhs_coeff))
+    (!= ?coefficient_sum 0)
+    (!= ?coefficient_sum 1)
+  )
+  (
+    (union ?sum (IntMul ?x (IntLit ?coefficient_sum)))
+    (subsume (IntAdd ?lhs_product ?rhs_product))
+    (subsume (IntAdd ?rhs_product ?lhs_product))
+  )
+)
+
+; Implicit-coefficient companions: x + c*x (bare x carries coefficient 1).
+(rule
+  (
+    (= ?sum (IntAdd ?x ?rhs_product))
+    (= ?rhs_product (IntMul ?x (IntLit ?rhs_coeff)))
+    (= ?coefficient_sum (+ 1 ?rhs_coeff))
+    (= ?coefficient_sum 0)
+  )
+  (
+    (union ?sum (IntLit 0))
+    (subsume (IntAdd ?x ?rhs_product))
+    (subsume (IntAdd ?rhs_product ?x))
+  )
+)
+(rule
+  (
+    (= ?sum (IntAdd ?x ?rhs_product))
+    (= ?rhs_product (IntMul ?x (IntLit ?rhs_coeff)))
+    (= ?coefficient_sum (+ 1 ?rhs_coeff))
+    (= ?coefficient_sum 1)
+  )
+  (
+    (union ?sum ?x)
+    (subsume (IntAdd ?x ?rhs_product))
+    (subsume (IntAdd ?rhs_product ?x))
+  )
+)
+(rule
+  (
+    (= ?sum (IntAdd ?x ?rhs_product))
+    (= ?rhs_product (IntMul ?x (IntLit ?rhs_coeff)))
+    (= ?coefficient_sum (+ 1 ?rhs_coeff))
+    (!= ?coefficient_sum 0)
+    (!= ?coefficient_sum 1)
+  )
+  (
+    (union ?sum (IntMul ?x (IntLit ?coefficient_sum)))
+    (subsume (IntAdd ?x ?rhs_product))
+    (subsume (IntAdd ?rhs_product ?x))
+  )
+)
+
+; Doubling: x + x = 2*x.
+(rule
+  ((= ?sum (IntAdd ?x ?x)))
+  (
+    (union ?sum (IntMul ?x (IntLit 2)))
+    (subsume (IntAdd ?x ?x))
+  )
+)
+
+; SYMBOLIC-coefficient like terms: c1*x + c2*x -> (c1+c2)*x where the
+; coefficients are expressions (dynamic dims, size products). The
+; combined coefficient IntAdd(?c1, ?c2) IS materialized here — safe because
+; its value bounds, computed as PRIMITIVE BigInt arithmetic in the
+; premises, exclude BOTH identity elements: never 0 (so the class can
+; never join the zero ideal — this is also what certifies the result via
+; the value route) and never 1 (so the x*1 collapse can never fire on
+; the combined form — no representative is ever planted into ?x's
+; class). Bounds-indeterminate coefficient sums (spanning 0 or 1) stay
+; unreduced and uncertified: fail-closed conservatism, pinned in the
+; certificate fixture. Both operand orientations die, as everywhere in
+; this section.
+(rule
+  (
+    (= ?sum (IntAdd ?lhs_product ?rhs_product))
+    (= ?lhs_product (IntMul ?x ?lhs_coeff))
+    (= ?rhs_product (IntMul ?x ?rhs_coeff))
+    (= ?lhs_coeff_lower (lower-bound-of ?lhs_coeff))
+    (= ?rhs_coeff_lower (lower-bound-of ?rhs_coeff))
+    (>= (+ ?lhs_coeff_lower ?rhs_coeff_lower) (bigint 2))
+  )
+  (
+    (union ?sum (IntMul ?x (IntAdd ?lhs_coeff ?rhs_coeff)))
+    (subsume (IntAdd ?lhs_product ?rhs_product))
+    (subsume (IntAdd ?rhs_product ?lhs_product))
+  )
+)
+(rule
+  (
+    (= ?sum (IntAdd ?lhs_product ?rhs_product))
+    (= ?lhs_product (IntMul ?x ?lhs_coeff))
+    (= ?rhs_product (IntMul ?x ?rhs_coeff))
+    (= ?lhs_coeff_upper (upper-bound-of ?lhs_coeff))
+    (= ?rhs_coeff_upper (upper-bound-of ?rhs_coeff))
+    (<= (+ ?lhs_coeff_upper ?rhs_coeff_upper) (bigint -1))
+  )
+  (
+    (union ?sum (IntMul ?x (IntAdd ?lhs_coeff ?rhs_coeff)))
+    (subsume (IntAdd ?lhs_product ?rhs_product))
+    (subsume (IntAdd ?rhs_product ?lhs_product))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Logical Shape Equivalence Code
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Right-Major Contiguous Strides
+
+(relation right-major-strides-demand (IntExprList))
+(function right-major-strides-state-of (IntExprList) RightMajorStridesFoldState :no-merge)
+
+; Demand folded strides state for right-major contiguous element layouts.
+;   shape   = [d2, d1, d0]
+;   strides = [d1*d0, d0, 1]
+(rule
+  (
+    (= ?right_major_layout (RightMajorContiguousElementLayoutLit (ShapeLit ?dims) ?bits))
+  )
+  (
+    (right-major-strides-demand ?dims)
+  )
+)
+
+; Propagate demand towards nil.
+(rule
+  (
+    (right-major-strides-demand (IntExprCons ?size ?tail))
+  )
+  (
+    (right-major-strides-demand ?tail)
+  )
+)
+
+; Empty suffix:
+;   rank           = 0
+;   total-elements = 1
+;   strides        = []
+(rule
+  (
+    (right-major-strides-demand (IntExprNil))
+  )
+  (
+    (set
+      (right-major-strides-state-of (IntExprNil))
+      (RightMajorStridesFoldStateLit 0 (IntLit 1) (IntExprNil)))
+  )
+)
+
+; Non-empty suffix:
+;   if tail has total-elements=s and strides=t
+;   then current list has stride s followed by t.
+(rule
+  (
+    (right-major-strides-demand ?list)
+    (= ?list (IntExprCons ?size ?tail))
+    (= (right-major-strides-state-of ?tail)
+      (RightMajorStridesFoldStateLit ?rank ?total-elements ?strides))
+  )
+  (
+    (set
+      (right-major-strides-state-of ?list)
+      (RightMajorStridesFoldStateLit
+        (+ ?rank 1)
+        (IntMul ?size ?total-elements)
+        (IntExprCons ?total-elements ?strides)))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Equate right-major contiguous element layouts with strided element layouts.
+(rule
+  (
+    (= ?right_major_layout (RightMajorContiguousElementLayoutLit (ShapeLit ?dims) ?bits))
+    (= (right-major-strides-state-of ?dims)
+      (RightMajorStridesFoldStateLit ?rank ?total-elements ?strides))
+  )
+  (
+    (union ?right_major_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Left-Major Contiguous Strides
+
+(relation left-major-strides-demand (IntExprList))
+(function left-major-strides-state-of (IntExprList) LeftMajorStridesFoldState :no-merge)
+
+; Demand folded strides state for left-major contiguous element layouts.
+;   shape   = [d2, d1, d0]
+;   strides = [1, d2, d2*d1]
+(rule
+  (
+    (= ?left_major_layout (LeftMajorContiguousElementLayoutLit (ShapeLit ?dims) ?bits))
+  )
+  (
+    (left-major-strides-demand ?dims)
+  )
+)
+
+; Propagate demand towards nil.
+(rule
+  (
+    (left-major-strides-demand (IntExprCons ?size ?tail))
+  )
+  (
+    (left-major-strides-demand ?tail)
+  )
+)
+
+; Empty suffix:
+;   rank           = 0
+;   total-elements = 1
+;   strides        = []
+(rule
+  (
+    (left-major-strides-demand (IntExprNil))
+  )
+  (
+    (set
+      (left-major-strides-state-of (IntExprNil))
+      (LeftMajorStridesFoldStateLit 0 (IntLit 1) (IntExprNil)))
+  )
+)
+
+; Non-empty suffix:
+;   if tail has strides=t
+;   then current list has stride 1 followed by each tail stride scaled by current-size.
+(rule
+  (
+    (left-major-strides-demand ?list)
+    (= ?list (IntExprCons ?size ?tail))
+    (= (left-major-strides-state-of ?tail)
+      (LeftMajorStridesFoldStateLit ?rank ?total-elements ?tail_strides))
+  )
+  (
+    (expr-list-scale-demand ?size ?tail_strides)
+  )
+)
+
+(rule
+  (
+    (left-major-strides-demand ?list)
+    (= ?list (IntExprCons ?size ?tail))
+    (= (left-major-strides-state-of ?tail)
+      (LeftMajorStridesFoldStateLit ?rank ?total-elements ?tail_strides))
+    (= ?scaled_tail_strides (expr-list-scale-of ?size ?tail_strides))
+  )
+  (
+    (set
+      (left-major-strides-state-of ?list)
+      (LeftMajorStridesFoldStateLit
+        (+ ?rank 1)
+        (IntMul ?size ?total-elements)
+        (IntExprCons (IntLit 1) ?scaled_tail_strides)))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Equate left-major contiguous element layouts with strided element layouts.
+(rule
+  (
+    (= ?left_major_layout (LeftMajorContiguousElementLayoutLit (ShapeLit ?dims) ?bits))
+    (= (left-major-strides-state-of ?dims)
+      (LeftMajorStridesFoldStateLit ?rank ?total-elements ?strides))
+  )
+  (
+    (union ?left_major_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Strided Indexing Fold-Right
+
+(relation strided-indexing-foldr-demand (IntExprList IntExprList))
+(function strided-indexing-foldr-state-of (IntExprList IntExprList) StridedIndexingFoldRState :no-merge)
+
+; Demand a folded element offset expression for explicit strided layouts.
+; Shape and stride lists are in the same order, so:
+;   shape   = [d2, d1, d0]
+;   strides = [s2, s1, s0]
+;   offset  = CoordVar(2,d2)*s2 + CoordVar(1,d1)*s1 + CoordVar(0,d0)*s0
+(rule
+  (
+    (= ?strided_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+  )
+  (
+    (strided-indexing-foldr-demand ?dims ?strides)
+  )
+)
+
+; Propagate demand towards nil while zipping shape and stride suffixes.
+(rule
+  (
+    (strided-indexing-foldr-demand
+      (IntExprCons ?size ?dim_tail)
+      (IntExprCons ?stride ?stride_tail))
+  )
+  (
+    (strided-indexing-foldr-demand ?dim_tail ?stride_tail)
+  )
+)
+
+; Empty suffixes: no axis remains and the accumulated element offset is zero.
+(rule
+  (
+    (strided-indexing-foldr-demand (IntExprNil) (IntExprNil))
+  )
+  (
+    (set
+      (strided-indexing-foldr-state-of (IntExprNil) (IntExprNil))
+      (StridedIndexingFoldRStateLit 0 (IntLit 0)))
+  )
+)
+
+; One list ended before the other, so the strided layout is malformed.
+(rule
+  (
+    (strided-indexing-foldr-demand (IntExprNil) (IntExprCons ?stride ?stride_tail))
+  )
+  (
+    (panic "StridedElementLayoutLit shape and stride ranks differ")
+  )
+)
+
+(rule
+  (
+    (strided-indexing-foldr-demand (IntExprCons ?size ?dim_tail) (IntExprNil))
+  )
+  (
+    (panic "StridedElementLayoutLit shape and stride ranks differ")
+  )
+)
+
+; Non-empty suffix:
+;   if tail has axis=i and linear=e
+;   then current list has:
+;     axis   = i + 1
+;     linear = CoordVar(i, size) * current-stride + e
+; The head of the current suffix IS the axis being folded: ?axis (the tail's
+; count) is its level-from-end and ?size its extent — the ONE site that
+; mints coordinate variables.
+;
+; ZERO-STRIDE AXES MINT NOTHING (forensically load-bearing): a broadcast
+; axis contributes no offset, and a `IntMul(CoordVar, (IntLit 0))` summand under
+; a constant multiplier is the seed of a non-terminating multiplication
+; pump (distributivity splits `IntMul(Z, bits)` out, congruence + constant
+; folding make Z self-referential, IntMul-associativity then squares the
+; constant pool to i64 overflow — see the forensics record). Skipping the
+; summand also makes a broadcast layout's fold expression EQUAL the
+; index-map-composed expression directly.
+;
+; BRANCH CONDITIONS ARE MONOTONE (Stage I2, design b1): the skip rule
+; fires on zero-class membership; the general rule requires the
+; provably-cannot-union-with-zero CERTIFICATE for the stride — never "not zero at match
+; time". This closes the compound-stride race for good (a stride like
+; IntMul(4, (IntVar "n")) over a pinned-zero IntVar only DERIVES its way into the
+; zero class mid-saturation; the old != guard could fire before that
+; landed and collide with the skip rule in the :no-merge state). A stride
+; that is NEITHER proven zero NOR certified nonzero (e.g. over a
+; maybe-empty IntVar bounded [0, N]) stalls the fold: the layout keeps its
+; constructor form and derives no offset expression — conservative
+; silence, never a panic, never a wrong fold. Note the general rule is
+; polynomially sound for ANY stride; the certificate here buys mutual
+; exclusion with the skip rule and zero-summand hygiene, not soundness.
+(rule
+  (
+    (strided-indexing-foldr-demand ?dims ?strides)
+    (= ?dims (IntExprCons ?size ?dim_tail))
+    (= ?strides (IntExprCons ?stride ?stride_tail))
+    (provably-cannot-union-with-zero ?stride)
+    (= (strided-indexing-foldr-state-of ?dim_tail ?stride_tail)
+      (StridedIndexingFoldRStateLit ?axis ?linear))
+  )
+  (
+    (set
+      (strided-indexing-foldr-state-of ?dims ?strides)
+      (StridedIndexingFoldRStateLit
+        (+ ?axis 1)
+        (IntAdd
+          (IntMul
+            (CoordVar ?axis ?size)
+            ?stride)
+          ?linear)))
+  )
+)
+; The skip fires on the ZERO CERTIFICATE, not literal zero-class
+; membership: a compound stride over a pinned-empty dim (IntMul(4, n) with
+; n pinned to 0) is provably zero through the product route once the
+; pin's congruence lands, so that axis is skipped instead of the whole
+; fold stalling — and the general rule's nonzero certificate is
+; mutually exclusive with it by tripwire, so the old :no-merge race is
+; structurally impossible.
+(rule
+  (
+    (strided-indexing-foldr-demand ?dims ?strides)
+    (= ?dims (IntExprCons ?size ?dim_tail))
+    (= ?strides (IntExprCons ?stride ?stride_tail))
+    (= ?stride (IntLit 0))
+    (= (strided-indexing-foldr-state-of ?dim_tail ?stride_tail)
+      (StridedIndexingFoldRStateLit ?axis ?linear))
+  )
+  (
+    (set
+      (strided-indexing-foldr-state-of ?dims ?strides)
+      (StridedIndexingFoldRStateLit
+        (+ ?axis 1)
+        ?linear))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Equate Strided Layouts with Element Offset Expressions
+(rule
+  (
+    (= ?strided_layout (StridedElementLayoutLit ?shape ?strides ?bits))
+    (= ?shape (ShapeLit ?dims))
+    (= (strided-indexing-foldr-state-of ?dims ?strides)
+      (StridedIndexingFoldRStateLit ?rank ?indexing_expr))
+  )
+  (
+    (union ?strided_layout (ElementOffsetExpressionLayoutLit ?indexing_expr ?shape ?bits))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Equate element offset expression layouts with bit offset expression layouts.
+; The width rides along; the raw integer is unwrapped only to scale the
+; offset expression.
+(rule
+  (
+    (= ?element_array_layout (ElementOffsetExpressionLayoutLit ?index_layout ?shape ?bit_width))
+    (= ?bit_width (BitWidthLit ?bits))
+  )
+  (
+    (union ?element_array_layout (BitOffsetExpressionLayoutLit (IntMul ?index_layout (IntLit ?bits)) ?shape ?bit_width))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; DOWNWARD LAYOUT DISCOVERY
+;
+; The ladder above only climbs (contiguous -> strided -> element -> bit).
+; Layouts BORN as bare expressions — composed view layouts, hand-written
+; offsets — need the reverse direction to rejoin the constructor world,
+; where injectivity proofs, cross-parent sharing, and readable rendering
+; live. Three arms:
+;   (3a) Strided -> Right/LeftMajorContiguous: unconditional (strided
+;        layouts already demand two folds; one more list-equality is free).
+;   (3b) ElementOffset -> Strided: per-axis linear coefficient extraction,
+;        demand-gated per LayoutTensor (the tensor supplies shape/rank —
+;        broadcast dims make shape underivable from the expression alone).
+;        ZERO-OFFSET ONLY for now (offsets punted): a constant remainder
+;        must be provably 0 or discovery stays silent.
+;   (3c) BitOffset -> ElementOffset: layout-intrinsic — the width to
+;        factor out is the layout's own BitWidth field (exactly one width
+;        per layout, nothing speculative; the old dtype gate is subsumed
+;        by the field).
+; coeff-of / const-part-of / coeff-strides-of are CONSTRUCTORS, not
+; :no-merge functions: different representatives of one expression class
+; yield syntactically different results that must UNION (sound by the
+; function-identity contract; egglog's only union-on-set idiom is the
+; constructor). The scaffolding representatives this leaves in IntExpr
+; classes are inert: no rule or renderer matches them.
+;
+; Trust point (documented, unchecked): a demanded offset expression ranges
+; over ITS tensor's own coordinates — an axis outside [0, rank) would be
+; silently dropped from the discovered strides. Composition guarantees
+; this by construction (output formals ARE the view's coordinates).
+
+; --- (3a) Strided -> contiguous discovery ---
+(rule
+  (
+    (= ?strided_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+  )
+  (
+    (right-major-strides-demand ?dims)
+    (left-major-strides-demand ?dims)
+  )
+)
+(rule
+  (
+    (= ?strided_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+    (= (right-major-strides-state-of ?dims)
+      (RightMajorStridesFoldStateLit ?rank ?total ?strides))
+  )
+  (
+    (union ?strided_layout (RightMajorContiguousElementLayoutLit (ShapeLit ?dims) ?bits))
+  )
+)
+(rule
+  (
+    (= ?strided_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+    (= (left-major-strides-state-of ?dims)
+      (LeftMajorStridesFoldStateLit ?rank ?total ?strides))
+  )
+  (
+    (union ?strided_layout (LeftMajorContiguousElementLayoutLit (ShapeLit ?dims) ?bits))
+  )
+)
+
+; --- (3c) Bit -> Element discovery, layout-intrinsic ---
+(relation bit-to-element-demand (Layout))
+(rule
+  (
+    (bit-to-element-demand ?layout)
+    (= ?layout (BitOffsetExpressionLayoutLit ?bit_expr ?shape ?bit_width))
+    (= ?bit_width (BitWidthLit ?bits))
+    (= ?bit_expr (IntMul ?expr (IntLit ?bits)))
+  )
+  (
+    (union ?layout (ElementOffsetExpressionLayoutLit ?expr ?shape ?bit_width))
+  )
+)
+
+; --- (3b) Element -> Strided discovery: linear coefficient extraction ---
+; Coefficients and remainders are PRIMITIVE i64s, never Exprs: emitting
+; expression intermediates into the global soup feeds the AC/distributivity
+; closure unboundedly (bisected empirically — IntExpr-valued coefficients drove
+; constant products past i64 overflow). Primitives also make :no-merge
+; CORRECT: representatives of one class are equal as functions, so their
+; coefficients agree numerically — a disagreement is a bug and panics
+; loudly. Symbolic strides stay conservatively undiscovered (i64-only, the
+; same precedent as the no-overlap injectivity fold).
+(relation element-to-strided-demand (LayoutTensor))
+(relation coeff-axis-demand (IntExpr i64))
+(relation const-part-demand (IntExpr))
+(relation strides-build-demand (IntExpr i64))
+(function coeff-of (IntExpr i64) i64 :no-merge)
+(function const-part-of (IntExpr) i64 :no-merge)
+(constructor coeff-strides-of (IntExpr i64) IntExprList)
+
+; The SYMBOLIC arm (single-occurrence extraction): strides that are
+; expressions, not literals. Never computes coefficient arithmetic —
+; it POINTS at existing stride subterm classes, which is what keeps it
+; out of the ring rules' reach (the literal-coefficient restriction
+; existed because expression-valued coefficient ARITHMETIC fed the AC
+; closure; pointing mints nothing but list cells and 0/1 literals).
+(relation symbolic-stride-demand (IntExpr i64))
+(constructor symbolic-stride-of (IntExpr i64) IntExpr)
+(relation symbolic-strides-build-demand (IntExpr i64))
+(constructor symbolic-strides-of (IntExpr i64) IntExprList)
+
+; Kickoff: the demanded tensor supplies the rank; walk axes rank-1 .. 0.
+(rule
+  (
+    (element-to-strided-demand ?layout_tensor)
+    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
+    (= ?layout (ElementOffsetExpressionLayoutLit ?expr ?shape ?bits))
+    (= ?rank (rank-of ?shape))
+  )
+  (
+    (strides-build-demand ?expr ?rank)
+    (symbolic-strides-build-demand ?expr ?rank)
+    (const-part-demand ?expr)
+  )
+)
+
+; Strides-list builder: axis k-1 heads the list for the k outermost-so-far.
+(rule
+  ((strides-build-demand ?expr 0))
+  ((set (coeff-strides-of ?expr 0) (IntExprNil)))
+)
+(rule
+  (
+    (strides-build-demand ?expr ?axis)
+    (> ?axis 0)
+    (= ?axis_minus_one (- ?axis 1))
+  )
+  (
+    (coeff-axis-demand ?expr ?axis_minus_one)
+    (strides-build-demand ?expr ?axis_minus_one)
+  )
+)
+(rule
+  (
+    (strides-build-demand ?expr ?axis)
+    (> ?axis 0)
+    (= ?axis_minus_one (- ?axis 1))
+    (= ?coefficient (coeff-of ?expr ?axis_minus_one))
+    (= ?tail (coeff-strides-of ?expr ?axis_minus_one))
+  )
+  (
+    (set (coeff-strides-of ?expr ?axis) (IntExprCons (IntLit ?coefficient) ?tail))
+  )
+)
+
+; Per-axis coefficients: structural recursion over representatives. Only
+; linear shapes match (IntMul with a IntLit side); nonlinear representatives are
+; silently unmatched — incompleteness, never unsoundness. The i64
+; disequality on axes is primitive (stable — primitives never merge).
+(rule
+  ((coeff-axis-demand ?expr ?axis) (= ?expr (IntLit ?value)))
+  ((set (coeff-of ?expr ?axis) 0))
+)
+(rule
+  ((coeff-axis-demand ?expr ?axis) (= ?expr (CoordVar ?axis ?extent)))
+  ((set (coeff-of ?expr ?axis) 1))
+)
+(rule
+  ((coeff-axis-demand ?expr ?axis) (= ?expr (CoordVar ?other_axis ?extent)) (!= ?other_axis ?axis))
+  ((set (coeff-of ?expr ?axis) 0))
+)
+(rule
+  ((coeff-axis-demand ?expr ?axis) (= ?expr (IntAdd ?lhs ?rhs)))
+  ((coeff-axis-demand ?lhs ?axis) (coeff-axis-demand ?rhs ?axis))
+)
+(rule
+  (
+    (coeff-axis-demand ?expr ?axis)
+    (= ?expr (IntAdd ?lhs ?rhs))
+    (= ?lhs_coeff (coeff-of ?lhs ?axis))
+    (= ?rhs_coeff (coeff-of ?rhs ?axis))
+  )
+  ((set (coeff-of ?expr ?axis) (+ ?lhs_coeff ?rhs_coeff)))
+)
+(rule
+  ((coeff-axis-demand ?expr ?axis) (= ?expr (IntMul ?lhs (IntLit ?multiplier))))
+  ((coeff-axis-demand ?lhs ?axis))
+)
+(rule
+  (
+    (coeff-axis-demand ?expr ?axis)
+    (= ?expr (IntMul ?lhs (IntLit ?multiplier)))
+    (= ?lhs_coeff (coeff-of ?lhs ?axis))
+  )
+  ((set (coeff-of ?expr ?axis) (* ?lhs_coeff ?multiplier)))
+)
+
+; Constant remainder: same recursion, axis-free.
+(rule
+  ((const-part-demand ?expr) (= ?expr (IntLit ?value)))
+  ((set (const-part-of ?expr) ?value))
+)
+(rule
+  ((const-part-demand ?expr) (= ?expr (CoordVar ?axis ?extent)))
+  ((set (const-part-of ?expr) 0))
+)
+(rule
+  ((const-part-demand ?expr) (= ?expr (IntAdd ?lhs ?rhs)))
+  ((const-part-demand ?lhs) (const-part-demand ?rhs))
+)
+(rule
+  (
+    (const-part-demand ?expr)
+    (= ?expr (IntAdd ?lhs ?rhs))
+    (= ?lhs_const (const-part-of ?lhs))
+    (= ?rhs_const (const-part-of ?rhs))
+  )
+  ((set (const-part-of ?expr) (+ ?lhs_const ?rhs_const)))
+)
+(rule
+  ((const-part-demand ?expr) (= ?expr (IntMul ?lhs (IntLit ?multiplier))))
+  ((const-part-demand ?lhs))
+)
+(rule
+  (
+    (const-part-demand ?expr)
+    (= ?expr (IntMul ?lhs (IntLit ?multiplier)))
+    (= ?lhs_const (const-part-of ?lhs))
+  )
+  ((set (const-part-of ?expr) (* ?lhs_const ?multiplier)))
+)
+
+; Discovery finale: every axis's coefficient resolved, remainder provably
+; zero — the expression IS the strided map over its tensor's shape.
+(rule
+  (
+    (element-to-strided-demand ?layout_tensor)
+    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
+    (= ?layout (ElementOffsetExpressionLayoutLit ?expr ?shape ?bits))
+    (= ?rank (rank-of ?shape))
+    (= ?strides (coeff-strides-of ?expr ?rank))
+    (= 0 (const-part-of ?expr))
+  )
+  (
+    (union ?layout (StridedElementLayoutLit ?shape ?strides ?bits))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; SYMBOLIC-STRIDE DISCOVERY (single-occurrence extraction). For fold-
+; and composition-shaped offsets, every axis occurs in exactly ONE
+; summand, so its stride does not need computing — it is an existing
+; subterm class to point at. The axis-support machinery enforces the
+; single-occurrence condition exactly: a summand pair where BOTH sides
+; carry the axis matches no rule (cancellation-unsafe, conservative),
+; and both-sides-free is served by the broadcast rule. Sound per case:
+;   - CoordVar(axis) contributes stride 1;
+;   - IntMul(CoordVar(axis), stride) contributes ?stride PROVIDED the
+;     cofactor is provably axis-free (linearity in the axis);
+;   - IntAdd recurses into the supported side past a provably-free side
+;     (the free side contributes nothing in this axis);
+;   - a whole offset provably free of the axis has stride 0 (broadcast).
+; Different representatives may resolve syntactically different strides;
+; the constructor unions them — sound because equal affine functions
+; have equal per-axis coefficients.
+
+; Builder: axis k-1 heads the list for the k outermost-so-far.
+(rule
+  ((symbolic-strides-build-demand ?expr 0))
+  ((set (symbolic-strides-of ?expr 0) (IntExprNil)))
+)
+(rule
+  (
+    (symbolic-strides-build-demand ?expr ?axis)
+    (> ?axis 0)
+    (= ?axis_minus_one (- ?axis 1))
+  )
+  (
+    (symbolic-stride-demand ?expr ?axis_minus_one)
+    (symbolic-strides-build-demand ?expr ?axis_minus_one)
+  )
+)
+(rule
+  (
+    (symbolic-strides-build-demand ?expr ?axis)
+    (> ?axis 0)
+    (= ?axis_minus_one (- ?axis 1))
+    (= ?stride (symbolic-stride-of ?expr ?axis_minus_one))
+    (= ?tail (symbolic-strides-of ?expr ?axis_minus_one))
+  )
+  (
+    (set (symbolic-strides-of ?expr ?axis) (IntExprCons ?stride ?tail))
+  )
+)
+
+; Pointing rules.
+(rule
+  ((symbolic-stride-demand ?expr ?axis) (= ?expr (CoordVar ?axis ?extent)))
+  ((set (symbolic-stride-of ?expr ?axis) (IntLit 1)))
+)
+(rule
+  ((symbolic-stride-demand ?expr ?axis) (= ?expr (IntMul (CoordVar ?axis ?extent) ?stride)))
+  ((axis-free-demand ?stride ?axis))
+)
+(rule
+  (
+    (symbolic-stride-demand ?expr ?axis)
+    (= ?expr (IntMul (CoordVar ?axis ?extent) ?stride))
+    (axis-free ?stride ?axis)
+  )
+  ((set (symbolic-stride-of ?expr ?axis) ?stride))
+)
+; Broadcast: the whole expression is provably free of the axis.
+(rule
+  ((symbolic-stride-demand ?expr ?axis))
+  ((axis-free-demand ?expr ?axis))
+)
+(rule
+  ((symbolic-stride-demand ?expr ?axis) (axis-free ?expr ?axis))
+  ((set (symbolic-stride-of ?expr ?axis) (IntLit 0)))
+)
+; Sums: recurse into the supported side past a provably-free side.
+(rule
+  ((symbolic-stride-demand ?expr ?axis) (= ?expr (IntAdd ?lhs ?rhs)))
+  (
+    (axis-free-demand ?lhs ?axis)
+    (axis-free-demand ?rhs ?axis)
+  )
+)
+(rule
+  (
+    (symbolic-stride-demand ?expr ?axis)
+    (= ?expr (IntAdd ?lhs ?rhs))
+    (axis-in-support ?lhs ?axis)
+    (axis-free ?rhs ?axis)
+  )
+  ((symbolic-stride-demand ?lhs ?axis))
+)
+(rule
+  (
+    (symbolic-stride-demand ?expr ?axis)
+    (= ?expr (IntAdd ?lhs ?rhs))
+    (axis-in-support ?lhs ?axis)
+    (axis-free ?rhs ?axis)
+    (= ?stride (symbolic-stride-of ?lhs ?axis))
+  )
+  ((set (symbolic-stride-of ?expr ?axis) ?stride))
+)
+(rule
+  (
+    (symbolic-stride-demand ?expr ?axis)
+    (= ?expr (IntAdd ?lhs ?rhs))
+    (axis-in-support ?rhs ?axis)
+    (axis-free ?lhs ?axis)
+  )
+  ((symbolic-stride-demand ?rhs ?axis))
+)
+(rule
+  (
+    (symbolic-stride-demand ?expr ?axis)
+    (= ?expr (IntAdd ?lhs ?rhs))
+    (axis-in-support ?rhs ?axis)
+    (axis-free ?lhs ?axis)
+    (= ?stride (symbolic-stride-of ?rhs ?axis))
+  )
+  ((set (symbolic-stride-of ?expr ?axis) ?stride))
+)
+
+; Constant-term zero propagates through ANY product with a
+; zero-constant-term factor (constant terms multiply — the symbolic
+; generalization of the literal-multiplier rule; needed because
+; IntMul(coordinate, IntVar) has no literal side).
+(rule
+  ((const-part-demand ?expr) (= ?expr (IntMul ?lhs ?rhs)))
+  ((const-part-demand ?lhs) (const-part-demand ?rhs))
+)
+(rule
+  ((const-part-demand ?expr) (= ?expr (IntMul ?lhs ?rhs)) (= 0 (const-part-of ?lhs)))
+  ((set (const-part-of ?expr) 0))
+)
+(rule
+  ((const-part-demand ?expr) (= ?expr (IntMul ?lhs ?rhs)) (= 0 (const-part-of ?rhs)))
+  ((set (const-part-of ?expr) 0))
+)
+
+; Symbolic finale: same contract as the literal one.
+(rule
+  (
+    (element-to-strided-demand ?layout_tensor)
+    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
+    (= ?layout (ElementOffsetExpressionLayoutLit ?expr ?shape ?bits))
+    (= ?rank (rank-of ?shape))
+    (= ?strides (symbolic-strides-of ?expr ?rank))
+    (= 0 (const-part-of ?expr))
+  )
+  (
+    (union ?layout (StridedElementLayoutLit ?shape ?strides ?bits))
+  )
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; INDEX-MAP SUBSTITUTION (the composition workhorse)
+;
+; subst-of(expr, map) = expr with every CoordVar k replaced by the map's
+; k-th-from-end entry — SIMULTANEOUS by construction: the CoordVar rule
+; reads the ORIGINAL map entry and results are assembled from child
+; results, never re-demanded, so a transpose map (a swap) composes
+; correctly where sequential per-variable rewriting would not.
+;
+; subst-of is a CONSTRUCTOR (egglog's union-on-set idiom): different
+; representatives of one class yield syntactically different images that
+; MUST union — sound because every IntExpr union is a function identity
+; (equal functions have equal substitution instances). The scaffolding
+; representative left in the result class is inert.
+;
+; An out-of-range axis leaves expr-list-nth-from-end unset and the rule
+; silently unmatched — a missed entry on one representative is mere
+; incompleteness; a panic would be a spurious abort.
+(relation subst-demand (IntExpr IndexMap))
+(constructor subst-of (IntExpr IndexMap) IntExpr)
+
+; NO SEED LITERALS (Stage Z3, user-directed: minimal and correct).
+; Membership premises like (= ?img (IntLit 0)) are lookups — but every
+; road into zero-ness or one-ness is a union ACTION, and actions
+; construct: the literal exists exactly when some class earned it. A
+; program with no zeros has nothing for zero-keyed rules to do, and
+; stalling there is vacuously correct.
+
+(rule
+  ((subst-demand ?expr ?map) (= ?expr (IntLit ?value)))
+  ((set (subst-of ?expr ?map) (IntLit ?value)))
+)
+; A IntVar is coordinate-free (maps bind coordinates, not unknowns), so substitution is the
+; identity on it — without this case a symbolic stride anywhere in the
+; parent offset silently stalls the whole composition (the combine rules
+; below need BOTH child images).
+(rule
+  ((subst-demand ?expr ?map) (= ?expr (IntVar ?dim_name)))
+  ((set (subst-of ?expr ?map) ?expr))
+)
+(rule
+  (
+    (subst-demand ?expr ?map)
+    (= ?expr (CoordVar ?axis ?extent))
+    (= ?map (IndexMapLit ?entries))
+    ; nth-from-end is ZERO-based, matching the 0-based de Bruijn axis
+    ; levels: axis k reads entry k directly (no bridge).
+    (= ?entry (expr-list-nth-from-end ?entries ?axis))
+  )
+  ((set (subst-of ?expr ?map) ?entry))
+)
+(rule
+  ((subst-demand ?expr ?map) (= ?expr (IntAdd ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+)
+(rule
+  (
+    (subst-demand ?expr ?map)
+    (= ?expr (IntAdd ?lhs ?rhs))
+    (= ?lhs_image (subst-of ?lhs ?map))
+    (= ?rhs_image (subst-of ?rhs ?map))
+  )
+  ((set (subst-of ?expr ?map) (IntAdd ?lhs_image ?rhs_image)))
+)
+(rule
+  ((subst-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+)
+; IntMul images are ZERO-AWARE (the foldr zero-stride precedent, one level
+; up): a zero factor image collapses the product image to (IntLit 0) DIRECTLY
+; instead of minting IntMul(0, <symbolic>) scaffolding.
+;
+; THE GENERIC RULE IS UNCONDITIONAL (Stage C1 relaxation, user-directed):
+; subst-of(Mul(a,b)) = Mul(image(a), image(b)) is a FUNCTION IDENTITY,
+; sound with no premises at all. The certificate premises it used to
+; carry were TERM HYGIENE from the pre-fence era — they kept
+; IntMul(<zero-image>, x) scaffolding out of the zero class, because
+; distributivity-era engines pumped through zero-class residents. Under
+; the full fence (guarded assoc, guarded dist both directions, no-subsume
+; folding, the eliminations) a zero-class scaffolding resident is INERT:
+; a cycle is a fuel depot, not an engine — the manufacturing rules
+; (dist/assoc) refuse uncertified bindings, so nothing operates the pump.
+; Validated by the attack ladder including dedicated zero-image storm
+; seeds; if a future rule re-arms scaffolding residents, the ladder is
+; the tripwire. What the relaxation buys: composition no longer stalls on
+; UNCERTIFIABLE images — maybe-zero IntVar strides (the recorded
+; slice-view stranding gap) and post-C1 gap-dim coordinates (extents
+; seeded [1, N]) now compose; the zero fast-paths remain as economies
+; (union-merge reconciles when both fire).
+(rule
+  (
+    (subst-demand ?expr ?map)
+    (= ?expr (IntMul ?lhs ?rhs))
+    (= ?lhs_image (subst-of ?lhs ?map))
+    (= ?lhs_image (IntLit 0))
+  )
+  ((set (subst-of ?expr ?map) (IntLit 0)))
+)
+(rule
+  (
+    (subst-demand ?expr ?map)
+    (= ?expr (IntMul ?lhs ?rhs))
+    (= ?rhs_image (subst-of ?rhs ?map))
+    (= ?rhs_image (IntLit 0))
+  )
+  ((set (subst-of ?expr ?map) (IntLit 0)))
+)
+(rule
+  (
+    (subst-demand ?expr ?map)
+    (= ?expr (IntMul ?lhs ?rhs))
+    (= ?lhs_image (subst-of ?lhs ?map))
+    (= ?rhs_image (subst-of ?rhs ?map))
+  )
+  ((set (subst-of ?expr ?map) (IntMul ?lhs_image ?rhs_image)))
+)
+
+; Division-family descent (Stage D3): substitution commutes with every
+; division constructor wherever the division is defined — a function
+; identity needing no premises (the partiality clause: the image is as
+; partial as the original, and consumers gate definedness where they
+; union). Unconditional, like the IntAdd case.
+(rule
+  ((subst-demand ?expr ?map) (= ?expr (IntTruncDiv ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+)
+(rule
+  (
+    (subst-demand ?expr ?map)
+    (= ?expr (IntTruncDiv ?lhs ?rhs))
+    (= ?lhs_image (subst-of ?lhs ?map))
+    (= ?rhs_image (subst-of ?rhs ?map))
+  )
+  ((set (subst-of ?expr ?map) (IntTruncDiv ?lhs_image ?rhs_image)))
+)
+(rule
+  ((subst-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+)
+(rule
+  (
+    (subst-demand ?expr ?map)
+    (= ?expr (IntTruncRem ?lhs ?rhs))
+    (= ?lhs_image (subst-of ?lhs ?map))
+    (= ?rhs_image (subst-of ?rhs ?map))
+  )
+  ((set (subst-of ?expr ?map) (IntTruncRem ?lhs_image ?rhs_image)))
+)
+(rule
+  ((subst-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+)
+(rule
+  ((subst-demand ?expr ?map) (= ?expr (IntMin ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+)
+(rule
+  (
+    (subst-demand ?expr ?map)
+    (= ?expr (IntMin ?lhs ?rhs))
+    (= ?lhs_image (subst-of ?lhs ?map))
+    (= ?rhs_image (subst-of ?rhs ?map))
+  )
+  ((set (subst-of ?expr ?map) (IntMin ?lhs_image ?rhs_image)))
+)
+(rule
+  ((subst-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+)
+(rule
+  (
+    (subst-demand ?expr ?map)
+    (= ?expr (IntMax ?lhs ?rhs))
+    (= ?lhs_image (subst-of ?lhs ?map))
+    (= ?rhs_image (subst-of ?rhs ?map))
+  )
+  ((set (subst-of ?expr ?map) (IntMax ?lhs_image ?rhs_image)))
+)
+(rule
+  (
+    (subst-demand ?expr ?map)
+    (= ?expr (IntCeilDiv ?lhs ?rhs))
+    (= ?lhs_image (subst-of ?lhs ?map))
+    (= ?rhs_image (subst-of ?rhs ?map))
+  )
+  ((set (subst-of ?expr ?map) (IntCeilDiv ?lhs_image ?rhs_image)))
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; INDEX-MAP / LAYOUT COMPOSITION (the header TODO — Step 2 of the views
+; stage). A view's layout IS its parent's offset function pre-composed with
+; the index map: offset_view(out) = offset_parent(map(out)). Composition
+; runs at the BIT level (the most basic form); the composed layout rejoins
+; the constructor ladder through downward discovery (element form via the
+; dtype gate, then strided/contiguous), which is demanded here.
+;
+; The composed-layout premise is a PREMISE-match on subst-of — it waits
+; silently until substitution completes (an action-position lookup would
+; panic loudly; either way nothing wrong can be minted).
+
+; Demand the substitution for every (parent layout, map) application...
+(rule
+  (
+    (= ?out_logical (LogicalIndexMapApply ?in_logical ?map ?shape))
+    (= ?in_lt (LayoutTensorLit ?in_logical ?in_layout))
+    (= ?in_layout (BitOffsetExpressionLayoutLit ?bit_expr ?in_shape ?bit_width))
+  )
+  (
+    (subst-demand ?bit_expr ?map)
+  )
+)
+
+; ...and when it completes, DERIVE the view's LayoutTensor: its layout is
+; the composed bit-offset expression over the VIEW's domain (?shape — the
+; apply's own output shape). The domain field is what makes an
+; identity-composed broadcast view a DIFFERENT layout from its parent,
+; so the strided-discovery demand below is sound (the false cross-rank
+; union is unrepresentable).
+(rule
+  (
+    (= ?out_logical (LogicalIndexMapApply ?in_logical ?map ?shape))
+    (= ?in_lt (LayoutTensorLit ?in_logical ?in_layout))
+    (= ?in_layout (BitOffsetExpressionLayoutLit ?bit_expr ?in_shape ?bit_width))
+    (= ?composed (subst-of ?bit_expr ?map))
+  )
+  (
+    ; The view keeps its parent's width (views never change element size)
+    ; and takes the apply's own output shape as its domain.
+    (let view_layout (BitOffsetExpressionLayoutLit ?composed ?shape ?bit_width))
+    (let view_lt (LayoutTensorLit ?out_logical view_layout))
+    (bit-to-element-demand view_layout)
+    (element-to-strided-demand view_lt)
+  )
+)
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; INJECTIVE-WRITE DOCTRINE
+;
+; A write through a non-injective layout is ill-defined (two coordinates, one
+; offset, last-writer-wins garbage), so every implementation that WRITES a
+; LayoutTensor requires a proof that the written (tensor, layout) pair is
+; injective. `injectivity-of` is a monotone proof token: set only where
+; provable, absent = unproven, and `:no-merge` panics on contradiction.
+; Reads through non-injective layouts (broadcast views, stride-0) stay legal.
+;
+; The token is keyed on the LayoutTensor, NOT the Layout: layout e-classes
+; are shape-erased (the offset expression depends only on strides and rank,
+; so same-strides different-shape layouts share one class), and injectivity
+; is a property of the offset FUNCTION restricted to the tensor's OWN domain.
+; Every proof rule therefore requires shape-of(logical) to equal the shape
+; the layout constructor declares — without that premise, a [4,4] tensor
+; carrying strides [3,1] would inherit a token from the merged class of a
+; [4,3] contiguous layout, and (0,3)/(1,0) collide at offset 3.
+;
+; Scripts may `set` the token directly for layouts the preamble cannot prove
+; (e.g. hand-written offset expressions for views) — the same trust level as
+; every other script-declared fact.
+(datatype Injectivity
+  (Injective)
+)
+(function injectivity-of (LayoutTensor) Injectivity :no-merge)
+
+; Contiguous layouts are bijections onto [0, product(dims)) for their own
+; shape (right- or left-major alike).
+(rule
+  (
+    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
+    (= ?layout (RightMajorContiguousElementLayoutLit ?shape ?bits))
+    (= (shape-of ?logical) ?shape)
+  )
+  (
+    (set (injectivity-of ?layout_tensor) (Injective))
+  )
+)
+(rule
+  (
+    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
+    (= ?layout (LeftMajorContiguousElementLayoutLit ?shape ?bits))
+    (= (shape-of ?logical) ?shape)
+  )
+  (
+    (set (injectivity-of ?layout_tensor) (Injective))
+  )
+)
+
+; Strided no-overlap fold: walking from the innermost axis outward, each
+; stride must cover the whole extent addressed so far (nested disjoint
+; boxes). Sufficient, not necessary — non-major-ordered permutations and
+; symbolic dims stay unproven, conservatively. Extents are concrete i64s;
+; negative or zero strides fail the >= and stay unproven.
+(relation strided-no-overlap-demand (IntExprList IntExprList))
+(function strided-extent-of (IntExprList IntExprList) i64 :no-merge)
+
+(rule
+  (
+    (= ?strided_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+  )
+  (
+    (strided-no-overlap-demand ?dims ?strides)
+  )
+)
+(rule
+  (
+    (strided-no-overlap-demand (IntExprCons ?size ?dim_tail) (IntExprCons ?stride ?stride_tail))
+  )
+  (
+    (strided-no-overlap-demand ?dim_tail ?stride_tail)
+  )
+)
+; Empty suffix addresses one cell.
+(rule
+  (
+    (strided-no-overlap-demand (IntExprNil) (IntExprNil))
+  )
+  (
+    (set (strided-extent-of (IntExprNil) (IntExprNil)) 1)
+  )
+)
+; Non-empty suffix: proven iff the tail is proven and this stride covers the
+; tail's extent. The new extent is stride * size — the box this axis spans.
+(rule
+  (
+    (strided-no-overlap-demand ?dims ?strides)
+    (= ?dims (IntExprCons (IntLit ?size) ?dim_tail))
+    (= ?strides (IntExprCons (IntLit ?stride) ?stride_tail))
+    (= ?tail_extent (strided-extent-of ?dim_tail ?stride_tail))
+    (>= ?stride ?tail_extent)
+  )
+  (
+    (set (strided-extent-of ?dims ?strides) (* ?stride ?size))
+  )
+)
+; A strided layout with a proven no-overlap stride nest is injective for a
+; tensor of exactly the declared shape.
+(rule
+  (
+    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
+    (= ?layout (StridedElementLayoutLit ?shape ?strides ?bits))
+    (= (shape-of ?logical) ?shape)
+    (= ?shape (ShapeLit ?dims))
+    (= ?extent (strided-extent-of ?dims ?strides))
+  )
+  (
+    (set (injectivity-of ?layout_tensor) (Injective))
+  )
+)
+
+
+;; @SPLICE rewrites
+
+
+
+
+
+;; @SPLICE forward
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; Always make a contiguous-layout layout tensor
+(rule
+  (
+    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
+    (= ?shape (shape-of ?logical))
+    (= ?bits (bits-of (dtype-of ?logical)))
+  )
+  (
+    (let ?new_layout_tensor (LayoutTensorLit ?logical (RightMajorContiguousElementLayoutLit ?shape ?bits)))
+  )
+)
+
+
+;; @SPLICE match
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;; @SPLICE coordinate
+
+
+
+
+
+
+
+
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; FIXPOINT INVARIANTS — the terminal stratum (user ruling 2026-07-23:
+; every invariant lives in egglog; nothing is checked in the extractor).
+;
+; This ruleset runs to saturation ONLY AFTER the main run has saturated:
+;   (run-schedule (saturate (run)) ... (saturate (run fixpoint-invariants)))
+; That ordering is what makes its optimistic rules LEGAL. The main
+; stratum is the prover; by its fixpoint every provable equality has
+; landed and every bound is final. Rules here may therefore do what
+; mid-run rules must never do (the pending-union race,
+; gather_pending_union_example.egg): write one :no-merge slot from
+; several sources and let a collision BE the error — at this stratum a
+; collision is a GENUINE mismatch, and egglog's own merge machinery is
+; the checker. This ruleset creates no unions and proves nothing new, so
+; no pending state can arise within it.
+;
+; Shape totality falls out by construction rather than by an absence
+; check (which no rule can state): every leaf is a shaped LogicalTensorInputLit,
+; every constructor has a propagation or closure rule, so a connected,
+; well-formed program leaves this stratum fully shaped — and a
+; mismatched one dies loudly inside it.
+(ruleset fixpoint-invariants)
+
+
+; Shape closure, gather: the out shape and EVERY coordinate's shape are
+; one shape. A per-gather suffix link, then closure both ways.
+(relation coordinate-shape-lock (LogicalTensor LogicalTensorList))
+(rule
+  (
+    (coordinate-shape-lock ?out_logical (LogicalTensorCons ?head_logical ?rest_list))
+  )
+  (
+    (coordinate-shape-lock ?out_logical ?rest_list)
+  )
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (coordinate-shape-lock ?out_logical (LogicalTensorCons ?head_logical ?rest_list))
+    (= ?head_shape (shape-of ?head_logical))
+  )
+  (
+    (set (shape-of ?out_logical) ?head_shape)
+  )
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (coordinate-shape-lock ?out_logical (LogicalTensorCons ?head_logical ?rest_list))
+    (= ?out_shape (shape-of ?out_logical))
+  )
+  (
+    (set (shape-of ?head_logical) ?out_shape)
+  )
+  :ruleset fixpoint-invariants
+)
+
+; Iota bounds: the PRESENCE demand only (user ruling 2026-07-23: range
+; checks removed for now). Absence of a lattice entry is unobservable to
+; rules — premises cannot negate, and egglog statically disallows value
+; lookups of non-constructor functions in actions — so the demand lives
+; at the CONSTRUCTION SITE as post-schedule checks (the LogicalIota
+; authoring contract; frontend builders emit the pair mechanically):
+;
+;   (check (= ?demanded_lower (lower-bound-of <the-iota-expr>)))
+;   (check (= ?demanded_upper (upper-bound-of <the-iota-expr>)))
+;
+; A check whose lookup finds nothing fails the program loudly at the
+; fixpoint.
+
+; VIEW ARITY LOCK: an index map's entry count IS its input's rank. Both
+; sides are i64 primitives (lengths and ranks are computed totally for
+; every list), and primitives never sit pending-equal — but the lock
+; stays in this stratum with its peers: one discipline, one home. A
+; mismatch is a genuine authoring error and collides loudly.
+(function view-arity-lock (LogicalTensor) i64 :no-merge)
+
+; COORDINATE-EXTENT LOCK: every CoordVar(axis, extent) reachable inside a
+; demanded expression must carry the SAME extent class as its axis's dim
+; in the governing shape (axis 0 = innermost = last dim — the standing
+; convention, now enforced). Demanded by iota expressions against their
+; own shape and by every view entry against the view's output shape; the
+; descent walks each IntExpr constructor; the leaf rule writes the dim
+; AND the extent into one :no-merge slot keyed (shape, axis) — at this
+; stratum a collision is a genuinely wrong extent, the loud death the
+; documented convention never had.
+(relation extent-lock-demand (IntExpr Shape))
+(relation extent-lock-list-demand (IntExprList Shape))
+(rule
+  (
+    (extent-lock-list-demand (IntExprCons ?head_expression ?rest_list) ?shape)
+  )
+  (
+    (extent-lock-demand ?head_expression ?shape)
+    (extent-lock-list-demand ?rest_list ?shape)
+  )
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (extent-lock-demand (IntAdd ?lhs ?rhs) ?shape)
+  )
+  (
+    (extent-lock-demand ?lhs ?shape)
+    (extent-lock-demand ?rhs ?shape)
+  )
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (extent-lock-demand (IntMul ?lhs ?rhs) ?shape)
+  )
+  (
+    (extent-lock-demand ?lhs ?shape)
+    (extent-lock-demand ?rhs ?shape)
+  )
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (extent-lock-demand (IntTruncDiv ?lhs ?rhs) ?shape)
+  )
+  (
+    (extent-lock-demand ?lhs ?shape)
+    (extent-lock-demand ?rhs ?shape)
+  )
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (extent-lock-demand (IntTruncRem ?lhs ?rhs) ?shape)
+  )
+  (
+    (extent-lock-demand ?lhs ?shape)
+    (extent-lock-demand ?rhs ?shape)
+  )
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (extent-lock-demand (IntCeilDiv ?lhs ?rhs) ?shape)
+  )
+  (
+    (extent-lock-demand ?lhs ?shape)
+    (extent-lock-demand ?rhs ?shape)
+  )
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (extent-lock-demand (IntMin ?lhs ?rhs) ?shape)
+  )
+  (
+    (extent-lock-demand ?lhs ?shape)
+    (extent-lock-demand ?rhs ?shape)
+  )
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (extent-lock-demand (IntMax ?lhs ?rhs) ?shape)
+  )
+  (
+    (extent-lock-demand ?lhs ?shape)
+    (extent-lock-demand ?rhs ?shape)
+  )
+  :ruleset fixpoint-invariants
+)
+(function axis-extent-lock (Shape i64) IntExpr :no-merge)
+(rule
+  (
+    (extent-lock-demand ?expression ?shape)
+    (= ?expression (CoordVar ?axis ?extent))
+    (= ?shape (ShapeLit ?dim_list))
+    ; nth-from-end is ZERO-based, matching the 0-based axis levels:
+    ; axis k reads dim k directly (no bridge).
+    (= ?dim (expr-list-nth-from-end ?dim_list ?axis))
+  )
+  (
+    (set (axis-extent-lock ?shape ?axis) ?dim)
+    (set (axis-extent-lock ?shape ?axis) ?extent)
+  )
+  :ruleset fixpoint-invariants
+)
+
+;; @SPLICE fixpoint

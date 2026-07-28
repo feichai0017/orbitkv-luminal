@@ -1,0 +1,1 @@
+(constructor LogicalExp2 (LogicalTensor) LogicalTensor)

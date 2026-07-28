@@ -1,0 +1,5 @@
+; Logical Commutativity : Add
+(rewrite
+  (LogicalAdd ?lhs ?rhs)
+  (LogicalAdd ?rhs ?lhs)
+)

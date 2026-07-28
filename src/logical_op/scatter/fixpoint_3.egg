@@ -1,0 +1,10 @@
+(rule
+  (
+    (= ?out_logical (LogicalScatter ?init_logical ?coordinate_list ?src_logical))
+    (= ?out_shape (shape-of ?out_logical))
+  )
+  (
+    (set (shape-of ?init_logical) ?out_shape)
+  )
+  :ruleset fixpoint-invariants
+)

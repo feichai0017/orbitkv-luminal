@@ -1,0 +1,87 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: the KV-cache row update — coordinate-form scatter
+; end to end, with IN-PLACE INTENT stated at the boundary: the updated
+; cache is written back into THE SAME caller buffer the cache arrived in
+; (result and init share one BufferId — user ruling: in-place is a
+; boundary statement, resolved by which implementation extraction picks
+; and how bufferization repairs it). The row position is a data-dependent
+; Int input; the column coordinate is an interior iota.
+
+(let cache_shape (ShapeLit (IntExprCons (IntLit 6) (IntExprCons (IntLit 4) (IntExprNil)))))
+(let cache_logical (LogicalTensorInputLit (LogicalIdLit "kv_cache") cache_shape (F32)))
+(let cache_layout (RightMajorContiguousElementLayoutLit cache_shape (bits-of (F32))))
+(let cache_layout_tensor (LayoutTensorLit cache_logical cache_layout))
+
+(let row_shape (ShapeLit (IntExprCons (IntLit 1) (IntExprCons (IntLit 4) (IntExprNil)))))
+(let new_row_logical (LogicalTensorInputLit (LogicalIdLit "new_row") row_shape (F32)))
+(let row_layout (RightMajorContiguousElementLayoutLit row_shape (bits-of (F32))))
+(let new_row_layout_tensor (LayoutTensorLit new_row_logical row_layout))
+
+(let position_logical (LogicalTensorInputLit (LogicalIdLit "write_position") row_shape (Int)))
+(let position_layout (RightMajorContiguousElementLayoutLit row_shape (bits-of (Int))))
+(let position_layout_tensor (LayoutTensorLit position_logical position_layout))
+
+(let column_iota_logical (LogicalIota (CoordVar 0 (IntLit 4)) row_shape))
+
+(let updated_logical
+  (LogicalScatter cache_logical
+    (LogicalTensorCons position_logical
+      (LogicalTensorCons column_iota_logical (LogicalTensorNil)))
+    new_row_logical))
+
+(let updated_layout_tensor (LayoutTensorLit updated_logical cache_layout))
+
+(let cache_buffer_id (BufferLit 330))
+(set (buffer-access-of cache_buffer_id) (ReadWrite))
+(set (buffer-freed-by cache_buffer_id) (CallerFrees))
+(let cache_input_buffer_tensor (BufferTensorLit cache_layout_tensor cache_buffer_id))
+
+(let new_row_buffer_id (BufferLit 331))
+(set (buffer-access-of new_row_buffer_id) (ReadOnly))
+(set (buffer-freed-by new_row_buffer_id) (CallerFrees))
+(let new_row_input_buffer_tensor (BufferTensorLit new_row_layout_tensor new_row_buffer_id))
+
+(let position_buffer_id (BufferLit 332))
+(set (buffer-access-of position_buffer_id) (ReadOnly))
+(set (buffer-freed-by position_buffer_id) (CallerFrees))
+(let position_input_buffer_tensor (BufferTensorLit position_layout_tensor position_buffer_id))
+
+; The in-place demand: the updated cache goes back into buffer 330.
+(let updated_output_buffer_tensor (BufferTensorLit updated_layout_tensor cache_buffer_id))
+
+(let input_boundary
+  (BufferInputLit
+    (BufferTensorCons cache_input_buffer_tensor
+      (BufferTensorCons new_row_input_buffer_tensor
+        (BufferTensorCons position_input_buffer_tensor
+          (BufferTensorNil))))))
+
+(let output
+  (BufferOutputLit (BufferTensorCons updated_output_buffer_tensor (BufferTensorNil))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; Iota authoring contract: every constructed iota demands its expression's
+; bounds — an absent entry fails the check loudly at the fixpoint.
+(check (= ?demanded_lower (lower-bound-of (CoordVar 0 (IntLit 4)))))
+(check (= ?demanded_upper (upper-bound-of (CoordVar 0 (IntLit 4)))))
+
+; Both implementations are available on the shared output layout tensor.
+(check
+  (= (LayoutTensorOpScatterMutatingGeneric
+       cache_layout_tensor
+       new_row_layout_tensor
+       (LayoutTensorCons position_layout_tensor
+         (LayoutTensorCons (LayoutTensorLit column_iota_logical position_layout)
+           (LayoutTensorNil))))
+     (LayoutTensorOpLit
+       (LayoutTensorCons cache_layout_tensor
+         (LayoutTensorCons new_row_layout_tensor
+           (LayoutTensorCons position_layout_tensor
+             (LayoutTensorCons (LayoutTensorLit column_iota_logical position_layout)
+               (LayoutTensorNil)))))
+       (LayoutTensorCons updated_layout_tensor (LayoutTensorNil)))))
+
+; The output slot carries the updated cache in the CACHE's buffer.
+(check (= (layout-tensor-of updated_output_buffer_tensor) updated_layout_tensor))
+(check (= (buffer-id-of updated_output_buffer_tensor) cache_buffer_id))

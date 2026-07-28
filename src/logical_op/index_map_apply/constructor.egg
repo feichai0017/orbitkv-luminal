@@ -1,0 +1,2 @@
+; All view ops
+(constructor LogicalIndexMapApply (LogicalTensor IndexMap Shape) LogicalTensor)

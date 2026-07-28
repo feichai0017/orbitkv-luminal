@@ -1,0 +1,71 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: input is mutated in place.
+;
+; Semantics:
+; - input and output have different logical tensors
+; - input and output share the same runtime buffer
+; - the selected LayoutTensorOp computes the output value
+
+(let x_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let x_dtype (F32))
+
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "in_place_x") x_shape x_dtype))
+(let y_logical (LogicalSqrt x_logical))
+
+(let x_layout (RightMajorContiguousElementLayoutLit x_shape (bits-of x_dtype)))
+(let x_layout_tensor (LayoutTensorLit x_logical x_layout))
+(let y_layout_tensor (LayoutTensorLit y_logical x_layout))
+
+(let shared_buffer_id (BufferLit 210))
+(set (buffer-access-of shared_buffer_id) (ReadWrite))
+(set (buffer-freed-by shared_buffer_id) (CallerFrees))
+
+(let x_input_buffer_tensor
+  (BufferTensorLit x_layout_tensor shared_buffer_id))
+
+; Same BufferId as the input, but a new LayoutTensor for the mutated value.
+(let y_output_buffer_tensor
+  (BufferTensorLit y_layout_tensor shared_buffer_id))
+
+(let input_boundary
+  (BufferInputLit
+    (BufferTensorCons x_input_buffer_tensor
+      (BufferTensorNil))))
+
+(let output
+  (BufferOutputLit
+    (BufferTensorCons y_output_buffer_tensor
+      (BufferTensorNil))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; In-place mutation is represented by storage identity across the boundary.
+(check (= (buffer-id-of x_input_buffer_tensor)
+          (buffer-id-of y_output_buffer_tensor)))
+
+; The output buffer points at the post-mutation value.
+(check (= (layout-tensor-of y_output_buffer_tensor) y_layout_tensor))
+
+; The value computation remains an ordinary LayoutTensorOp.
+(check
+  (= (input-layout-tensor-list-of
+       (LayoutTensorOpSqrtFunctionalGeneric x_layout_tensor x_layout))
+     (LayoutTensorCons x_layout_tensor (LayoutTensorNil))))
+
+(check
+  (= (output-layout-tensor-list-of
+       (LayoutTensorOpSqrtFunctionalGeneric x_layout_tensor x_layout))
+     (LayoutTensorCons y_layout_tensor (LayoutTensorNil))))
+
+; The MUTATING implementation is offered as well: the output layout equals
+; the input's and the written tensor is provably injective (contiguous), so
+; both match preconditions hold.
+(check (= (injectivity-of y_layout_tensor) (Injective)))
+(check
+  (= (input-layout-tensor-list-of
+       (LayoutTensorOpSqrtMutatingGeneric x_layout_tensor))
+     (LayoutTensorCons x_layout_tensor (LayoutTensorNil))))
+(check
+  (= (output-layout-tensor-list-of
+       (LayoutTensorOpSqrtMutatingGeneric x_layout_tensor))
+     (LayoutTensorCons y_layout_tensor (LayoutTensorNil))))

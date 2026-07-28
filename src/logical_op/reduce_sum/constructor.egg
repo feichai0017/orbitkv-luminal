@@ -1,0 +1,2 @@
+; Reduction Ops ; In reality the reduction order needs to be specified.
+(constructor LogicalReduceSum (LogicalTensor i64) LogicalTensor)

@@ -1,0 +1,11 @@
+; Propagate shape
+(rule
+  (
+    (= ?out_logical (LogicalReduceMax ?in_logical ?reduction_index))
+    (= (shape-of ?in_logical) (ShapeLit ?dims))
+    (= ?out_dims (expr-list-remove-axis-from-end ?dims ?reduction_index))
+  )
+  (
+    (set (shape-of ?out_logical) (ShapeLit ?out_dims))
+  )
+)

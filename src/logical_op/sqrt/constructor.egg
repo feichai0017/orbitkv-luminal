@@ -1,0 +1,2 @@
+; Unary Ops
+(constructor LogicalSqrt (LogicalTensor) LogicalTensor)

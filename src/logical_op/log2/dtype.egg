@@ -1,0 +1,10 @@
+; DType Propagation : LogicalLog2
+(rule
+  (
+    (= ?out_logical_tensor (LogicalLog2 ?in_logical))
+    (= ?dtype (dtype-of ?in_logical))
+  )
+  (
+    (set (dtype-of ?out_logical_tensor) ?dtype)
+  )
+)

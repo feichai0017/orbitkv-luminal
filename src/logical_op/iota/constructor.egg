@@ -1,0 +1,7 @@
+; Logical Iota : the index-expression generator. The value at output
+; coordinates (c0..ck) is the IntExpr evaluated with CoordVar(axis i)
+; bound to ci — the tensor form of a single IntExpr over the shape's
+; coordinate variables. Rank-1 with one CoordVar is luminal's flat
+; iota; the expr's CoordVar extents are expected to agree with the
+; shape's dims (the fixture pins the convention; no rule re-checks it).
+(constructor LogicalIota (IntExpr Shape) LogicalTensor)

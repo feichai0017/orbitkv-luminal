@@ -1,0 +1,43 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; PENDING-UNION REGRESSION PIN (found adversarially 2026-07-23): two shape
+; terms that are provably equal — [10] literal vs a 9-deep serialized
+; literal-fold chain summing ten 1s — feed one gather's coordinate list.
+; The old duplicative-set enforcement inside coords-common-shape panicked
+; HERE ("Illegal merge attempted"): the sets fired around iteration 4
+; while the fold chain finished around iteration 9, so the two classes
+; were PENDING-equal, not yet equal. The fix: the egglog side computes the
+; common shape from the head alone (single source, race-free), and
+; coordinate-shape agreement is enforced at the saturation FIXPOINT by
+; GatherMatcher::extract, where every provable equality has landed. This
+; fixture passing IS the regression pin: a valid program must not panic,
+; and its shapes must resolve equal.
+
+(let flat_shape (ShapeLit (IntExprCons (IntLit 10) (IntExprNil))))
+(let folded_shape
+  (ShapeLit
+    (IntExprCons
+      (IntAdd (IntAdd (IntAdd (IntAdd (IntAdd (IntAdd (IntAdd (IntAdd (IntAdd (IntLit 1) (IntLit 1)) (IntLit 1)) (IntLit 1)) (IntLit 1)) (IntLit 1)) (IntLit 1)) (IntLit 1)) (IntLit 1)) (IntLit 1))
+      (IntExprNil))))
+
+(let ids_a (LogicalTensorInputLit (LogicalIdLit "ids_a") flat_shape (Int)))
+(let iota_b (LogicalIota (CoordVar 0 (IntLit 10)) folded_shape))
+
+(let data_shape (ShapeLit (IntExprCons (IntLit 5) (IntExprCons (IntLit 7) (IntExprNil)))))
+(let data (LogicalTensorInputLit (LogicalIdLit "data") data_shape (F32)))
+
+(let racy_gather
+  (LogicalGather data
+    (LogicalTensorCons ids_a
+      (LogicalTensorCons iota_b (LogicalTensorNil)))))
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; Iota authoring contract: every constructed iota demands its expression's
+; bounds — an absent entry fails the check loudly at the fixpoint.
+(check (= ?demanded_lower (lower-bound-of (CoordVar 0 (IntLit 10)))))
+(check (= ?demanded_upper (upper-bound-of (CoordVar 0 (IntLit 10)))))
+
+; If we get here, the shapes unioned before (or in the same rebuild as) the
+; duplicative sets — no false panic on this ordering.
+(check (= flat_shape folded_shape))
+(check (= (shape-of racy_gather) flat_shape))

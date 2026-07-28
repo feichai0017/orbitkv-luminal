@@ -1,0 +1,131 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Tiled-view pins (Stage D3): THE CONSUMER PROOF for the division
+; family. Tiling in this IR is an index-map decomposition — the map
+; introduces tile coordinates as honest coordinates of a finer box, and
+; division lives at the map boundary:
+;
+;   TILING direction: a [4, 128] tensor viewed as [4, 2, 64] via the
+;     RECOMPOSITION entry 64*w1 + w0 (ring-only: the composed offset is
+;     linear in the new coordinates, so discovery classifies it with the
+;     machinery that already exists).
+;   UNTILING direction: a [4, 2, 64] tensor viewed flat as [4, 128] via
+;     the DECOMPOSITION entries tdiv(u0, 64) and trem(u0, 64) — division
+;     in map entries, composed through substitution, collapsed by the
+;     RECOMPOSITION law d*(n tdiv d) + (n trem d) = n back to the flat
+;     right-major offset.
+;
+; Both directions must discover their composed layouts as the contiguity
+; classes they truly are. The standalone pins below hold each identity
+; up separately: translation + small-dividend (tile recovery), the ceil
+; bridge (device-honest representative), fusion, and the negation
+; normalizations.
+
+(let flat_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprCons (IntLit 128) (IntExprNil)))))
+(let tiled_shape
+  (ShapeLit (IntExprCons (IntLit 4) (IntExprCons (IntLit 2) (IntExprCons (IntLit 64) (IntExprNil))))))
+(let storage_dtype (F32))
+
+; --- TILING: flat storage, tiled view ---
+(let flat_logical (LogicalTensorInputLit (LogicalIdLit "flat_storage") flat_shape storage_dtype))
+(let flat_layout (RightMajorContiguousElementLayoutLit flat_shape (bits-of storage_dtype)))
+(let flat_layout_tensor (LayoutTensorLit flat_logical flat_layout))
+; recomposition entry: the parent's inner coordinate as 64*w1 + w0
+(let tile_recomposition
+  (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 64)) (CoordVar 0 (IntLit 64))))
+(let tiling_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 2 (IntLit 4))
+      (IntExprCons tile_recomposition (IntExprNil)))))
+(let tiled_view_logical (LogicalIndexMapApply flat_logical tiling_map tiled_shape))
+
+; --- UNTILING: tiled storage, flat view ---
+(let tiled_logical (LogicalTensorInputLit (LogicalIdLit "tiled_storage") tiled_shape storage_dtype))
+(let tiled_layout (RightMajorContiguousElementLayoutLit tiled_shape (bits-of storage_dtype)))
+(let tiled_layout_tensor (LayoutTensorLit tiled_logical tiled_layout))
+(let flat_inner_coordinate (CoordVar 0 (IntLit 128)))
+(let tile_index_entry (IntTruncDiv flat_inner_coordinate (IntLit 64)))
+(let tile_offset_entry (IntTruncRem flat_inner_coordinate (IntLit 64)))
+(let untiling_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 1 (IntLit 4))
+      (IntExprCons tile_index_entry
+        (IntExprCons tile_offset_entry (IntExprNil))))))
+(let flat_view_logical (LogicalIndexMapApply tiled_logical untiling_map flat_shape))
+
+; hand-written fold offsets (the ladder derives these in the layout
+; classes; subst-of is keyed by class)
+(let flat_element_offset
+  (IntAdd (IntMul (CoordVar 1 (IntLit 4)) (IntLit 128)) (CoordVar 0 (IntLit 128))))
+(let tiled_element_offset
+  (IntAdd (IntMul (CoordVar 2 (IntLit 4)) (IntLit 128))
+    (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 64)) (CoordVar 0 (IntLit 64)))))
+
+; --- standalone identity material ---
+(let tile_recovery (IntTruncDiv tile_recomposition (IntLit 64)))
+(let offset_recovery (IntTruncRem tile_recomposition (IntLit 64)))
+(let ceiling_term (IntCeilDiv flat_inner_coordinate (IntLit 64)))
+(let fused_pair (IntTruncDiv (IntTruncDiv flat_inner_coordinate (IntLit 4)) (IntLit 16)))
+(let direct_quotient (IntTruncDiv flat_inner_coordinate (IntLit 64)))
+(let negated_dividend (IntTruncDiv (IntMul (IntLit -1) flat_inner_coordinate) (IntLit 64)))
+(let negative_divisor_quotient (IntTruncDiv flat_inner_coordinate (IntLit -64)))
+(let negative_divisor_remainder (IntTruncRem flat_inner_coordinate (IntLit -64)))
+(let negative_divisor_ceiling (IntCeilDiv flat_inner_coordinate (IntLit -64)))
+; descent completion: the identity map carries a division term through
+(let identity_rank1_map
+  (IndexMapLit (IntExprCons (CoordVar 0 (IntLit 128)) (IntExprNil))))
+(subst-demand direct_quotient identity_rank1_map)
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; --- TILING: the composed layout is linear in the tile coordinates and
+; discovery classifies it completely ---
+(check
+  (= (BitOffsetExpressionLayoutLit
+       (subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map)
+       tiled_shape
+       (bits-of storage_dtype))
+     (StridedElementLayoutLit
+       tiled_shape
+       (IntExprCons (IntLit 128) (IntExprCons (IntLit 64) (IntExprCons (IntLit 1) (IntExprNil))))
+       (bits-of storage_dtype))))
+(check
+  (= (BitOffsetExpressionLayoutLit
+       (subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map)
+       tiled_shape
+       (bits-of storage_dtype))
+     (RightMajorContiguousElementLayoutLit tiled_shape (bits-of storage_dtype))))
+
+; --- UNTILING: division entries compose through substitution and the
+; RECOMPOSITION law collapses them back to the flat right-major offset —
+; the round trip, as layouts ---
+(check
+  (= (BitOffsetExpressionLayoutLit
+       (subst-of (IntMul tiled_element_offset (IntLit 32)) untiling_map)
+       flat_shape
+       (bits-of storage_dtype))
+     (RightMajorContiguousElementLayoutLit flat_shape (bits-of storage_dtype))))
+
+; --- the tiled recovery, standalone: translation shifts the multiple
+; out, the small dividend vanishes, the zero summand collapses ---
+(check (= tile_recovery (CoordVar 1 (IntLit 2))))
+(check (= offset_recovery (CoordVar 0 (IntLit 64))))
+
+; --- the ceil bridge: every ceiling over a nonneg dividend earns the
+; device-honest shifted-trunc representative ---
+(check
+  (= ceiling_term
+     (IntTruncDiv (IntAdd flat_inner_coordinate (IntAdd (IntLit 64) (IntLit -1))) (IntLit 64))))
+
+; --- fusion: two divisions are one ---
+(check (= fused_pair direct_quotient))
+
+; --- negation normalizations: dividend sign hoists out; a negative
+; divisor rewrites to its positive twin (quotient flips, remainder
+; keeps, ceiling negates the dividend) ---
+(check (= negated_dividend (IntMul (IntLit -1) direct_quotient)))
+(check (= negative_divisor_quotient (IntMul (IntLit -1) direct_quotient)))
+(check (= negative_divisor_remainder (IntTruncRem flat_inner_coordinate (IntLit 64))))
+(check (= negative_divisor_ceiling (IntCeilDiv (IntMul (IntLit -1) flat_inner_coordinate) (IntLit 64))))
+
+; --- substitution descends through division constructors ---
+(check (= (subst-of direct_quotient identity_rank1_map) direct_quotient))

@@ -1,0 +1,42 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: write-after-read hazard.
+;
+; Semantics:
+; - y = Sqrt(x) must land in x's buffer (in-place mutation of the input)
+; - z = Exp(x) also reads x, into its own output buffer
+; - the copy materializing y into x's buffer must NOT run before Exp reads x:
+;   the plan needs an anti-dependency (WAR) ordering edge Exp -> copy.
+
+(let x_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let x_dtype (F32))
+
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "war_x") x_shape x_dtype))
+(let y_logical (LogicalSqrt x_logical))
+(let z_logical (LogicalExp x_logical))
+
+(let x_layout (RightMajorContiguousElementLayoutLit x_shape (bits-of x_dtype)))
+(let x_layout_tensor (LayoutTensorLit x_logical x_layout))
+(let y_layout_tensor (LayoutTensorLit y_logical x_layout))
+(let z_layout_tensor (LayoutTensorLit z_logical x_layout))
+
+(let shared_buffer_id (BufferLit 240))
+(set (buffer-access-of shared_buffer_id) (ReadWrite))
+(set (buffer-freed-by shared_buffer_id) (CallerFrees))
+(let z_buffer_id (BufferLit 241))
+(set (buffer-access-of z_buffer_id) (ReadWrite))
+(set (buffer-freed-by z_buffer_id) (CallerFrees))
+
+(let x_input_buffer_tensor (BufferTensorLit x_layout_tensor shared_buffer_id))
+(let y_output_buffer_tensor (BufferTensorLit y_layout_tensor shared_buffer_id))
+(let z_output_buffer_tensor (BufferTensorLit z_layout_tensor z_buffer_id))
+
+(let input_boundary
+  (BufferInputLit (BufferTensorCons x_input_buffer_tensor (BufferTensorNil))))
+
+(let output
+  (BufferOutputLit
+    (BufferTensorCons y_output_buffer_tensor
+      (BufferTensorCons z_output_buffer_tensor
+        (BufferTensorNil)))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))

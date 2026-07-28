@@ -1,0 +1,157 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Adversarial substitution pins (subst-of): the cases most likely to
+; expose an unsound or non-simultaneous substitution. Every expected
+; result is hand-computed. Conventions under test:
+;   - entries: first list element <-> HIGHEST input axis; nth-from-end
+;     is ZERO-based (luminal-aligned, ruling 2026-07-24): axis k reads
+;     entry k directly
+;   - simultaneity: all variables substituted against the ORIGINAL map,
+;     never against already-substituted results
+;   - union-merge: images of different representatives of one class are
+;     unioned (sound by the function-identity contract)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; P1 — SQUARE transpose: the formal-collision case. Input and output
+; formals are the SAME terms (both axes span 3), so any sequential
+; scheme corrupts (v0 -> v1 -> v0 again); only simultaneous survives.
+(let p1_parent
+  (IntAdd (IntMul (CoordVar 1 (IntLit 3)) (IntLit 3)) (CoordVar 0 (IntLit 3))))
+(let p1_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 0 (IntLit 3))
+      (IntExprCons (CoordVar 1 (IntLit 3))
+        (IntExprNil)))))
+(subst-demand p1_parent p1_map)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; P2 — rank-3 FULL PERMUTATION (a 3-cycle), all sizes distinct so any
+; axis/size mix-up changes the answer. Also exercises the middle index
+; of a 3-entry list (the nth-from-end upward-propagation fix).
+; Parent [2,3,5], right-major: offset = 15*v2 + 5*v1 + v0.
+; Map: dim0(5)<-v1, dim1(3)<-v2, dim2(2)<-v0; output shape [3,5,2].
+(let p2_parent
+  (IntAdd (IntMul (CoordVar 2 (IntLit 2)) (IntLit 15))
+    (IntAdd (IntMul (CoordVar 1 (IntLit 3)) (IntLit 5))
+      (CoordVar 0 (IntLit 5)))))
+(let p2_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 0 (IntLit 2))
+      (IntExprCons (CoordVar 2 (IntLit 3))
+        (IntExprCons (CoordVar 1 (IntLit 5))
+          (IntExprNil))))))
+(subst-demand p2_parent p2_map)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; P3 — DIAGONAL: one output variable feeds BOTH input axes (repeated
+; entries). Parent [4,4]: offset = 4*v1 + v0; both dims <- v0(4).
+(let p3_parent
+  (IntAdd (IntMul (CoordVar 1 (IntLit 4)) (IntLit 4)) (CoordVar 0 (IntLit 4))))
+(let p3_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 0 (IntLit 4))
+      (IntExprCons (CoordVar 0 (IntLit 4))
+        (IntExprNil)))))
+(subst-demand p3_parent p3_map)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; P4 — COMPOUND entries + cross-axis mapping: dim0(8) <- 2*v1 + 1 (a
+; strided, shifted window), dim1(4) <- v0(2). Parent [4,8]: 8*v1 + v0.
+; Output [3,2].
+(let p4_parent
+  (IntAdd (IntMul (CoordVar 1 (IntLit 4)) (IntLit 8)) (CoordVar 0 (IntLit 8))))
+(let p4_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 0 (IntLit 2))
+      (IntExprCons (IntAdd (IntMul (CoordVar 1 (IntLit 3)) (IntLit 2)) (IntLit 1))
+        (IntExprNil)))))
+(subst-demand p4_parent p4_map)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; P5 — MULTI-REPRESENTATIVE agreement: the parent class is given TWO
+; syntactically different, function-equal representatives (a script
+; union — a distributivity instance the rule set no longer derives).
+; Substitution images of BOTH representatives must land in ONE class:
+; the union-merge soundness of subst-of, exercised deliberately.
+; Parent reps: (v1 + v0) * 2  ==  v1*2 + v0*2, both over [6,6].
+; Map: dim1 <- 2 (a slice), dim0 <- v0(6); output [6].
+(let p5_parent (IntMul (IntAdd (CoordVar 1 (IntLit 6)) (CoordVar 0 (IntLit 6))) (IntLit 2)))
+(let p5_parent_alt
+  (IntAdd (IntMul (CoordVar 1 (IntLit 6)) (IntLit 2)) (IntMul (CoordVar 0 (IntLit 6)) (IntLit 2))))
+(union p5_parent p5_parent_alt)
+(let p5_map
+  (IndexMapLit
+    (IntExprCons (IntLit 2)
+      (IntExprCons (CoordVar 0 (IntLit 6))
+        (IntExprNil)))))
+(subst-demand p5_parent p5_map)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; P6 — IDENTITY / BROADCAST rank-up: rank-1 parent viewed inside [4,5]
+; by its own coordinate. The composed expression IS the parent's — the
+; expression level is CORRECT here; the domain distinction is the
+; LAYOUT's job (the broadcast-domain question, tracked separately).
+(let p6_parent (CoordVar 0 (IntLit 5)))
+(let p6_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 0 (IntLit 5))
+      (IntExprNil))))
+(subst-demand p6_parent p6_map)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; P7 — OUT-OF-RANGE axis: the parent mentions v2 but the map has two
+; entries, so the root substitution must never complete (silent
+; incompleteness, never a panic or a partial result). Unsetness is not
+; directly checkable; the in-range subterm's image is.
+(let p7_parent (IntAdd (CoordVar 2 (IntLit 7)) (CoordVar 0 (IntLit 5))))
+(let p7_map
+  (IndexMapLit
+    (IntExprCons (IntLit 0)
+      (IntExprCons (CoordVar 0 (IntLit 5))
+        (IntExprNil)))))
+(subst-demand p7_parent p7_map)
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; P1: swap lands both variables at once: 3*v0 + v1.
+(check
+  (= (subst-of p1_parent p1_map)
+     (IntAdd (IntMul (CoordVar 0 (IntLit 3)) (IntLit 3)) (CoordVar 1 (IntLit 3)))))
+
+; P2: the 3-cycle: 15*v0(2) + 5*v2(3) + v1(5).
+(check
+  (= (subst-of p2_parent p2_map)
+     (IntAdd (IntMul (CoordVar 0 (IntLit 2)) (IntLit 15))
+       (IntAdd (IntMul (CoordVar 2 (IntLit 3)) (IntLit 5))
+         (CoordVar 1 (IntLit 5))))))
+
+; P3: the diagonal: 4*v0 + v0, exactly this form (no ring folding —
+; distributivity is deliberately absent).
+(check
+  (= (subst-of p3_parent p3_map)
+     (IntAdd (IntMul (CoordVar 0 (IntLit 4)) (IntLit 4)) (CoordVar 0 (IntLit 4)))))
+
+; P4: compound entry lands intact: 8*v0(2) + (2*v1(3) + 1).
+(check
+  (= (subst-of p4_parent p4_map)
+     (IntAdd (IntMul (CoordVar 0 (IntLit 2)) (IntLit 8))
+       (IntAdd (IntMul (CoordVar 1 (IntLit 3)) (IntLit 2)) (IntLit 1)))))
+
+; P5: BOTH representatives' images are in the one result class — the
+; factored image verbatim, and the expanded image with its constant
+; folded (2*2 -> 4).
+(check
+  (= (subst-of p5_parent p5_map)
+     (IntMul (IntAdd (IntLit 2) (CoordVar 0 (IntLit 6))) (IntLit 2))))
+(check
+  (= (subst-of p5_parent p5_map)
+     (IntAdd (IntLit 4) (IntMul (CoordVar 0 (IntLit 6)) (IntLit 2)))))
+
+; P6: identity composition: the image IS the parent expression.
+(check (= (subst-of p6_parent p6_map) p6_parent))
+
+; P7: the in-range subterm resolves...
+(check (= (subst-of (CoordVar 0 (IntLit 5)) p7_map) (CoordVar 0 (IntLit 5))))
+; ...and nothing more is assertable: the root's entry is absent by
+; design (axis 2 has no map entry), which downstream consumers see as
+; "composition not derivable" — the fail-safe.

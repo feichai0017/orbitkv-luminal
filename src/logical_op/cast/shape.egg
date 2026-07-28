@@ -1,0 +1,11 @@
+; Shape Propagation : LogicalCast — the shape is the input's (only the
+; element type changes).
+(rule
+  (
+    (= ?out_logical (LogicalCast ?in_logical ?target_dtype))
+    (= ?shape (shape-of ?in_logical))
+  )
+  (
+    (set (shape-of ?out_logical) ?shape)
+  )
+)

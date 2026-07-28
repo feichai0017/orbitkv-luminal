@@ -1,0 +1,10 @@
+; DType Propagation : IndexMapApply
+(rule
+  (
+    (= ?out_logical_tensor (LogicalIndexMapApply ?in_logical ?index_map ?shape))
+    (= ?dtype (dtype-of ?in_logical))
+  )
+  (
+    (set (dtype-of ?out_logical_tensor) ?dtype)
+  )
+)

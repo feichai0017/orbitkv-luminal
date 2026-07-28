@@ -1,0 +1,1 @@
+(constructor LogicalMul (LogicalTensor LogicalTensor) LogicalTensor)

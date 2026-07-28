@@ -1,0 +1,5 @@
+; Input-alias-safe mutating add: BOTH inputs and the output share one
+; layout (the match precondition), so the second input may alias the
+; mutated storage — element i coincides everywhere by construction. The
+; Rust op declares the matching may-share permit.
+(constructor LayoutTensorOpAddMutatingInputAliasSafeGeneric (LayoutTensor LayoutTensor) LayoutTensorOp)

@@ -1,0 +1,12 @@
+; Rank-0 init scatter is ill-formed, the same posture as gather's: an
+; empty coordinate list leaves src's shape unconstrained, and a
+; whole-scalar overwrite is a copy, not a scatter. Structural premise —
+; Cons and Nil never union, no race.
+(rule
+  (
+    (= ?out_logical_tensor (LogicalScatter ?init_logical (LogicalTensorNil) ?src_logical))
+  )
+  (
+    (panic "LogicalScatter with an empty coordinate list (rank-0 init) is ill-formed; a whole-scalar overwrite is a copy")
+  )
+)

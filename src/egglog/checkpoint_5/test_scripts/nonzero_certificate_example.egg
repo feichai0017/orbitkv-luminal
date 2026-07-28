@@ -1,0 +1,178 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Certificate pins (Stage I2, regated Stage C1): the adversarial suite for
+; provably-cannot-union-with-zero. The invariant under test:
+;
+;   certified => not identically zero over ANY possible-valuation set the
+;   future can bring (stability clause) => can never join the zero class
+;
+; Positive pins prove each route fires where it must (fail-closed rules
+; are only useful if they actually open); negative pins prove the
+; certificate REFUSES everything that is — or could legally become —
+; zero. The tripwires (certified zero-class member; contradictory
+; support facts) must stay silent through the whole run: the fixture
+; passing IS the tripwire check.
+
+; Coordinates for the suite. extent-1 deliberately included: under the
+; possible-valuations contract its box is {0} in every use (the extent
+; rides in the term), so it is IDENTICALLY ZERO — the extent-1 collapse
+; unions it with (IntLit 0), and no certificate is ever granted (Stage C1,
+; user ruling: coordinates earn certification from their extent's STABLE
+; lower bound, never by default).
+(let coord_inner (CoordVar 0 (IntLit 4)))
+(let coord_outer (CoordVar 1 (IntLit 12)))
+(let coord_extent_one (CoordVar 2 (IntLit 1)))
+
+; A bounded symbolic dim (lower >= 1: value-route-certifiable) and a maybe-zero
+; symbolic dim (lower = 0: correctly UNcertifiable — an empty-instance
+; pin may legally put it in the zero class).
+(let seq_len (IntVar "seq_len"))
+(set (lower-bound-of seq_len) (bigint 1))
+(set (upper-bound-of seq_len) (bigint 4096))
+(let maybe_empty_dim (IntVar "maybe_empty_dim"))
+(set (lower-bound-of maybe_empty_dim) (bigint 0))
+(set (upper-bound-of maybe_empty_dim) (bigint 64))
+
+; THE BUCKETING DOCTRINE, captured: full ring optimization on a dynamic
+; dim requires its coordinates certified, and certification requires the
+; extent's LOWER bound >= 2 (the stability clause — an upper bound can
+; fall to 1 under a later pin, and nothing reverts). The remedy lives
+; UPSTREAM of egglog: split dynamic ranges into buckets {0}, {1}, [2, N]
+; and compile each separately. The [2, N] bucket's seeds earn everything;
+; sizes 0 and 1 are degenerate geometries with their own kernels. Here:
+; bucketed_two_plus_dim models the [2, N] bucket (coordinate certified);
+; seq_len [1, 4096] models an UNBUCKETED dim — its coordinate sits in the
+; gap, refused by BOTH certificates, because whether it is identically
+; zero depends on a pin that has not happened.
+(let bucketed_two_plus_dim (IntVar "bucketed_two_plus_dim"))
+(set (lower-bound-of bucketed_two_plus_dim) (bigint 2))
+(set (upper-bound-of bucketed_two_plus_dim) (bigint 4000))
+(let bucketed_coordinate (CoordVar 3 bucketed_two_plus_dim))
+(let gap_coordinate (CoordVar 4 seq_len))
+
+; R1 material: literals of every sign.
+(let positive_literal (IntLit 7))
+(let negative_literal (IntLit -3))
+
+; R3/R4 material: fold-shaped and composition-shaped offsets.
+(let strided_summand (IntMul coord_outer (IntLit 2)))
+(let fold_offset (IntAdd strided_summand coord_inner))
+(let origin_touching_offset (IntAdd (IntLit 5) coord_inner))
+(let symbolic_summand (IntMul coord_outer seq_len))
+(let symbolic_offset (IntAdd symbolic_summand coord_inner))
+
+; Same-axis material, three tiers. LITERAL coefficients: reduced by the
+; like-term combiner (2v + (-1)v joins v's class atomically), certified
+; through the coordinate route as v itself. SYMBOLIC coefficients with
+; DECISIVE bounds: the symbolic combiner branches fire when the
+; coefficient-sum bounds exclude both identity elements (seq_len + 2 has
+; bounds [3, 4098]) — reduced to IntMul(v, IntAdd(seq_len, 2)) and certified
+; via the product route. BOUNDS-INDETERMINATE coefficients (sum spans 0
+; and 1: maybe_empty_dim - 5 spans [-5, 59]): unreduced and uncertified
+; — the standing fail-closed conservatism, pinned below.
+(let same_axis_sum (IntAdd (IntMul coord_inner (IntLit 2)) (IntMul coord_inner (IntLit -1))))
+(let symbolic_same_axis_sum (IntAdd (IntMul coord_inner seq_len) (IntMul coord_inner (IntLit 2))))
+(let indeterminate_same_axis_sum
+  (IntAdd (IntMul coord_inner maybe_empty_dim) (IntMul coord_inner (IntLit -5))))
+
+; Zero material: the literal zero's class (via a folding pair) and a
+; zero-factor product. Neither may ever be certified.
+(let folded_zero (IntAdd (IntLit 3) (IntLit -3)))
+(let zero_factor_product (IntMul coord_inner (IntLit 0)))
+
+; Maybe-zero product: certified factor times uncertifiable factor.
+(let maybe_zero_product (IntMul coord_inner maybe_empty_dim))
+
+; A sum carrying the zero-factor product as a summand: the zero-summand
+; elimination must collapse it past the (never-unioned) zero product.
+(let sum_past_zero_product (IntAdd coord_outer zero_factor_product))
+
+; The b1 fold-stall pin: a strided layout whose outer stride is the
+; maybe-zero dim. The general foldr rule requires a certified stride,
+; the skip rule requires the zero class — this stride is neither, so the
+; fold stalls and the layout NEVER derives an offset-expression form.
+; (The offset it would fold to is semantically fine; underivable is the
+; deliberate conservative choice — design b1.)
+(let stall_shape (ShapeLit (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil)))))
+(let stall_layout
+  (StridedElementLayoutLit
+    stall_shape
+    (IntExprCons maybe_empty_dim (IntExprCons (IntLit 1) (IntExprNil)))
+    (bits-of (F32))))
+(let stall_offset (IntAdd (IntMul coord_outer maybe_empty_dim) coord_inner))
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; --- the value route ---
+(check (provably-cannot-union-with-zero positive_literal))
+(check (provably-cannot-union-with-zero negative_literal))
+(check (provably-cannot-union-with-zero seq_len))
+(fail (check (provably-cannot-union-with-zero (IntLit 0))))
+(fail (check (provably-cannot-union-with-zero maybe_empty_dim)))
+
+; --- the coordinate route (Stage C1: certification earned from the
+; extent's stable lower bound, never granted by default) ---
+(check (provably-cannot-union-with-zero coord_inner))
+(check (provably-cannot-union-with-zero bucketed_coordinate))
+; the gap-dim coordinate ([1, 4096] extent) is refused by BOTH
+; certificates — the bucketing doctrine's motivating case...
+(fail (check (provably-cannot-union-with-zero gap_coordinate)))
+(fail (check (= gap_coordinate (IntLit 0))))
+; ...and the extent-1 coordinate COLLAPSES: identically zero over every
+; possible valuation, unioned into the zero class, never certified.
+(fail (check (provably-cannot-union-with-zero coord_extent_one)))
+(check (= coord_extent_one (IntLit 0)))
+
+; --- the product route ---
+(check (provably-cannot-union-with-zero strided_summand))
+(check (provably-cannot-union-with-zero symbolic_summand))
+(fail (check (provably-cannot-union-with-zero zero_factor_product)))
+(fail (check (provably-cannot-union-with-zero maybe_zero_product)))
+
+; --- the sum route — origin-touching and symbolic offsets certify ---
+(check (provably-cannot-union-with-zero fold_offset))
+(check (provably-cannot-union-with-zero origin_touching_offset))
+(check (provably-cannot-union-with-zero symbolic_offset))
+; ...the literal same-axis sum is REDUCED by the combiner and certified
+; as the coordinate itself...
+(check (= same_axis_sum coord_inner))
+(check (provably-cannot-union-with-zero same_axis_sum))
+; ...the symbolic same-axis sum with decisive coefficient bounds is
+; reduced to its combined form and certified...
+(check (= symbolic_same_axis_sum (IntMul coord_inner (IntAdd seq_len (IntLit 2)))))
+(check (provably-cannot-union-with-zero symbolic_same_axis_sum))
+; ...and the bounds-indeterminate sum pins the fail-closed conservatism.
+(fail (check (provably-cannot-union-with-zero indeterminate_same_axis_sum)))
+(fail (check (= indeterminate_same_axis_sum
+              (IntMul coord_inner (IntAdd maybe_empty_dim (IntLit -5))))))
+
+; --- zero classes are never certified ---
+(check (= folded_zero (IntLit 0)))
+(fail (check (provably-cannot-union-with-zero folded_zero)))
+
+; --- the zero certificate: ideal membership as fact AND class ---
+; The zero-factor product is provably zero (product route), and since
+; the absorption union (Stage Z1) its class faithfully JOINS the zero
+; class — the e-graph states x*0 = 0 as an equality...
+(check (= zero_factor_product (IntLit 0)))
+; ...and sums collapse past it — absorption's useful work, via the
+; elimination and the identity rewrites alike...
+(check (= sum_past_zero_product coord_outer))
+; ...while a maybe-zero IntVar stays refused by both certificates (an
+; empty-instance pin may legally put it in the zero class; a nonzero
+; instance may not — indeterminate, so silence).
+(fail (check (provably-cannot-union-with-zero maybe_empty_dim)))
+(fail (check (= maybe_empty_dim (IntLit 0))))
+
+; --- support facts behaved (spot pins) ---
+(check (axis-in-support fold_offset 0))
+(check (axis-in-support fold_offset 1))
+; axis-free is DEMAND-driven: only classes an R4 driver asked about carry
+; facts. (IntLit 5) was demanded as origin_touching_offset's partner on
+; axis 0; an undemanded literal has no row (and needs none).
+(check (axis-free (IntLit 5) 0))
+
+; --- the b1 fold stall: no offset form ever derives ---
+(fail
+  (check
+    (= stall_layout
+       (ElementOffsetExpressionLayoutLit stall_offset stall_shape (bits-of (F32))))))

@@ -1,0 +1,284 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Dynamic-dimension pins (Stage I1): a IntVar-shaped tensor through the whole
+; symbolic pipeline. Three named paths under test:
+;   (i)  a view composed over a SYMBOLIC-STRIDE parent, with a zero map
+;        entry (exercises the subst IntVar-identity base case and the
+;        zero-aware IntMul image rules — the two holes that would otherwise
+;        silently strand every dynamic view);
+;   (ii) a PINNED IntVar ((union (IntVar "pinned_dim") (IntLit 3))): folding,
+;        bounds, and CoordVar extents all see the concrete value through
+;        congruence;
+;   (iii) Vars in EXTENT position: CoordVar(axis, (IntVar "seq_len")) bounds
+;        derive from the IntVar's seeded bounds.
+; Plus the bounds demonstration Stage I0 could not host: with symbolic
+; extents the VALUE world never folds, so bound products march past
+; i64::MAX losslessly in BigInt. Plus SIZE-ZERO paths: empty tensors are
+; legal (bounds discipline is lower >= 0).
+;
+; Bounds discipline: every IntVar is seeded here (seq_len explicitly;
+; pinned_dim/empty_dim through their pins) and main.rs hard-errors on any
+; IntVar without consistent bounds.
+;
+; seq_len is seeded lower >= 2 — THE BUCKETING DOCTRINE (Stage C1): this
+; fixture models the [2, N] bucket's compilation, where coordinates over
+; the dynamic dim earn certification and support from the stable lower
+; bound, so the full ring machinery (sum-route witnesses, symbolic-stride
+; discovery) runs. A dim seeded [1, N] leaves its coordinates in the
+; certificate gap (see gap_probe_dim below: discovery deliberately
+; stalls); the sizes 0 and 1 are degenerate geometries compiled as their
+; own buckets (empty_dim and pinned paths below).
+
+(let seq_len (IntVar "seq_len"))
+(set (lower-bound-of seq_len) (bigint 2))
+(set (upper-bound-of seq_len) (bigint 1000000000000))
+
+; storage: shape [4, seq_len] — the SYMBOLIC dim innermost, so the
+; right-major stride of the outer axis is the symbolic seq_len
+; (strides [seq_len, 1]).
+(let storage_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprCons seq_len (IntExprNil)))))
+(let view_shape (ShapeLit (IntExprCons seq_len (IntExprNil))))
+(let storage_dtype (F32))
+(let storage_logical (LogicalTensorInputLit (LogicalIdLit "dyn_storage") storage_shape storage_dtype))
+
+; Row-0 slice keeping the symbolic axis: map entries range over the
+; OUTPUT's coordinates, listed from the parent's outermost axis inward:
+; parent outer (size 4) <- 0 (the slice), parent inner (size seq_len) <- v0.
+(let row0_map
+  (IndexMapLit
+    (IntExprCons (IntLit 0)
+      (IntExprCons (CoordVar 0 seq_len)
+        (IntExprNil)))))
+(let row0_view_logical (LogicalIndexMapApply storage_logical row0_map view_shape))
+
+(let storage_layout (RightMajorContiguousElementLayoutLit storage_shape (bits-of storage_dtype)))
+(let storage_layout_tensor (LayoutTensorLit storage_logical storage_layout))
+
+; Hand-written view layout: the row is contiguous over [seq_len].
+(let row0_offset (CoordVar 0 seq_len))
+(let row0_view_layout (ElementOffsetExpressionLayoutLit row0_offset view_shape (bits-of storage_dtype)))
+(let row0_view_layout_tensor (LayoutTensorLit row0_view_logical row0_view_layout))
+
+; A transpose view of the same storage: its composed offset
+; coord_inner*seq_len + coord_outer keeps a SYMBOLIC coefficient, so
+; strided discovery stays conservative (the 3b coefficient extraction is
+; literal-i64 only — a documented completeness gap, not an error; the
+; layout is still derived at the bit/element level).
+(let transposed_shape (ShapeLit (IntExprCons seq_len (IntExprCons (IntLit 4) (IntExprNil)))))
+(let transpose_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 0 (IntLit 4))
+      (IntExprCons (CoordVar 1 seq_len)
+        (IntExprNil)))))
+(let transposed_view_logical (LogicalIndexMapApply storage_logical transpose_map transposed_shape))
+
+; Path (ii): a pinned dynamic dim.
+(let pinned_dim (IntVar "pinned_dim"))
+(union pinned_dim (IntLit 3))
+(let pinned_product (IntMul (IntLit 2) pinned_dim))
+(let pinned_coord (CoordVar 0 pinned_dim))
+
+; Path (ii-b): a dim pinned BY BOUNDS ALONE (ruling 2026-07-27) — the
+; BINDING interface: a binding never writes a union, it seeds tight
+; bounds, and the [n,n] pin-collapse rule delivers var = literal to
+; every user by congruence.
+(let bound_pinned_dim (IntVar "bound_pinned_dim"))
+(set (lower-bound-of bound_pinned_dim) (bigint 512))
+(set (upper-bound-of bound_pinned_dim) (bigint 512))
+(let bound_pinned_product (IntMul (IntLit 2) bound_pinned_dim))
+
+; Path (ii-c): a tight pin OUTSIDE i64 range — the partial primitive
+; (bigint-to-i64) is simply unmatched, so the pin stays a BigInt-lattice
+; fact and NO IntLit is ever minted (fail-open, never a wrapped value).
+(let past_i64_pinned_dim (IntVar "past_i64_pinned_dim"))
+(set (lower-bound-of past_i64_pinned_dim) (from-string "3000000000000000000000000"))
+(set (upper-bound-of past_i64_pinned_dim) (from-string "3000000000000000000000000"))
+
+; Past-i64 bounds: batch_coord * seq_len * seq_len has upper bound
+; 3 * 10^24 — value-world folding never touches it (symbolic factors),
+; BigInt bounds hold it.
+(let past_i64_product (IntMul (IntMul (CoordVar 1 (IntLit 4)) seq_len) seq_len))
+
+; SIZE-ZERO paths: empty tensors are legal.
+; A possibly-empty dim: bounds [0, 8] — its coordinate still gets sound
+; bounds [0, 7] (vacuously true for the empty instances).
+(let maybe_empty_dim (IntVar "maybe_empty_dim"))
+(set (lower-bound-of maybe_empty_dim) (bigint 0))
+(set (upper-bound-of maybe_empty_dim) (bigint 8))
+(let maybe_empty_coord (CoordVar 0 maybe_empty_dim))
+; A PINNED-empty dim: its coordinate has no values, so it gets NO bounds
+; (the fail-closed representation of an empty range — never a crossed
+; interval, which stays reserved for the unsound-union tripwire).
+(let empty_dim (IntVar "empty_dim"))
+(union empty_dim (IntLit 0))
+(let empty_coord (CoordVar 0 empty_dim))
+
+; A COMPOUND stride over the pinned-empty dim: provably zero through the
+; product route, so the strided-indexing fold SKIPS that axis instead of
+; stalling — the old compound-stride race, now handled by certificate.
+(let compound_zero_stride (IntMul (IntLit 4) empty_dim))
+(let skip_shape (ShapeLit (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil)))))
+(let skip_layout
+  (StridedElementLayoutLit
+    skip_shape
+    (IntExprCons compound_zero_stride (IntExprCons (IntLit 1) (IntExprNil)))
+    (bits-of storage_dtype)))
+
+; GAP-DIM PROBE (Stage C1): an UNBUCKETED dim seeded [1, 64]. Its
+; coordinates sit in the certificate gap — not identically zero today, but
+; a pin to 1 could make them so, and the stability clause forbids
+; certifying (or minting support) on an upper bound. The composed
+; transpose below therefore never discovers its strided form: the
+; fail-closed cost of a possibly-degenerate geometry, paid until the dim
+; is bucketed ([2, N] seed) or pinned.
+(let gap_probe_dim (IntVar "gap_probe_dim"))
+(set (lower-bound-of gap_probe_dim) (bigint 1))
+(set (upper-bound-of gap_probe_dim) (bigint 64))
+(let gap_probe_shape
+  (ShapeLit (IntExprCons (IntLit 3) (IntExprCons gap_probe_dim (IntExprNil)))))
+(let gap_probe_logical
+  (LogicalTensorInputLit (LogicalIdLit "gap_probe_storage") gap_probe_shape storage_dtype))
+(let gap_probe_layout
+  (RightMajorContiguousElementLayoutLit gap_probe_shape (bits-of storage_dtype)))
+(let gap_probe_layout_tensor (LayoutTensorLit gap_probe_logical gap_probe_layout))
+(let gap_transposed_shape
+  (ShapeLit (IntExprCons gap_probe_dim (IntExprCons (IntLit 3) (IntExprNil)))))
+(let gap_transpose_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 0 (IntLit 3))
+      (IntExprCons (CoordVar 1 gap_probe_dim)
+        (IntExprNil)))))
+(let gap_view_logical
+  (LogicalIndexMapApply gap_probe_logical gap_transpose_map gap_transposed_shape))
+(let gap_probe_offset
+  (IntAdd (IntMul (CoordVar 1 (IntLit 3)) gap_probe_dim) (CoordVar 0 gap_probe_dim)))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; The right-major fold over [4, seq_len] produces SYMBOLIC strides
+; [seq_len, 1]...
+(check
+  (= storage_layout
+     (StridedElementLayoutLit
+       storage_shape
+       (IntExprCons seq_len (IntExprCons (IntLit 1) (IntExprNil)))
+       (bits-of storage_dtype))))
+
+; ...and the strided-indexing foldr the symbolic offset
+; outer_coord*seq_len + inner_coord.
+(let storage_offset (IntAdd (IntMul (CoordVar 1 (IntLit 4)) seq_len) (CoordVar 0 seq_len)))
+(check
+  (= storage_layout
+     (ElementOffsetExpressionLayoutLit storage_offset storage_shape (bits-of storage_dtype))))
+
+; Path (i) pins. Substitution is the identity on the symbolic constant...
+(check (= (subst-of seq_len row0_map) seq_len))
+; ...the zero entry annihilates the symbolic-stride summand directly
+; (zero-aware IntMul image: no stranded IntMul(0, seq_len) scaffolding)...
+(check (= (subst-of storage_offset row0_map) row0_offset))
+; ...and the COMPOSED view layout lands in the hand-written class at the
+; bit level (the composition acceptance shape, now symbolic).
+(check
+  (= row0_view_layout
+     (BitOffsetExpressionLayoutLit
+       (subst-of (IntMul storage_offset (IntLit 32)) row0_map)
+       view_shape
+       (bits-of storage_dtype))))
+
+; Downward discovery still works where the coefficients are literal: the
+; composed row is Strided([seq_len],[1]) and therefore right-major
+; contiguous — a SYMBOLIC-length contiguous row, discovered, not declared.
+(check
+  (= row0_view_layout
+     (StridedElementLayoutLit view_shape (IntExprCons (IntLit 1) (IntExprNil)) (bits-of storage_dtype))))
+(check
+  (= row0_view_layout
+     (RightMajorContiguousElementLayoutLit view_shape (bits-of storage_dtype))))
+
+; Transpose pins: substitution lands the symbolic-coefficient offset...
+(let transposed_offset (IntAdd (IntMul (CoordVar 0 (IntLit 4)) seq_len) (CoordVar 1 seq_len)))
+(check (= (subst-of storage_offset transpose_map) transposed_offset))
+; ...and SYMBOLIC-STRIDE DISCOVERY (single-occurrence extraction) now
+; derives the strided form ([1, seq_len] over [seq_len, 4]) — this pin
+; was a deliberate fail-check while 3b was literal-only; it flipped when
+; the pointing rules landed...
+(check
+  (= (BitOffsetExpressionLayoutLit
+       (subst-of (IntMul storage_offset (IntLit 32)) transpose_map)
+       transposed_shape
+       (bits-of storage_dtype))
+     (StridedElementLayoutLit
+       transposed_shape
+       (IntExprCons (IntLit 1) (IntExprCons seq_len (IntExprNil)))
+       (bits-of storage_dtype))))
+; ...and the discovery CASCADES: a transposed right-major view is
+; left-major contiguous, and the strides fold recognizes [1, seq_len]
+; over [seq_len, 4] as exactly that — a symbolic transpose, fully
+; classified.
+(check
+  (= (BitOffsetExpressionLayoutLit
+       (subst-of (IntMul storage_offset (IntLit 32)) transpose_map)
+       transposed_shape
+       (bits-of storage_dtype))
+     (LeftMajorContiguousElementLayoutLit transposed_shape (bits-of storage_dtype))))
+
+; The gap-dim probe: composition COMPLETES (the relaxed substitution
+; needs no certificates — the composed bit-offset class exists), but
+; symbolic-stride discovery STALLS on the gap axis (no support facts, so
+; the single-occurrence recursion cannot identify its summand): the
+; strided form deliberately never derives.
+(check
+  (= (subst-of gap_probe_offset gap_transpose_map)
+     (IntAdd (IntMul (CoordVar 0 (IntLit 3)) gap_probe_dim) (CoordVar 1 gap_probe_dim))))
+(fail
+  (check
+    (= (BitOffsetExpressionLayoutLit
+         (subst-of (IntMul gap_probe_offset (IntLit 32)) gap_transpose_map)
+         gap_transposed_shape
+         (bits-of storage_dtype))
+       (StridedElementLayoutLit
+         gap_transposed_shape
+         (IntExprCons (IntLit 1) (IntExprCons gap_probe_dim (IntExprNil)))
+         (bits-of storage_dtype)))))
+
+; Path (ii) pins: the pin is congruence-visible everywhere.
+(check (= pinned_product (IntLit 6)))
+(check (= (lower-bound-of pinned_coord) (bigint 0)))
+(check (= (upper-bound-of pinned_coord) (bigint 2)))
+
+; Path (ii-b) pins: tight bounds ARE a pin — the collapse rule unioned
+; the var with its literal, and folding sees it by congruence...
+(check (= bound_pinned_dim (IntLit 512)))
+(check (= bound_pinned_product (IntLit 1024)))
+; ...while a merely-BOUNDED var must never collapse to either endpoint...
+(fail (check (= seq_len (IntLit 2))))
+(fail (check (= seq_len (IntLit 1000000000000))))
+; ...and the past-i64 pin minted no IntLit at all (path ii-c).
+(fail (check (= past_i64_pinned_dim (IntLit ?any_value))))
+(check (= (lower-bound-of past_i64_pinned_dim) (from-string "3000000000000000000000000")))
+
+; Path (iii) pins: CoordVar over a symbolic extent ranges [0, hi(seq_len)-1].
+(check (= (lower-bound-of row0_offset) (bigint 0)))
+(check (= (upper-bound-of row0_offset) (bigint 999999999999)))
+
+; The past-i64 demonstration: 3 * 10^12 * 10^12.
+(check (= (upper-bound-of past_i64_product) (from-string "3000000000000000000000000")))
+(fail (check (= (upper-bound-of past_i64_product) (bigint 0))))
+
+; Size-zero pins: the possibly-empty dim's coordinate is bounded by the
+; widest instance...
+(check (= (lower-bound-of maybe_empty_coord) (bigint 0)))
+(check (= (upper-bound-of maybe_empty_coord) (bigint 7)))
+; ...and the provably-empty dim's coordinate has NO bounds at all (any
+; value comparison against an unset row is unprovable).
+(fail (check (= (lower-bound-of empty_coord) (bigint 0))))
+(fail (check (= (upper-bound-of empty_coord) (bigint 0))))
+
+; The compound zero stride is certified zero and its axis is SKIPPED by
+; the fold: the layout derives the inner-axis-only offset.
+(check (= compound_zero_stride (IntLit 0)))
+(check
+  (= skip_layout
+     (ElementOffsetExpressionLayoutLit
+       (CoordVar 0 (IntLit 4))
+       skip_shape
+       (bits-of storage_dtype))))

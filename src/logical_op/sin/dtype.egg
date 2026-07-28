@@ -1,0 +1,10 @@
+; DType Propagation : LogicalSin
+(rule
+  (
+    (= ?out_logical_tensor (LogicalSin ?in_logical))
+    (= ?dtype (dtype-of ?in_logical))
+  )
+  (
+    (set (dtype-of ?out_logical_tensor) ?dtype)
+  )
+)

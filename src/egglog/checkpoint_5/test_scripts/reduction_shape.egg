@@ -1,0 +1,53 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Reduction shape propagation checks.
+;
+; Shape lists are outer-to-inner: [size_2, size_1, size_0].
+; Reduction axes follow the indexing fold: axis 0 is the rightmost dimension.
+
+(let shape3
+  (ShapeLit
+    (IntExprCons (IntLit 30)
+      (IntExprCons (IntLit 20)
+        (IntExprCons (IntLit 10)
+          (IntExprNil))))))
+
+(let shape_drop_axis0
+  (ShapeLit
+    (IntExprCons (IntLit 30)
+      (IntExprCons (IntLit 20)
+        (IntExprNil)))))
+
+(let shape_drop_axis1
+  (ShapeLit
+    (IntExprCons (IntLit 30)
+      (IntExprCons (IntLit 10)
+        (IntExprNil)))))
+
+(let shape_drop_axis2
+  (ShapeLit
+    (IntExprCons (IntLit 20)
+      (IntExprCons (IntLit 10)
+        (IntExprNil)))))
+
+(let x_logical
+  (LogicalTensorInputLit (LogicalIdLit "input_0") shape3 (F32)))
+
+(let sum_axis0 (LogicalReduceSum x_logical 0))
+(let sum_axis1 (LogicalReduceSum x_logical 1))
+(let max_axis2 (LogicalReduceMax x_logical 2))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+(check (= (expr-list-remove-axis-from-end
+            (IntExprCons (IntLit 30)
+              (IntExprCons (IntLit 20)
+                (IntExprCons (IntLit 10)
+                  (IntExprNil))))
+            1)
+          (IntExprCons (IntLit 30)
+            (IntExprCons (IntLit 10)
+              (IntExprNil)))))
+
+(check (= (shape-of sum_axis0) shape_drop_axis0))
+(check (= (shape-of sum_axis1) shape_drop_axis1))
+(check (= (shape-of max_axis2) shape_drop_axis2))

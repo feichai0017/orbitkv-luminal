@@ -1,0 +1,73 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Bounds-lattice pins (Stage I0): every expected value is hand-computed.
+; Conventions under test:
+;   - IntLit is exact; CoordVar(axis, extent) ranges [0, extent-1] via the
+;     extent's OWN bounds (so the rule is already uniform for symbolic
+;     extents)
+;   - IntAdd adds endpoints; IntMul takes the four-corner min/max (mixed signs)
+;   - lower-bound-of only rises (:merge max), upper-bound-of only falls
+;     (:merge min): every representative of a class contributes, and the
+;     tightest bound wins
+;   - bounds are facts about classes, never members of them: nothing here
+;     may change any expression class, extraction, or plan
+;
+; Bounds past i64::MAX cannot be pinned here: a CONSTANT product that
+; large would (correctly) panic the i64 value-world fold first, and all
+; extents in this fixture are literals. The past-i64 demonstration lives
+; in dynamic_dim_example.egg, whose symbolic bound products never
+; value-fold. (A standalone BigInt probe with 10^63 bounds passes against
+; the same lattice rules with the ring rules absent — forensics record.)
+
+; The transformer-style geometry: inner axis spans 4, outer axis spans 12.
+(let inner_coord (CoordVar 0 (IntLit 4)))
+(let outer_coord (CoordVar 1 (IntLit 12)))
+
+; A fixture-realistic strided offset: 64*outer + 32*inner.
+(let strided_offset (IntAdd (IntMul outer_coord (IntLit 64)) (IntMul inner_coord (IntLit 32))))
+
+; Mixed signs: a negative stride.
+(let negative_stride_term (IntMul inner_coord (IntLit -2)))
+(let shifted_offset (IntAdd negative_stride_term (IntLit 100)))
+
+; A literal equal to the offset's ceiling, seeded so the final check can
+; PROVE the lattice never confuses a bound with a value (a != check needs
+; both terms to exist; check-time lookups never create them).
+(let offset_ceiling (IntLit 800))
+
+; Depth: nine chained constant factors over the outer coordinate. The
+; constants collapse to 64^9 = 2^54 in the value world (safely inside
+; i64); the BOUNDS must survive the four-corner recursion at every
+; intermediate depth.
+(let deep_product_chain
+  (IntMul (IntMul (IntMul (IntMul (IntMul (IntMul (IntMul (IntMul (IntMul outer_coord
+    (IntLit 64)) (IntLit 64)) (IntLit 64)) (IntLit 64)) (IntLit 64)) (IntLit 64))
+    (IntLit 64)) (IntLit 64)) (IntLit 64)))
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; Literals are exact.
+(check (= (lower-bound-of (IntLit 64)) (bigint 64)))
+(check (= (upper-bound-of (IntLit 64)) (bigint 64)))
+
+; Coordinates: [0, extent-1].
+(check (= (lower-bound-of outer_coord) (bigint 0)))
+(check (= (upper-bound-of outer_coord) (bigint 11)))
+
+; The offset: [0, 11*64 + 3*32] = [0, 800].
+(check (= (lower-bound-of strided_offset) (bigint 0)))
+(check (= (upper-bound-of strided_offset) (bigint 800)))
+(fail (check (= (upper-bound-of strided_offset) (bigint 801))))
+
+; Mixed signs: inner*-2 is [-6, 0]; +100 shifts to [94, 100].
+(check (= (lower-bound-of negative_stride_term) (bigint -6)))
+(check (= (upper-bound-of negative_stride_term) (bigint 0)))
+(check (= (lower-bound-of shifted_offset) (bigint 94)))
+(check (= (upper-bound-of shifted_offset) (bigint 100)))
+
+; Depth: [0, 11 * 64^9]. 64^9 = 18014398509481984.
+(check (= (lower-bound-of deep_product_chain) (bigint 0)))
+(check (= (upper-bound-of deep_product_chain) (from-string "198158383604301824")))
+
+; Bounds are facts, not members: sharing the bound [800,800]-vs-[0,800]
+; relationship with the literal 800 does not union the classes.
+(check (!= strided_offset offset_ceiling))

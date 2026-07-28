@@ -1,0 +1,10 @@
+; Shape Propagation : LogicalRecip
+(rule
+  (
+    (= ?out_logical (LogicalRecip ?in_logical))
+    (= ?shape (shape-of ?in_logical))
+  )
+  (
+    (set (shape-of ?out_logical) ?shape)
+  )
+)

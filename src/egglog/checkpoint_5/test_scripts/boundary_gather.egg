@@ -1,0 +1,80 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: an embedding lookup end to end — the coordinate-form
+; gather (R8) with a data-dependent coordinate (token ids, a caller input)
+; and a statically-known coordinate (the column passthrough, an INTERIOR
+; iota with no buffer of its own). The plan must materialize the iota into
+; program-allocated storage, gather from table + ids + that storage into the
+; caller's output buffer, and free the iota's storage after its last read.
+
+(let table_shape (ShapeLit (IntExprCons (IntLit 6) (IntExprCons (IntLit 4) (IntExprNil)))))
+(let table_logical (LogicalTensorInputLit (LogicalIdLit "embedding_table") table_shape (F32)))
+(let table_layout (RightMajorContiguousElementLayoutLit table_shape (bits-of (F32))))
+(let table_layout_tensor (LayoutTensorLit table_logical table_layout))
+
+(let lookup_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprCons (IntLit 4) (IntExprNil)))))
+(let token_ids_logical (LogicalTensorInputLit (LogicalIdLit "token_ids") lookup_shape (Int)))
+(let ids_layout (RightMajorContiguousElementLayoutLit lookup_shape (bits-of (Int))))
+(let ids_layout_tensor (LayoutTensorLit token_ids_logical ids_layout))
+
+; The passthrough column coordinate: interior iota, never a boundary tensor.
+(let column_iota_logical (LogicalIota (CoordVar 0 (IntLit 4)) lookup_shape))
+
+(let lookup_logical
+  (LogicalGather table_logical
+    (LogicalTensorCons token_ids_logical
+      (LogicalTensorCons column_iota_logical (LogicalTensorNil)))))
+
+(let lookup_layout (RightMajorContiguousElementLayoutLit lookup_shape (bits-of (F32))))
+(let lookup_layout_tensor (LayoutTensorLit lookup_logical lookup_layout))
+
+(let table_buffer_id (BufferLit 310))
+(set (buffer-access-of table_buffer_id) (ReadOnly))
+(set (buffer-freed-by table_buffer_id) (CallerFrees))
+(let table_input_buffer_tensor (BufferTensorLit table_layout_tensor table_buffer_id))
+
+(let ids_buffer_id (BufferLit 311))
+(set (buffer-access-of ids_buffer_id) (ReadOnly))
+(set (buffer-freed-by ids_buffer_id) (CallerFrees))
+(let ids_input_buffer_tensor (BufferTensorLit ids_layout_tensor ids_buffer_id))
+
+(let lookup_buffer_id (BufferLit 312))
+(set (buffer-access-of lookup_buffer_id) (ReadWrite))
+(set (buffer-freed-by lookup_buffer_id) (CallerFrees))
+(let lookup_output_buffer_tensor (BufferTensorLit lookup_layout_tensor lookup_buffer_id))
+
+(let input_boundary
+  (BufferInputLit
+    (BufferTensorCons table_input_buffer_tensor
+      (BufferTensorCons ids_input_buffer_tensor
+        (BufferTensorNil)))))
+
+(let output
+  (BufferOutputLit
+    (BufferTensorCons lookup_output_buffer_tensor
+      (BufferTensorNil))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; Iota authoring contract: every constructed iota demands its expression's
+; bounds — an absent entry fails the check loudly at the fixpoint.
+(check (= ?demanded_lower (lower-bound-of (CoordVar 0 (IntLit 4)))))
+(check (= ?demanded_upper (upper-bound-of (CoordVar 0 (IntLit 4)))))
+
+; The variable-arity op match fired: the gather is implementable.
+(check
+  (= (LayoutTensorOpGatherGeneric
+       table_layout_tensor
+       (LayoutTensorCons ids_layout_tensor
+         (LayoutTensorCons (LayoutTensorLit column_iota_logical ids_layout)
+           (LayoutTensorNil)))
+       lookup_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorCons table_layout_tensor
+         (LayoutTensorCons ids_layout_tensor
+           (LayoutTensorCons (LayoutTensorLit column_iota_logical ids_layout)
+             (LayoutTensorNil))))
+       (LayoutTensorCons lookup_layout_tensor (LayoutTensorNil)))))
+
+; The output slot carries the gathered value in the caller's buffer.
+(check (= (layout-tensor-of lookup_output_buffer_tensor) lookup_layout_tensor))
+(check (= (buffer-id-of lookup_output_buffer_tensor) lookup_buffer_id))

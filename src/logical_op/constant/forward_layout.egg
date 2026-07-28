@@ -1,0 +1,12 @@
+; Forward LayoutTensor Propagation : Logical Constant — the same source-op
+; mint, over the RANK-0 canonical layout (empty shape; the stride folds'
+; Nil base cases make its offset expression the empty fold).
+(rule
+  (
+    (= ?out_logical (LogicalConstant ?constant_value))
+    (= ?bits (bits-of (dtype-of ?out_logical)))
+  )
+  (
+    (let out_layout_tensor (LayoutTensorLit ?out_logical (RightMajorContiguousElementLayoutLit (ShapeLit (IntExprNil)) ?bits)))
+  )
+)

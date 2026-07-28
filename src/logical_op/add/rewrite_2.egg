@@ -1,0 +1,5 @@
+; Logical Associativity : Add
+(rewrite
+  (LogicalAdd (LogicalAdd ?lhs ?rhs) ?outer)
+  (LogicalAdd ?lhs (LogicalAdd ?rhs ?outer))
+)

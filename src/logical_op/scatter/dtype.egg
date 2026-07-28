@@ -1,0 +1,17 @@
+;Dtype Propagation : LogicalScatter — the result carries init's dtype AND
+; src's dtype, duplicatively: dtype values are ATOMS (nullary
+; constructors that can never become equal later), so the duplicative
+; :no-merge tripwire is legal here — an init/src dtype mismatch is a
+; GENUINE error and panics (the audit rule of thumb; compound values
+; like Shape must gate positively instead).
+(rule
+  (
+    (= ?out_logical_tensor (LogicalScatter ?init_logical ?coordinate_list ?src_logical))
+    (= ?init_dtype (dtype-of ?init_logical))
+    (= ?src_dtype (dtype-of ?src_logical))
+  )
+  (
+    (set (dtype-of ?out_logical_tensor) ?init_dtype)
+    (set (dtype-of ?out_logical_tensor) ?src_dtype)
+  )
+)

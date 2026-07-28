@@ -1,0 +1,8 @@
+; Logical Gather : coordinate-form gather (R8). One Int coordinate
+; tensor PER AXIS of the data tensor, all sharing one shape — which IS
+; the output shape: out[c] = data[coords_0[c], .., coords_{r-1}[c]].
+; A statically-known axis supplies an iota; view = the all-iota special
+; case. The coords list length is expected to equal the data's rank
+; (documented convention, like iota's extent agreement); out-of-bounds
+; coordinate VALUES are undefined behavior (user ruling 2026-07-22).
+(constructor LogicalGather (LogicalTensor LogicalTensorList) LogicalTensor)

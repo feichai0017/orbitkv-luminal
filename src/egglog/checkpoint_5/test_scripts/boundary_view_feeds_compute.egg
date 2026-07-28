@@ -1,0 +1,89 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: a VIEW feeds compute (Stage 7 / Step 4 of the views
+; stage) — the minimal end-to-end proof of the zero-movement lowering.
+;
+; Semantics:
+; - x: [2,3] right-major in caller buffer 40, READ-ONLY (weights-shaped: a
+;   view of read-only storage is legal because nothing writes through it)
+; - v = transpose view of x onto [3,2]: the composed layout IS left-major
+;   contiguous (transpose of right-major = left-major) — discovered through
+;   composition + downward discovery, never declared
+; - y = Sqrt(v), demanded right-major in caller buffer 41
+;
+; Plan shape (pinned by the golden + the fixture test): ONE kernel — Sqrt
+; reading buffer 40 directly through the composed layout (the view op is
+; extracted at cost 0 and folds to zero plan nodes) and writing buffer 41
+; through its seeded destination. Zero allocations, zero copies.
+
+(let x_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
+(let transposed_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprCons (IntLit 2) (IntExprNil)))))
+(let x_dtype (F32))
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "view_compute_input") x_shape x_dtype))
+
+; Map entries range over the OUTPUT's coordinates, listed from the parent's
+; outermost axis inward: parent outer (size 2) <- output inner v0 (extent 2),
+; parent inner (size 3) <- output outer v1 (extent 3) — the transpose.
+(let transpose_map
+  (IndexMapLit
+    (IntExprCons (CoordVar 0 (IntLit 2))
+      (IntExprCons (CoordVar 1 (IntLit 3))
+        (IntExprNil)))))
+(let view_logical (LogicalIndexMapApply x_logical transpose_map transposed_shape))
+(let y_logical (LogicalSqrt view_logical))
+
+(let x_layout (RightMajorContiguousElementLayoutLit x_shape (bits-of x_dtype)))
+(let x_layout_tensor (LayoutTensorLit x_logical x_layout))
+(let x_buffer_id (BufferLit 40))
+(set (buffer-access-of x_buffer_id) (ReadOnly))
+(set (buffer-freed-by x_buffer_id) (CallerFrees))
+(let x_input_buffer_tensor (BufferTensorLit x_layout_tensor x_buffer_id))
+
+; The hand-written expectation for the composed view layout: left-major
+; contiguous over [3,2]. The checks below prove the derived composition
+; lands in this class.
+(let expected_view_layout
+  (LeftMajorContiguousElementLayoutLit transposed_shape (bits-of x_dtype)))
+(let expected_view_layout_tensor (LayoutTensorLit view_logical expected_view_layout))
+
+(let y_output_layout (RightMajorContiguousElementLayoutLit transposed_shape (bits-of x_dtype)))
+(let y_output_layout_tensor (LayoutTensorLit y_logical y_output_layout))
+(let y_buffer_id (BufferLit 41))
+(set (buffer-access-of y_buffer_id) (ReadWrite))
+(set (buffer-freed-by y_buffer_id) (CallerFrees))
+(let y_output_buffer_tensor (BufferTensorLit y_output_layout_tensor y_buffer_id))
+
+(let input_boundary
+  (BufferInputLit (BufferTensorCons x_input_buffer_tensor (BufferTensorNil))))
+(let output
+  (BufferOutputLit (BufferTensorCons y_output_buffer_tensor (BufferTensorNil))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; The composed view layout — the parent's fold-derived bit offset pushed
+; through the transpose map — lands in the hand-written left-major class.
+(let x_element_offset
+  (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 3)) (CoordVar 0 (IntLit 3))))
+(check
+  (= expected_view_layout
+     (BitOffsetExpressionLayoutLit
+       (subst-of (IntMul x_element_offset (IntLit 32)) transpose_map)
+       transposed_shape
+       (bits-of x_dtype))))
+
+; The VIEW implementation derives for exactly that layout (no injectivity
+; demanded — this one happens to be injective, but the match never asks)...
+(check
+  (= (LayoutTensorOpLit
+       (LayoutTensorCons x_layout_tensor (LayoutTensorNil))
+       (LayoutTensorCons expected_view_layout_tensor (LayoutTensorNil)))
+     (LayoutTensorOpIndexMapApplyViewGeneric
+       x_layout_tensor transpose_map transposed_shape expected_view_layout)))
+
+; ...and the sqrt kernel is offered directly ON the view's LayoutTensor, so
+; extraction can wire compute to the reinterpreted storage with no
+; materialization in between.
+(check
+  (= (LayoutTensorOpLit
+       (LayoutTensorCons expected_view_layout_tensor (LayoutTensorNil))
+       (LayoutTensorCons y_output_layout_tensor (LayoutTensorNil)))
+     (LayoutTensorOpSqrtFunctionalGeneric expected_view_layout_tensor y_output_layout)))

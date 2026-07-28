@@ -1,0 +1,64 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Distributivity-bridge pins (Stage I4). The equalities distributivity
+; exists to deliver, plus the refusals that keep it terminating. The
+; certificate-guarded rules must:
+;   - bridge CONCRETE factored/expanded strided offsets (needs the
+;     expand direction: the 64 in the expanded form below is BORN a
+;     literal — no fold event ever happened, so there is no live
+;     factorization for the factoring direction to see; folding now
+;     preserves factorizations of DERIVED products, but cannot invent
+;     one for a literal);
+;   - bridge SYMBOLIC factored/expanded forms (either direction works:
+;     symbolic factors never fold away);
+;   - factor a LIVE shared constant out of a sum of products;
+;   - REFUSE the same-factor constant-sum pump (Engine C) and anything
+;     zero-adjacent — the refusal pins are the termination story.
+
+(let coord_inner (CoordVar 0 (IntLit 4)))
+(let coord_outer (CoordVar 1 (IntLit 12)))
+(let seq_len (IntVar "seq_len"))
+(set (lower-bound-of seq_len) (bigint 1))
+(set (upper-bound-of seq_len) (bigint 4096))
+
+; The concrete bridge: a composed-view-shaped offset times the bit width
+; against its hand-expanded strided form.
+(let concrete_factored (IntMul (IntAdd (IntMul coord_outer (IntLit 2)) coord_inner) (IntLit 32)))
+(let concrete_expanded (IntAdd (IntMul coord_outer (IntLit 64)) (IntMul coord_inner (IntLit 32))))
+
+; The symbolic bridge: same shape with a dynamic-dim stride.
+(let symbolic_factored (IntMul (IntAdd (IntMul coord_outer seq_len) coord_inner) (IntLit 32)))
+(let symbolic_expanded
+  (IntAdd (IntMul (IntMul coord_outer seq_len) (IntLit 32)) (IntMul coord_inner (IntLit 32))))
+
+; Live-factor factoring: both products share the literal 32 as syntax.
+(let shared_factor_sum (IntAdd (IntMul coord_outer (IntLit 32)) (IntMul coord_inner (IntLit 32))))
+(let shared_factor_factored (IntMul (IntAdd coord_outer coord_inner) (IntLit 32)))
+
+; Same-axis constant multiples: the like-term combiner reduces the sum
+; ATOMICALLY (2v - v = v, dual-orientation subsume, no intermediates) —
+; while the factoring route to the same fact stays refused (the
+; certificate cannot certify a same-axis sum before reduction; the
+; matched-term guard blocks the firing that would plant a compound
+; representative in v's class).
+(let same_axis_sum (IntAdd (IntMul coord_inner (IntLit 2)) (IntMul coord_inner (IntLit -1))))
+
+; Zero-adjacent material: the historical t7j seed. Its equality to the
+; collapsed form comes from the identity rules alone; distributivity
+; must stay out of the transient window.
+(let zero_summand_seed (IntMul (IntAdd coord_inner (IntLit 0)) (IntLit 32)))
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; The concrete bridge holds...
+(check (= concrete_factored concrete_expanded))
+; ...the symbolic bridge holds...
+(check (= symbolic_factored symbolic_expanded))
+; ...and the live shared factor factors out.
+(check (= shared_factor_sum shared_factor_factored))
+
+; The like-term reduction holds — delivered by the combiner, not by
+; factoring...
+(check (= same_axis_sum coord_inner))
+(check (provably-cannot-union-with-zero same_axis_sum))
+; ...and the zero-summand seed collapses by the identities, quietly.
+(check (= zero_summand_seed (IntMul coord_inner (IntLit 32))))

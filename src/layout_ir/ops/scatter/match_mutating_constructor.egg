@@ -1,0 +1,3 @@
+; Mutating scatter : writes INTO init's storage. No layout metadata —
+; the output layout IS init's, by the match precondition.
+(constructor LayoutTensorOpScatterMutatingGeneric (LayoutTensor LayoutTensor LayoutTensorList) LayoutTensorOp)

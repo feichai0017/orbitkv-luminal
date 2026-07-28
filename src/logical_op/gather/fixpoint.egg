@@ -1,0 +1,9 @@
+(rule
+  (
+    (= ?out_logical (LogicalGather ?data_logical ?coordinate_list))
+  )
+  (
+    (coordinate-shape-lock ?out_logical ?coordinate_list)
+  )
+  :ruleset fixpoint-invariants
+)

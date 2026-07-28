@@ -1,0 +1,5 @@
+; Logical Distributivity : Mul and Add
+(birewrite
+  (LogicalMul (LogicalAdd ?lhs ?rhs) ?shared_factor)
+  (LogicalAdd (LogicalMul ?lhs ?shared_factor) (LogicalMul ?rhs ?shared_factor))
+)

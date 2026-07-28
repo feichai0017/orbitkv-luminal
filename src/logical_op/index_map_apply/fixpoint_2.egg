@@ -1,0 +1,11 @@
+(rule
+  (
+    (= ?out_logical (LogicalIndexMapApply ?in_logical (IndexMapLit ?entry_list) ?out_shape))
+    (= ?in_shape (shape-of ?in_logical))
+    (= ?in_rank (rank-of ?in_shape))
+  )
+  (
+    (set (view-arity-lock ?out_logical) ?in_rank)
+  )
+  :ruleset fixpoint-invariants
+)

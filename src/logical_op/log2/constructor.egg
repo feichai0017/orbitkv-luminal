@@ -1,0 +1,1 @@
+(constructor LogicalLog2 (LogicalTensor) LogicalTensor)

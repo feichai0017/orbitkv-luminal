@@ -1,0 +1,5 @@
+; Logical Commutativity : Mul
+(rewrite
+  (LogicalMul ?lhs ?rhs)
+  (LogicalMul ?rhs ?lhs)
+)

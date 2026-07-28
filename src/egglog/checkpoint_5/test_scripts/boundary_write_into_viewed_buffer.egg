@@ -1,0 +1,112 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: a writer targets a VIEWED buffer while a view-reader is
+; live (Stage 7 / Step 4 of the views stage) — the conflict-rejection pin for
+; the real view op.
+;
+; Semantics:
+; - x: [2,2] right-major in caller buffer 50 (read-write)
+; - v = row-0 view of x (composed layout: element offset v0 over [2] —
+;   discovered right-major contiguous)
+; - r = Exp(v), demanded in caller buffer 51: a live reader of buffer 50's
+;   bytes THROUGH the view
+; - y = Sqrt(x), demanded back into buffer 50 itself: an in-place update
+;   wish on the viewed storage
+;
+; The planner must NOT grant Sqrt its seed: writing buffer 50 in place would
+; clobber the bytes Exp still has to read (Exp is dataflow-independent of
+; Sqrt, so no ordering proves the read happens first — and the analyzer is
+; deliberately REGION-BLIND, so even a disjoint-region variant of this
+; program, writing only row 1 while row 0 is read, would be rejected the
+; same way; this fixture uses the whole-tensor write so it needs no
+; script-granted injectivity token). Sqrt degrades out-of-place: it writes a
+; fresh allocation, and the boundary honors y@50 with one copy ordered
+; AFTER Exp's read (the WAR anti edge).
+;
+; Plan shape (pinned by the golden + the fixture test): two kernels (Sqrt
+; into an allocation, Exp reading buffer 50 directly through the folded
+; view), one BufferCopy allocation -> buffer 50, one alloc/free pair.
+
+(let x_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 2) (IntExprNil)))))
+(let row_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprNil))))
+(let x_dtype (F32))
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "viewed_storage") x_shape x_dtype))
+
+; Row-0 slice: parent outer (size 2) <- 0, parent inner (size 2) <- v0.
+(let row0_map
+  (IndexMapLit
+    (IntExprCons (IntLit 0)
+      (IntExprCons (CoordVar 0 (IntLit 2))
+        (IntExprNil)))))
+(let row0_view_logical (LogicalIndexMapApply x_logical row0_map row_shape))
+
+(let y_logical (LogicalSqrt x_logical))
+(let r_logical (LogicalExp row0_view_logical))
+
+(let x_layout (RightMajorContiguousElementLayoutLit x_shape (bits-of x_dtype)))
+(let x_layout_tensor (LayoutTensorLit x_logical x_layout))
+(let x_buffer_id (BufferLit 50))
+(set (buffer-access-of x_buffer_id) (ReadWrite))
+(set (buffer-freed-by x_buffer_id) (CallerFrees))
+(let x_input_buffer_tensor (BufferTensorLit x_layout_tensor x_buffer_id))
+
+; Hand-written expectation for the composed row-0 view layout: the row is
+; a contiguous [2] (the zero map entry annihilates the outer summand).
+(let expected_view_layout
+  (RightMajorContiguousElementLayoutLit row_shape (bits-of x_dtype)))
+(let expected_view_layout_tensor (LayoutTensorLit row0_view_logical expected_view_layout))
+
+; y = Sqrt(x) demanded IN PLACE: the output slot reuses buffer 50.
+(let y_output_layout (RightMajorContiguousElementLayoutLit x_shape (bits-of x_dtype)))
+(let y_output_layout_tensor (LayoutTensorLit y_logical y_output_layout))
+(let y_output_buffer_tensor (BufferTensorLit y_output_layout_tensor x_buffer_id))
+
+; r = Exp(v) demanded in its own buffer 51.
+(let r_output_layout (RightMajorContiguousElementLayoutLit row_shape (bits-of x_dtype)))
+(let r_output_layout_tensor (LayoutTensorLit r_logical r_output_layout))
+(let r_buffer_id (BufferLit 51))
+(set (buffer-access-of r_buffer_id) (ReadWrite))
+(set (buffer-freed-by r_buffer_id) (CallerFrees))
+(let r_output_buffer_tensor (BufferTensorLit r_output_layout_tensor r_buffer_id))
+
+(let input_boundary
+  (BufferInputLit (BufferTensorCons x_input_buffer_tensor (BufferTensorNil))))
+(let output
+  (BufferOutputLit
+    (BufferTensorCons y_output_buffer_tensor
+      (BufferTensorCons r_output_buffer_tensor
+        (BufferTensorNil)))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; The composed row-0 layout is DISCOVERED contiguous (zero entry annihilates,
+; strides fold, contiguity classified)...
+(let x_element_offset
+  (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 2)) (CoordVar 0 (IntLit 2))))
+(check
+  (= expected_view_layout
+     (BitOffsetExpressionLayoutLit
+       (subst-of (IntMul x_element_offset (IntLit 32)) row0_map)
+       row_shape
+       (bits-of x_dtype))))
+
+; ...the VIEW implementation derives for it...
+(check
+  (= (LayoutTensorOpLit
+       (LayoutTensorCons x_layout_tensor (LayoutTensorNil))
+       (LayoutTensorCons expected_view_layout_tensor (LayoutTensorNil)))
+     (LayoutTensorOpIndexMapApplyViewGeneric
+       x_layout_tensor row0_map row_shape expected_view_layout)))
+
+; ...and both kernels are offered: Exp on the view's LayoutTensor, Sqrt on
+; the parent. Which storage each may use is the PLANNER's decision — the
+; rejection under test lives in the plan golden, not in the e-graph.
+(check
+  (= (LayoutTensorOpLit
+       (LayoutTensorCons expected_view_layout_tensor (LayoutTensorNil))
+       (LayoutTensorCons r_output_layout_tensor (LayoutTensorNil)))
+     (LayoutTensorOpExpFunctionalGeneric expected_view_layout_tensor r_output_layout)))
+(check
+  (= (LayoutTensorOpLit
+       (LayoutTensorCons x_layout_tensor (LayoutTensorNil))
+       (LayoutTensorCons y_output_layout_tensor (LayoutTensorNil)))
+     (LayoutTensorOpSqrtFunctionalGeneric x_layout_tensor y_output_layout)))

@@ -1,0 +1,9 @@
+(rule
+  (
+    (coordinate-tensor-list ?coordinate_list)
+    (= ?coordinate_list (LogicalTensorNil))
+  )
+  (
+    (coordinate-iota-expressions ?coordinate_list (IntExprNil))
+  )
+)

@@ -1,0 +1,11 @@
+(rule
+  (
+    (= ?out_logical_tensor (LogicalLessThan ?in1_logical ?in2_logical))
+    (= ?in1_dtype (dtype-of ?in1_logical))
+    (= ?in2_dtype (dtype-of ?in2_logical))
+    (!= ?in1_dtype ?in2_dtype)
+  )
+  (
+    (panic "LogicalLessThan operands must share one dtype")
+  )
+)

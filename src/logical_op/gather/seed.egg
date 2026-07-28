@@ -1,0 +1,14 @@
+; Rank-0 data gather is ill-formed: an EMPTY coordinate list leaves the
+; output shape underdetermined — "broadcast a scalar to shape S" is the
+; empty-index-map VIEW's job, not gather's (ONNX takes the same posture:
+; Gather/GatherND require rank >= 1). The premise is STRUCTURAL (the Nil
+; constructor), so there is no pending-equality race: Cons and Nil
+; classes never union.
+(rule
+  (
+    (= ?out_logical_tensor (LogicalGather ?data_logical (LogicalTensorNil)))
+  )
+  (
+    (panic "LogicalGather with an empty coordinate list (rank-0 data) is ill-formed; scalar broadcast is the empty-index-map view")
+  )
+)

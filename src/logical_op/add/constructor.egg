@@ -1,0 +1,2 @@
+; Binary Ops
+(constructor LogicalAdd (LogicalTensor LogicalTensor) LogicalTensor)

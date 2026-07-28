@@ -1,0 +1,4 @@
+; Logical Cast : reinterpret the element type — the TARGET dtype rides
+; in the term; the shape is the input's; the bit width changes, so a
+; cast is always a materializer, never a view.
+(constructor LogicalCast (LogicalTensor Dtype) LogicalTensor)

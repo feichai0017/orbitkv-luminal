@@ -1,0 +1,116 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Exact-division pins (Stage D2): the adversarial suite for
+; provably-exact-division-expression and provably-one-expression.
+;
+; Exactness is where every division semantics collapses into one
+; function, and it is a STRUCTURAL fact — intervals cannot see
+; divisibility ((x * 64) has bounds saying nothing about 64), syntax
+; can. One-ness is a CLASS (Stage Z3): the division producers and the
+; bounds-one route union into the literal's class, so the e-graph states
+; x/x = 1 faithfully. Every consumer that unions through a division node
+; pairs exactness with the value-level divisor gates: exactness without
+; definedness moves nothing (pinned below).
+
+; --- material ---
+(let tile_index (IntVar "tile_index"))
+(set (lower-bound-of tile_index) (bigint 0))
+(set (upper-bound-of tile_index) (bigint 100))
+(let payload (IntVar "payload"))
+(set (lower-bound-of payload) (bigint 5))
+(set (upper-bound-of payload) (bigint 9))
+; sign-indeterminate: bounds span zero, so NO sign-gated bridge could
+; ever fire — exactness rescues the collapse anyway
+(let spanning_index (IntVar "spanning_index"))
+(set (lower-bound-of spanning_index) (bigint -5))
+(set (upper-bound-of spanning_index) (bigint 59))
+(let nonneg_size (IntVar "nonneg_size"))
+(set (lower-bound-of nonneg_size) (bigint 1))
+(set (upper-bound-of nonneg_size) (bigint 4096))
+(let negative_step (IntVar "negative_step"))
+(set (lower-bound-of negative_step) (bigint -9))
+(set (upper-bound-of negative_step) (bigint -3))
+(let maybe_zero_divisor (IntVar "maybe_zero_divisor"))
+(set (lower-bound-of maybe_zero_divisor) (bigint 0))
+(set (upper-bound-of maybe_zero_divisor) (bigint 8))
+
+; the tiling round trip
+(let tiled_offset (IntMul tile_index (IntLit 64)))
+(let round_trip_quotient (IntTruncDiv tiled_offset (IntLit 64)))
+(let round_trip_ceiling (IntCeilDiv tiled_offset (IntLit 64)))
+(let round_trip_remainder (IntTruncRem tiled_offset (IntLit 64)))
+(let offset_past_remainder (IntAdd payload round_trip_remainder))
+
+; the sign-indeterminate rescue
+(let spanning_multiple (IntMul spanning_index (IntLit 64)))
+(let spanning_quotient (IntTruncDiv spanning_multiple (IntLit 64)))
+
+; self division — the one certificate's producers
+(let self_quotient (IntTruncDiv nonneg_size nonneg_size))
+(let self_ceiling (IntCeilDiv nonneg_size nonneg_size))
+(let self_remainder (IntTruncRem nonneg_size nonneg_size))
+(let negative_self_quotient (IntTruncDiv negative_step negative_step))
+(let scaled_by_self_ratio (IntMul payload self_quotient))
+
+; definedness refusals: exactness holds, nothing moves
+(let undefined_multiple (IntMul tile_index maybe_zero_divisor))
+(let undefined_quotient (IntTruncDiv undefined_multiple maybe_zero_divisor))
+(let undefined_self (IntTruncDiv maybe_zero_divisor maybe_zero_divisor))
+
+; non-multiple: the relation must refuse
+(let non_multiple (IntMul tile_index (IntLit 63)))
+
+; divisor-one identities
+(let identity_quotient (IntTruncDiv payload (IntLit 1)))
+(let identity_ceiling (IntCeilDiv payload (IntLit 1)))
+(let identity_remainder (IntTruncRem payload (IntLit 1)))
+
+; the sum route + exact agreement
+(let sum_of_multiples
+  (IntAdd (IntMul tile_index (IntLit 64)) (IntMul payload (IntLit 64))))
+(let sum_trunc (IntTruncDiv sum_of_multiples (IntLit 64)))
+(let sum_ceil (IntCeilDiv sum_of_multiples (IntLit 64)))
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; --- the tiling round trip: quotient recovers the tile index, the
+; remainder is the zero function and is eliminated as a summand ---
+(check (= round_trip_quotient tile_index))
+(check (= round_trip_ceiling tile_index))
+(check (= round_trip_remainder (IntLit 0)))
+(check (= offset_past_remainder payload))
+
+; --- sign-indeterminate rescue: bounds span zero, exactness collapses
+; anyway (no sign reasoning involved) ---
+(check (= spanning_quotient spanning_index))
+
+; --- self division: the producer unions put x/x in the literal's
+; class directly (Stage Z3) — the e-graph states x/x = 1 as an
+; equality, and the class inherits the literal's exact bounds ---
+(check (= self_quotient (IntLit 1)))
+(check (= self_ceiling (IntLit 1)))
+(check (= negative_self_quotient (IntLit 1)))
+(check (= self_quotient (IntLit 1)))
+(check (= (lower-bound-of self_quotient) (bigint 1)))
+(check (= (upper-bound-of self_quotient) (bigint 1)))
+(check (= self_remainder (IntLit 0)))
+; the one-factor elimination consumes the fact
+(check (= scaled_by_self_ratio payload))
+
+; --- definedness is never implied by exactness: the relation holds for
+; a maybe-zero divisor, and every consumer refuses ---
+(check (provably-exact-division-expression undefined_multiple maybe_zero_divisor))
+(fail (check (= undefined_quotient tile_index)))
+(fail (check (= undefined_self (IntLit 1))))
+
+; --- a non-multiple gets no exactness fact ---
+(fail (check (provably-exact-division-expression non_multiple (IntLit 64))))
+
+; --- divisor-one identities ---
+(check (= identity_quotient payload))
+(check (= identity_ceiling payload))
+(check (= identity_remainder (IntLit 0)))
+
+; --- the sum route certifies the sum of multiples, and exact agreement
+; unions the trunc and ceil quotients into one class ---
+(check (provably-exact-division-expression sum_of_multiples (IntLit 64)))
+(check (= sum_trunc sum_ceil))

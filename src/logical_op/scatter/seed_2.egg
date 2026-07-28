@@ -1,0 +1,10 @@
+; Scatter seeds the shared coordinate demand (Int tripwire, common
+; shape, layout-tensor lists — the same machinery gather uses).
+(rule
+  (
+    (= ?out_logical_tensor (LogicalScatter ?init_logical ?coordinate_list ?src_logical))
+  )
+  (
+    (coordinate-tensor-list ?coordinate_list)
+  )
+)

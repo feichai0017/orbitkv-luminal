@@ -1,0 +1,1801 @@
+//! The BufferTensor IR: the post-decision layer between analysis and the
+//! erased buffer plan.
+//!
+//! A **BufferTensor** is a value paired with its assigned storage. Once the
+//! conflict analysis has decided every tie and the assignment has given every
+//! value a buffer, ops stop being value-level dataflow and become operations
+//! over BufferTensors: each node consumes and produces (value, buffer) pairs.
+//! The buffer plan ([`crate::bufferize::BufferIrGraph`]) is a *lowering* of
+//! this IR — the "forgetting" step that erases the value half — and safety is
+//! argued HERE, where both halves still exist, never after the erasure.
+//!
+//! This module hosts the layer's op surface (the trait an op presents once
+//! every aliasing decision is behind it), the graph types, and the
+//! construction from `(extracted program, analysis, assignment)`. The
+//! lowering lives in `bufferize` beside the plan machinery it feeds.
+
+#![allow(dead_code)]
+
+use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
+
+use anyhow::Result;
+use egraph_serialize::ClassId;
+use petgraph::graph::{DiGraph, NodeIndex};
+
+use crate::bufferize::{Analysis, Buffer, BufferId, Bufferizer};
+use crate::layout_ir::{Access, ExtractedGraph, ExtractedNode};
+
+// =============================================================================
+// The post-decision op surface
+// =============================================================================
+
+/// Display-only slot names, deliberately SEPARATE from the functional op
+/// surface: renaming a slot must never look like a semantic change. Consumed
+/// by graph rendering and by error messages ("operand `rhs` of ..."), and by
+/// the extractor when it labels operand edges. It is a supertrait of
+/// [`BufferTensorIrOp`] only because dynamic dispatch requires it — anything
+/// callable through a `dyn` object must be reachable from its trait stack.
+pub trait OpSlotNames {
+    /// The display name of input slot `operand` (the op's signature order).
+    fn operand_name(&self, operand: usize) -> String {
+        format!("in{operand}")
+    }
+    /// The display name of output slot `result`.
+    fn result_name(&self, result: usize) -> String {
+        format!("out{result}")
+    }
+}
+
+/// Clone plumbing for `Box<dyn BufferTensorIrOp>`. Cloning through a trait
+/// object needs the concrete type, and at a `dyn` call site only the vtable
+/// knows it — so a per-type function must be dispatchable through the object,
+/// i.e. live in its trait stack. The blanket impl below writes that function
+/// ONCE for every `Clone` op; op authors just `#[derive(Clone)]`.
+pub trait CloneBufferTensorIrOp {
+    fn clone_bt_box(&self) -> Box<dyn BufferTensorIrOp>;
+}
+
+impl<T: BufferTensorIrOp + Clone + 'static> CloneBufferTensorIrOp for T {
+    fn clone_bt_box(&self) -> Box<dyn BufferTensorIrOp> {
+        Box::new(self.clone())
+    }
+}
+
+/// What an op IS once every aliasing decision is behind it: its identity and
+/// its memory effects — the surface the BufferTensor layer, the lowering, and
+/// (eventually) the execution engine consume. Deliberately free of analysis
+/// concerns: `Bufferizable` (the aliasing contract) and `ToDps` are the
+/// ANALYSIS-time surfaces, and by this layer their questions are all answered.
+///
+/// Every value-level op is one automatically (`LayoutIrOp` has this as a
+/// supertrait); planner-synthesized ops like [`BufferCopy`] implement ONLY
+/// this trait — they have no logical semantics, no egglog constructor, and
+/// never meet the analyzer.
+pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + Debug {
+    /// The op's IR name (see the label policy in [`crate::layout_ir::ops`]).
+    fn label(&self) -> &str;
+
+    /// Is this operand's buffer read? (Inputs are read.)
+    fn operand_reads_memory(&self, _operand: usize) -> bool {
+        true
+    }
+
+    /// Is this result's buffer written? (Outputs are written.)
+    fn result_writes_memory(&self, _result: usize) -> bool {
+        true
+    }
+
+    /// Does this result start as undefined CONTENTS (like `tensor.empty` /
+    /// `alloc_tensor`)? A value fact, not a storage fact — a seeded poison
+    /// lives in caller storage yet is still undefined. Undefined values are
+    /// write-targets only: a program that READS one (an op operand, or an
+    /// output slot binding) is rejected by the bufferizer's input-program
+    /// validation as ill-formed, so this flag marks alloc-like results for
+    /// destination seeding and plan folding — never data anyone may consume.
+    fn result_is_undefined(&self, _result: usize) -> bool {
+        false
+    }
+}
+
+impl Clone for Box<dyn BufferTensorIrOp> {
+    fn clone(&self) -> Self {
+        self.clone_bt_box()
+    }
+}
+
+// =============================================================================
+// Planner-synthesized ops
+// =============================================================================
+
+/// The transport op: reads its single operand's buffer and writes its single
+/// result's buffer, the result carrying the SAME value in different storage
+/// (value preserved, buffer changed — the signature by which a copy is
+/// recognized structurally). Synthesized by the planner for tie repairs and
+/// boundary materialization, AFTER analysis — so it implements only
+/// [`BufferTensorIrOp`], never `LayoutIrOp`: it has no logical semantics, no
+/// egglog constructor, no aliasing contract to declare, and no DPS story.
+#[derive(Debug, Clone, Copy)]
+pub struct BufferCopy;
+
+impl OpSlotNames for BufferCopy {
+    fn operand_name(&self, _operand: usize) -> String {
+        "src".to_string()
+    }
+    fn result_name(&self, _result: usize) -> String {
+        "dst".to_string()
+    }
+}
+
+impl BufferTensorIrOp for BufferCopy {
+    fn label(&self) -> &str {
+        "BufferCopy"
+    }
+}
+
+/// The allocator: brings a buffer's storage into existence, producing its
+/// FIRST resident — an undefined BufferTensor (the same poison that stood
+/// here before `optimize` converted it). Its "write" installs no binding
+/// (`result_writes_memory` = false): allocation orders against nothing via
+/// WAR, only via the dataflow of its produced resident. Synthesized by
+/// `optimize`, never analyzed, no egglog constructor.
+#[derive(Debug, Clone, Copy)]
+pub struct BufferAlloc;
+
+impl OpSlotNames for BufferAlloc {
+    fn result_name(&self, _result: usize) -> String {
+        "buffer".to_string()
+    }
+}
+
+impl BufferTensorIrOp for BufferAlloc {
+    fn label(&self) -> &str {
+        "BufferAlloc"
+    }
+    fn result_writes_memory(&self, _result: usize) -> bool {
+        false // installs no binding: never a WAR writer
+    }
+    fn result_is_undefined(&self, _result: usize) -> bool {
+        true
+    }
+}
+
+/// The deallocator: ends a buffer's storage, consuming its FINAL resident.
+/// It observes no bytes (`operand_reads_memory` = false — never a RaW
+/// reader); its ordering comes entirely from its in-edges (Data from the
+/// final resident's producer, Anti from every other toucher), and it has
+/// out-degree ZERO by invariant — nothing ever depends on a free, so later
+/// placement passes may move it as freely as its in-edges allow.
+#[derive(Debug, Clone, Copy)]
+pub struct BufferFree;
+
+impl OpSlotNames for BufferFree {
+    fn operand_name(&self, _operand: usize) -> String {
+        "buffer".to_string()
+    }
+}
+
+impl BufferTensorIrOp for BufferFree {
+    fn label(&self) -> &str {
+        "BufferFree"
+    }
+    fn operand_reads_memory(&self, _operand: usize) -> bool {
+        false // frees destroy storage, they do not observe bytes
+    }
+}
+
+// =============================================================================
+// The BufferTensor graph
+// =============================================================================
+
+/// A value paired with its assigned storage — the unit everything in this IR
+/// consumes and produces. One value may have several residences (a copy
+/// transports it between buffers), so identity here is the PAIR, never the
+/// value alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BufferTensor {
+    pub value: ClassId,
+    pub buffer: BufferId,
+}
+
+/// A node of the BufferTensor graph. Nothing here is folded: views and poison
+/// producers are ordinary `Op` nodes (their nature is recognized from declared
+/// memory effects), and every planning decision is burned into the tensors —
+/// a rejected tie shows as a retargeted operand fed by a copy, an admitted
+/// one as operand and result sharing a buffer.
+#[derive(Debug, Clone)]
+pub enum BtNode {
+    /// The input boundary: the caller installs these residents (one slot per
+    /// boundary binding, in program declaration order).
+    Input { slots: Vec<BufferTensor> },
+    /// An operation over BufferTensors. The (value, buffer) algebra tells the
+    /// node kinds apart structurally: a copy preserves the value and changes
+    /// the buffer; a view preserves the buffer and changes the value; an
+    /// in-place op changes the value on one buffer; an out-of-place op
+    /// changes both.
+    Op {
+        op: Box<dyn BufferTensorIrOp>,
+        operands: Vec<BufferTensor>,
+        results: Vec<BufferTensor>,
+        /// The op's must-tie pairs `(operand, result)`, extracted from its
+        /// aliasing contract at construction — carried because the lowered
+        /// plan renders ties but must not query analysis-time declarations.
+        ties: Vec<(usize, usize)>,
+    },
+    /// The output boundary: each slot promises its buffer's final resident
+    /// (slot order = program declaration order).
+    Output { slots: Vec<BufferTensor> },
+}
+
+/// An edge of the BufferTensor graph: dataflow (a produced BufferTensor
+/// flowing to a consumer, labeled by its value) or anti-dependence (a
+/// consumer that must run before a writer overwrites its buffer, installed
+/// by [`install_anti_edges`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BtEdge {
+    Data { value: ClassId },
+    Anti { buffer: BufferId },
+}
+
+/// The BufferTensor IR: every value resident in its assigned storage, every
+/// decision explicit, nothing yet forgotten. `lower` (in `bufferize`) erases
+/// it into the executable [`crate::bufferize::BufferIrGraph`].
+#[derive(Debug, Clone)]
+pub struct BufferTensorIrGraph {
+    pub dag: DiGraph<BtNode, BtEdge>,
+    /// Every distinct buffer, by id (interned during assignment).
+    pub buffers: HashMap<BufferId, Buffer>,
+    /// The buffer holding each value (values collapse onto buffers via reuse).
+    pub value_buffer: HashMap<ClassId, BufferId>,
+}
+
+impl BufferTensorIrGraph {
+    fn buffer_name(&self, id: &BufferId) -> String {
+        let label = self
+            .buffers
+            .get(id)
+            .map(|buffer| buffer.label.replace('\n', " / "))
+            .unwrap_or_default();
+        match id {
+            BufferId::Boundary(_) => format!("pinned[{label}]"),
+            BufferId::Allocated(n) => {
+                if label.is_empty() {
+                    format!("alloc#{n}")
+                } else {
+                    format!("alloc#{n}[{label}]")
+                }
+            }
+        }
+    }
+
+    /// Render the BufferTensor graph to Graphviz dot — the AUDIT view: the
+    /// full lowering story in one picture, three domains in one grammar
+    /// (tensors are rounded boxes, ops are squares, hue names the domain):
+    ///
+    ///  * the LOGICAL story (violet): logical tensors and the logical ops
+    ///    that relate them;
+    ///  * the LAYOUT story (amber): the DPS-rewritten LayoutIR program —
+    ///    LayoutTensors and the layout ops over them, exactly the program
+    ///    the planner received;
+    ///  * the BUFFER story (rose): the same ops AGAIN as buffer-tensor ops —
+    ///    identical shape, now consuming and producing BufferTensors — plus
+    ///    the planner-inserted transports. Each BufferTensor points to the
+    ///    LayoutTensor it represents and to its BufferId storage note, which
+    ///    is what makes it a (value, storage) pair. Boundaries (blue) attach
+    ///    here, where the caller's bindings live.
+    ///
+    /// The rose story is the FINISHED BufferTensor program (post-`optimize`:
+    /// poisons folded, dead buffers dropped), while the amber story always
+    /// shows the source program as received — so a poison dest visible in
+    /// amber with no rose twin reads as "allocation decision made".
+    /// Dependency-ordering edges (WAR and storage lifetime alike) render
+    /// dashed black between the rose ops, labeled by the ordered buffer.
+    /// `source` must be the graph this BufferTensor IR was built from (the
+    /// post-DPS extracted graph): value detail is looked up by e-class.
+    pub(crate) fn to_dot(&self, source: &ExtractedGraph) -> String {
+        use crate::layout_ir::{DotEmitter, LayoutTensorInfo, VisualKind};
+        use petgraph::visit::EdgeRef;
+
+        // Value detail (LayoutTensor label, logical, layout) by e-class.
+        let mut values: HashMap<&ClassId, &LayoutTensorInfo> = HashMap::new();
+        for node in source.dag.node_weights() {
+            match node {
+                ExtractedNode::BufferInput(input) => {
+                    values.insert(&input.value.eclass, &input.value);
+                }
+                ExtractedNode::LayoutOp(op) => {
+                    for output in &op.outputs {
+                        values.insert(&output.eclass, output);
+                    }
+                }
+                ExtractedNode::BufferOutput(_) => {}
+            }
+        }
+
+        // A buffer tensor's OWN name: the source program's BufferTensorLit
+        // let binding at the boundary, when there is one. The extractor falls
+        // back to the e-class string when no let name exists — that fallback
+        // is not a name, so it renders blank like every planner-synthesized
+        // residence.
+        let mut residence_names: HashMap<(ClassId, BufferId), String> = HashMap::new();
+        let mut record_name = |value: &ClassId, info: &crate::layout_ir::BufferInfo| {
+            if info.tensor_label != info.tensor_eclass.to_string() {
+                residence_names.insert(
+                    (value.clone(), BufferId::Boundary(info.id_eclass.clone())),
+                    info.tensor_label.clone(),
+                );
+            }
+        };
+        for node in source.dag.node_weights() {
+            match node {
+                ExtractedNode::BufferInput(input) => {
+                    record_name(&input.value.eclass, &input.buffer);
+                }
+                ExtractedNode::BufferOutput(output) => {
+                    for slot in &output.slots {
+                        record_name(&slot.value, &slot.buffer);
+                    }
+                }
+                ExtractedNode::LayoutOp(_) => {}
+            }
+        }
+
+        let mut emitter = DotEmitter::new();
+
+        // THE LAYOUT STORY (amber, with its violet logical structure): the
+        // LayoutIR ops exactly as the planner received them. Boundary nodes
+        // are drawn once, in the buffer story below.
+        for node in source.dag.node_weights() {
+            match node {
+                ExtractedNode::BufferInput(input) => {
+                    emitter.value_node(&input.value);
+                }
+                ExtractedNode::LayoutOp(op) => {
+                    let in_slots: Vec<String> =
+                        op.inputs.iter().map(|input| input.port.clone()).collect();
+                    let out_slots: Vec<String> = (0..op.outputs.len())
+                        .map(|result| op.op.result_name(result))
+                        .collect();
+                    let ties = crate::layout_ir::must_ties(op.op.as_ref());
+                    let op_id = emitter.slot_node(
+                        op.op.label(),
+                        &in_slots,
+                        &out_slots,
+                        &ties,
+                        VisualKind::LayoutIr,
+                        &op.tooltip,
+                    );
+                    let out_ports =
+                        crate::layout_ir::tied_out_ports(&in_slots, &out_slots, &ties);
+                    for (result, output) in op.outputs.iter().enumerate() {
+                        let value_id = emitter.value_node(output);
+                        emitter.edge_from_slot(op_id, &out_ports[result], value_id);
+                    }
+                    for input in &op.inputs {
+                        if let Some(value) = values.get(&input.value) {
+                            let value_id = emitter.value_node(value);
+                            emitter.edge_to_slot(value_id, op_id, &input.port);
+                        }
+                    }
+                }
+                ExtractedNode::BufferOutput(_) => {}
+            }
+        }
+
+        // THE BUFFER STORY (rose): every op again, as the buffer-tensor op
+        // it became — consuming and producing BufferTensors. Each residence
+        // is drawn once and wired to what it IS: the LayoutTensor it
+        // represents ("tensor") and its storage note ("buffer").
+        let mut op_ids: HashMap<NodeIndex, usize> = HashMap::new();
+        let mut buffer_ids: HashMap<BufferId, usize> = HashMap::new();
+        let mut wired: HashSet<usize> = HashSet::new();
+        let residence = |emitter: &mut DotEmitter,
+                         buffer_ids: &mut HashMap<BufferId, usize>,
+                         wired: &mut HashSet<usize>,
+                         tensor: &BufferTensor|
+         -> Option<usize> {
+            let info = values.get(&tensor.value)?;
+            let name = self.buffer_name(&tensor.buffer);
+            let label = residence_names
+                .get(&(tensor.value.clone(), tensor.buffer.clone()))
+                .map(String::as_str)
+                .unwrap_or("");
+            let id = emitter.residence_node(info, label, &name);
+            if wired.insert(id) {
+                // Constitution, ingredient -> term: the LayoutTensor and the
+                // storage note are what the residence IS MADE OF.
+                let value_id = emitter.value_node(info);
+                emitter.info_edge(value_id, id);
+                let storage_id = *buffer_ids
+                    .entry(tensor.buffer.clone())
+                    .or_insert_with(|| emitter.raw_node(name.clone(), VisualKind::BufferId, ""));
+                emitter.info_edge(storage_id, id);
+            }
+            Some(id)
+        };
+
+        for index in self.dag.node_indices() {
+            match &self.dag[index] {
+                BtNode::Input { slots } => {
+                    let input_id = emitter.raw_node(
+                        "Input".to_string(),
+                        VisualKind::Output,
+                        "program input boundary",
+                    );
+                    for (i, slot) in slots.iter().enumerate() {
+                        if let Some(slot_id) =
+                            residence(&mut emitter, &mut buffer_ids, &mut wired, slot)
+                        {
+                            // Boundary membership is information: which slot
+                            // installs this residence, not a byte movement.
+                            emitter.info_edge_labeled(input_id, slot_id, &format!("in {i}"));
+                        }
+                    }
+                }
+                BtNode::Op {
+                    op,
+                    operands,
+                    results,
+                    ties,
+                } => {
+                    let in_slots: Vec<String> =
+                        (0..operands.len()).map(|i| op.operand_name(i)).collect();
+                    let out_slots: Vec<String> =
+                        (0..results.len()).map(|i| op.result_name(i)).collect();
+                    let op_id = emitter.slot_node(
+                        op.label(),
+                        &in_slots,
+                        &out_slots,
+                        ties,
+                        VisualKind::BufferTensor,
+                        "",
+                    );
+                    op_ids.insert(index, op_id);
+                    let out_ports =
+                        crate::layout_ir::tied_out_ports(&in_slots, &out_slots, ties);
+                    for (i, tensor) in operands.iter().enumerate() {
+                        if let Some(value_id) =
+                            residence(&mut emitter, &mut buffer_ids, &mut wired, tensor)
+                        {
+                            emitter.edge_to_slot(value_id, op_id, &in_slots[i]);
+                        }
+                    }
+                    for (i, tensor) in results.iter().enumerate() {
+                        if let Some(value_id) =
+                            residence(&mut emitter, &mut buffer_ids, &mut wired, tensor)
+                        {
+                            emitter.edge_from_slot(op_id, &out_ports[i], value_id);
+                        }
+                    }
+                }
+                BtNode::Output { slots } => {
+                    let output_id = emitter.raw_node(
+                        "Output".to_string(),
+                        VisualKind::Output,
+                        "program output boundary",
+                    );
+                    for (i, slot) in slots.iter().enumerate() {
+                        if let Some(slot_id) =
+                            residence(&mut emitter, &mut buffer_ids, &mut wired, slot)
+                        {
+                            // Boundary membership is information: which slot
+                            // this residence fills, not a byte movement.
+                            emitter.info_edge_labeled(slot_id, output_id, &format!("out {i}"));
+                        }
+                    }
+                }
+            }
+        }
+
+        // DEPENDENCY edges (dashed black, labeled by the ordered buffer):
+        // every Anti edge, plus the alloc -> first-toucher ordering of a
+        // synthesized BufferAlloc — whose poison the toucher does not list
+        // as an operand, so the shared-residence dataflow reconstruction
+        // above cannot draw it.
+        for edge in self.dag.edge_references() {
+            match edge.weight() {
+                BtEdge::Anti { buffer } => {
+                    if let (Some(&from), Some(&to)) =
+                        (op_ids.get(&edge.source()), op_ids.get(&edge.target()))
+                    {
+                        let label = self.buffer_name(buffer);
+                        emitter.styled_edge(from, to, &label, "#000000", "dashed");
+                    }
+                }
+                BtEdge::Data { value } => {
+                    let source_is_alloc = matches!(
+                        &self.dag[edge.source()],
+                        BtNode::Op { op, operands, results, .. }
+                            if operands.is_empty()
+                                && !results.is_empty()
+                                && (0..results.len()).all(|r| op.result_is_undefined(r))
+                    );
+                    if !source_is_alloc {
+                        continue;
+                    }
+                    let operand_backed = match &self.dag[edge.target()] {
+                        BtNode::Op { operands, .. } => {
+                            operands.iter().any(|t| &t.value == value)
+                        }
+                        _ => true,
+                    };
+                    if operand_backed {
+                        continue; // drawn as dataflow through the residence
+                    }
+                    if let (Some(&from), Some(&to)) =
+                        (op_ids.get(&edge.source()), op_ids.get(&edge.target()))
+                    {
+                        let BtNode::Op { results, .. } = &self.dag[edge.source()] else {
+                            unreachable!()
+                        };
+                        let label = self.buffer_name(&results[0].buffer);
+                        emitter.styled_edge(from, to, &label, "#000000", "dashed");
+                    }
+                }
+            }
+        }
+
+        emitter.finish()
+    }
+}
+
+/// Build the BufferTensor graph from the extracted program, the analysis
+/// verdicts, and the buffer assignment. Walks the source in topo order,
+/// mirroring every node — no folding happens here — and materializing each
+/// planning decision as structure:
+///
+///  * A REJECTED must-tie takes the GENERIC REPAIR: the operand is retargeted
+///    to the tied result's fresh buffer, preceded by a [`BufferCopy`] op
+///    transporting the operand's bytes iff the result's pre-write contents
+///    must equal them (the op reads the operand, or writes nothing — a view).
+///  * An output slot whose value does not already live in its destination
+///    gets a boundary [`BufferCopy`] delivering it (an obligation a `Read`
+///    grant forbids — a hard error, since only pass-through is legal there).
+///
+/// The producer map is keyed on the (value, buffer) PAIR: after a transport,
+/// a value has two residences with different producers, and every consumer
+/// names the residence it actually uses.
+pub(crate) fn build_buffer_tensor_ir(
+    graph: &ExtractedGraph,
+    order: &[NodeIndex],
+    assignment: Bufferizer,
+    analysis: &Analysis,
+) -> Result<BufferTensorIrGraph> {
+    let Bufferizer {
+        buffers,
+        value_buffer,
+        ..
+    } = assignment;
+    let buffer_of = |value: &ClassId| value_buffer[value].clone();
+
+    let mut dag: DiGraph<BtNode, BtEdge> = DiGraph::new();
+    let mut producer: HashMap<(ClassId, BufferId), NodeIndex> = HashMap::new();
+    // The single Input node, created lazily at the first boundary binding;
+    // subsequent bindings append slots in walk order.
+    let mut input_node: Option<NodeIndex> = None;
+    // Dense op positions over the same topo `order` the analysis used.
+    let mut next_position: usize = 0;
+
+    let link = |dag: &mut DiGraph<BtNode, BtEdge>,
+                    producer: &HashMap<(ClassId, BufferId), NodeIndex>,
+                    tensor: &BufferTensor,
+                    to: NodeIndex| {
+        if let Some(&from) = producer.get(&(tensor.value.clone(), tensor.buffer.clone())) {
+            dag.add_edge(
+                from,
+                to,
+                BtEdge::Data {
+                    value: tensor.value.clone(),
+                },
+            );
+        }
+    };
+
+    for index in order {
+        match &graph.dag[*index] {
+            ExtractedNode::BufferInput(input) => {
+                let tensor = BufferTensor {
+                    value: input.value.eclass.clone(),
+                    buffer: buffer_of(&input.value.eclass),
+                };
+                let node = *input_node
+                    .get_or_insert_with(|| dag.add_node(BtNode::Input { slots: Vec::new() }));
+                producer.insert((tensor.value.clone(), tensor.buffer.clone()), node);
+                let BtNode::Input { slots } = &mut dag[node] else {
+                    unreachable!()
+                };
+                slots.push(tensor);
+            }
+            ExtractedNode::LayoutOp(op) => {
+                let position = next_position;
+                next_position += 1;
+
+                let ties = crate::layout_ir::must_ties(op.op.as_ref());
+
+                let results: Vec<BufferTensor> = op
+                    .outputs
+                    .iter()
+                    .map(|output| BufferTensor {
+                        value: output.eclass.clone(),
+                        buffer: buffer_of(&output.eclass),
+                    })
+                    .collect();
+                let mut operands: Vec<BufferTensor> = op
+                    .inputs
+                    .iter()
+                    .map(|input| BufferTensor {
+                        value: input.value.clone(),
+                        buffer: buffer_of(&input.value),
+                    })
+                    .collect();
+
+                // THE GENERIC REPAIR (MLIR resolveConflicts): a rejected tie
+                // retargets its operand to the tied result's fresh buffer.
+                // Missing in_place entry = never decided = rejected (the
+                // policy omission contract). The bytes travel first iff the
+                // result's pre-write contents must equal the operand's: the
+                // op reads the operand (accumulator), or writes nothing at
+                // all (a view — its "initializing write" IS the copy).
+                for &(operand, result) in &ties {
+                    if analysis.in_place.get(&(position, operand)) == Some(&true) {
+                        continue;
+                    }
+                    let target = results[result].buffer.clone();
+                    let needs_bytes = op.op.operand_reads_memory(operand)
+                        || !op.op.result_writes_memory(result);
+                    if needs_bytes {
+                        let src = operands[operand].clone();
+                        let dst = BufferTensor {
+                            value: src.value.clone(),
+                            buffer: target.clone(),
+                        };
+                        let copy = dag.add_node(BtNode::Op {
+                            op: Box::new(BufferCopy),
+                            operands: vec![src.clone()],
+                            results: vec![dst.clone()],
+                            ties: Vec::new(),
+                        });
+                        link(&mut dag, &producer, &src, copy);
+                        producer.insert((dst.value.clone(), dst.buffer.clone()), copy);
+                    } else {
+                        // A write-only dest whose bytes are irrelevant: no
+                        // copy, pure retarget. If the operand's producer is an
+                        // undefined-contents producer feeding nothing else,
+                        // its result is BORN relocated in the target — the
+                        // residence the op actually consumes then has a real
+                        // producer (the allocator's stand-in), instead of a
+                        // stranded orphan in a dead fallback buffer. A
+                        // DEFINED producer (chained DPS: a real op's result
+                        // used as a pure dest) must never be relocated — that
+                        // would silently move where the earlier op writes.
+                        let old = (operands[operand].value.clone(), operands[operand].buffer.clone());
+                        if let Some(&producer_node) = producer.get(&old) {
+                            let relocatable = dag.edges(producer_node).next().is_none()
+                                && matches!(
+                                    &dag[producer_node],
+                                    BtNode::Op { op, operands, results, .. }
+                                        if operands.is_empty()
+                                            && !results.is_empty()
+                                            && (0..results.len())
+                                                .all(|r| op.result_is_undefined(r))
+                                );
+                            if relocatable {
+                                let BtNode::Op { results, .. } = &mut dag[producer_node] else {
+                                    unreachable!()
+                                };
+                                for tensor in results.iter_mut() {
+                                    if tensor.value == old.0 {
+                                        tensor.buffer = target.clone();
+                                    }
+                                }
+                                producer.remove(&old);
+                                producer.insert((old.0.clone(), target.clone()), producer_node);
+                            }
+                        }
+                    }
+                    operands[operand].buffer = target;
+                }
+
+                let node = dag.add_node(BtNode::Op {
+                    op: op.op.clone_bt_box(),
+                    operands: operands.clone(),
+                    results: results.clone(),
+                    ties,
+                });
+                for tensor in &operands {
+                    link(&mut dag, &producer, tensor, node);
+                }
+                for tensor in &results {
+                    producer.insert((tensor.value.clone(), tensor.buffer.clone()), node);
+                }
+            }
+            ExtractedNode::BufferOutput(output) => {
+                let mut slots = Vec::new();
+                for slot in &output.slots {
+                    let dest = BufferId::Boundary(slot.buffer.id_eclass.clone());
+                    let src_buffer = buffer_of(&slot.value);
+                    if src_buffer != dest {
+                        // Materialize-into-destination: a boundary transport.
+                        // (A producer pinned to write `dest` directly makes
+                        // src == dest and skips this.)
+                        if buffers.get(&dest).is_some_and(|b| b.access == Access::ReadOnly) {
+                            anyhow::bail!(
+                                "output slot {} requires materializing a value into \
+                                 read-only buffer {:?}: ReadOnly access forbids the \
+                                 write (only a pass-through of an existing binding \
+                                 is legal for a read-only destination)",
+                                slot.index,
+                                dest,
+                            );
+                        }
+                        let src = BufferTensor {
+                            value: slot.value.clone(),
+                            buffer: src_buffer,
+                        };
+                        let dst = BufferTensor {
+                            value: slot.value.clone(),
+                            buffer: dest.clone(),
+                        };
+                        let copy = dag.add_node(BtNode::Op {
+                            op: Box::new(BufferCopy),
+                            operands: vec![src.clone()],
+                            results: vec![dst.clone()],
+                            ties: Vec::new(),
+                        });
+                        link(&mut dag, &producer, &src, copy);
+                        producer.insert((dst.value.clone(), dst.buffer.clone()), copy);
+                    }
+                    slots.push(BufferTensor {
+                        value: slot.value.clone(),
+                        buffer: dest,
+                    });
+                }
+                let out = dag.add_node(BtNode::Output {
+                    slots: slots.clone(),
+                });
+                for tensor in &slots {
+                    link(&mut dag, &producer, tensor, out);
+                }
+            }
+        }
+    }
+    debug_assert_eq!(
+        next_position,
+        analysis.op_count,
+        "BufferTensor op positions diverged from analysis positions"
+    );
+
+    Ok(BufferTensorIrGraph {
+        dag,
+        buffers,
+        value_buffer,
+    })
+}
+
+// =============================================================================
+// Buffer-tensor optimizations: the storage-lifetime pass
+// =============================================================================
+
+/// The storage-level rewrites that are sound BEFORE value erasure, run after
+/// the certificate installs its inputs — so the finished BufferTensor graph
+/// is the program as it ships, with values still present:
+///
+///  * ALLOC CONVERSION: a poison-shaped op (no operands, every result
+///    undefined) is the allocator's stand-in. On a program-minted (System)
+///    buffer it BECOMES the [`BufferAlloc`] — same result residence, so the
+///    dest edge it already feeds is the alloc→first-writer ordering. On
+///    caller storage (an admitted seed) it folds to nothing: the caller owns
+///    that allocation.
+///  * BUFFER DCE: buffers no remaining node touches leave the buffer table
+///    and the value_buffer map.
+///  * ALLOC SYNTHESIS: a surviving System buffer whose first resident is a
+///    DEFINED value (a retarget-copy target; a no-DPS result) gets a
+///    synthesized [`BufferAlloc`] producing a fresh poison resident, placed
+///    before the buffer's first toucher, with a Data edge to it — the same
+///    poison-flows-to-its-overwriter shape as a DPS dest edge, minus the
+///    named slot.
+///  * FREE INSERTION (eager): every buffer whose deallocation is the
+///    program's responsibility (`FreedBy::Program` — all minted buffers, and
+///    donated boundary buffers) gets one [`BufferFree`] consuming the
+///    buffer's final written resident (or its Input-installed resident, if
+///    nothing writes it), placed after the buffer's last toucher. Every
+///    toucher not already ordered before the free gets an Anti edge into it
+///    — and NOTHING ever points out of a free (out-degree zero, by
+///    invariant), so later placement passes may move frees as freely as
+///    their in-edges allow.
+///
+/// The VIEW fold deliberately does NOT live here: a view is a value-level
+/// distinction with no storage-level content, so "a view is nothing" only
+/// becomes true once values are erased. It stays a lowering rule.
+///
+/// The rebuild preserves node order (allocs and frees slot in at their
+/// placement points), so the lowering's emission order — and with it the
+/// plan's printed schedule — reads allocate → use → free.
+pub(crate) fn optimize(bt: BufferTensorIrGraph) -> BufferTensorIrGraph {
+    use petgraph::visit::EdgeRef;
+    let BufferTensorIrGraph {
+        dag,
+        mut buffers,
+        mut value_buffer,
+    } = bt;
+
+    let is_poison_shaped = |node: &BtNode| -> bool {
+        matches!(
+            node,
+            BtNode::Op { op, operands, results, .. }
+                if operands.is_empty()
+                    && !results.is_empty()
+                    && (0..results.len()).all(|r| op.result_is_undefined(r))
+        )
+    };
+
+    // PREPASS over the original graph, in node order:
+    //  * which poison producers convert (System) vs fold (Boundary);
+    //  * every buffer's touchers, first toucher, last toucher, last written
+    //    resident, and Input-installed resident — poison producers excluded
+    //    (they are the allocs themselves, or vanish).
+    let mut folds: HashSet<NodeIndex> = HashSet::new();
+    let mut converts: HashSet<NodeIndex> = HashSet::new();
+    let mut alloc_produced: HashSet<BufferId> = HashSet::new();
+    let mut touchers: HashMap<BufferId, Vec<NodeIndex>> = HashMap::new();
+    let mut first_toucher: HashMap<BufferId, NodeIndex> = HashMap::new();
+    let mut last_toucher: HashMap<BufferId, NodeIndex> = HashMap::new();
+    let mut final_resident: HashMap<BufferId, (BufferTensor, NodeIndex)> = HashMap::new();
+    // Buffers in first-touch order: the deterministic iteration order for
+    // every placement decision below (HashMap order is not reproducible).
+    let mut discovery: Vec<BufferId> = Vec::new();
+    let touch = |buffer: &BufferId,
+                     index: NodeIndex,
+                     touchers: &mut HashMap<BufferId, Vec<NodeIndex>>,
+                     first_toucher: &mut HashMap<BufferId, NodeIndex>,
+                     last_toucher: &mut HashMap<BufferId, NodeIndex>,
+                     discovery: &mut Vec<BufferId>| {
+        touchers.entry(buffer.clone()).or_default().push(index);
+        if !first_toucher.contains_key(buffer) {
+            first_toucher.insert(buffer.clone(), index);
+            discovery.push(buffer.clone());
+        }
+        last_toucher.insert(buffer.clone(), index);
+    };
+    for index in dag.node_indices() {
+        match &dag[index] {
+            node @ BtNode::Op { op, operands, results, .. } => {
+                if is_poison_shaped(node) {
+                    let system = results
+                        .iter()
+                        .all(|t| matches!(t.buffer, BufferId::Allocated(_)));
+                    if system {
+                        converts.insert(index);
+                        for tensor in results {
+                            alloc_produced.insert(tensor.buffer.clone());
+                        }
+                    } else {
+                        folds.insert(index);
+                    }
+                    continue;
+                }
+                // A toucher is a node that OBSERVES or MUTATES the buffer's
+                // bytes — the declared per-slot effects, not mere slot
+                // membership. A metadata view (un-read operand, un-written
+                // result) has an empty byte footprint and must stay invisible
+                // to the lifetime machinery: it folds at lowering, so an
+                // alloc/free ordering edge docked on it would strand there
+                // (the Anti-endpoint tripwire). Nothing is lost — every
+                // reader THROUGH the view resides in the same buffer and is
+                // a toucher in its own right. (A DPS dest operand is un-read
+                // too, but its op writes the tied result into the same
+                // buffer, so the buffer is still touched.)
+                for (operand, tensor) in operands.iter().enumerate() {
+                    if op.operand_reads_memory(operand) {
+                        touch(&tensor.buffer, index, &mut touchers, &mut first_toucher, &mut last_toucher, &mut discovery);
+                    }
+                }
+                for (result, tensor) in results.iter().enumerate() {
+                    if op.result_writes_memory(result) {
+                        touch(&tensor.buffer, index, &mut touchers, &mut first_toucher, &mut last_toucher, &mut discovery);
+                        final_resident.insert(tensor.buffer.clone(), (tensor.clone(), index));
+                    }
+                }
+            }
+            BtNode::Input { slots } => {
+                for slot in slots {
+                    touch(&slot.buffer, index, &mut touchers, &mut first_toucher, &mut last_toucher, &mut discovery);
+                    // The caller-installed resident: the free's operand when
+                    // nothing in the program ever writes the buffer.
+                    final_resident
+                        .entry(slot.buffer.clone())
+                        .or_insert((slot.clone(), index));
+                }
+            }
+            BtNode::Output { slots } => {
+                for slot in slots {
+                    touch(&slot.buffer, index, &mut touchers, &mut first_toucher, &mut last_toucher, &mut discovery);
+                }
+            }
+        }
+    }
+
+    // Buffer DCE on the post-fold universe: alive = touched by a surviving
+    // real node, or produced by a converting alloc.
+    let mut used: HashSet<BufferId> = touchers.keys().cloned().collect();
+    used.extend(alloc_produced.iter().cloned());
+    buffers.retain(|id, _| used.contains(id));
+    value_buffer.retain(|_, id| used.contains(id));
+
+    // Which live buffers need a SYNTHESIZED alloc (first resident is
+    // defined), and which need a free. Deterministic order: buffer-table-
+    // independent, driven by first/last toucher scan order below.
+    let needs_alloc = |id: &BufferId| -> bool {
+        matches!(id, BufferId::Allocated(_)) && !alloc_produced.contains(id) && used.contains(id)
+    };
+    let needs_free = |id: &BufferId| -> bool {
+        used.contains(id)
+            && buffers
+                .get(id)
+                .is_some_and(|b| b.freed_by == crate::layout_ir::FreedBy::Program)
+    };
+
+    // Deterministic placement lists, in buffer-discovery order: which
+    // buffers get a synthesized alloc before a given node, and which get
+    // their free after it.
+    let mut allocs_before: HashMap<NodeIndex, Vec<BufferId>> = HashMap::new();
+    let mut frees_after: HashMap<NodeIndex, Vec<BufferId>> = HashMap::new();
+    for buffer in &discovery {
+        if needs_alloc(buffer) {
+            allocs_before
+                .entry(first_toucher[buffer])
+                .or_default()
+                .push(buffer.clone());
+        }
+        if needs_free(buffer) {
+            frees_after
+                .entry(last_toucher[buffer])
+                .or_default()
+                .push(buffer.clone());
+        }
+    }
+
+    // REBUILD, order-preserving: folds vanish, converts become BufferAlloc,
+    // synthesized allocs slot in before their buffer's first toucher, frees
+    // after its last toucher.
+    let mut out: DiGraph<BtNode, BtEdge> = DiGraph::new();
+    let mut remap: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+    let mut synth: usize = 0;
+    // (buffer, alloc node, first toucher original index) for post-rebuild edges.
+    let mut synthesized: Vec<(BufferId, NodeIndex, NodeIndex)> = Vec::new();
+    // (buffer, free node) for post-rebuild anti edges.
+    let mut frees: Vec<(BufferId, NodeIndex)> = Vec::new();
+    for index in dag.node_indices() {
+        if folds.contains(&index) {
+            continue;
+        }
+        // Synthesized allocs for buffers first touched here.
+        for buffer in allocs_before.get(&index).cloned().unwrap_or_default() {
+            synth += 1;
+            let poison = BufferTensor {
+                value: ClassId::from(format!("alloc$poison${synth}")),
+                buffer: buffer.clone(),
+            };
+            value_buffer.insert(poison.value.clone(), buffer.clone());
+            let alloc = out.add_node(BtNode::Op {
+                op: Box::new(BufferAlloc),
+                operands: Vec::new(),
+                results: vec![poison],
+                ties: Vec::new(),
+            });
+            synthesized.push((buffer.clone(), alloc, index));
+        }
+        if converts.contains(&index) {
+            let BtNode::Op { results, ties, .. } = &dag[index] else {
+                unreachable!()
+            };
+            let alloc = out.add_node(BtNode::Op {
+                op: Box::new(BufferAlloc),
+                operands: Vec::new(),
+                results: results.clone(),
+                ties: ties.clone(),
+            });
+            remap.insert(index, alloc);
+        } else {
+            remap.insert(index, out.add_node(dag[index].clone()));
+        }
+        // Frees for buffers last touched here.
+        for buffer in frees_after.get(&index).cloned().unwrap_or_default() {
+            let (resident, producer_index) = final_resident
+                .get(&buffer)
+                .expect("a freed buffer has a final resident")
+                .clone();
+            let free = out.add_node(BtNode::Op {
+                op: Box::new(BufferFree),
+                operands: vec![resident.clone()],
+                results: Vec::new(),
+                ties: Vec::new(),
+            });
+            if let Some(&from) = remap.get(&producer_index) {
+                out.add_edge(
+                    from,
+                    free,
+                    BtEdge::Data {
+                        value: resident.value.clone(),
+                    },
+                );
+            }
+            frees.push((buffer, free));
+        }
+    }
+    for edge in dag.edge_references() {
+        if let (Some(&source), Some(&target)) =
+            (remap.get(&edge.source()), remap.get(&edge.target()))
+        {
+            out.add_edge(source, target, edge.weight().clone());
+        }
+    }
+    // Synthesized alloc → first toucher: the poison flowing to its
+    // overwriter (a dest edge without a named slot).
+    for (_, alloc, first) in &synthesized {
+        if let Some(&to) = remap.get(first) {
+            let BtNode::Op { results, .. } = &out[*alloc] else {
+                unreachable!()
+            };
+            let value = results[0].value.clone();
+            out.add_edge(*alloc, to, BtEdge::Data { value });
+        }
+    }
+    // Free ordering: every toucher of the buffer not already ordered before
+    // its free gets an Anti edge into it. Frees gain NO out-edges, ever.
+    for (buffer, free) in &frees {
+        let Some(all) = touchers.get(buffer) else {
+            continue;
+        };
+        for original in all {
+            let Some(&toucher) = remap.get(original) else {
+                continue;
+            };
+            if toucher == *free {
+                continue;
+            }
+            let ordered = petgraph::algo::has_path_connecting(&out, toucher, *free, None);
+            if !ordered {
+                out.add_edge(
+                    toucher,
+                    *free,
+                    BtEdge::Anti {
+                        buffer: buffer.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    BufferTensorIrGraph {
+        dag: out,
+        buffers,
+        value_buffer,
+    }
+}
+
+// =============================================================================
+// Anti-dependence: the residency rule as an edge-installer
+// =============================================================================
+
+/// Install WAR (anti-dependence) ordering edges — the residency rule, applied
+/// uniformly to EVERY writer with no node-kind dispatch: a node that writes
+/// buffer B must run after every unordered consumer of B's other residents,
+/// or an eager executor could clobber a value mid-read. For analyzer-admitted
+/// compute writes this adds nothing (the analysis proved their conflicting
+/// consumers dataflow-ordered), so in practice the installed edges are the
+/// transport (copy) edges — but the rule neither knows nor cares what a copy
+/// is.
+///
+/// Consumers span every op operand the op actually reads (transports' srcs
+/// included — a copy is just an op). Output slots are deliberately NOT edge
+/// targets: a writer unordered against a boundary promise is a contradiction
+/// for the certificate to reject, not an ordering to install. Poison results
+/// write nothing, so they are never writers (a future Alloc's "write"
+/// installs no binding).
+///
+/// Ordering is judged against the DATAFLOW graph only — a snapshot taken
+/// before any Anti edge exists. Judging the live graph is a verified
+/// miscompile: the Anti edge added for one hazard "orders" the OPPOSITE
+/// hazard (two copies swapping two buffers get one edge instead of two),
+/// converting a genuinely unschedulable plan into a silent wrong-answer
+/// schedule. Against the frozen graph the swap gets both edges and fails
+/// loudly at the lowering's schedulability check.
+pub(crate) fn install_anti_edges(bt: &mut BufferTensorIrGraph) {
+    let frozen = bt.dag.clone();
+    let mut writers: Vec<(NodeIndex, BufferId)> = Vec::new();
+    for index in frozen.node_indices() {
+        if let BtNode::Op { op, results, .. } = &frozen[index] {
+            for (result, tensor) in results.iter().enumerate() {
+                if op.result_writes_memory(result) {
+                    writers.push((index, tensor.buffer.clone()));
+                }
+            }
+        }
+    }
+    for (writer, buffer) in &writers {
+        let readers: Vec<NodeIndex> = frozen
+            .node_indices()
+            .filter(|&index| {
+                if index == *writer {
+                    return false; // a use cannot conflict with itself (RMW)
+                }
+                match &frozen[index] {
+                    BtNode::Op { op, operands, .. } => operands
+                        .iter()
+                        .enumerate()
+                        .any(|(i, t)| t.buffer == *buffer && op.operand_reads_memory(i)),
+                    BtNode::Input { .. } | BtNode::Output { .. } => false,
+                }
+            })
+            .collect();
+        for reader in readers {
+            let ordered =
+                petgraph::algo::has_path_connecting(&frozen, reader, *writer, None)
+                    || petgraph::algo::has_path_connecting(&frozen, *writer, reader, None);
+            if !ordered {
+                bt.dag.add_edge(
+                    reader,
+                    *writer,
+                    BtEdge::Anti {
+                        buffer: buffer.clone(),
+                    },
+                );
+            }
+        }
+    }
+}
+
+// =============================================================================
+// The semantic certificate
+// =============================================================================
+
+/// THE PLAN CERTIFICATE — the residency rule and the storage-lifetime rule,
+/// machine-checked on the finished BufferTensor graph before lowering,
+/// independent of every decision the analysis and placement passes made. A
+/// violation is a hard error, never a warning. Runs AFTER `optimize` (the
+/// storage-lifetime pass), because the lifetime arms certify what that pass
+/// constructs — allocs and frees must exist to be checked.
+///
+/// RESIDENCY: for every consumer R of a BufferTensor `(v, B)` and every
+/// writer W of buffer B, the graph's ordering edges (Data AND Anti) force W
+/// to run either before v's producer (the definition then overwrites W —
+/// harmless) or after R (R already observed its bytes). Any other
+/// interleaving means some legal schedule lets W clobber contents R still
+/// needs. Judged at BUFFER granularity — one buffer is one storage, no
+/// region reasoning (user decision 1b; programs needing disjoint-region
+/// cohabitation are rejected at input validation).
+///
+/// Two skips, both principled: `W == producer(v)` is the definition itself,
+/// and `W == R` is a node reading and writing one buffer — its intra-op
+/// safety is the op's own declared contract (the may-share permit), trusted
+/// by design. There are NO other exemptions: input validation guarantees no
+/// consumer of undefined contents exists, so every consumed residence must
+/// have a producer — a missing one is a construction bug and errors loudly.
+///
+/// STORAGE LIFETIME (Alloc/Free Phase 3): allocs and frees are recognized
+/// STRUCTURALLY from declared effects (never by label) — alloc-shaped = no
+/// operands, every result undefined; free-shaped = operands, no results.
+/// The certified rows:
+///   * minted (Allocated) buffer — exactly one alloc and exactly one free;
+///   * boundary + FreedBy::Program (donated) — no alloc, exactly one free,
+///     and the buffer must not back an output slot (donated storage does
+///     not outlive the call);
+///   * boundary + FreedBy::Caller — neither alloc nor free;
+///   * CONTAINMENT: every toucher of B (a node that observes or mutates
+///     B's bytes, plus the boundary slots) is path-ordered AFTER B's alloc
+///     and BEFORE B's free — otherwise some legal schedule uses storage
+///     that does not exist yet, or has already been destroyed;
+///   * a free has out-degree ZERO (nothing may ever depend on one).
+/// A buffer without a record certifies as CallerFrees — the declared-absence
+/// semantics; real pipeline graphs always carry records (input validation
+/// requires both declarations).
+///
+/// MLIR has no analogue: One-Shot Bufferization's guards all live inside the
+/// per-candidate analysis query, and nothing re-checks committed decisions.
+pub(crate) fn validate(bt: &BufferTensorIrGraph) -> Result<()> {
+    let mut producer: HashMap<(ClassId, BufferId), NodeIndex> = HashMap::new();
+    for index in bt.dag.node_indices() {
+        match &bt.dag[index] {
+            BtNode::Input { slots } => {
+                for slot in slots {
+                    producer.insert((slot.value.clone(), slot.buffer.clone()), index);
+                }
+            }
+            BtNode::Op { results, .. } => {
+                for tensor in results {
+                    producer.insert((tensor.value.clone(), tensor.buffer.clone()), index);
+                }
+            }
+            BtNode::Output { .. } => {}
+        }
+    }
+
+    let mut consumers: Vec<(NodeIndex, &BufferTensor)> = Vec::new();
+    let mut writers: Vec<(NodeIndex, &BufferTensor)> = Vec::new();
+    for index in bt.dag.node_indices() {
+        match &bt.dag[index] {
+            BtNode::Input { .. } => {}
+            BtNode::Op {
+                op,
+                operands,
+                results,
+                ..
+            } => {
+                for (operand, tensor) in operands.iter().enumerate() {
+                    if op.operand_reads_memory(operand) {
+                        consumers.push((index, tensor));
+                    }
+                }
+                for (result, tensor) in results.iter().enumerate() {
+                    if op.result_writes_memory(result) {
+                        writers.push((index, tensor));
+                    }
+                }
+            }
+            BtNode::Output { slots } => {
+                for slot in slots {
+                    consumers.push((index, slot));
+                }
+            }
+        }
+    }
+
+    let describe = |index: NodeIndex| -> String {
+        match &bt.dag[index] {
+            BtNode::Input { .. } => "the input boundary".to_string(),
+            BtNode::Op { op, .. } => op.label().to_string(),
+            BtNode::Output { .. } => "the output boundary".to_string(),
+        }
+    };
+
+    let mut space = petgraph::algo::DfsSpace::new(&bt.dag);
+    for (reader, tensor) in &consumers {
+        let Some(&def) = producer.get(&(tensor.value.clone(), tensor.buffer.clone())) else {
+            anyhow::bail!(
+                "plan validation failed: {} consumes value {} in buffer {:?} \
+                 which has no producer — every consumed residence is defined \
+                 (input validation forbids undefined reads), so this is a \
+                 construction bug",
+                describe(*reader),
+                tensor.value,
+                tensor.buffer,
+            );
+        };
+        for (writer, written) in &writers {
+            if written.buffer != tensor.buffer {
+                continue;
+            }
+            if *writer == def || *writer == *reader {
+                continue;
+            }
+            let before_def =
+                petgraph::algo::has_path_connecting(&bt.dag, *writer, def, Some(&mut space));
+            let after_read =
+                petgraph::algo::has_path_connecting(&bt.dag, *reader, *writer, Some(&mut space));
+            if !(before_def || after_read) {
+                anyhow::bail!(
+                    "plan validation failed: {} writes buffer {:?} unordered \
+                     against the read of value {} by {} (defined by {}) — \
+                     some legal schedule clobbers live contents",
+                    describe(*writer),
+                    tensor.buffer,
+                    tensor.value,
+                    describe(*reader),
+                    describe(def),
+                );
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The storage-lifetime arms (see the doc above). One walk collects,
+    // per buffer in first-appearance order (deterministic error reports),
+    // its allocs, frees, and touchers; the rows then certify counts,
+    // donation, containment, and the free-sink invariant.
+    // ------------------------------------------------------------------
+    let mut lifetime_order: Vec<BufferId> = Vec::new();
+    let mut seen: HashSet<BufferId> = HashSet::new();
+    let mut allocs: HashMap<BufferId, Vec<NodeIndex>> = HashMap::new();
+    let mut frees: HashMap<BufferId, Vec<NodeIndex>> = HashMap::new();
+    let mut touchers: HashMap<BufferId, Vec<NodeIndex>> = HashMap::new();
+    let mut output_bound: HashMap<BufferId, NodeIndex> = HashMap::new();
+    fn note(
+        buffer: &BufferId,
+        index: NodeIndex,
+        into: &mut HashMap<BufferId, Vec<NodeIndex>>,
+        seen: &mut HashSet<BufferId>,
+        order: &mut Vec<BufferId>,
+    ) {
+        if seen.insert(buffer.clone()) {
+            order.push(buffer.clone());
+        }
+        into.entry(buffer.clone()).or_default().push(index);
+    }
+    for index in bt.dag.node_indices() {
+        match &bt.dag[index] {
+            BtNode::Op {
+                op,
+                operands,
+                results,
+                ..
+            } => {
+                let alloc_shaped = operands.is_empty()
+                    && !results.is_empty()
+                    && (0..results.len()).all(|result| op.result_is_undefined(result));
+                let free_shaped = results.is_empty() && !operands.is_empty();
+                if alloc_shaped {
+                    for tensor in results {
+                        note(&tensor.buffer, index, &mut allocs, &mut seen, &mut lifetime_order);
+                    }
+                    continue;
+                }
+                if free_shaped {
+                    for tensor in operands {
+                        note(&tensor.buffer, index, &mut frees, &mut seen, &mut lifetime_order);
+                    }
+                    continue;
+                }
+                // A toucher observes or mutates bytes — the same effect-keyed
+                // definition the placement pass uses (metadata views stay
+                // invisible; their readers are touchers in their own right).
+                for (operand, tensor) in operands.iter().enumerate() {
+                    if op.operand_reads_memory(operand) {
+                        note(&tensor.buffer, index, &mut touchers, &mut seen, &mut lifetime_order);
+                    }
+                }
+                for (result, tensor) in results.iter().enumerate() {
+                    if op.result_writes_memory(result) {
+                        note(&tensor.buffer, index, &mut touchers, &mut seen, &mut lifetime_order);
+                    }
+                }
+            }
+            BtNode::Input { slots } => {
+                for slot in slots {
+                    note(&slot.buffer, index, &mut touchers, &mut seen, &mut lifetime_order);
+                }
+            }
+            BtNode::Output { slots } => {
+                for slot in slots {
+                    note(&slot.buffer, index, &mut touchers, &mut seen, &mut lifetime_order);
+                    output_bound.entry(slot.buffer.clone()).or_insert(index);
+                }
+            }
+        }
+    }
+
+    for buffer in &lifetime_order {
+        let buffer_allocs = allocs.get(buffer).map(Vec::as_slice).unwrap_or(&[]);
+        let buffer_frees = frees.get(buffer).map(Vec::as_slice).unwrap_or(&[]);
+        match buffer {
+            BufferId::Allocated(_) => {
+                if buffer_allocs.len() != 1 {
+                    anyhow::bail!(
+                        "plan validation failed: minted buffer {:?} has {} \
+                         allocation nodes — planner-minted storage is brought \
+                         into existence by exactly one alloc (was `optimize` \
+                         skipped?)",
+                        buffer,
+                        buffer_allocs.len(),
+                    );
+                }
+                if buffer_frees.len() != 1 {
+                    anyhow::bail!(
+                        "plan validation failed: minted buffer {:?} has {} \
+                         frees — planner-minted storage is destroyed exactly \
+                         once (minted implies FreedBy::Program; leaks and \
+                         double-frees are both errors)",
+                        buffer,
+                        buffer_frees.len(),
+                    );
+                }
+            }
+            BufferId::Boundary(_) => {
+                if let Some(&alloc) = buffer_allocs.first() {
+                    anyhow::bail!(
+                        "plan validation failed: caller storage {:?} is \
+                         program-allocated by {} — caller buffers exist at \
+                         launch and are never program-allocated",
+                        buffer,
+                        describe(alloc),
+                    );
+                }
+                let freed_by = bt
+                    .buffers
+                    .get(buffer)
+                    .map(|record| record.freed_by)
+                    .unwrap_or(crate::layout_ir::FreedBy::Caller);
+                match freed_by {
+                    crate::layout_ir::FreedBy::Program => {
+                        if buffer_frees.len() != 1 {
+                            anyhow::bail!(
+                                "plan validation failed: donated buffer {:?} \
+                                 (FreedBy::Program) has {} frees — donated \
+                                 storage is destroyed exactly once",
+                                buffer,
+                                buffer_frees.len(),
+                            );
+                        }
+                        if output_bound.contains_key(buffer) {
+                            anyhow::bail!(
+                                "plan validation failed: donated buffer {:?} \
+                                 (FreedBy::Program) backs an output slot — \
+                                 donated storage must not outlive the call",
+                                buffer,
+                            );
+                        }
+                    }
+                    crate::layout_ir::FreedBy::Caller => {
+                        if let Some(&free) = buffer_frees.first() {
+                            anyhow::bail!(
+                                "plan validation failed: caller-owned buffer \
+                                 {:?} (FreedBy::Caller) is freed by {} — the \
+                                 program must never destroy storage that \
+                                 outlives the call",
+                                buffer,
+                                describe(free),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // CONTAINMENT: every toucher inside [alloc, free].
+        let buffer_touchers = touchers.get(buffer).map(Vec::as_slice).unwrap_or(&[]);
+        for &alloc in buffer_allocs {
+            for &toucher in buffer_touchers {
+                if !petgraph::algo::has_path_connecting(&bt.dag, alloc, toucher, Some(&mut space))
+                {
+                    anyhow::bail!(
+                        "plan validation failed: {} touches buffer {:?} \
+                         unordered against its allocation — some legal \
+                         schedule uses storage before it exists",
+                        describe(toucher),
+                        buffer,
+                    );
+                }
+            }
+        }
+        for &free in buffer_frees {
+            for &toucher in buffer_touchers {
+                if !petgraph::algo::has_path_connecting(&bt.dag, toucher, free, Some(&mut space))
+                {
+                    anyhow::bail!(
+                        "plan validation failed: {} touches buffer {:?} \
+                         unordered against its free — some legal schedule \
+                         uses storage after it is destroyed",
+                        describe(toucher),
+                        buffer,
+                    );
+                }
+            }
+            if bt.dag.edges(free).next().is_some() {
+                anyhow::bail!(
+                    "plan validation failed: the free of buffer {:?} has an \
+                     outgoing edge — nothing may ever depend on a free \
+                     (out-degree zero by invariant)",
+                    buffer,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::MockOp;
+
+    fn cid(s: &str) -> ClassId {
+        ClassId::from(s)
+    }
+    fn vbuf(name: &str) -> BufferId {
+        BufferId::Boundary(cid(name))
+    }
+    fn bt(value: &str, buffer: &str) -> BufferTensor {
+        BufferTensor {
+            value: cid(value),
+            buffer: vbuf(buffer),
+        }
+    }
+    /// A writer node: produces its (written) result from no operands.
+    fn writer(dag: &mut DiGraph<BtNode, BtEdge>, result: BufferTensor) -> NodeIndex {
+        dag.add_node(BtNode::Op {
+            op: Box::new(MockOp::default()),
+            operands: Vec::new(),
+            results: vec![result],
+            ties: Vec::new(),
+        })
+    }
+    fn out(dag: &mut DiGraph<BtNode, BtEdge>, slots: Vec<BufferTensor>) -> NodeIndex {
+        dag.add_node(BtNode::Output { slots })
+    }
+    fn data(dag: &mut DiGraph<BtNode, BtEdge>, from: NodeIndex, to: NodeIndex, value: &str) {
+        dag.add_edge(from, to, BtEdge::Data { value: cid(value) });
+    }
+    fn graph(dag: DiGraph<BtNode, BtEdge>) -> BufferTensorIrGraph {
+        BufferTensorIrGraph {
+            dag,
+            buffers: HashMap::new(),
+            value_buffer: HashMap::new(),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // The semantic certificate, proven to REJECT (every pipeline test already
+    // exercises acceptance). These hand-build BufferTensor graphs the pipeline
+    // itself refuses to construct, and pin the exact violation the residency
+    // rule exists to catch.
+    // -------------------------------------------------------------------------
+
+    /// The two-unordered-writers miscompile: both write D, the boundary reads
+    /// the first writer's value, nothing orders the second. Buffer-granular:
+    /// there is no layout arm to excuse the pair (what tier-a formerly
+    /// admitted for differing region tags is now rejected uniformly).
+    #[test]
+    fn certificate_rejects_unordered_second_writer() {
+        let mut dag = DiGraph::new();
+        let w1 = writer(&mut dag, bt("v1", "D"));
+        let _w2 = writer(&mut dag, bt("v2", "D"));
+        let o = out(&mut dag, vec![bt("v1", "D")]);
+        data(&mut dag, w1, o, "v1");
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("unordered"), "{err}");
+    }
+
+    /// The same shape with the second writer ordered BEFORE the definition
+    /// (its bytes are overwritten before the read observes anything) is legal.
+    #[test]
+    fn certificate_accepts_writer_ordered_before_definition() {
+        let mut dag = DiGraph::new();
+        let w1 = writer(&mut dag, bt("v1", "D"));
+        let w2 = writer(&mut dag, bt("v2", "D"));
+        let o = out(&mut dag, vec![bt("v1", "D")]);
+        data(&mut dag, w1, o, "v1");
+        data(&mut dag, w2, w1, "v2");
+        validate(&graph(dag)).expect("writer before definition is overwritten");
+    }
+
+    /// A writer squeezed BETWEEN the definition and its read clobbers the
+    /// bytes the read still needs: rejected.
+    #[test]
+    fn certificate_rejects_write_between_definition_and_read() {
+        let mut dag = DiGraph::new();
+        let w1 = writer(&mut dag, bt("v1", "D"));
+        let w2 = writer(&mut dag, bt("v2", "D"));
+        let o = out(&mut dag, vec![bt("v1", "D")]);
+        data(&mut dag, w1, w2, "v1");
+        data(&mut dag, w2, o, "v2");
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("unordered"), "{err}");
+    }
+
+    /// Definition chains are total: input validation forbids undefined reads,
+    /// so a consumed residence with no producer is a construction bug and
+    /// errors loudly (the successor of the old `def: None` tripwire).
+    #[test]
+    fn certificate_rejects_consumer_with_no_producer() {
+        let mut dag = DiGraph::new();
+        dag.add_node(BtNode::Op {
+            op: Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
+            operands: vec![bt("v", "D")],
+            results: vec![bt("r", "A")],
+            ties: Vec::new(),
+        });
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("no producer"), "{err}");
+    }
+
+    // -------------------------------------------------------------------------
+    // The storage-lifetime arms, proven to REJECT (every pipeline test
+    // exercises acceptance — each fixture's allocs, frees, and donated
+    // buffers pass through these rows). Hand-built graphs the placement pass
+    // itself refuses to construct.
+    // -------------------------------------------------------------------------
+
+    fn abt(value: &str, buffer: u32) -> BufferTensor {
+        BufferTensor {
+            value: cid(value),
+            buffer: BufferId::Allocated(buffer),
+        }
+    }
+    fn alloc(dag: &mut DiGraph<BtNode, BtEdge>, poison: BufferTensor) -> NodeIndex {
+        dag.add_node(BtNode::Op {
+            op: Box::new(BufferAlloc),
+            operands: Vec::new(),
+            results: vec![poison],
+            ties: Vec::new(),
+        })
+    }
+    fn free_node(dag: &mut DiGraph<BtNode, BtEdge>, resident: BufferTensor) -> NodeIndex {
+        dag.add_node(BtNode::Op {
+            op: Box::new(BufferFree),
+            operands: vec![resident],
+            results: Vec::new(),
+            ties: Vec::new(),
+        })
+    }
+    /// A reader node: consumes its operand, produces an unrelated result.
+    fn reader(
+        dag: &mut DiGraph<BtNode, BtEdge>,
+        operand: BufferTensor,
+        result: BufferTensor,
+    ) -> NodeIndex {
+        dag.add_node(BtNode::Op {
+            op: Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
+            operands: vec![operand],
+            results: vec![result],
+            ties: Vec::new(),
+        })
+    }
+    /// A graph whose buffer table declares `freed_by` for the named boundary
+    /// buffers (hand-built graphs otherwise certify under the declared-absence
+    /// default, CallerFrees).
+    fn graph_with_records(
+        dag: DiGraph<BtNode, BtEdge>,
+        records: Vec<(&str, crate::layout_ir::FreedBy)>,
+    ) -> BufferTensorIrGraph {
+        let mut buffers = HashMap::new();
+        for (name, freed_by) in records {
+            let id = vbuf(name);
+            buffers.insert(
+                id.clone(),
+                Buffer {
+                    id,
+                    access: Access::ReadWrite,
+                    freed_by,
+                    owner: crate::bufferize::Owner::Caller,
+                    label: name.to_string(),
+                },
+            );
+        }
+        BufferTensorIrGraph {
+            dag,
+            buffers,
+            value_buffer: HashMap::new(),
+        }
+    }
+
+    /// A minted buffer with storage but no alloc: some legal schedule uses
+    /// storage that was never brought into existence.
+    #[test]
+    fn lifetime_rejects_minted_buffer_without_alloc() {
+        let mut dag = DiGraph::new();
+        let w = writer(&mut dag, abt("v", 7));
+        let o = out(&mut dag, vec![abt("v", 7)]);
+        data(&mut dag, w, o, "v");
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("allocation nodes"), "{err}");
+    }
+
+    /// A minted buffer allocated twice is a double-alloc.
+    #[test]
+    fn lifetime_rejects_double_alloc() {
+        let mut dag = DiGraph::new();
+        let a1 = alloc(&mut dag, abt("p1", 7));
+        let _a2 = alloc(&mut dag, abt("p2", 7));
+        let w = writer(&mut dag, abt("v", 7));
+        let f = free_node(&mut dag, abt("v", 7));
+        data(&mut dag, a1, w, "p1");
+        data(&mut dag, w, f, "v");
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("2 allocation nodes"), "{err}");
+    }
+
+    /// A minted buffer that is never freed is a leak.
+    #[test]
+    fn lifetime_rejects_minted_buffer_without_free() {
+        let mut dag = DiGraph::new();
+        let a = alloc(&mut dag, abt("p", 7));
+        let w = writer(&mut dag, abt("v", 7));
+        data(&mut dag, a, w, "p");
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("0 frees"), "{err}");
+    }
+
+    /// USE AFTER FREE: a reader of the buffer with no ordering edge into the
+    /// free — some legal schedule reads destroyed storage.
+    #[test]
+    fn lifetime_rejects_use_after_free() {
+        let mut dag = DiGraph::new();
+        let a = alloc(&mut dag, abt("p", 7));
+        let w = writer(&mut dag, abt("v", 7));
+        let r = reader(&mut dag, abt("v", 7), bt("r", "R"));
+        let f = free_node(&mut dag, abt("v", 7));
+        data(&mut dag, a, w, "p");
+        data(&mut dag, w, r, "v");
+        data(&mut dag, w, f, "v");
+        // no r -> f ordering: the read races the free
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("after it is destroyed"), "{err}");
+    }
+
+    /// USE BEFORE ALLOC: a toucher with no ordering edge from the alloc —
+    /// some legal schedule writes storage that does not exist yet.
+    #[test]
+    fn lifetime_rejects_toucher_unordered_against_alloc() {
+        let mut dag = DiGraph::new();
+        let _a = alloc(&mut dag, abt("p", 7));
+        let w = writer(&mut dag, abt("v", 7));
+        let f = free_node(&mut dag, abt("v", 7));
+        data(&mut dag, w, f, "v");
+        // no a -> w ordering: the write races the allocation
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("before it exists"), "{err}");
+    }
+
+    /// Caller storage is never program-allocated.
+    #[test]
+    fn lifetime_rejects_alloc_on_caller_storage() {
+        let mut dag = DiGraph::new();
+        let _a = alloc(&mut dag, bt("p", "B"));
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("program-allocated"), "{err}");
+    }
+
+    /// Caller-owned storage (FreedBy::Caller — also the declared-absence
+    /// default) must never be freed by the program.
+    #[test]
+    fn lifetime_rejects_free_of_caller_owned_storage() {
+        let mut dag = DiGraph::new();
+        let w = writer(&mut dag, bt("v", "B"));
+        let f = free_node(&mut dag, bt("v", "B"));
+        data(&mut dag, w, f, "v");
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("freed by"), "{err}");
+    }
+
+    /// A donated buffer (FreedBy::Program) must be freed exactly once.
+    #[test]
+    fn lifetime_rejects_donated_buffer_without_free() {
+        let mut dag = DiGraph::new();
+        let _w = writer(&mut dag, bt("v", "D"));
+        let err = validate(&graph_with_records(
+            dag,
+            vec![("D", crate::layout_ir::FreedBy::Program)],
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("0 frees"), "{err}");
+    }
+
+    /// Donated storage must not outlive the call: binding it to an output
+    /// slot is a contradiction.
+    #[test]
+    fn lifetime_rejects_donated_buffer_backing_an_output() {
+        let mut dag = DiGraph::new();
+        let w = writer(&mut dag, bt("v", "D"));
+        let f = free_node(&mut dag, bt("v", "D"));
+        let o = out(&mut dag, vec![bt("v", "D")]);
+        data(&mut dag, w, f, "v");
+        data(&mut dag, w, o, "v");
+        let err = validate(&graph_with_records(
+            dag,
+            vec![("D", crate::layout_ir::FreedBy::Program)],
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("backs an output slot"), "{err}");
+    }
+
+    /// Nothing may ever depend on a free: out-degree zero by invariant.
+    #[test]
+    fn lifetime_rejects_free_with_an_outgoing_edge() {
+        let mut dag = DiGraph::new();
+        let a = alloc(&mut dag, abt("p", 7));
+        let w = writer(&mut dag, abt("v", 7));
+        let f = free_node(&mut dag, abt("v", 7));
+        let sink = writer(&mut dag, bt("unrelated", "X"));
+        data(&mut dag, a, w, "p");
+        data(&mut dag, w, f, "v");
+        data(&mut dag, f, sink, "v");
+        let err = validate(&graph(dag)).unwrap_err();
+        assert!(err.to_string().contains("outgoing edge"), "{err}");
+    }
+}

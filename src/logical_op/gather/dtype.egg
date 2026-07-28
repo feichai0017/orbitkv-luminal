@@ -1,0 +1,10 @@
+;Dtype Propagation : LogicalGather — the result carries the DATA's dtype.
+(rule
+  (
+    (= ?out_logical_tensor (LogicalGather ?data_logical ?coordinate_list))
+    (= ?data_dtype (dtype-of ?data_logical))
+  )
+  (
+    (set (dtype-of ?out_logical_tensor) ?data_dtype)
+  )
+)

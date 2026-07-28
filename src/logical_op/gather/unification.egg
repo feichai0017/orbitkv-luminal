@@ -1,0 +1,5 @@
+; The ALL-IOTA extraction (gather⇄view unification, approved 2026-07-24):
+; a coordinate list whose every element's class contains an iota, folded
+; to its index-map entry list. Class-level membership is deliberate and
+; sound: a coordinate proven EQUAL to an iota qualifies.
+(relation coordinate-iota-expressions (LogicalTensorList IntExprList))

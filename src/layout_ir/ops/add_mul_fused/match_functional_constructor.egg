@@ -1,0 +1,2 @@
+;                                    Input1      Input2      Out1    Out2
+(constructor LayoutTensorOpAddMulFusedGeneric (LayoutTensor LayoutTensor Layout Layout) LayoutTensorOp)

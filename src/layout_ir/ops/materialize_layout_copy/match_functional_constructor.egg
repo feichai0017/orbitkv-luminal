@@ -1,0 +1,2 @@
+; Generic Out-of-place Copy
+(constructor LayoutTensorOpCopyGeneric (LayoutTensor Layout) LayoutTensorOp)

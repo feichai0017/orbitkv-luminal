@@ -1,0 +1,9 @@
+; Shape Propagation : LogicalConstant — RANK 0, always: the empty shape.
+(rule
+  (
+    (= ?out_logical (LogicalConstant ?constant_value))
+  )
+  (
+    (set (shape-of ?out_logical) (ShapeLit (IntExprNil)))
+  )
+)

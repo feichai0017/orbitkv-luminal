@@ -1,0 +1,53 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: a DONATED input (Alloc/Free Phase 3) — the end-to-end
+; proof of the FreedBy::Program declaration path and of the certificate's
+; donated-buffer row.
+;
+; Semantics:
+; - x: [2,2] right-major in caller buffer 60, READ-ONLY and DONATED
+;   (ProgramFrees): the classic read-then-destroy shape — the program may
+;   only load the bytes, but destroying the storage after its last use is
+;   the program's responsibility, and the storage must not outlive the call.
+;   Access and FreedBy are deliberately orthogonal declarations.
+; - y = Sqrt(x), demanded right-major in caller buffer 61 (CallerFrees).
+;
+; Plan shape (pinned by the golden + the fixture test): one Sqrt kernel
+; reading buffer 60 and writing its seeded destination in buffer 61, then
+; ONE BufferFree consuming buffer 60, fenced AFTER the kernel's read by the
+; anti edge. No allocations, no copies. The certificate's lifetime arms
+; certify the row: donated => exactly one free, no alloc, not output-bound,
+; every toucher ordered before the free.
+
+(let x_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 2) (IntExprNil)))))
+(let x_dtype (F32))
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "donated_input") x_shape x_dtype))
+(let y_logical (LogicalSqrt x_logical))
+
+(let x_layout (RightMajorContiguousElementLayoutLit x_shape (bits-of x_dtype)))
+(let x_layout_tensor (LayoutTensorLit x_logical x_layout))
+(let x_buffer_id (BufferLit 60))
+(set (buffer-access-of x_buffer_id) (ReadOnly))
+(set (buffer-freed-by x_buffer_id) (ProgramFrees))
+(let x_input_buffer_tensor (BufferTensorLit x_layout_tensor x_buffer_id))
+
+(let y_output_layout (RightMajorContiguousElementLayoutLit x_shape (bits-of x_dtype)))
+(let y_output_layout_tensor (LayoutTensorLit y_logical y_output_layout))
+(let y_buffer_id (BufferLit 61))
+(set (buffer-access-of y_buffer_id) (ReadWrite))
+(set (buffer-freed-by y_buffer_id) (CallerFrees))
+(let y_output_buffer_tensor (BufferTensorLit y_output_layout_tensor y_buffer_id))
+
+(let input_boundary
+  (BufferInputLit (BufferTensorCons x_input_buffer_tensor (BufferTensorNil))))
+(let output
+  (BufferOutputLit (BufferTensorCons y_output_buffer_tensor (BufferTensorNil))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; The sqrt implementation derives (the plan behavior under test — the free
+; insertion and its ordering — lives in the golden, not the e-graph).
+(check
+  (= (LayoutTensorOpLit
+       (LayoutTensorCons x_layout_tensor (LayoutTensorNil))
+       (LayoutTensorCons y_output_layout_tensor (LayoutTensorNil)))
+     (LayoutTensorOpSqrtFunctionalGeneric x_layout_tensor y_output_layout)))

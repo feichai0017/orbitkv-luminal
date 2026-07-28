@@ -1,0 +1,1 @@
+(constructor LogicalReduceMax (LogicalTensor i64) LogicalTensor)

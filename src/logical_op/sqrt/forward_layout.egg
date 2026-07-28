@@ -1,0 +1,10 @@
+; Forward LayoutTensor Propagation : Logical Sqrt
+(rule
+  (
+    (= ?out_logical (LogicalSqrt ?in_logical))
+    (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?in_layout))
+  )
+  (
+    (let new_out_layout_tensor (LayoutTensorLit ?out_logical ?in_layout)) ; Forward Propagation
+  )
+)

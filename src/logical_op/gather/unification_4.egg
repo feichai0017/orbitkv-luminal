@@ -1,0 +1,20 @@
+; The unification itself — ONE DIRECTION ONLY (user ruling: never mint
+; gathers from views; the reverse would manufacture a gather plus one
+; iota per map entry inside every view's class). An all-iota gather IS a
+; view application: out[c] = data[e_0(c), .., e_{r-1}(c)] is exactly the
+; index map [e_0 .. e_{r-1}] applied at the coords' common shape. The
+; union is at the LOGICAL level; layout tensors keep implementations
+; honest (the view rides composed layouts, the materializers require
+; injective destinations). Termination: the minted map's entries are
+; EXISTING expression classes — no new expressions, no cycle back.
+(rule
+  (
+    (= ?out_logical (LogicalGather ?data_logical ?coordinate_list))
+    (coordinate-iota-expressions ?coordinate_list ?entry_expressions)
+    (= ?common_shape (coords-common-shape ?coordinate_list))
+  )
+  (
+    (union ?out_logical
+      (LogicalIndexMapApply ?data_logical (IndexMapLit ?entry_expressions) ?common_shape))
+  )
+)

@@ -1,0 +1,10 @@
+; Logical Scatter : coordinate-form scatter (R8 dual). One Int
+; coordinate tensor PER AXIS of the destination, all sharing the
+; SOURCE's shape: out[coords_0[c], .., coords_{r-1}[c]] = src[c] for
+; c over src's shape; everywhere else out = init (functional
+; copy-through — the logical op never mutates; in-place intent is a
+; BOUNDARY statement, result and init sharing one BufferId, resolved
+; by which implementations exist). Duplicate coordinates and
+; out-of-bounds coordinate VALUES are undefined behavior (user
+; ruling 2026-07-22). Field order: init, coords, src.
+(constructor LogicalScatter (LogicalTensor LogicalTensorList LogicalTensor) LogicalTensor)

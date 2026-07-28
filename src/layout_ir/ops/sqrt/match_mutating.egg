@@ -1,0 +1,24 @@
+; Mutating implementations: the kernel reads and overwrites its FIRST
+; operand's storage, so the match preconditions are (a) the output layout IS
+; the mutated operand's layout — the shared ?layout variable — and (b) the
+; written tensor is provably injective. The bufferization analysis decides
+; whether the mutation is actually admitted in place; a rejected tie
+; relocates the operand into fresh storage and mutates there (the kernel's
+; one-buffer contract is invariant under relocation).
+
+; Layout Tensor Op Sqrt Mutating
+(rule
+  (
+    (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?layout))
+    (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?layout))
+    (= ?out_logical (LogicalSqrt ?in_logical))
+    (= (injectivity-of ?out_layout_tensor) (Injective))
+  )
+  (
+    (let ?layout_tensor_op
+      (LayoutTensorOpLit
+        (LayoutTensorCons ?in_layout_tensor (LayoutTensorNil))
+        (LayoutTensorCons ?out_layout_tensor (LayoutTensorNil))))
+    (union ?layout_tensor_op (LayoutTensorOpSqrtMutatingGeneric ?in_layout_tensor))
+  )
+)

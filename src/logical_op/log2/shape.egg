@@ -1,0 +1,10 @@
+; Shape Propagation : LogicalLog2
+(rule
+  (
+    (= ?out_logical (LogicalLog2 ?in_logical))
+    (= ?shape (shape-of ?in_logical))
+  )
+  (
+    (set (shape-of ?out_logical) ?shape)
+  )
+)

@@ -1,0 +1,4 @@
+; Generic Iota : a ZERO-INPUT source op — writes the evaluated index
+; expression into its output. The expr, shape, and output layout are
+; metadata; the op list carries no tensor operands at all.
+(constructor LayoutTensorOpIotaGeneric (IntExpr Shape Layout) LayoutTensorOp)

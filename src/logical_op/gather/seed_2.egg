@@ -1,0 +1,8 @@
+(rule
+  (
+    (= ?out_logical_tensor (LogicalGather ?data_logical ?coordinate_list))
+  )
+  (
+    (coordinate-tensor-list ?coordinate_list)
+  )
+)

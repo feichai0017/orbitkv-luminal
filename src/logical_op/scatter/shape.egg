@@ -1,0 +1,12 @@
+; Shape Propagation : LogicalScatter — the result has INIT's shape (a
+; scatter preserves its destination's geometry; src/coords agreement is
+; gated positively at the op matches and closed at the terminal stratum).
+(rule
+  (
+    (= ?out_logical (LogicalScatter ?init_logical ?coordinate_list ?src_logical))
+    (= ?init_shape (shape-of ?init_logical))
+  )
+  (
+    (set (shape-of ?out_logical) ?init_shape)
+  )
+)

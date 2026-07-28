@@ -1,0 +1,2 @@
+; Generic IndexMapApply
+(constructor LayoutTensorOpIndexMapApplyMaterialize (LayoutTensor IndexMap Shape Layout) LayoutTensorOp) ; This one is going to be very tough

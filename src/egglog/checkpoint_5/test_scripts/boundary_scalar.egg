@@ -1,0 +1,56 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: scalars end to end (Stage R9). Two rank-0 shapes at
+; once — a scalar SOURCE (the bias constant, broadcast up to [3, 5] and
+; added to a real input) and a scalar SINK (the biased field fully reduced
+; back down to rank 0 and written into a rank-0 caller buffer). The plan
+; must materialize or view the broadcast (extraction's choice), and the
+; rank-0 output buffer holds exactly one F32 element.
+
+(let x_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprCons (IntLit 5) (IntExprNil)))))
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "scalar_x") x_shape (F32)))
+(let x_layout (RightMajorContiguousElementLayoutLit x_shape (bits-of (F32))))
+(let x_layout_tensor (LayoutTensorLit x_logical x_layout))
+
+(let bias_constant (LogicalConstant 1.5))
+(let bias_field (LogicalIndexMapApply bias_constant (IndexMapLit (IntExprNil)) x_shape))
+
+(let biased_logical (LogicalAdd x_logical bias_field))
+
+; full reduction back to rank 0: [3, 5] -> [5] -> ()
+(let row_total_logical (LogicalReduceSum biased_logical 0))
+(let total_logical (LogicalReduceSum row_total_logical 0))
+
+(let scalar_shape (ShapeLit (IntExprNil)))
+(let total_layout (RightMajorContiguousElementLayoutLit scalar_shape (bits-of (F32))))
+(let total_layout_tensor (LayoutTensorLit total_logical total_layout))
+
+(let x_buffer_id (BufferLit 320))
+(set (buffer-access-of x_buffer_id) (ReadOnly))
+(set (buffer-freed-by x_buffer_id) (CallerFrees))
+(let x_input_buffer_tensor (BufferTensorLit x_layout_tensor x_buffer_id))
+
+(let total_buffer_id (BufferLit 321))
+(set (buffer-access-of total_buffer_id) (ReadWrite))
+(set (buffer-freed-by total_buffer_id) (CallerFrees))
+(let total_output_buffer_tensor (BufferTensorLit total_layout_tensor total_buffer_id))
+
+(let input_boundary
+  (BufferInputLit (BufferTensorCons x_input_buffer_tensor (BufferTensorNil))))
+
+(let output
+  (BufferOutputLit (BufferTensorCons total_output_buffer_tensor (BufferTensorNil))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; The scalar source is implementable...
+(check
+  (= (LayoutTensorOpConstantGeneric 1.5 (RightMajorContiguousElementLayoutLit scalar_shape (bits-of (F32))))
+     (LayoutTensorOpLit
+       (LayoutTensorNil)
+       (LayoutTensorCons
+         (LayoutTensorLit bias_constant (RightMajorContiguousElementLayoutLit scalar_shape (bits-of (F32))))
+         (LayoutTensorNil)))))
+
+; ...and the rank-0 output slot carries the fully-reduced value.
+(check (= (layout-tensor-of total_output_buffer_tensor) total_layout_tensor))
+(check (= (buffer-id-of total_output_buffer_tensor) total_buffer_id))

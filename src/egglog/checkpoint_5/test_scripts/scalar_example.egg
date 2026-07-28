@@ -1,0 +1,84 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Scalar pins (Stage R9): RANK-0 tensors, adversarially. The consumer
+; shapes: LogicalConstant (one value, the empty shape — never a length-1
+; vector), broadcast of a scalar through the EMPTY index map, FULL
+; reduction down to rank 0, and scalar elementwise arithmetic. The pins
+; walk every subsystem a scalar touches: shape/rank/dtype propagation,
+; the source-op canonical mint over the empty shape, injectivity of a
+; one-element layout, the zero-input op match, and congruence dedup
+; (every (LogicalConstant 1.5) in a program IS one class).
+
+(let scalar_shape (ShapeLit (IntExprNil)))
+
+; --- the constant ---
+(let bias_constant (LogicalConstant 1.5))
+(let bias_constant_again (LogicalConstant 1.5))
+(let other_constant (LogicalConstant 2.5))
+(let scalar_layout (RightMajorContiguousElementLayoutLit scalar_shape (bits-of (F32))))
+
+; --- broadcast to [3, 5] through the empty index map ---
+(let bcast_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprCons (IntLit 5) (IntExprNil)))))
+(let bias_field (LogicalIndexMapApply bias_constant (IndexMapLit (IntExprNil)) bcast_shape))
+(let bcast_layout (RightMajorContiguousElementLayoutLit bcast_shape (bits-of (F32))))
+
+; --- full reduction: [4] -> rank 0 ---
+(let vec_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let vec_logical (LogicalTensorInputLit (LogicalIdLit "scalar_probe_vec") vec_shape (F32)))
+(let vec_layout (RightMajorContiguousElementLayoutLit vec_shape (bits-of (F32))))
+(let vec_layout_tensor (LayoutTensorLit vec_logical vec_layout))
+(let total_logical (LogicalReduceSum vec_logical 0))
+
+; --- scalar elementwise: rank-0 Add of the constant with the total ---
+(let shifted_total_logical (LogicalAdd total_logical bias_constant))
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; --- the constant: rank 0, F32, congruence-deduped ---
+(check (= (shape-of bias_constant) scalar_shape))
+(check (= (rank-of scalar_shape) 0))
+(check (= (dtype-of bias_constant) (F32)))
+(check (= bias_constant bias_constant_again))
+(fail (check (= bias_constant other_constant)))
+
+; --- the source mint: rank-0 canonical layout tensor, trivially injective ---
+(check (= (layout-of (LayoutTensorLit bias_constant scalar_layout)) scalar_layout))
+(check (= (injectivity-of (LayoutTensorLit bias_constant scalar_layout)) (Injective)))
+
+; --- the zero-input op match ---
+(check
+  (= (LayoutTensorOpConstantGeneric 1.5 scalar_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorNil)
+       (LayoutTensorCons (LayoutTensorLit bias_constant scalar_layout) (LayoutTensorNil)))))
+
+; --- broadcast: shape and dtype flow through the empty index map ---
+(check (= (shape-of bias_field) bcast_shape))
+(check (= (dtype-of bias_field) (F32)))
+; ...and the materializing implementation is available on the canonical
+; rank-2 destination (its layout is injective; the broadcast VIEW's
+; composed layout is deliberately not injective — one storage element).
+(check
+  (= (LayoutTensorOpIndexMapApplyMaterialize
+       (LayoutTensorLit bias_constant scalar_layout)
+       (IndexMapLit (IntExprNil))
+       bcast_shape
+       bcast_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorCons (LayoutTensorLit bias_constant scalar_layout) (LayoutTensorNil))
+       (LayoutTensorCons (LayoutTensorLit bias_field bcast_layout) (LayoutTensorNil)))))
+
+; --- full reduction lands on the empty shape with a rank-0 mint ---
+(check (= (shape-of total_logical) scalar_shape))
+(check (= (layout-of (LayoutTensorLit total_logical scalar_layout)) scalar_layout))
+
+; --- scalar elementwise: rank-0 add propagates shape and matches ---
+(check (= (shape-of shifted_total_logical) scalar_shape))
+(check
+  (= (LayoutTensorOpAddFunctionalGeneric
+       (LayoutTensorLit total_logical scalar_layout)
+       (LayoutTensorLit bias_constant scalar_layout)
+       scalar_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorCons (LayoutTensorLit total_logical scalar_layout)
+         (LayoutTensorCons (LayoutTensorLit bias_constant scalar_layout) (LayoutTensorNil)))
+       (LayoutTensorCons (LayoutTensorLit shifted_total_logical scalar_layout) (LayoutTensorNil)))))

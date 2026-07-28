@@ -1,0 +1,11 @@
+; Scatter locks SRC's shape to its coordinates' (the out shape is init's,
+; closed below — src is independent of out: a scatter writes a REGION).
+(rule
+  (
+    (= ?out_logical (LogicalScatter ?init_logical ?coordinate_list ?src_logical))
+  )
+  (
+    (coordinate-shape-lock ?src_logical ?coordinate_list)
+  )
+  :ruleset fixpoint-invariants
+)

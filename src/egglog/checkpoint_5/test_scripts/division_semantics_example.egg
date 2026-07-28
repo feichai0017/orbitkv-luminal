@@ -1,0 +1,101 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Division-semantics pins (Stage D1): the sign-witness suite for the
+; division family. The rounding mode lives in the constructor NAME, and
+; these pins make the semantics an enforced fact: if any future fold or
+; rule drifts toward a different rounding (the floor-vs-trunc trap, the
+; luminal CeilDiv bug), a witness here fails loudly.
+;
+;   IntTruncDiv / IntTruncRem: toward zero; remainder follows the
+;     dividend's sign (C / Rust / hardware).
+;   IntCeilDiv: toward +infinity (tile counts).
+;
+; Also pinned: interval propagation (four-corner quotients, the
+; anti-monotone negative-divisor case, the tile-coordinate remainder
+; refinement) and the fail-closed partiality gate (a divisor whose
+; bounds admit zero mints NOTHING).
+
+; --- fold witnesses: all four sign quadrants ---
+(let trunc_neg_pos (IntTruncDiv (IntLit -7) (IntLit 2)))
+(let trunc_pos_neg (IntTruncDiv (IntLit 7) (IntLit -2)))
+(let trunc_neg_neg (IntTruncDiv (IntLit -7) (IntLit -2)))
+(let trunc_pos_pos (IntTruncDiv (IntLit 7) (IntLit 2)))
+(let rem_neg_pos (IntTruncRem (IntLit -7) (IntLit 2)))
+(let rem_pos_neg (IntTruncRem (IntLit 7) (IntLit -2)))
+(let rem_exact (IntTruncRem (IntLit 64) (IntLit 8)))
+(let ceil_pos_pos (IntCeilDiv (IntLit 7) (IntLit 2)))
+(let ceil_exact (IntCeilDiv (IntLit 8) (IntLit 2)))
+(let ceil_neg_pos (IntCeilDiv (IntLit -40) (IntLit 3)))
+(let ceil_pos_neg (IntCeilDiv (IntLit 7) (IntLit -2)))
+(let ceil_neg_neg (IntCeilDiv (IntLit -7) (IntLit -2)))
+; the tile-count shape: a 4097-element dim in 64-wide tiles needs 65
+(let tile_count (IntCeilDiv (IntLit 4097) (IntLit 64)))
+
+; --- interval material ---
+(let bounded_dividend (IntVar "bounded_dividend"))
+(set (lower-bound-of bounded_dividend) (bigint 10))
+(set (upper-bound-of bounded_dividend) (bigint 20))
+(let negative_divisor (IntVar "negative_divisor"))
+(set (lower-bound-of negative_divisor) (bigint -4))
+(set (upper-bound-of negative_divisor) (bigint -2))
+(let maybe_zero_divisor (IntVar "maybe_zero_divisor"))
+(set (lower-bound-of maybe_zero_divisor) (bigint 0))
+(set (upper-bound-of maybe_zero_divisor) (bigint 8))
+
+(let quotient_pos_divisor (IntTruncDiv bounded_dividend (IntLit 3)))
+(let ceiling_pos_divisor (IntCeilDiv bounded_dividend (IntLit 3)))
+(let remainder_pos_divisor (IntTruncRem bounded_dividend (IntLit 3)))
+(let quotient_neg_divisor (IntTruncDiv bounded_dividend negative_divisor))
+(let remainder_neg_divisor (IntTruncRem bounded_dividend negative_divisor))
+; the fail-closed partiality gate: NOTHING may derive for this one
+(let quotient_maybe_zero (IntTruncDiv bounded_dividend maybe_zero_divisor))
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; --- truncation is TOWARD ZERO, all quadrants (fail-pins guard the
+; floor drift on the negative-dividend case) ---
+(check (= trunc_pos_pos (IntLit 3)))
+(check (= trunc_neg_pos (IntLit -3)))
+(fail (check (= trunc_neg_pos (IntLit -4))))
+(check (= trunc_pos_neg (IntLit -3)))
+(check (= trunc_neg_neg (IntLit 3)))
+
+; --- the remainder follows the DIVIDEND's sign ---
+(check (= rem_neg_pos (IntLit -1)))
+(check (= rem_pos_neg (IntLit 1)))
+(check (= rem_exact (IntLit 0)))
+
+; --- ceiling: up for positive quotients, and trunc ALREADY IS the
+; ceiling for negative quotients (the luminal integer-CeilDiv bug is the
+; fail-pin: their formula returns -12 here) ---
+(check (= ceil_pos_pos (IntLit 4)))
+(check (= ceil_exact (IntLit 4)))
+(check (= ceil_neg_pos (IntLit -13)))
+(fail (check (= ceil_neg_pos (IntLit -12))))
+(check (= ceil_pos_neg (IntLit -3)))
+(check (= ceil_neg_neg (IntLit 4)))
+(check (= tile_count (IntLit 65)))
+
+; --- interval propagation: positive divisor (monotone corners) ---
+(check (= (lower-bound-of quotient_pos_divisor) (bigint 3)))
+(check (= (upper-bound-of quotient_pos_divisor) (bigint 6)))
+; ceiling bounds: the D1 corner rule alone would give lower 3 (the +1
+; slack), but the D3 ceil->trunc bridge supplies the shifted-trunc
+; representative whose four-corner bounds are EXACT — the lattice keeps
+; the tighter [4, 7] (true ceil(10/3) = 4, ceil(20/3) = 7)
+(check (= (lower-bound-of ceiling_pos_divisor) (bigint 4)))
+(check (= (upper-bound-of ceiling_pos_divisor) (bigint 7)))
+; the tile-coordinate refinement: nonneg dividend, positive divisor
+(check (= (lower-bound-of remainder_pos_divisor) (bigint 0)))
+(check (= (upper-bound-of remainder_pos_divisor) (bigint 2)))
+
+; --- interval propagation: NEGATIVE divisor (anti-monotone; the corners
+; handle it: 10..20 / -4..-2 spans [-10, -2]) ---
+(check (= (lower-bound-of quotient_neg_divisor) (bigint -10)))
+(check (= (upper-bound-of quotient_neg_divisor) (bigint -2)))
+(check (= (lower-bound-of remainder_neg_divisor) (bigint -3)))
+(check (= (upper-bound-of remainder_neg_divisor) (bigint 3)))
+
+; --- the partiality gate: a divisor whose bounds admit zero mints NO
+; facts (fail-closed silence, never a wrong bound and never a panic) ---
+(fail (check (= (lower-bound-of quotient_maybe_zero) (bigint 1))))
+(fail (check (= (upper-bound-of quotient_maybe_zero) (bigint 20))))

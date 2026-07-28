@@ -1,0 +1,83 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Luminal op-parity pins (2026-07-24): the elementwise batch — Exp2, Log2,
+; Sin, Recip (unary pairs), Mod (binary pair), LessThan (Bool result,
+; functional only), Cast (the dtype-changing materializer) — plus the new
+; dtype vocabulary (luminal's 20 names, exact). Pinned per op: dtype and
+; shape propagation and the implementation match; plus the two special
+; cases that are NOT clones: LessThan's result is Bool with a CANONICAL
+; 8-bit destination (operand layouts must never forward onto it), and
+; Cast's destination carries the TARGET dtype's bit width.
+
+(let vec_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "parity_x") vec_shape (F32)))
+(let y_logical (LogicalTensorInputLit (LogicalIdLit "parity_y") vec_shape (F32)))
+(let f32_layout (RightMajorContiguousElementLayoutLit vec_shape (bits-of (F32))))
+(let x_layout_tensor (LayoutTensorLit x_logical f32_layout))
+(let y_layout_tensor (LayoutTensorLit y_logical f32_layout))
+
+(let exp2_logical (LogicalExp2 x_logical))
+(let log2_logical (LogicalLog2 x_logical))
+(let sin_logical (LogicalSin x_logical))
+(let recip_logical (LogicalRecip x_logical))
+(let mod_logical (LogicalMod x_logical y_logical))
+(let less_logical (LogicalLessThan x_logical y_logical))
+(let half_logical (LogicalCast x_logical (F16)))
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; --- the unary four: dtype and shape propagate; the functional match is
+; pinned in full for Exp2 (the other three are byte-identical clones) ---
+(check (= (dtype-of exp2_logical) (F32)))
+(check (= (dtype-of log2_logical) (F32)))
+(check (= (dtype-of sin_logical) (F32)))
+(check (= (dtype-of recip_logical) (F32)))
+(check (= (shape-of exp2_logical) vec_shape))
+(check (= (shape-of log2_logical) vec_shape))
+(check (= (shape-of sin_logical) vec_shape))
+(check (= (shape-of recip_logical) vec_shape))
+(check
+  (= (LayoutTensorOpExp2FunctionalGeneric x_layout_tensor f32_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorCons x_layout_tensor (LayoutTensorNil))
+       (LayoutTensorCons (LayoutTensorLit exp2_logical f32_layout) (LayoutTensorNil)))))
+; ...and the mutating sibling on the shared layout.
+(check
+  (= (LayoutTensorOpExp2MutatingGeneric x_layout_tensor)
+     (LayoutTensorOpLit
+       (LayoutTensorCons x_layout_tensor (LayoutTensorNil))
+       (LayoutTensorCons (LayoutTensorLit exp2_logical f32_layout) (LayoutTensorNil)))))
+
+; --- Mod: the binary pair ---
+(check (= (dtype-of mod_logical) (F32)))
+(check (= (shape-of mod_logical) vec_shape))
+(check
+  (= (LayoutTensorOpModFunctionalGeneric x_layout_tensor y_layout_tensor f32_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorCons x_layout_tensor
+         (LayoutTensorCons y_layout_tensor (LayoutTensorNil)))
+       (LayoutTensorCons (LayoutTensorLit mod_logical f32_layout) (LayoutTensorNil)))))
+
+; --- LessThan: Bool result in a CANONICAL 8-BIT destination ---
+(check (= (dtype-of less_logical) (Bool)))
+(check (= (shape-of less_logical) vec_shape))
+(let bool_layout (RightMajorContiguousElementLayoutLit vec_shape (bits-of (Bool))))
+(check (= (layout-of (LayoutTensorLit less_logical bool_layout)) bool_layout))
+(check
+  (= (LayoutTensorOpLessThanGeneric x_layout_tensor y_layout_tensor bool_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorCons x_layout_tensor
+         (LayoutTensorCons y_layout_tensor (LayoutTensorNil)))
+       (LayoutTensorCons (LayoutTensorLit less_logical bool_layout) (LayoutTensorNil)))))
+; ...and the operands' 32-bit layouts never forward onto the Bool result.
+(fail (check (= (layout-of (LayoutTensorLit less_logical f32_layout)) f32_layout)))
+
+; --- Cast: the destination carries the TARGET dtype's bit width ---
+(check (= (dtype-of half_logical) (F16)))
+(check (= (shape-of half_logical) vec_shape))
+(let f16_layout (RightMajorContiguousElementLayoutLit vec_shape (bits-of (F16))))
+(check (= (layout-of (LayoutTensorLit half_logical f16_layout)) f16_layout))
+(check
+  (= (LayoutTensorOpCastGeneric x_layout_tensor (F16) f16_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorCons x_layout_tensor (LayoutTensorNil))
+       (LayoutTensorCons (LayoutTensorLit half_logical f16_layout) (LayoutTensorNil)))))

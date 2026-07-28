@@ -1,0 +1,93 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Lattice-pair pins (Stage M1): IntMin / IntMax. The consumer shape is
+; the BOUNDARY TILE: the last tile of a ragged dim is
+; min(tile_size, remaining) wide, and wherever bounds decide which side
+; wins, the min folds away at compile time. Also pinned: folds across
+; sign quadrants, idempotency on symbolic classes, commutativity,
+; interval propagation, the value route certifying never-zero lattice
+; terms, substitution descent, and the refusals (overlapping intervals
+; collapse nothing — fail-closed).
+
+(let sequence_length (IntVar "sequence_length"))
+(set (lower-bound-of sequence_length) (bigint 2))
+(set (upper-bound-of sequence_length) (bigint 4096))
+; a full-tile tail: at least one whole tile remains
+(let full_remaining (IntVar "full_remaining"))
+(set (lower-bound-of full_remaining) (bigint 64))
+(set (upper-bound-of full_remaining) (bigint 200))
+; a ragged tail: strictly inside one tile
+(let ragged_remaining (IntVar "ragged_remaining"))
+(set (lower-bound-of ragged_remaining) (bigint 1))
+(set (upper-bound-of ragged_remaining) (bigint 63))
+; an undecided width: bounds straddle the tile size
+(let undecided_remaining (IntVar "undecided_remaining"))
+(set (lower-bound-of undecided_remaining) (bigint 1))
+(set (upper-bound-of undecided_remaining) (bigint 100))
+
+; folds, all sign quadrants
+(let fold_min_mixed (IntMin (IntLit 7) (IntLit -3)))
+(let fold_max_mixed (IntMax (IntLit 7) (IntLit -3)))
+(let fold_min_negative (IntMin (IntLit -7) (IntLit -3)))
+(let fold_max_negative (IntMax (IntLit -7) (IntLit -3)))
+
+; idempotency on a symbolic class
+(let idempotent_minimum (IntMin sequence_length sequence_length))
+(let idempotent_maximum (IntMax sequence_length sequence_length))
+
+; commutativity
+(let ordered_minimum (IntMin sequence_length (IntLit 64)))
+(let swapped_minimum (IntMin (IntLit 64) sequence_length))
+
+; the boundary-tile collapses
+(let full_tile_width (IntMin (IntLit 64) full_remaining))
+(let ragged_tile_width (IntMin (IntLit 64) ragged_remaining))
+(let undecided_tile_width (IntMin (IntLit 64) undecided_remaining))
+(let clamped_floor (IntMax (IntLit 64) ragged_remaining))
+
+; interval propagation material
+(let bounded_minimum (IntMin sequence_length (IntLit 7)))
+(let bounded_maximum (IntMax sequence_length (IntLit 7)))
+
+; substitution descent: a min over a coordinate through the identity map
+(let tile_coordinate (CoordVar 0 (IntLit 128)))
+(let coordinate_minimum (IntMin tile_coordinate (IntLit 64)))
+(let identity_rank1_map
+  (IndexMapLit (IntExprCons (CoordVar 0 (IntLit 128)) (IntExprNil))))
+(subst-demand coordinate_minimum identity_rank1_map)
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; --- folds ---
+(check (= fold_min_mixed (IntLit -3)))
+(check (= fold_max_mixed (IntLit 7)))
+(check (= fold_min_negative (IntLit -7)))
+(check (= fold_max_negative (IntLit -3)))
+
+; --- idempotency ---
+(check (= idempotent_minimum sequence_length))
+(check (= idempotent_maximum sequence_length))
+
+; --- commutativity: both operand orders share one class ---
+(check (= ordered_minimum swapped_minimum))
+
+; --- boundary tiles: bounds decide the winner and the min folds away ---
+(check (= full_tile_width (IntLit 64)))
+(check (= ragged_tile_width ragged_remaining))
+(check (= clamped_floor (IntLit 64)))
+; ...and an undecided width collapses to NEITHER side (fail-closed)
+(fail (check (= undecided_tile_width (IntLit 64))))
+(fail (check (= undecided_tile_width undecided_remaining)))
+
+; --- interval propagation: min/max are pointwise on endpoints ---
+(check (= (lower-bound-of bounded_minimum) (bigint 2)))
+(check (= (upper-bound-of bounded_minimum) (bigint 7)))
+(check (= (lower-bound-of bounded_maximum) (bigint 7)))
+(check (= (upper-bound-of bounded_maximum) (bigint 4096)))
+(check (= (lower-bound-of undecided_tile_width) (bigint 1)))
+(check (= (upper-bound-of undecided_tile_width) (bigint 64)))
+
+; --- the value route certifies never-zero lattice terms from bounds ---
+(check (provably-cannot-union-with-zero bounded_minimum))
+
+; --- substitution descends through the lattice pair ---
+(check (= (subst-of coordinate_minimum identity_rank1_map) coordinate_minimum))

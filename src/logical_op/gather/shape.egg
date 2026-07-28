@@ -1,0 +1,10 @@
+; Shape Propagation : LogicalGather — the coords' common shape IS the output shape.
+(rule
+  (
+    (= ?out_logical (LogicalGather ?data_logical ?coordinate_list))
+    (= ?common_shape (coords-common-shape ?coordinate_list))
+  )
+  (
+    (set (shape-of ?out_logical) ?common_shape)
+  )
+)

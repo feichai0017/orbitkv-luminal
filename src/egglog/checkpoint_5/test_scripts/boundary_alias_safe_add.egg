@@ -1,0 +1,56 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: z = x + x computed back into x's own buffer.
+;
+; The rhs read ALIASES the mutated storage — the exact shape the
+; input-alias-safe mutating add exists for: all three layouts are equal by
+; construction, so element i coincides everywhere and the may-share permit's
+; precondition is discharged at match time.
+
+(let x_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let x_dtype (F32))
+
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "alias_safe_x") x_shape x_dtype))
+(let z_logical (LogicalAdd x_logical x_logical))
+
+(let x_layout (RightMajorContiguousElementLayoutLit x_shape (bits-of x_dtype)))
+(let x_layout_tensor (LayoutTensorLit x_logical x_layout))
+(let z_layout_tensor (LayoutTensorLit z_logical x_layout))
+
+(let shared_buffer_id (BufferLit 250))
+(set (buffer-access-of shared_buffer_id) (ReadWrite))
+(set (buffer-freed-by shared_buffer_id) (CallerFrees))
+
+(let x_input_buffer_tensor
+  (BufferTensorLit x_layout_tensor shared_buffer_id))
+
+; Same BufferId as the input, but a new LayoutTensor for the accumulated value.
+(let z_output_buffer_tensor
+  (BufferTensorLit z_layout_tensor shared_buffer_id))
+
+(let input_boundary
+  (BufferInputLit
+    (BufferTensorCons x_input_buffer_tensor
+      (BufferTensorNil))))
+
+(let output
+  (BufferOutputLit
+    (BufferTensorCons z_output_buffer_tensor
+      (BufferTensorNil))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; In-place accumulation is represented by storage identity across the boundary.
+(check (= (buffer-id-of x_input_buffer_tensor)
+          (buffer-id-of z_output_buffer_tensor)))
+
+; Both match preconditions of the input-alias-safe implementation hold.
+(check (= (injectivity-of z_layout_tensor) (Injective)))
+(check
+  (= (input-layout-tensor-list-of
+       (LayoutTensorOpAddMutatingInputAliasSafeGeneric x_layout_tensor x_layout_tensor))
+     (LayoutTensorCons x_layout_tensor
+       (LayoutTensorCons x_layout_tensor (LayoutTensorNil)))))
+(check
+  (= (output-layout-tensor-list-of
+       (LayoutTensorOpAddMutatingInputAliasSafeGeneric x_layout_tensor x_layout_tensor))
+     (LayoutTensorCons z_layout_tensor (LayoutTensorNil))))

@@ -1,0 +1,13 @@
+; Forward LayoutTensor Propagation : Logical Gather — a fresh materialized
+; result: the canonical right-major contiguous layout tensor is minted from
+; the output's own shape and dtype (the reduces' canonical choice).
+(rule
+  (
+    (= ?out_logical (LogicalGather ?data_logical ?coordinate_list))
+    (= ?bits (bits-of (dtype-of ?out_logical)))
+    (= ?shape (shape-of ?out_logical))
+  )
+  (
+    (let out_layout_tensor (LayoutTensorLit ?out_logical (RightMajorContiguousElementLayoutLit ?shape ?bits)))
+  )
+)

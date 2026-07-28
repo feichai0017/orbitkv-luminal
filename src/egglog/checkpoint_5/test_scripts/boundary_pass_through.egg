@@ -1,0 +1,46 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: input is passed through to output unaltered.
+;
+; Semantics:
+; - input and output have the same logical tensor
+; - input and output have the same layout
+; - input and output have the same runtime buffer
+
+(let x_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let x_dtype (F32))
+
+(let x_logical (LogicalTensorInputLit (LogicalIdLit "pass_through_x") x_shape x_dtype))
+(let x_layout (RightMajorContiguousElementLayoutLit x_shape (bits-of x_dtype)))
+(let x_layout_tensor (LayoutTensorLit x_logical x_layout))
+
+(let x_buffer_id (BufferLit 200))
+(set (buffer-access-of x_buffer_id) (ReadWrite))
+(set (buffer-freed-by x_buffer_id) (CallerFrees))
+
+(let x_input_buffer_tensor
+  (BufferTensorLit x_layout_tensor x_buffer_id))
+
+; This is intentionally the same runtime object as the input boundary.
+(let x_output_buffer_tensor
+  (BufferTensorLit x_layout_tensor x_buffer_id))
+
+(let input_boundary
+  (BufferInputLit
+    (BufferTensorCons x_input_buffer_tensor
+      (BufferTensorNil))))
+
+(let output
+  (BufferOutputLit
+    (BufferTensorCons x_output_buffer_tensor
+      (BufferTensorNil))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; The output is exactly the input buffer tensor.
+(check (= x_input_buffer_tensor x_output_buffer_tensor))
+
+; The output points to the same logical/layout value and storage.
+(check (= (layout-tensor-of x_output_buffer_tensor) x_layout_tensor))
+(check (= (buffer-id-of x_output_buffer_tensor) x_buffer_id))
+(check (= (buffer-id-of x_input_buffer_tensor)
+          (buffer-id-of x_output_buffer_tensor)))

@@ -1,0 +1,10 @@
+;Dtype Propagation : LogicalConstant — F32, unconditionally (luminal
+; parity: their Constant is F32; a typed constant arrives with Cast).
+(rule
+  (
+    (= ?out_logical_tensor (LogicalConstant ?constant_value))
+  )
+  (
+    (set (dtype-of ?out_logical_tensor) (F32))
+  )
+)

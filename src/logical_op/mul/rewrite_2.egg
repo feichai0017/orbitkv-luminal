@@ -1,0 +1,5 @@
+; Logical Associativity : Mul
+(rewrite
+  (LogicalMul (LogicalMul ?lhs ?rhs) ?outer)
+  (LogicalMul ?lhs (LogicalMul ?rhs ?outer))
+)

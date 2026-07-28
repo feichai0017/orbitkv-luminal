@@ -1,0 +1,11 @@
+(rule
+  (
+    (coordinate-tensor-list ?coordinate_list)
+    (= ?coordinate_list (LogicalTensorCons ?head_logical ?rest_list))
+    (= ?head_logical (LogicalIota ?head_expr ?head_shape))
+    (coordinate-iota-expressions ?rest_list ?rest_expressions)
+  )
+  (
+    (coordinate-iota-expressions ?coordinate_list (IntExprCons ?head_expr ?rest_expressions))
+  )
+)

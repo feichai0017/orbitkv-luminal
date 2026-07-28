@@ -1,0 +1,61 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Multi-dim Iota pins (Stage R7): LogicalIota(expr, shape) — the value at
+; output coordinates (c0..ck) is the IntExpr evaluated with CoordVar(axis i)
+; bound to ci. Pinned here: the Int dtype rule, shape carried in the term,
+; the canonical right-major layout tensor minted for a SOURCE op (no input
+; layout tensor to propagate from), the injectivity token on that canonical
+; layout, the zero-input op match (inputs = Nil), and — the free win worth
+; stating — iota terms whose exprs are one IntExpr class ARE one logical
+; class: the whole expression machinery (folds, bounds, division) reaches
+; iota values with no iota-specific rules at all.
+
+; The row-major linear index over shape [3, 5]: axis 1 is the outer dim
+; (extent 3), axis 0 the inner (extent 5) — expr = c1*5 + c0.
+(let window_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprCons (IntLit 5) (IntExprNil)))))
+(let window_expr
+  (IntAdd
+    (IntMul (CoordVar 1 (IntLit 3)) (IntLit 5))
+    (CoordVar 0 (IntLit 5))))
+(let linear_iota (LogicalIota window_expr window_shape))
+
+; The canonical layout the source-op mint must produce.
+(let window_layout (RightMajorContiguousElementLayoutLit window_shape (bits-of (Int))))
+
+; Two spellings of one constant expr: the iota terms must land in ONE class
+; purely through IntExpr equality saturation.
+(let scalar_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let folded_iota (LogicalIota (IntAdd (IntLit 2) (IntLit 3)) scalar_shape))
+(let literal_iota (LogicalIota (IntLit 5) scalar_shape))
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; Iota authoring contract: every constructed iota demands its expression's
+; bounds — an absent entry fails the check loudly at the fixpoint.
+(check (= ?demanded_lower (lower-bound-of window_expr)))
+(check (= ?demanded_upper (upper-bound-of window_expr)))
+(check (= ?demanded_lower (lower-bound-of (IntAdd (IntLit 2) (IntLit 3)))))
+(check (= ?demanded_upper (upper-bound-of (IntAdd (IntLit 2) (IntLit 3)))))
+(check (= ?demanded_lower (lower-bound-of (IntLit 5))))
+(check (= ?demanded_upper (upper-bound-of (IntLit 5))))
+
+; --- dtype: index data is Int, unconditionally ---
+(check (= (dtype-of linear_iota) (Int)))
+
+; --- shape rides in the term ---
+(check (= (shape-of linear_iota) window_shape))
+
+; --- the source-op mint: the canonical right-major layout tensor exists,
+; carries its layout, and is provably injective ---
+(check (= (layout-of (LayoutTensorLit linear_iota window_layout)) window_layout))
+(check (= (injectivity-of (LayoutTensorLit linear_iota window_layout)) (Injective)))
+
+; --- the zero-input op match: inputs = Nil, one written output ---
+(check
+  (= (LayoutTensorOpIotaGeneric window_expr window_shape window_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorNil)
+       (LayoutTensorCons (LayoutTensorLit linear_iota window_layout) (LayoutTensorNil)))))
+
+; --- expression equality saturation reaches iota for free: 2+3 and 5 are
+; one IntExpr class, so the two iota terms are one logical class ---
+(check (= folded_iota literal_iota))

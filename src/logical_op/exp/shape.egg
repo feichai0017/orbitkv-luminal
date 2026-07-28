@@ -1,0 +1,10 @@
+; Shape Propagation : LogicalExp
+(rule
+  (
+    (= ?out_logical (LogicalExp ?in_logical))
+    (= ?shape (shape-of ?in_logical))
+  )
+  (
+    (set (shape-of ?out_logical) ?shape)
+  )
+)

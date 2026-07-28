@@ -1,0 +1,7 @@
+; Mutating (in-place) Ops: the kernel reads and overwrites ONE storage —
+; its first operand's — so they are matched only when the output layout
+; EQUALS the mutated operand's layout (and the write is injective). No
+; output Layout field: the input LayoutTensor determines it, so consing
+; stays truthful. Binary forms mutate operand 1 and read operand 2 from
+; anywhere.
+(constructor LayoutTensorOpSqrtMutatingGeneric (LayoutTensor) LayoutTensorOp)
