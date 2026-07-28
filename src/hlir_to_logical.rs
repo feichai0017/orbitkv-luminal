@@ -335,10 +335,24 @@ fn dtype_term(dtype: DType) -> String {
 }
 
 pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
+    hlir_to_logical_with_dims(graph, &graph.dyn_map, None)
+}
+
+/// [`hlir_to_logical`] with explicit dim pins and optional RANGE seeds.
+/// `dyn_map` pins every var numerically (geometry bookkeeping + the default
+/// tight-bound seeds). When `ranges` supplies an interval for a var, the
+/// binding seeds THAT interval instead of the tight pin — the bucket-wide
+/// render: analyses and fixpoint checks then hold over the whole bucket,
+/// while the numeric bookkeeping still uses the representative pin. A
+/// range-seeded program does NOT collapse to literals and is therefore for
+/// VALIDATION, not execution.
+pub fn hlir_to_logical_with_dims(
+    graph: &Graph,
+    dyn_map: &FxHashMap<char, usize>,
+    ranges: Option<&BTreeMap<char, (usize, usize)>>,
+) -> Result<LogicalProgram> {
     let order = toposort(&graph.graph, None)
         .map_err(|_| anyhow!("hlir_to_logical: HLIR graph has a cycle"))?;
-
-    let dyn_map = &graph.dyn_map;
     let mut pinned_vars: BTreeMap<char, usize> = BTreeMap::new();
     let mut values: FxHashMap<NodeIndex, ValueInfo> = FxHashMap::default();
     let mut inputs_text = String::new();
@@ -616,9 +630,13 @@ pub fn hlir_to_logical(graph: &Graph) -> Result<LogicalProgram> {
     // literal in the collapsed class).
     let mut seeds_text = String::new();
     for (var, value) in &pinned_vars {
+        let (lower, upper) = match ranges.and_then(|ranges| ranges.get(var)) {
+            Some((min, max)) => (*min, *max),
+            None => (*value, *value),
+        };
         seeds_text.push_str(&format!(
-            "(set (lower-bound-of (IntVar \"{var}\")) (bigint {value}))\n\
-             (set (upper-bound-of (IntVar \"{var}\")) (bigint {value}))\n"
+            "(set (lower-bound-of (IntVar \"{var}\")) (bigint {lower}))\n\
+             (set (upper-bound-of (IntVar \"{var}\")) (bigint {upper}))\n"
         ));
     }
 

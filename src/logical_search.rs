@@ -12,6 +12,7 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow, ensure};
+use std::collections::BTreeMap;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashMap;
@@ -184,6 +185,107 @@ pub fn search_logical(
     })
 }
 
+
+/// One bucket combination's finished search: the dim ranges it covers, the
+/// representative pins it was searched at, and the winning plan.
+#[derive(Debug)]
+pub struct BucketPlan {
+    pub ranges: BTreeMap<char, (usize, usize)>,
+    pub representative: FxHashMap<char, usize>,
+    pub program: LogicalProgram,
+    pub outcome: SearchOutcome,
+}
+
+/// Range-seeded bucketed search, mirroring their per-bucket model: one
+/// Cartesian combination of `DimBucket`s per search, each combination run
+/// TWICE — a bucket-wide RANGE-seeded render whose fixpoint checks prove
+/// the model sound over the whole interval (validation only; ranges do not
+/// collapse), then a representative-pinned render that is searched and
+/// profiled. `select_bucket` picks the covering plan at runtime.
+///
+/// Slice note (documented divergence from their symbolic LLIR): each
+/// winning plan is STATIC at its representative; executing at another pin
+/// re-renders — genome transfer across renders is future work.
+pub fn bucketed_search_logical(
+    graph: &crate::graph::Graph,
+    dim_buckets: &BTreeMap<char, Vec<crate::graph::DimBucket>>,
+    input_data: impl Fn(&FxHashMap<char, usize>) -> FxHashMap<i64, Vec<f32>>,
+    options: &LogicalSearchOptions,
+) -> Result<Vec<BucketPlan>> {
+    use crate::hlir_to_logical::hlir_to_logical_with_dims;
+    ensure!(!dim_buckets.is_empty(), "no dim buckets supplied");
+
+    // Cartesian combinations, dims in sorted order (their bucket_combinations).
+    let dims: Vec<&char> = dim_buckets.keys().collect();
+    let mut combos: Vec<Vec<usize>> = vec![Vec::new()];
+    for dim in &dims {
+        let count = dim_buckets[*dim].len();
+        combos = combos
+            .into_iter()
+            .flat_map(|combo| {
+                (0..count).map(move |index| {
+                    let mut next = combo.clone();
+                    next.push(index);
+                    next
+                })
+            })
+            .collect();
+    }
+
+    let mut plans = Vec::new();
+    for combo in combos {
+        let mut ranges = BTreeMap::new();
+        let mut representative = graph.dyn_map.clone();
+        for (dim, bucket_index) in dims.iter().zip(&combo) {
+            let bucket = &dim_buckets[*dim][*bucket_index];
+            ranges.insert(**dim, (bucket.min, bucket.max));
+            representative.insert(**dim, bucket.representative_value());
+        }
+
+        // Bucket-wide soundness: the range-seeded render must run its whole
+        // fixpoint (authoring-contract checks included) over the interval.
+        let validation =
+            hlir_to_logical_with_dims(graph, &representative, Some(&ranges))?;
+        let text = format!(
+            "{}\n\n{}",
+            crate::egglog_snippet::assembled_program(),
+            validation.text
+        );
+        crate::egglog_snippet::new_egraph()
+            .parse_and_run_program(None, &text)
+            .map_err(|err| anyhow!("bucket {ranges:?} fails bucket-wide validation: {err}"))?;
+
+        // Representative render: searched and profiled.
+        let program = hlir_to_logical_with_dims(graph, &representative, None)?;
+        let text = format!(
+            "{}\n\n{}",
+            crate::egglog_snippet::assembled_program(),
+            program.text
+        );
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph
+            .parse_and_run_program(None, &text)
+            .map_err(|err| anyhow!("bucket {ranges:?} representative render fails: {err}"))?;
+        let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
+        let data = input_data(&representative);
+        let outcome = search_logical(&serialized, &program, &data, options)?;
+        plans.push(BucketPlan { ranges, representative, program, outcome });
+    }
+    Ok(plans)
+}
+
+/// The covering bucket plan for a concrete dim assignment, if any.
+pub fn select_bucket<'a>(
+    plans: &'a [BucketPlan],
+    dims: &FxHashMap<char, usize>,
+) -> Option<&'a BucketPlan> {
+    plans.iter().find(|plan| {
+        plan.ranges.iter().all(|(dim, (min, max))| {
+            dims.get(dim).is_some_and(|value| value >= min && value <= max)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,4 +373,91 @@ mod tests {
             }
         }
     }
+
+    /// BUCKETED: two buckets over 'a', each validated bucket-wide
+    /// (range seeds) and searched at its representative; selection covers
+    /// runtime dims; each bucket's plan agrees with ReferenceRuntime at its
+    /// representative.
+    #[test]
+    fn bucketed_search_validates_searches_and_selects() {
+        use crate::graph::DimBucket;
+
+        let build = |dim: usize| {
+            let mut cx = Graph::new();
+            cx.set_dim('a', dim);
+            let x = cx.tensor(('a', 2));
+            let y = cx.tensor(('a', 2));
+            let out = (x * y).output();
+            (cx, x, y, out)
+        };
+
+        let buckets: BTreeMap<char, Vec<DimBucket>> = [(
+            'a',
+            vec![DimBucket::new(2, 4), DimBucket::new(5, 9)],
+        )]
+        .into();
+
+        // The graph used for SEARCH: built at any pin (per-bucket renders
+        // re-pin), sharing the same HLIR shape.
+        let (cx, x, y, _out) = build(3);
+        let data_for = |rep: &FxHashMap<char, usize>| {
+            let n = rep[&'a'] * 2;
+            let mut data = FxHashMap::default();
+            data.insert(x.id.index() as i64, (0..n).map(|v| v as f32 + 1.0).collect());
+            data.insert(y.id.index() as i64, (0..n).map(|v| v as f32 * 0.5).collect());
+            data
+        };
+        let plans = bucketed_search_logical(
+            &cx,
+            &buckets,
+            data_for,
+            &LogicalSearchOptions::default(),
+        )
+        .expect("bucketed search completes");
+        assert_eq!(plans.len(), 2, "one plan per bucket");
+
+        // Selection covers each bucket; out-of-range dims select nothing.
+        let mut dims = FxHashMap::default();
+        dims.insert('a', 3usize);
+        assert!(select_bucket(&plans, &dims).unwrap().ranges[&'a'] == (2, 4));
+        dims.insert('a', 7usize);
+        assert!(select_bucket(&plans, &dims).unwrap().ranges[&'a'] == (5, 9));
+        dims.insert('a', 20usize);
+        assert!(select_bucket(&plans, &dims).is_none());
+
+        // Numeric agreement at each bucket's representative.
+        for plan in &plans {
+            let rep = plan.representative[&'a'];
+            let (mut cx_ref, xr, yr, out_ref) = build(rep);
+            let data = data_for(&plan.representative);
+            cx_ref.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+            let mut theirs = cx_ref.search(
+                ReferenceRuntime::default(),
+                CompileOptions::default().search_graph_limit(1),
+            );
+            theirs.set_data(xr.id, data[&(x.id.index() as i64)].clone());
+            theirs.set_data(yr.id, data[&(y.id.index() as i64)].clone());
+            theirs.execute(&cx_ref.dyn_map);
+            let expected = theirs.get_f32(out_ref.id).clone();
+
+            let mut runtime = SsaReferenceRuntime::default();
+            runtime.load_plan(plan.outcome.best_plan.clone());
+            for (id, values) in &data {
+                runtime.set_data(*id, values.clone());
+            }
+            runtime.execute().expect("bucket plan executes at representative");
+            let ours = runtime
+                .get_f32(plan.program.output_slots[0].1 as i64)
+                .unwrap();
+            assert_eq!(ours.len(), expected.len());
+            for (index, (lhs, rhs)) in ours.iter().zip(&expected).enumerate() {
+                assert!(
+                    (lhs - rhs).abs() <= 1e-5 * rhs.abs().max(1.0),
+                    "bucket {:?} element {index}: ours {lhs} vs theirs {rhs}",
+                    plan.ranges
+                );
+            }
+        }
+    }
+
 }
