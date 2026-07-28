@@ -361,6 +361,64 @@ impl TestGraph {
 // Fixture path: real egglog scripts through the real extractor
 // =============================================================================
 
+/// Run `test_scripts/<script>` through egglog (with the full preamble) and
+/// hand back the serialized e-graph — the selection tooling's raw material.
+pub fn serialize_fixture(script: &str) -> egraph_serialize::EGraph {
+    use egglog::SerializeConfig;
+
+    let preamble = crate::egglog_snippet::assembled_program();
+    let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
+        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
+    let program = format!("{preamble}\n\n{source}");
+
+    let mut egraph = crate::egglog_snippet::new_egraph();
+    egraph
+        .parse_and_run_program(Some(script.to_string()), &program)
+        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
+    egraph.serialize(SerializeConfig::default()).egraph
+}
+
+/// Build a TOTAL genome over a fixture's produced classes: each class takes
+/// the first preference (an implementation constructor name) it can satisfy,
+/// falling back to its first candidate — the producer index is
+/// deterministically sorted, so the same preferences always build the same
+/// genome.
+pub fn genome_preferring(
+    egraph: &egraph_serialize::EGraph,
+    preferences: &[&str],
+) -> extractor::Genome {
+    let index = extractor::producer_index(egraph);
+    let mut genome = extractor::Genome::default();
+    for (class, candidates) in index {
+        let pick = preferences
+            .iter()
+            .find_map(|preferred| {
+                candidates
+                    .iter()
+                    .find(|(name, _)| name.as_str() == *preferred)
+            })
+            .or_else(|| candidates.first())
+            .expect("produced classes have candidates");
+        genome.choices.insert(class, pick.1.clone());
+    }
+    genome
+}
+
+/// Genome-driven fixture extraction (the selection adapter's walk) plus the
+/// plan fingerprint the search dedups on.
+pub fn extract_fixture_with_genome(
+    script: &str,
+    preferences: &[&str],
+) -> (ExtractedGraph, u64) {
+    let egraph = serialize_fixture(script);
+    let genome = genome_preferring(&egraph, preferences);
+    let graph = extractor::extract_layout_ir_with_genome(&egraph, &genome)
+        .expect("genome extraction runs")
+        .expect("genome extraction reaches the boundary");
+    let fingerprint = extractor::plan_fingerprint(&graph);
+    (graph, fingerprint)
+}
+
 /// Run `test_scripts/<script>` through egglog (with the full preamble) and the
 /// real extractor, returning the extracted graph. Panics on any failure — these
 /// are test fixtures.
@@ -1149,6 +1207,122 @@ mod harness_tests {
         g.output(&x, "B");
         let plan = bufferize::bufferize(&g.build()).expect("pass-through is legal");
         assert!(plan.summary().contains("ops (0):"), "{}", plan.summary());
+    }
+
+    /// GENOME WALK, consistent-fused: both boundary classes choose the SAME
+    /// fused enode; instance dedup (keyed by concrete enode) yields ONE
+    /// kernel claiming both output slots into the caller's buffers.
+    #[test]
+    fn genome_fused_choice_dedups_one_instance_claiming_both_slots() {
+        use crate::bufferize::BufferId;
+        use crate::layout_ir::ExtractedNode;
+
+        let (graph, _) = extract_fixture_with_genome(
+            "add_mul_fused.egg",
+            &["LayoutTensorOpAddMulFusedGeneric"],
+        );
+        let computes = graph
+            .dag
+            .node_weights()
+            .filter(|node| matches!(node, ExtractedNode::LayoutOp(_)))
+            .count();
+        assert_eq!(computes, 1, "instance dedup across both claimed slots");
+        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let allocs = plan
+            .buffers
+            .keys()
+            .filter(|id| matches!(id, BufferId::Allocated(_)))
+            .count();
+        assert_eq!(allocs, 0, "both slots land in caller buffers:\n{}", plan.summary());
+    }
+
+    /// GENOME WALK, the MIXED plan (the paper-walk's scenario 3, now
+    /// executable): the add value chooses the fused kernel, the mul value
+    /// chooses the standalone Mul. The fused instance's unclaimed mul slot
+    /// writes a fresh WASTE destination — allocated, written, freed unread —
+    /// instead of double-writing the caller's mul buffer (which the
+    /// two-writers tripwire would reject). Wasteful, correct, priced by
+    /// profiling: the single-mutation bridge between the pair and fused
+    /// plans.
+    #[test]
+    fn genome_mixed_choice_mints_a_waste_destination() {
+        use crate::bufferize::BufferId;
+        use crate::layout_ir::ExtractedNode;
+
+        let (graph, _) = extract_fixture_with_genome(
+            "add_mul_fused.egg",
+            &[
+                "LayoutTensorOpMulFunctionalGeneric",
+                "LayoutTensorOpAddMulFusedGeneric",
+            ],
+        );
+        let computes = graph
+            .dag
+            .node_weights()
+            .filter(|node| matches!(node, ExtractedNode::LayoutOp(_)))
+            .count();
+        assert_eq!(computes, 2, "fused kernel + standalone mul");
+        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let summary = plan.summary();
+        assert!(summary.contains("AddMulFusedGeneric"), "{summary}");
+        assert!(summary.contains("MulFunctionalGeneric"), "{summary}");
+        let allocs = plan
+            .buffers
+            .keys()
+            .filter(|id| matches!(id, BufferId::Allocated(_)))
+            .count();
+        assert_eq!(allocs, 1, "the unclaimed fused slot writes scratch:\n{summary}");
+    }
+
+    /// Many genomes, one plan: the fingerprint identifies the PLAN, so the
+    /// search can skip re-profiling genomes that build what it already
+    /// timed (plan-hash dedup ruling, 2026-07-27).
+    #[test]
+    fn genome_plan_fingerprints_identify_plans() {
+        let (_, fused_a) = extract_fixture_with_genome(
+            "add_mul_fused.egg",
+            &["LayoutTensorOpAddMulFusedGeneric"],
+        );
+        let (_, fused_b) = extract_fixture_with_genome(
+            "add_mul_fused.egg",
+            &["LayoutTensorOpAddMulFusedGeneric"],
+        );
+        let (_, mixed) = extract_fixture_with_genome(
+            "add_mul_fused.egg",
+            &[
+                "LayoutTensorOpMulFunctionalGeneric",
+                "LayoutTensorOpAddMulFusedGeneric",
+            ],
+        );
+        assert_eq!(fused_a, fused_b, "same genome, same plan, same fingerprint");
+        assert_ne!(fused_a, mixed, "different plans, different fingerprints");
+    }
+
+    /// Dead rows under a REAL genome: with the fused matmul chosen for the
+    /// output, the genome's rows for the product and the broadcast views
+    /// (fallback-filled) are never read — one kernel, no intermediate.
+    #[test]
+    fn genome_matmul_fused_choice_swallows_the_intermediate() {
+        use crate::bufferize::BufferId;
+        use crate::layout_ir::ExtractedNode;
+
+        let (graph, _) = extract_fixture_with_genome(
+            "matmul_fused_example.egg",
+            &["LayoutTensorOpMatMulFusedGeneric"],
+        );
+        let computes = graph
+            .dag
+            .node_weights()
+            .filter(|node| matches!(node, ExtractedNode::LayoutOp(_)))
+            .count();
+        assert_eq!(computes, 1, "dead rows: views and product never demanded");
+        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let allocs = plan
+            .buffers
+            .keys()
+            .filter(|id| matches!(id, BufferId::Allocated(_)))
+            .count();
+        assert_eq!(allocs, 0, "no intermediate buffer:\n{}", plan.summary());
     }
 
     /// CHAIN FUSION, fused route: selecting MatMulFusedGeneric demands

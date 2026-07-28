@@ -26,6 +26,9 @@ struct Extractor<'a> {
     op_specs: HashMap<ClassId, Vec<OpSpec>>,
     producer_index: HashMap<ClassId, Vec<ProducerRef>>,
     input_terminals: HashMap<ClassId, InputInfo>,
+    /// The search genome, when this walk is genome-driven (see [`Genome`]).
+    /// `None` = the deterministic fixture extractor (min-cost tooling).
+    genome: Option<&'a Genome>,
     memo: HashMap<ClassId, Option<Plan>>,
 }
 
@@ -104,17 +107,154 @@ pub fn extract_layout_ir(egraph: &EGraph) -> Result<Option<ExtractedGraph>> {
 /// constructor names — the test/debug lever for exercising a specific
 /// implementation. `None` allows every op; a program not implementable
 /// within the list fails extraction loudly.
+///
+/// Both this and [`extract_layout_ir`] are the DETERMINISTIC FIXTURE
+/// extractor (min-cost, tie-broken) — tooling for fixtures and goldens,
+/// not the selection mechanism. The search path is
+/// [`extract_layout_ir_with_genome`].
 pub fn extract_layout_ir_with_ops(
     egraph: &EGraph,
     allowed_ops: Option<&[&str]>,
 ) -> Result<Option<ExtractedGraph>> {
     let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
-    let mut extractor = Extractor::new(egraph, allowed);
+    let mut extractor = Extractor::new(egraph, allowed, None);
     extractor.extract()
 }
 
+/// One genome choice: the concrete implementation enode that produces the
+/// keyed LayoutTensor class, and which of its output slots carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducerChoice {
+    pub enode: NodeId,
+    pub output_index: usize,
+}
+
+/// The search genome: a per-LayoutTensor-class producer selection. The
+/// genome is the ONLY authority under [`extract_layout_ir_with_genome`] —
+/// it replaces both the cost choice and first-emission slot claiming. The
+/// contract is TOTALITY over produced classes: a demanded class that has
+/// producers but no entry fails extraction loudly (no silent substitution).
+/// Entries for classes the walk never demands are dead rows — legal and
+/// free (the reachability-kill semantics).
+#[derive(Debug, Clone, Default)]
+pub struct Genome {
+    pub choices: HashMap<ClassId, ProducerChoice>,
+}
+
+/// Genome-driven extraction — the selection adapter's walk. Starts from the
+/// binding outputs and instantiates exactly the genome's chosen producer
+/// per demanded class; multi-output instances dedup by enode; output slots
+/// the genome does NOT assign to their instance write anonymous waste
+/// destinations (fresh synthetic values, allocated and freed unread —
+/// waste-allowed, priced by profiling).
+#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
+pub fn extract_layout_ir_with_genome(
+    egraph: &EGraph,
+    genome: &Genome,
+) -> Result<Option<ExtractedGraph>> {
+    let mut extractor = Extractor::new(egraph, None, Some(genome));
+    extractor.extract()
+}
+
+/// Every LayoutTensor class's candidate producers, as
+/// `(implementation constructor name, choice)` pairs sorted for
+/// determinism — the raw material genome construction and mutation draw
+/// from. Classes with no producers (boundary inputs) are absent.
+#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
+pub fn producer_index(
+    egraph: &EGraph,
+) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
+    let extractor = Extractor::new(egraph, None, None);
+    let mut index = std::collections::BTreeMap::new();
+    for (class, producers) in &extractor.producer_index {
+        let mut entries: Vec<(String, ProducerChoice)> = Vec::new();
+        for producer in producers {
+            let Some(node_ids) = extractor.class_nodes.get(&producer.op_class) else {
+                continue;
+            };
+            for node_id in node_ids {
+                let Some(node) = extractor.egraph.nodes.get(node_id) else {
+                    continue;
+                };
+                if node.subsumed || !extractor.matchers.contains_key(node.op.as_str()) {
+                    continue;
+                }
+                entries.push((
+                    node.op.clone(),
+                    ProducerChoice {
+                        enode: node_id.clone(),
+                        output_index: producer.output_index,
+                    },
+                ));
+            }
+        }
+        if !entries.is_empty() {
+            entries.sort_by_key(|(name, choice)| {
+                (name.clone(), choice.enode.to_string(), choice.output_index)
+            });
+            index.insert(class.clone(), entries);
+        }
+    }
+    index
+}
+
+/// A stable fingerprint of a plan's SHAPE: the chosen instances (enode +
+/// claimed slots) and the dataflow between them. Many genomes map to one
+/// plan (dead rows are unread), so the search hashes the built plan and
+/// skips re-profiling duplicates (ruling 2026-07-27).
+#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
+pub fn plan_fingerprint(graph: &ExtractedGraph) -> u64 {
+    use petgraph::visit::EdgeRef;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    for index in graph.dag.node_indices() {
+        match &graph.dag[index] {
+            ExtractedNode::LayoutOp(op) => {
+                "op".hash(&mut hasher);
+                op.op.label().hash(&mut hasher);
+                if let crate::layout_ir::Provenance::Extracted {
+                    source_enode,
+                    selected_output_index,
+                    ..
+                } = &op.provenance
+                {
+                    source_enode.to_string().hash(&mut hasher);
+                    selected_output_index.hash(&mut hasher);
+                }
+                for output in &op.outputs {
+                    output.eclass.to_string().hash(&mut hasher);
+                }
+            }
+            ExtractedNode::BufferInput(input) => {
+                "in".hash(&mut hasher);
+                input.value.eclass.to_string().hash(&mut hasher);
+            }
+            ExtractedNode::BufferOutput(output) => {
+                "out".hash(&mut hasher);
+                for slot in &output.slots {
+                    slot.index.hash(&mut hasher);
+                    slot.value.to_string().hash(&mut hasher);
+                }
+            }
+        }
+    }
+    for edge in graph.dag.edge_references() {
+        edge.source().index().hash(&mut hasher);
+        edge.target().index().hash(&mut hasher);
+        edge.weight().port.hash(&mut hasher);
+        edge.weight().value.to_string().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 impl<'a> Extractor<'a> {
-    fn new(egraph: &'a EGraph, allowed_ops: Option<HashSet<String>>) -> Self {
+    fn new(
+        egraph: &'a EGraph,
+        allowed_ops: Option<HashSet<String>>,
+        genome: Option<&'a Genome>,
+    ) -> Self {
         let matchers = built_in_matchers()
             .into_iter()
             .filter(|matcher| {
@@ -144,6 +284,7 @@ impl<'a> Extractor<'a> {
             op_specs,
             producer_index,
             input_terminals,
+            genome,
             memo: HashMap::new(),
         }
     }
@@ -195,6 +336,24 @@ impl<'a> Extractor<'a> {
             }
         }
         candidates.extend(self.producer_candidates_for_output(class));
+
+        // GENOME AUTHORITY (the selection adapter): when a genome drives the
+        // walk, a class with producers is produced by EXACTLY its chosen
+        // enode/slot — never by cost, never by first-emission claiming. A
+        // produced class missing from the genome violates the total-genome
+        // contract: candidates empty out and extraction fails loudly at the
+        // root (fail-open, no silent substitution).
+        if let Some(genome) = self.genome {
+            if self.producer_index.contains_key(class) {
+                match genome.choices.get(class) {
+                    Some(choice) => candidates.retain(|candidate| {
+                        candidate.source_enode.as_ref() == Some(&choice.enode)
+                            && candidate.selected_output_index == Some(choice.output_index)
+                    }),
+                    None => candidates.clear(),
+                }
+            }
+        }
 
         for candidate in candidates {
             let mut cost = candidate.base_cost();
@@ -1672,6 +1831,21 @@ struct IrBuilder<'e, 'a> {
 }
 
 impl<'e, 'a> IrBuilder<'e, 'a> {
+    /// Whether an instantiated op's output slot BELONGS to its output class.
+    /// Without a genome every slot is claimed (the deterministic extractor's
+    /// first-emission behavior). Under a genome, a slot is claimed only if
+    /// the genome maps that class to exactly this enode and slot — the
+    /// genome, not emission order, decides ownership.
+    fn slot_claimed(&self, output: &ClassId, enode: &NodeId, slot: usize) -> bool {
+        match self.extractor.genome {
+            None => true,
+            Some(genome) => genome
+                .choices
+                .get(output)
+                .is_some_and(|choice| &choice.enode == enode && choice.output_index == slot),
+        }
+    }
+
     fn ensure_value(&mut self, class: &ClassId) -> Result<NodeIndex> {
         if let Some(index) = self.value_producer.get(class) {
             return Ok(*index);
@@ -1710,7 +1884,22 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
                 let outputs = plan
                     .output_list
                     .iter()
-                    .map(|output| self.extractor.layout_tensor_info(output))
+                    .enumerate()
+                    .map(|(slot, output)| {
+                        let mut info = self.extractor.layout_tensor_info(output);
+                        if !self.slot_claimed(output, &source_enode, slot) {
+                            // WASTE DESTINATION (genome walks only): this
+                            // instance computes the slot, but the genome
+                            // assigned the class to a different producer. A
+                            // fresh synthetic value identity (the poison-id
+                            // idiom) makes bufferize allocate scratch instead
+                            // of double-writing the class's real home.
+                            info.eclass =
+                                ClassId::from(format!("genome$waste${source_enode}${slot}"));
+                            info.label = format!("{} (unclaimed)", info.label);
+                        }
+                        info
+                    })
                     .collect::<Vec<_>>();
                 let inputs = plan
                     .children
@@ -1725,7 +1914,7 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
                     op: op.clone(),
                     provenance: crate::layout_ir::Provenance::Extracted {
                         op_eclass,
-                        source_enode,
+                        source_enode: source_enode.clone(),
                         selected_output_index: plan.selected_output_index.unwrap_or(0),
                     },
                     inputs,
@@ -1736,8 +1925,10 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
                 };
                 let index = self.dag.add_node(ExtractedNode::LayoutOp(node));
                 self.op_nodes.insert(key, index);
-                for output in &plan.output_list {
-                    self.value_producer.insert(output.clone(), index);
+                for (slot, output) in plan.output_list.iter().enumerate() {
+                    if self.slot_claimed(output, &source_enode, slot) {
+                        self.value_producer.insert(output.clone(), index);
+                    }
                 }
                 self.value_producer.insert(class.clone(), index);
 
