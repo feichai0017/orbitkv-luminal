@@ -131,6 +131,13 @@ impl OpSlotNames for ScatterFunctionalDps {
 }
 
 impl BufferTensorIrOp for ScatterFunctionalDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        scatter_reference(self.rank, ctx)
+    }
+
     fn label(&self) -> &str {
         "ScatterFunctionalGeneric" // DPS forms keep the IR name
     }
@@ -180,6 +187,13 @@ impl OpSlotNames for ScatterMutating {
 }
 
 impl BufferTensorIrOp for ScatterMutating {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        scatter_reference(self.rank, ctx)
+    }
+
     fn label(&self) -> &str {
         "ScatterMutatingGeneric"
     }
@@ -267,4 +281,42 @@ impl OpMatcher for ScatterMutatingMatcher {
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
         Box::new(ScatterMutating { rank: coordinate_rank(site, 2) })
     }
+}
+
+/// The shared scatter reference kernel: operands [init, src, coord0..] (+
+/// dest for the DPS form); dest starts as a copy of init, then
+/// dest[coords(i)] = src[i] over the src iteration space. Out-of-bounds
+/// coordinates are UB by ruling — surfaced LOUDLY here (their reference
+/// silently skips them; differentials must stay in bounds).
+fn scatter_reference(
+    rank: usize,
+    ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+) -> anyhow::Result<()> {
+    let init_dims = ctx.operand_dims[0].clone();
+    anyhow::ensure!(
+        init_dims.len() == rank,
+        "scatter kernel: init rank {} vs op rank {rank}",
+        init_dims.len()
+    );
+    let mut strides = vec![1usize; rank];
+    for k in (0..rank.saturating_sub(1)).rev() {
+        strides[k] = strides[k + 1] * init_dims[k + 1];
+    }
+    ctx.dests[0].copy_from_slice(&ctx.operands[0].clone());
+    let src = ctx.operands[1].clone();
+    for i in 0..src.len() {
+        let mut flat = 0usize;
+        for axis in 0..rank {
+            let coord = ctx.operands[2 + axis][i] as i64;
+            anyhow::ensure!(
+                coord >= 0 && (coord as usize) < init_dims[axis],
+                "scatter coordinate {coord} out of bounds for axis {axis} (extent {}) — \
+                 UB per ruling, surfaced loudly",
+                init_dims[axis]
+            );
+            flat += coord as usize * strides[axis];
+        }
+        ctx.dests[0][flat] = src[i];
+    }
+    Ok(())
 }

@@ -450,6 +450,103 @@ mod tests {
         assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
     }
 
+    /// MULTI-RANK gather differential: a 2-D nonzero-start slice lowers to
+    /// a flat iota over rank-2 data — the coordinate-decomposition bridge
+    /// (per-axis div/mod iotas) against their runtime.
+    #[test]
+    fn differential_two_dim_slice_against_reference_runtime() {
+        let build = || {
+            let mut cx = Graph::new();
+            let x = cx.tensor((4, 5));
+            let out = x.slice((1..3, 2..5)).output();
+            (cx, x, out)
+        };
+        let x_data: Vec<f32> = (0..20).map(|v| v as f32 * 1.5).collect();
+
+        let (mut cx, x, out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(x.id, x_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(out.id).clone();
+
+        let (cx2, x2, out2) = build();
+        let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
+        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+    }
+
+    /// REPEAT differential: tiling strides (z % d) lift into IntTruncRem
+    /// map entries.
+    #[test]
+    fn differential_repeat_against_reference_runtime() {
+        let build = || {
+            let mut cx = Graph::new();
+            let x = cx.tensor(3);
+            let y = cx.tensor(12);
+            let out = (x.repeat(4) * y).output();
+            (cx, x, y, out)
+        };
+        let x_data = vec![1.0, 2.0, 3.0];
+        let y_data: Vec<f32> = (0..12).map(|v| v as f32 + 0.5).collect();
+
+        let (mut cx, x, y, out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(x.id, x_data.clone());
+        theirs.set_data(y.id, y_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(out.id).clone();
+
+        let (cx2, x2, y2, out2) = build();
+        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+    }
+
+    /// SCATTER differential: src scattered into a copied dest at iota
+    /// positions — the KV-cache shape, flat-1-D bridge, both kernels'
+    /// init-copy semantics, against their runtime (in-bounds indices; OOB
+    /// diverges by design: they skip, we refuse).
+    #[test]
+    fn differential_scatter_against_reference_runtime() {
+        let build = || {
+            let mut cx = Graph::new();
+            let dest = cx.tensor(8);
+            let src = cx.tensor(3);
+            let indexes = cx.iota(crate::shape::Expression::from('z') * 2 + 1, 3);
+            let out = src.scatter(indexes, dest).output();
+            (cx, dest, src, out)
+        };
+        let dest_data: Vec<f32> = (0..8).map(|v| v as f32 * 10.0).collect();
+        let src_data = vec![-1.0, -2.0, -3.0];
+
+        let (mut cx, dest, src, out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(dest.id, dest_data.clone());
+        theirs.set_data(src.id, src_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(out.id).clone();
+
+        let (cx2, dest2, src2, out2) = build();
+        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+        assert!(
+            program.text.contains("LogicalScatter"),
+            "{}",
+            program.text
+        );
+        let ours = run_ssa(&cx2, &[(dest2.id, dest_data), (src2.id, src_data)]);
+        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+    }
+
     /// Reduction differential: sum over the front axis of a [2, 3] tensor,
     /// crossing the axis-convention flip and the reduce kernel.
     #[test]

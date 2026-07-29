@@ -33,6 +33,10 @@ pub enum IotaExpr {
     Coord(usize),
     Add(Box<IotaExpr>, Box<IotaExpr>),
     Mul(Box<IotaExpr>, Box<IotaExpr>),
+    /// Truncated (toward-zero) division — the preamble's IntTruncDiv.
+    TruncDiv(Box<IotaExpr>, Box<IotaExpr>),
+    /// Truncated remainder — the preamble's IntTruncRem.
+    TruncRem(Box<IotaExpr>, Box<IotaExpr>),
 }
 
 impl IotaExpr {
@@ -43,6 +47,10 @@ impl IotaExpr {
             IotaExpr::Coord(axis_from_end) => coords[coords.len() - 1 - axis_from_end] as i64,
             IotaExpr::Add(a, b) => a.eval(coords) + b.eval(coords),
             IotaExpr::Mul(a, b) => a.eval(coords) * b.eval(coords),
+            // Divisors are literal strides/extents (>= 1 by construction);
+            // a zero here is a translator bug and deserves the loud panic.
+            IotaExpr::TruncDiv(a, b) => a.eval(coords) / b.eval(coords),
+            IotaExpr::TruncRem(a, b) => a.eval(coords) % b.eval(coords),
         }
     }
 }
@@ -77,6 +85,16 @@ pub(crate) fn parse_int_expr(
         let lhs = parse_int_expr(site, &site.class_of_child(mul, 0)?, depth - 1)?;
         let rhs = parse_int_expr(site, &site.class_of_child(mul, 1)?, depth - 1)?;
         return Some(IotaExpr::Mul(Box::new(lhs), Box::new(rhs)));
+    }
+    if let Some(div) = site.node_in_class(class, "IntTruncDiv") {
+        let lhs = parse_int_expr(site, &site.class_of_child(div, 0)?, depth - 1)?;
+        let rhs = parse_int_expr(site, &site.class_of_child(div, 1)?, depth - 1)?;
+        return Some(IotaExpr::TruncDiv(Box::new(lhs), Box::new(rhs)));
+    }
+    if let Some(rem) = site.node_in_class(class, "IntTruncRem") {
+        let lhs = parse_int_expr(site, &site.class_of_child(rem, 0)?, depth - 1)?;
+        let rhs = parse_int_expr(site, &site.class_of_child(rem, 1)?, depth - 1)?;
+        return Some(IotaExpr::TruncRem(Box::new(lhs), Box::new(rhs)));
     }
     None
 }

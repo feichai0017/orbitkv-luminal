@@ -24,8 +24,8 @@ use rustc_hash::FxHashMap;
 use crate::dtype::DType;
 use crate::graph::Graph;
 use crate::hlir::{
-    Add, Constant, Exp2, Gather, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip, Sin,
-    Sqrt, SumReduce,
+    Add, Constant, Exp2, Gather, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip,
+    Scatter, Sin, Sqrt, SumReduce,
 };
 use crate::shape::{Expression, Term};
 use std::collections::BTreeMap;
@@ -87,11 +87,37 @@ fn parent_dims_from_tracker(
     let mut real: Vec<(usize, usize)> = Vec::new(); // (coefficient, extent)
     for (stride, &dim) in tracker.strides.iter().zip(&dims) {
         let stride = stride.resolve_vars(dyn_map);
-        let c = stride_coefficient(&stride).ok_or_else(|| {
-            anyhow!("hlir_to_logical slice 2: non-affine stride at {at} (repeat/slice — later slice)")
-        })?;
-        if c > 0 && dim > 1 {
-            real.push((c, dim));
+        match stride_coefficient(&stride) {
+            Some(c) => {
+                if c > 0 && dim > 1 {
+                    real.push((c, dim));
+                }
+            }
+            None => {
+                // A repeat axis: s(i) = c * (i % d). Recover c = s(1) and
+                // d = the first wrap-around zero, verify, and record the
+                // PARENT extent d (the view tiles it).
+                let recover = || -> Option<(usize, usize)> {
+                    let c = stride.exec_single_var_checked(1)?;
+                    if c == 0 {
+                        return None;
+                    }
+                    let d = (2..=dim).find(|&i| {
+                        stride.exec_single_var_checked(i) == Some(0)
+                    })?;
+                    (0..dim.min(2 * d + 2))
+                        .all(|i| stride.exec_single_var_checked(i) == Some(c * (i % d)))
+                        .then_some((c, d))
+                };
+                let Some((c, d)) = recover() else {
+                    bail!(
+                        "hlir_to_logical: non-affine stride at {at} (not a repeat pattern — later slice)"
+                    );
+                };
+                if d > 1 {
+                    real.push((c, d));
+                }
+            }
         }
     }
     real.sort_by(|a, b| b.0.cmp(&a.0));
@@ -132,15 +158,11 @@ fn lift_operand(
         return Ok((source.let_name.clone(), view_dims));
     }
 
-    let coefficients: Vec<usize> = tracker
+    let coefficients: Vec<Option<usize>> = tracker
         .strides
         .iter()
-        .map(|stride| {
-            stride_coefficient(&stride.resolve_vars(dyn_map)).ok_or_else(|| {
-                anyhow!("hlir_to_logical slice 2: non-affine stride at {at} (repeat/slice — later slice)")
-            })
-        })
-        .collect::<Result<_>>()?;
+        .map(|stride| stride_coefficient(&stride.resolve_vars(dyn_map)))
+        .collect();
 
     let parent = &source.dims;
     let mut parent_strides = vec![1usize; parent.len()];
@@ -151,20 +173,42 @@ fn lift_operand(
     // Match every real view axis to a unique parent axis by (stride, extent).
     let rank = view_dims.len();
     let mut consumed: Vec<Option<usize>> = vec![None; parent.len()];
+    let mut repeated: Vec<bool> = vec![false; parent.len()];
     for (axis, (&coefficient, &dim)) in coefficients.iter().zip(&view_dims).enumerate() {
-        if coefficient == 0 || dim == 1 {
+        if coefficient == Some(0) || dim == 1 {
             continue; // broadcast, or a degenerate axis whose index is always 0
         }
-        let matched = (0..parent.len()).find(|&k| {
-            consumed[k].is_none() && parent_strides[k] == coefficient && parent[k] == dim
-        });
-        let Some(k) = matched else {
-            bail!(
-                "hlir_to_logical slice 2: {at} axis {axis} (extent {dim}, stride {coefficient}) \
-                 matches no axis of parent {parent:?} (repeat/slice/merge — later slice)"
-            );
-        };
-        consumed[k] = Some(axis);
+        if let Some(coefficient) = coefficient {
+            let matched = (0..parent.len()).find(|&k| {
+                consumed[k].is_none() && parent_strides[k] == coefficient && parent[k] == dim
+            });
+            let Some(k) = matched else {
+                bail!(
+                    "hlir_to_logical: {at} axis {axis} (extent {dim}, stride {coefficient}) \
+                     matches no axis of parent {parent:?} (slice/merge — later slice)"
+                );
+            };
+            consumed[k] = Some(axis);
+        } else {
+            // Nonlinear stride: probe the REPEAT pattern s(i) = c * (i % d)
+            // against each unconsumed parent axis.
+            let stride = tracker.strides[axis].resolve_vars(dyn_map);
+            let matched = (0..parent.len()).find(|&k| {
+                consumed[k].is_none() && dim % parent[k] == 0 && {
+                    let (c, d) = (parent_strides[k], parent[k]);
+                    (0..dim.min(2 * d + 2))
+                        .all(|i| stride.exec_single_var_checked(i) == Some(c * (i % d)))
+                }
+            });
+            let Some(k) = matched else {
+                bail!(
+                    "hlir_to_logical: non-affine stride at {at} axis {axis} matches no \
+                     repeat pattern over parent {parent:?} — later slice"
+                );
+            };
+            consumed[k] = Some(axis);
+            repeated[k] = true;
+        }
     }
     for k in 0..parent.len() {
         ensure!(
@@ -179,7 +223,16 @@ fn lift_operand(
     let mut entries = "(IntExprNil)".to_string();
     for k in (0..parent.len()).rev() {
         let entry = match consumed[k] {
-            Some(axis) => format!("(CoordVar {} (IntLit {}))", rank - 1 - axis, view_dims[axis]),
+            Some(axis) => {
+                let coord =
+                    format!("(CoordVar {} (IntLit {}))", rank - 1 - axis, view_dims[axis]);
+                if repeated[k] {
+                    // Tiling: the view coordinate wraps over the parent extent.
+                    format!("(IntTruncRem {coord} (IntLit {}))", parent[k])
+                } else {
+                    coord
+                }
+            }
             None => "(IntLit 0)".to_string(),
         };
         entries = format!("(IntExprCons {entry} {entries})");
@@ -222,6 +275,14 @@ fn op_input_trackers(op: &dyn crate::op::HLIROp) -> Option<Vec<ShapeTracker>> {
     }
     if let Some(op) = op.downcast_ref::<Gather>() {
         return Some(op.input_shapes.clone());
+    }
+    if let Some(op) = op.downcast_ref::<Scatter>() {
+        // Source order [dest, indexes, src]; src iterates the index shape.
+        return Some(vec![
+            tracker_of(&op.dest_shape, &op.dest_strides),
+            tracker_of(&op.index_shape, &op.index_strides),
+            tracker_of(&op.index_shape, &op.src_strides),
+        ]);
     }
     if let Some(op) = op.downcast_ref::<SumReduce>() {
         return Some(vec![op.input_shape]);
@@ -354,13 +415,21 @@ fn int_expr_term(
                 })?;
                 stack.push(format!("(IntLit {value})"));
             }
-            Term::Add | Term::Mul => {
-                let top = stack.pop();
-                let (Some(a), Some(b)) = (top, stack.pop()) else {
+            Term::Add | Term::Mul | Term::Sub | Term::Div | Term::Mod => {
+                // Their builders emit RHS terms first, so the stack TOP is
+                // the LEFT operand (verified against as_op + the Sub impl).
+                let (Some(left), Some(right)) = (stack.pop(), stack.pop()) else {
                     bail!("hlir_to_logical: malformed index expression at {at}");
                 };
-                let op = if matches!(term, Term::Add) { "IntAdd" } else { "IntMul" };
-                stack.push(format!("({op} {b} {a})"));
+                let rendered = match term {
+                    Term::Add => format!("(IntAdd {left} {right})"),
+                    Term::Mul => format!("(IntMul {left} {right})"),
+                    Term::Sub => format!("(IntAdd {left} (IntMul (IntLit -1) {right}))"),
+                    Term::Div => format!("(IntTruncDiv {left} {right})"),
+                    Term::Mod => format!("(IntTruncRem {left} {right})"),
+                    _ => unreachable!(),
+                };
+                stack.push(rendered);
             }
             other => bail!(
                 "hlir_to_logical: index-expression term {other:?} at {at} — later slice"
@@ -371,6 +440,166 @@ fn int_expr_term(
         (Some(result), true) => Ok(result),
         _ => bail!("hlir_to_logical: malformed index expression at {at}"),
     }
+}
+
+/// A ShapeTracker rebuilt from an op's snapshot fields (Scatter carries
+/// dims/strides pairs rather than trackers).
+fn tracker_of(dims: &[Expression], strides: &[Expression]) -> ShapeTracker {
+    ShapeTracker {
+        dims: dims.iter().copied().collect(),
+        strides: strides.iter().copied().collect(),
+        element_stride_bits: 32,
+    }
+}
+
+/// The row-major flat index over `dims`, as CoordVar arithmetic (axes
+/// zero-based from the END).
+fn flat_index_term(dims: &[usize]) -> String {
+    let rank = dims.len();
+    let mut stride = 1usize;
+    let mut parts: Vec<String> = Vec::new();
+    for axis in (0..rank).rev() {
+        let coord = format!("(CoordVar {} (IntLit {}))", rank - 1 - axis, dims[axis]);
+        parts.push(if stride == 1 {
+            coord
+        } else {
+            format!("(IntMul {coord} (IntLit {stride}))")
+        });
+        stride *= dims[axis];
+    }
+    let mut term = parts.pop().unwrap_or_else(|| "(IntLit 0)".to_string());
+    while let Some(part) = parts.pop() {
+        term = format!("(IntAdd {part} {term})");
+    }
+    term
+}
+
+/// Numerically recover an affine form `c0 + Σ m_a · coord_a` of `eval`
+/// over the full (bounded) coordinate domain — VERIFIED at every point, so
+/// the recovered form is exact, not a guess. `None` = not affine, or the
+/// domain exceeds the probe bound.
+fn affine_over(dims: &[usize], eval: impl Fn(&[usize]) -> Option<i64>) -> Option<(i64, Vec<i64>)> {
+    const PROBE_BOUND: usize = 1 << 16;
+    let total: usize = dims.iter().product();
+    if total == 0 || total > PROBE_BOUND {
+        return None;
+    }
+    let rank = dims.len();
+    let origin = vec![0usize; rank];
+    let c0 = eval(&origin)?;
+    let mut slopes = vec![0i64; rank];
+    for axis in 0..rank {
+        if dims[axis] > 1 {
+            let mut unit = origin.clone();
+            unit[axis] = 1;
+            slopes[axis] = eval(&unit)? - c0;
+        }
+    }
+    let mut coords = vec![0usize; rank];
+    for flat in 0..total {
+        let mut remainder = flat;
+        for axis in (0..rank).rev() {
+            coords[axis] = remainder % dims[axis];
+            remainder /= dims[axis];
+        }
+        let predicted = c0
+            + coords
+                .iter()
+                .zip(&slopes)
+                .map(|(&coord, &slope)| coord as i64 * slope)
+                .sum::<i64>();
+        if eval(&coords)? != predicted {
+            return None;
+        }
+    }
+    Some((c0, slopes))
+}
+
+/// Render a recovered affine form as an IntExpr term over CoordVars.
+fn affine_term(c0: i64, slopes: &[i64], dims: &[usize]) -> String {
+    let rank = dims.len();
+    let mut parts: Vec<String> = Vec::new();
+    for (axis, &slope) in slopes.iter().enumerate() {
+        if slope == 0 {
+            continue;
+        }
+        let coord = format!("(CoordVar {} (IntLit {}))", rank - 1 - axis, dims[axis]);
+        parts.push(if slope == 1 {
+            coord
+        } else {
+            format!("(IntMul {coord} (IntLit {slope}))")
+        });
+    }
+    let mut term = if parts.is_empty() || c0 != 0 {
+        format!("(IntLit {c0})")
+    } else {
+        parts.remove(0)
+    };
+    for part in parts {
+        term = format!("(IntAdd {part} {term})");
+    }
+    term
+}
+
+/// Emit a consumer-shaped specialization of a recorded iota: the consumer's
+/// contiguous view of the flat generator becomes a fresh LogicalIota at the
+/// VIEW shape, substituting the row-major flat index for `z` — their
+/// flat-iota-reshaped-by-tracker idiom, absorbed at translation time.
+#[allow(clippy::too_many_arguments)]
+fn specialize_iota(
+    ops_text: &mut String,
+    post_checks: &mut String,
+    expr: &Expression,
+    range: usize,
+    tracker: &ShapeTracker,
+    dyn_map: &FxHashMap<char, usize>,
+    node_index: usize,
+    position: usize,
+) -> Result<(String, Vec<usize>)> {
+    let at = format!("t{node_index} operand {position} (iota)");
+    ensure!(
+        tracker.is_contiguous(),
+        "hlir_to_logical: iota through a non-contiguous view at {at} — later slice"
+    );
+    let view_dims: Vec<usize> = tracker
+        .dims
+        .iter()
+        .map(|dim| {
+            dim.exec(dyn_map)
+                .with_context(|| format!("hlir_to_logical: unpinned dim at {at}"))
+        })
+        .collect::<Result<_>>()?;
+    ensure!(
+        view_dims.iter().product::<usize>() == range,
+        "hlir_to_logical: iota view at {at} does not cover its range {range}"
+    );
+    let resolved = expr.resolve_vars(dyn_map);
+    let flat_of = |coords: &[usize]| -> Option<i64> {
+        let mut flat = 0usize;
+        for (axis, &coord) in coords.iter().enumerate() {
+            flat = flat * view_dims[axis] + coord;
+        }
+        resolved.exec_single_var_checked(flat).map(|v| v as i64)
+    };
+    // Affine forms (the slice/unfold family) get exact, DIV-FREE
+    // expressions recovered and verified over the whole domain; anything
+    // else falls back to the raw walk (div/mod included).
+    let value_expr = match affine_over(&view_dims, flat_of) {
+        Some((c0, slopes)) => affine_term(c0, &slopes, &view_dims),
+        None => {
+            let flat = flat_index_term(&view_dims);
+            int_expr_term(expr, &flat, dyn_map, &at)?
+        }
+    };
+    let shape = shape_term(&view_dims);
+    let name = format!("t{node_index}_operand{position}_iota");
+    ops_text.push_str(&format!("(let {name} (LogicalIota {value_expr} {shape}))\n"));
+    // The iota authoring contract: construction sites demand bounds.
+    post_checks.push_str(&format!(
+        "(check (= ?lo{node_index}_{position} (lower-bound-of {value_expr})))\n\
+         (check (= ?hi{node_index}_{position} (upper-bound-of {value_expr})))\n"
+    ));
+    Ok((name, view_dims))
 }
 
 fn dtype_term(dtype: DType) -> String {
@@ -397,6 +626,11 @@ pub fn hlir_to_logical_with_dims(
     let order = toposort(&graph.graph, None)
         .map_err(|_| anyhow!("hlir_to_logical: HLIR graph has a cycle"))?;
     let mut pinned_vars: BTreeMap<char, usize> = BTreeMap::new();
+    // Iota nodes: recorded, not emitted — every consumer SPECIALIZES the
+    // iota at its own view shape (flat index = the row-major sum over the
+    // consumer's coordinates), absorbing their flat-iota-reshaped-by-
+    // tracker idiom without any reshape machinery.
+    let mut iota_exprs: FxHashMap<NodeIndex, (Expression, usize)> = FxHashMap::default();
     let mut values: FxHashMap<NodeIndex, ValueInfo> = FxHashMap::default();
     let mut inputs_text = String::new();
     let mut ops_text = String::new();
@@ -453,12 +687,92 @@ pub fn hlir_to_logical_with_dims(
                 anyhow!("hlir_to_logical: Output at t{idx} has no source")
             })?;
             output_nodes.push((node, source, output.node));
+        } else if let Some(scatter) = dyn_op.downcast_ref::<Scatter>() {
+            // Their scatter: sources [dest, indexes, src]; output = copy(dest)
+            // then output[indexes[i]] = src[i] with FLAT positions into the
+            // dest view. Coordinate form coincides for RANK-1 dest (their
+            // scatter API is flat-1-D by contract); src iterates the INDEX
+            // shape through src_strides (zero-padded broadcasts included).
+            // OOB divergence: theirs silently skips, ours is UB surfaced
+            // loudly at the kernel.
+            ensure!(
+                sources.len() == 3,
+                "hlir_to_logical: scatter at t{idx} has {} sources",
+                sources.len()
+            );
+            let dest_tracker = tracker_of(&scatter.dest_shape, &scatter.dest_strides);
+            let index_tracker = tracker_of(&scatter.index_shape, &scatter.index_strides);
+            let src_tracker = tracker_of(&scatter.index_shape, &scatter.src_strides);
+            let trackers = [&dest_tracker, &index_tracker, &src_tracker];
+            let mut lifted = Vec::new();
+            for (position, (source, tracker)) in
+                sources.iter().zip(trackers).enumerate()
+            {
+                let source_value = values.get(source).ok_or_else(|| {
+                    anyhow!(
+                        "hlir_to_logical: t{idx} reads untranslated t{}",
+                        source.index()
+                    )
+                })?;
+                let entry = match iota_exprs.get(source) {
+                    Some((expr, range)) => specialize_iota(
+                        &mut ops_text,
+                        &mut post_checks,
+                        expr,
+                        *range,
+                        tracker,
+                        dyn_map,
+                        idx,
+                        position,
+                    )?,
+                    None => lift_operand(
+                        &mut ops_text,
+                        tracker,
+                        source_value,
+                        dyn_map,
+                        idx,
+                        position,
+                    )?,
+                };
+                lifted.push(entry);
+            }
+            let (dest_name, dest_dims) = &lifted[0];
+            let (index_name, index_dims) = &lifted[1];
+            let (src_name, src_dims) = &lifted[2];
+            ensure!(
+                dest_dims.len() == 1,
+                "hlir_to_logical: scatter at t{idx} over rank-{} dest — flat→coordinate \
+                 decomposition is a later slice",
+                dest_dims.len()
+            );
+            ensure!(
+                index_dims == src_dims,
+                "hlir_to_logical: scatter at t{idx} index shape {index_dims:?} vs src shape {src_dims:?}"
+            );
+            ops_text.push_str(&format!(
+                "(let t{idx}_logical (LogicalScatter {dest_name} \
+                 (LogicalTensorCons {index_name} (LogicalTensorNil)) {src_name}))\n"
+            ));
+            let out_dims = dest_dims.clone();
+            let dtype = values[&sources[2]].dtype;
+            values.insert(
+                node,
+                ValueInfo {
+                    let_name: format!("t{idx}_logical"),
+                    dims: out_dims,
+                    dtype,
+                },
+            );
         } else if dyn_op.downcast_ref::<Gather>().is_some() {
             // Their gather: sources [indexes, data]; out[i] = data_view[idx[i]]
-            // with idx FLAT into the data view. Our coordinate-form gather
-            // coincides exactly when the data view is RANK 1 (the slice
-            // lowering's shape); higher ranks need flat→coordinate div/mod
-            // decomposition — a later slice, refused loudly.
+            // with idx FLAT into the data view. Coordinate form needs one
+            // coordinate tensor per data axis:
+            //   * rank-1 data: the index tensor IS the coordinate — any
+            //     index source, including data-dependent lookups.
+            //   * rank-N data with an IOTA index source: per-axis coordinate
+            //     iotas (flat/stride % dim over the index expression) — the
+            //     slice/unfold family. Data-dependent rank-N refuses loudly
+            //     (needs tensor-level div/mod).
             let gather = dyn_op.downcast_ref::<Gather>().unwrap();
             ensure!(
                 sources.len() == 2,
@@ -467,31 +781,138 @@ pub fn hlir_to_logical_with_dims(
             );
             let trackers = &gather.input_shapes;
             ensure!(trackers.len() == 2, "gather at t{idx} missing trackers");
-            let index_source = values.get(&sources[0]).ok_or_else(|| {
-                anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", sources[0].index())
-            })?;
             let data_source = values.get(&sources[1]).ok_or_else(|| {
                 anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", sources[1].index())
             })?;
-            let (index_name, index_dims) =
-                lift_operand(&mut ops_text, &trackers[0], index_source, dyn_map, idx, 0)?;
-            let (data_name, data_dims) =
-                lift_operand(&mut ops_text, &trackers[1], data_source, dyn_map, idx, 1)?;
-            ensure!(
-                data_dims.len() == 1,
-                "hlir_to_logical: gather at t{idx} over rank-{} data — flat→coordinate \
-                 decomposition is a later slice",
-                data_dims.len()
-            );
+            let (data_name, data_dims) = match iota_exprs.get(&sources[1]) {
+                Some((expr, range)) => specialize_iota(
+                    &mut ops_text,
+                    &mut post_checks,
+                    expr,
+                    *range,
+                    &trackers[1],
+                    dyn_map,
+                    idx,
+                    1,
+                )?,
+                None => {
+                    lift_operand(&mut ops_text, &trackers[1], data_source, dyn_map, idx, 1)?
+                }
+            };
+
+            let (coord_list, out_dims) = if data_dims.len() == 1 {
+                let index_source = values.get(&sources[0]).ok_or_else(|| {
+                    anyhow!(
+                        "hlir_to_logical: t{idx} reads untranslated t{}",
+                        sources[0].index()
+                    )
+                })?;
+                let (index_name, index_dims) = match iota_exprs.get(&sources[0]) {
+                    Some((expr, range)) => specialize_iota(
+                        &mut ops_text,
+                        &mut post_checks,
+                        expr,
+                        *range,
+                        &trackers[0],
+                        dyn_map,
+                        idx,
+                        0,
+                    )?,
+                    None => lift_operand(
+                        &mut ops_text,
+                        &trackers[0],
+                        index_source,
+                        dyn_map,
+                        idx,
+                        0,
+                    )?,
+                };
+                (
+                    format!("(LogicalTensorCons {index_name} (LogicalTensorNil))"),
+                    index_dims,
+                )
+            } else {
+                let Some((index_expr, index_range)) = iota_exprs.get(&sources[0]) else {
+                    bail!(
+                        "hlir_to_logical: gather at t{idx} over rank-{} data with a \
+                         data-dependent index — later slice",
+                        data_dims.len()
+                    );
+                };
+                let index_tracker = &trackers[0];
+                ensure!(
+                    index_tracker.is_contiguous(),
+                    "hlir_to_logical: gather index view at t{idx} is non-contiguous — later slice"
+                );
+                let out_dims: Vec<usize> = index_tracker
+                    .dims
+                    .iter()
+                    .map(|dim| {
+                        dim.exec(dyn_map)
+                            .with_context(|| format!("hlir_to_logical: unpinned dim at t{idx}"))
+                    })
+                    .collect::<Result<_>>()?;
+                ensure!(
+                    out_dims.iter().product::<usize>() == *index_range,
+                    "hlir_to_logical: gather index view at t{idx} does not cover its range"
+                );
+                // Per-DATA-axis coordinates recovered as VERIFIED affine
+                // forms over the OUT coordinates (the slice/unfold family is
+                // affine; div/mod forms currently trip an egglog support
+                // tripwire — see the seam notes — and affine is better
+                // translation anyway). Non-affine coordinate maps refuse
+                // loudly.
+                let mut data_strides = vec![1usize; data_dims.len()];
+                for k in (0..data_dims.len().saturating_sub(1)).rev() {
+                    data_strides[k] = data_strides[k + 1] * data_dims[k + 1];
+                }
+                let resolved = index_expr.resolve_vars(dyn_map);
+                let value_of = |coords: &[usize]| -> Option<i64> {
+                    let mut flat = 0usize;
+                    for (axis, &coord) in coords.iter().enumerate() {
+                        flat = flat * out_dims[axis] + coord;
+                    }
+                    resolved.exec_single_var_checked(flat).map(|v| v as i64)
+                };
+                let shape = shape_term(&out_dims);
+                let mut coord_names = Vec::new();
+                for (k, (&stride, &dim)) in data_strides.iter().zip(&data_dims).enumerate() {
+                    let coord_of = |coords: &[usize]| -> Option<i64> {
+                        let value = value_of(coords)?;
+                        Some((value / stride as i64) % dim as i64)
+                    };
+                    let Some((c0, slopes)) = affine_over(&out_dims, coord_of) else {
+                        bail!(
+                            "hlir_to_logical: gather at t{idx} has a non-affine coordinate \
+                             map for data axis {k} — later slice"
+                        );
+                    };
+                    let coord_expr = affine_term(c0, &slopes, &out_dims);
+                    let name = format!("t{idx}_coord{k}_iota");
+                    ops_text.push_str(&format!(
+                        "(let {name} (LogicalIota {coord_expr} {shape}))\n"
+                    ));
+                    post_checks.push_str(&format!(
+                        "(check (= ?glo{idx}_{k} (lower-bound-of {coord_expr})))\n\
+                         (check (= ?ghi{idx}_{k} (upper-bound-of {coord_expr})))\n"
+                    ));
+                    coord_names.push(name);
+                }
+                let mut list = "(LogicalTensorNil)".to_string();
+                for name in coord_names.iter().rev() {
+                    list = format!("(LogicalTensorCons {name} {list})");
+                }
+                (list, out_dims)
+            };
+
             ops_text.push_str(&format!(
-                "(let t{idx}_logical (LogicalGather {data_name} \
-                 (LogicalTensorCons {index_name} (LogicalTensorNil))))\n"
+                "(let t{idx}_logical (LogicalGather {data_name} {coord_list}))\n"
             ));
             values.insert(
                 node,
                 ValueInfo {
                     let_name: format!("t{idx}_logical"),
-                    dims: index_dims,
+                    dims: out_dims,
                     dtype: data_source.dtype,
                 },
             );
@@ -515,25 +936,12 @@ pub fn hlir_to_logical_with_dims(
                 .1
                 .exec(dyn_map)
                 .with_context(|| format!("hlir_to_logical: unpinned iota range at t{idx}"))?;
-            // Their iota is a flat generator: value at flat index i is
-            // expr(z = i) over `range` = the shape product. Rank-1 [range]
-            // here; consumers' trackers reshape as needed.
-            let coord = format!("(CoordVar 0 (IntLit {extent}))");
-            let expr = int_expr_term(&iota.0, &coord, dyn_map, &format!("iota t{idx}"))?;
-            let shape = shape_term(&[extent]);
-            ops_text.push_str(&format!(
-                "(let t{idx}_logical (LogicalIota {expr} {shape}))\n"
-            ));
-            // The iota authoring contract: every construction site demands
-            // its expression's bounds at the fixpoint.
-            post_checks.push_str(&format!(
-                "(check (= ?lo{idx} (lower-bound-of {expr})))\n\
-                 (check (= ?hi{idx} (upper-bound-of {expr})))\n"
-            ));
+            // Recorded only — consumers specialize (see iota_exprs).
+            iota_exprs.insert(node, (iota.0, extent));
             values.insert(
                 node,
                 ValueInfo {
-                    let_name: format!("t{idx}_logical"),
+                    let_name: format!("t{idx}_iota"),
                     dims: vec![extent],
                     dtype: DType::Int,
                 },
@@ -578,7 +986,26 @@ pub fn hlir_to_logical_with_dims(
                         anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
                     })?;
                     let (operand_name, operand_dims) =
-                        lift_operand(&mut ops_text, tracker, source_value, dyn_map, idx, position)?;
+                        match iota_exprs.get(source) {
+                            Some((expr, range)) => specialize_iota(
+                                &mut ops_text,
+                                &mut post_checks,
+                                expr,
+                                *range,
+                                tracker,
+                                dyn_map,
+                                idx,
+                                position,
+                            )?,
+                            None => lift_operand(
+                                &mut ops_text,
+                                tracker,
+                                source_value,
+                                dyn_map,
+                                idx,
+                                position,
+                            )?,
+                        };
                     match &dims {
                         None => dims = Some(operand_dims),
                         Some(existing) if *existing == operand_dims => {}
@@ -623,8 +1050,21 @@ pub fn hlir_to_logical_with_dims(
                 let source_value = values.get(&source).ok_or_else(|| {
                     anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
                 })?;
-                let (operand_name, tracker_dims) =
-                    lift_operand(&mut ops_text, &tracker, source_value, dyn_map, idx, 0)?;
+                let (operand_name, tracker_dims) = match iota_exprs.get(&source) {
+                    Some((expr, range)) => specialize_iota(
+                        &mut ops_text,
+                        &mut post_checks,
+                        expr,
+                        *range,
+                        &tracker,
+                        dyn_map,
+                        idx,
+                        0,
+                    )?,
+                    None => {
+                        lift_operand(&mut ops_text, &tracker, source_value, dyn_map, idx, 0)?
+                    }
+                };
                 let rank = tracker_dims.len();
                 if dim >= rank {
                     bail!("hlir_to_logical: t{idx} reduces axis {dim} of rank-{rank} input");
@@ -658,10 +1098,28 @@ pub fn hlir_to_logical_with_dims(
 
     let mut outputs_text = String::new();
     let mut output_slots: Vec<(usize, u64)> = Vec::new();
+    let mut emitted_direct_iotas: std::collections::HashSet<NodeIndex> =
+        std::collections::HashSet::new();
     for (_, source, key) in &output_nodes {
         let value = values.get(source).ok_or_else(|| {
             anyhow!("hlir_to_logical: Output reads untranslated t{}", source.index())
         })?;
+        if let Some((expr, range)) = iota_exprs.get(source) {
+            if emitted_direct_iotas.insert(*source) {
+                let coord = format!("(CoordVar 0 (IntLit {range}))");
+                let value_expr =
+                    int_expr_term(expr, &coord, dyn_map, &format!("output iota t{key}"))?;
+                let shape = shape_term(&[*range]);
+                outputs_text.push_str(&format!(
+                    "(let {} (LogicalIota {value_expr} {shape}))\n",
+                    value.let_name
+                ));
+                post_checks.push_str(&format!(
+                    "(check (= ?oil{key} (lower-bound-of {value_expr})))\n\
+                     (check (= ?oih{key} (upper-bound-of {value_expr})))\n"
+                ));
+            }
+        }
         let shape = shape_term(&value.dims);
         let dtype = dtype_term(value.dtype);
         outputs_text.push_str(&format!(
