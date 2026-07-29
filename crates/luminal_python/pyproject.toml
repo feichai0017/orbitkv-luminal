@@ -10,6 +10,11 @@ dependencies = [
     "safetensors",
 ]
 
+# Makes torch.compile(model, backend="luminal") resolvable via torch's
+# entry-point discovery (and the default backend for luminal_generate).
+[project.entry-points."torch_dynamo_backends"]
+luminal = "luminal.main:luminal_backend"
+
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
