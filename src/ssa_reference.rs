@@ -450,32 +450,21 @@ mod tests {
         assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
     }
 
-    /// MULTI-RANK gather differential: a 2-D nonzero-start slice lowers to
-    /// a flat iota over rank-2 data — the coordinate-decomposition bridge
-    /// (per-axis div/mod iotas) against their runtime.
+    /// PIN of the frontend-seam limitation (ruling 2026-07-29): a 2-D
+    /// nonzero-start slice arrives with its per-axis structure already
+    /// flattened by their frontend (ShapeTracker carries no offsets, so
+    /// slice lowers to a flat iota + gather). Recovery is not a design;
+    /// the translator refuses LOUDLY until the structure is preserved at
+    /// the frontend seam.
     #[test]
-    fn differential_two_dim_slice_against_reference_runtime() {
-        let build = || {
-            let mut cx = Graph::new();
-            let x = cx.tensor((4, 5));
-            let out = x.slice((1..3, 2..5)).output();
-            (cx, x, out)
-        };
-        let x_data: Vec<f32> = (0..20).map(|v| v as f32 * 1.5).collect();
+    fn two_dim_slice_refuses_pending_the_frontend_seam() {
+        let mut cx = Graph::new();
+        let x = cx.tensor((4, 5));
+        let _out = x.slice((1..3, 2..5)).output();
 
-        let (mut cx, x, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(out.id).clone();
-
-        let (cx2, x2, out2) = build();
-        let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
-        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        let err = crate::hlir_to_logical::hlir_to_logical(&cx)
+            .expect_err("flattened per-axis structure must refuse, never be guessed");
+        assert!(err.to_string().contains("frontend"), "{err}");
     }
 
     /// REPEAT differential: tiling strides (z % d) lift into IntTruncRem

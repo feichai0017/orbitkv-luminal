@@ -53,18 +53,80 @@ struct ValueInfo {
     dtype: DType,
 }
 
-/// The affine-through-origin coefficient of a stride expression in `z`
-/// (`s(i) = c * i`) — `None` for anything nonlinear (repeat's modulo,
-/// offsets) or containing unresolved dyn vars.
-fn stride_coefficient(stride: &Expression) -> Option<usize> {
-    let s0 = stride.exec_single_var_checked(0)?;
-    let s1 = stride.exec_single_var_checked(1)?;
-    let s2 = stride.exec_single_var_checked(2)?;
-    let s3 = stride.exec_single_var_checked(3)?;
-    (s0 == 0 && s2 == 2 * s1 && s3 == 3 * s1).then_some(s1)
+/// Their expression, parsed into a tree (RPN with the stack TOP as the
+/// LEFT operand — verified against their `as_op` and the `Sub` impl).
+enum ExprTree {
+    Num(i64),
+    Var(char),
+    Op(Term, Box<ExprTree>, Box<ExprTree>),
 }
 
-/// Recover the CANONICAL parent dims (size-1 axes omitted — they are
+fn rpn_tree(expr: &Expression) -> Option<ExprTree> {
+    let mut stack: Vec<ExprTree> = Vec::new();
+    for term in expr.terms.read().iter() {
+        match term {
+            Term::Num(n) => stack.push(ExprTree::Num(*n)),
+            Term::Var(c) => stack.push(ExprTree::Var(*c)),
+            op => {
+                let left = stack.pop()?;
+                let right = stack.pop()?;
+                stack.push(ExprTree::Op(*op, Box::new(left), Box::new(right)));
+            }
+        }
+    }
+    if stack.len() == 1 { stack.pop() } else { None }
+}
+
+/// A stride expression's STRUCTURAL classification — syntax-directed over
+/// the parsed tree, so the recovered semantics are exact BY CONSTRUCTION
+/// (their tracker algebra emits these forms; anything else is a loud bail,
+/// never a guess — no evaluation, no probing, per the 2026-07-29 ruling).
+enum StrideForm {
+    /// Broadcast: contributes nothing.
+    Zero,
+    /// `c · z` (or bare `z`): an ordinary strided axis.
+    Affine(usize),
+    /// `c · (z % d)`: a repeat/tiling axis over a parent of extent `d`.
+    Repeat { stride: usize, extent: usize },
+}
+
+fn classify_stride(expr: &Expression) -> Option<StrideForm> {
+    fn positive(n: i64) -> Option<usize> {
+        (n > 0).then_some(n as usize)
+    }
+    let tree = rpn_tree(expr)?;
+    match tree {
+        ExprTree::Num(0) => Some(StrideForm::Zero),
+        ExprTree::Var('z') => Some(StrideForm::Affine(1)),
+        ExprTree::Op(Term::Mul, left, right) => {
+            let (factor, other) = match (*left, *right) {
+                (ExprTree::Num(n), other) | (other, ExprTree::Num(n)) => (positive(n)?, other),
+                _ => return None,
+            };
+            match other {
+                ExprTree::Var('z') => Some(StrideForm::Affine(factor)),
+                ExprTree::Op(Term::Mod, modl, modr) => match (*modl, *modr) {
+                    (ExprTree::Var('z'), ExprTree::Num(d)) => Some(StrideForm::Repeat {
+                        stride: factor,
+                        extent: positive(d)?,
+                    }),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        ExprTree::Op(Term::Mod, left, right) => match (*left, *right) {
+            (ExprTree::Var('z'), ExprTree::Num(d)) => Some(StrideForm::Repeat {
+                stride: 1,
+                extent: positive(d)?,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Recover the CANONICAL parent dims/// Recover the CANONICAL parent dims (size-1 axes omitted — they are
 /// unobservable through strides and semantically inert) from one consumer's
 /// tracker: contiguous trackers answer directly; affine views reconstruct
 /// by sorting real axes' coefficients into a telescoping contiguous ladder.
@@ -87,37 +149,21 @@ fn parent_dims_from_tracker(
     let mut real: Vec<(usize, usize)> = Vec::new(); // (coefficient, extent)
     for (stride, &dim) in tracker.strides.iter().zip(&dims) {
         let stride = stride.resolve_vars(dyn_map);
-        match stride_coefficient(&stride) {
-            Some(c) => {
-                if c > 0 && dim > 1 {
+        match classify_stride(&stride) {
+            Some(StrideForm::Zero) => {}
+            Some(StrideForm::Affine(c)) => {
+                if dim > 1 {
                     real.push((c, dim));
                 }
             }
-            None => {
-                // A repeat axis: s(i) = c * (i % d). Recover c = s(1) and
-                // d = the first wrap-around zero, verify, and record the
-                // PARENT extent d (the view tiles it).
-                let recover = || -> Option<(usize, usize)> {
-                    let c = stride.exec_single_var_checked(1)?;
-                    if c == 0 {
-                        return None;
-                    }
-                    let d = (2..=dim).find(|&i| {
-                        stride.exec_single_var_checked(i) == Some(0)
-                    })?;
-                    (0..dim.min(2 * d + 2))
-                        .all(|i| stride.exec_single_var_checked(i) == Some(c * (i % d)))
-                        .then_some((c, d))
-                };
-                let Some((c, d)) = recover() else {
-                    bail!(
-                        "hlir_to_logical: non-affine stride at {at} (not a repeat pattern — later slice)"
-                    );
-                };
+            Some(StrideForm::Repeat { stride: c, extent: d }) => {
                 if d > 1 {
                     real.push((c, d));
                 }
             }
+            None => bail!(
+                "hlir_to_logical: unrecognized stride form at {at} — loud bail, never a guess"
+            ),
         }
     }
     real.sort_by(|a, b| b.0.cmp(&a.0));
@@ -158,10 +204,10 @@ fn lift_operand(
         return Ok((source.let_name.clone(), view_dims));
     }
 
-    let coefficients: Vec<Option<usize>> = tracker
+    let forms: Vec<Option<StrideForm>> = tracker
         .strides
         .iter()
-        .map(|stride| stride_coefficient(&stride.resolve_vars(dyn_map)))
+        .map(|stride| classify_stride(&stride.resolve_vars(dyn_map)))
         .collect();
 
     let parent = &source.dims;
@@ -170,44 +216,50 @@ fn lift_operand(
         parent_strides[k] = parent_strides[k + 1] * parent[k + 1];
     }
 
-    // Match every real view axis to a unique parent axis by (stride, extent).
+    // Match every real view axis to a unique parent axis, structurally.
     let rank = view_dims.len();
     let mut consumed: Vec<Option<usize>> = vec![None; parent.len()];
     let mut repeated: Vec<bool> = vec![false; parent.len()];
-    for (axis, (&coefficient, &dim)) in coefficients.iter().zip(&view_dims).enumerate() {
-        if coefficient == Some(0) || dim == 1 {
-            continue; // broadcast, or a degenerate axis whose index is always 0
-        }
-        if let Some(coefficient) = coefficient {
-            let matched = (0..parent.len()).find(|&k| {
-                consumed[k].is_none() && parent_strides[k] == coefficient && parent[k] == dim
-            });
-            let Some(k) = matched else {
-                bail!(
-                    "hlir_to_logical: {at} axis {axis} (extent {dim}, stride {coefficient}) \
-                     matches no axis of parent {parent:?} (slice/merge — later slice)"
-                );
-            };
-            consumed[k] = Some(axis);
-        } else {
-            // Nonlinear stride: probe the REPEAT pattern s(i) = c * (i % d)
-            // against each unconsumed parent axis.
-            let stride = tracker.strides[axis].resolve_vars(dyn_map);
-            let matched = (0..parent.len()).find(|&k| {
-                consumed[k].is_none() && dim % parent[k] == 0 && {
-                    let (c, d) = (parent_strides[k], parent[k]);
-                    (0..dim.min(2 * d + 2))
-                        .all(|i| stride.exec_single_var_checked(i) == Some(c * (i % d)))
-                }
-            });
-            let Some(k) = matched else {
-                bail!(
-                    "hlir_to_logical: non-affine stride at {at} axis {axis} matches no \
-                     repeat pattern over parent {parent:?} — later slice"
-                );
-            };
-            consumed[k] = Some(axis);
-            repeated[k] = true;
+    for (axis, (form, &dim)) in forms.iter().zip(&view_dims).enumerate() {
+        let Some(form) = form else {
+            bail!(
+                "hlir_to_logical: unrecognized stride form at {at} axis {axis} — loud bail, never a guess"
+            );
+        };
+        match form {
+            StrideForm::Zero => continue,
+            _ if dim == 1 => continue,
+            StrideForm::Affine(coefficient) => {
+                let matched = (0..parent.len()).find(|&k| {
+                    consumed[k].is_none()
+                        && parent_strides[k] == *coefficient
+                        && parent[k] == dim
+                });
+                let Some(k) = matched else {
+                    bail!(
+                        "hlir_to_logical: {at} axis {axis} (extent {dim}, stride {coefficient}) \
+                         matches no axis of parent {parent:?} (slice/merge — pending the \
+                         frontend-seam decision)"
+                    );
+                };
+                consumed[k] = Some(axis);
+            }
+            StrideForm::Repeat { stride, extent } => {
+                let matched = (0..parent.len()).find(|&k| {
+                    consumed[k].is_none()
+                        && parent_strides[k] == *stride
+                        && parent[k] == *extent
+                        && dim % extent == 0
+                });
+                let Some(k) = matched else {
+                    bail!(
+                        "hlir_to_logical: {at} axis {axis} repeat form matches no axis of \
+                         parent {parent:?}"
+                    );
+                };
+                consumed[k] = Some(axis);
+                repeated[k] = true;
+            }
         }
     }
     for k in 0..parent.len() {
@@ -452,99 +504,11 @@ fn tracker_of(dims: &[Expression], strides: &[Expression]) -> ShapeTracker {
     }
 }
 
-/// The row-major flat index over `dims`, as CoordVar arithmetic (axes
-/// zero-based from the END).
-fn flat_index_term(dims: &[usize]) -> String {
-    let rank = dims.len();
-    let mut stride = 1usize;
-    let mut parts: Vec<String> = Vec::new();
-    for axis in (0..rank).rev() {
-        let coord = format!("(CoordVar {} (IntLit {}))", rank - 1 - axis, dims[axis]);
-        parts.push(if stride == 1 {
-            coord
-        } else {
-            format!("(IntMul {coord} (IntLit {stride}))")
-        });
-        stride *= dims[axis];
-    }
-    let mut term = parts.pop().unwrap_or_else(|| "(IntLit 0)".to_string());
-    while let Some(part) = parts.pop() {
-        term = format!("(IntAdd {part} {term})");
-    }
-    term
-}
-
-/// Numerically recover an affine form `c0 + Σ m_a · coord_a` of `eval`
-/// over the full (bounded) coordinate domain — VERIFIED at every point, so
-/// the recovered form is exact, not a guess. `None` = not affine, or the
-/// domain exceeds the probe bound.
-fn affine_over(dims: &[usize], eval: impl Fn(&[usize]) -> Option<i64>) -> Option<(i64, Vec<i64>)> {
-    const PROBE_BOUND: usize = 1 << 16;
-    let total: usize = dims.iter().product();
-    if total == 0 || total > PROBE_BOUND {
-        return None;
-    }
-    let rank = dims.len();
-    let origin = vec![0usize; rank];
-    let c0 = eval(&origin)?;
-    let mut slopes = vec![0i64; rank];
-    for axis in 0..rank {
-        if dims[axis] > 1 {
-            let mut unit = origin.clone();
-            unit[axis] = 1;
-            slopes[axis] = eval(&unit)? - c0;
-        }
-    }
-    let mut coords = vec![0usize; rank];
-    for flat in 0..total {
-        let mut remainder = flat;
-        for axis in (0..rank).rev() {
-            coords[axis] = remainder % dims[axis];
-            remainder /= dims[axis];
-        }
-        let predicted = c0
-            + coords
-                .iter()
-                .zip(&slopes)
-                .map(|(&coord, &slope)| coord as i64 * slope)
-                .sum::<i64>();
-        if eval(&coords)? != predicted {
-            return None;
-        }
-    }
-    Some((c0, slopes))
-}
-
-/// Render a recovered affine form as an IntExpr term over CoordVars.
-fn affine_term(c0: i64, slopes: &[i64], dims: &[usize]) -> String {
-    let rank = dims.len();
-    let mut parts: Vec<String> = Vec::new();
-    for (axis, &slope) in slopes.iter().enumerate() {
-        if slope == 0 {
-            continue;
-        }
-        let coord = format!("(CoordVar {} (IntLit {}))", rank - 1 - axis, dims[axis]);
-        parts.push(if slope == 1 {
-            coord
-        } else {
-            format!("(IntMul {coord} (IntLit {slope}))")
-        });
-    }
-    let mut term = if parts.is_empty() || c0 != 0 {
-        format!("(IntLit {c0})")
-    } else {
-        parts.remove(0)
-    };
-    for part in parts {
-        term = format!("(IntAdd {part} {term})");
-    }
-    term
-}
-
-/// Emit a consumer-shaped specialization of a recorded iota: the consumer's
-/// contiguous view of the flat generator becomes a fresh LogicalIota at the
-/// VIEW shape, substituting the row-major flat index for `z` — their
-/// flat-iota-reshaped-by-tracker idiom, absorbed at translation time.
+/// Translate a recorded iota consumed at its OWN flat shape — term-for-term
+/// symbolic translation, exact by construction. A RESHAPED consumption means
+/// their frontend flattened per-axis structure (flatten_strides); that
+/// information is preserved at the frontend seam or not at all (ruling
+/// 2026-07-29): loud bail, never recovery.
 #[allow(clippy::too_many_arguments)]
 fn specialize_iota(
     ops_text: &mut String,
@@ -559,7 +523,7 @@ fn specialize_iota(
     let at = format!("t{node_index} operand {position} (iota)");
     ensure!(
         tracker.is_contiguous(),
-        "hlir_to_logical: iota through a non-contiguous view at {at} — later slice"
+        "hlir_to_logical: iota through a non-contiguous view at {at}"
     );
     let view_dims: Vec<usize> = tracker
         .dims
@@ -570,27 +534,13 @@ fn specialize_iota(
         })
         .collect::<Result<_>>()?;
     ensure!(
-        view_dims.iter().product::<usize>() == range,
-        "hlir_to_logical: iota view at {at} does not cover its range {range}"
+        view_dims == [range],
+        "hlir_to_logical: iota at {at} consumed at {view_dims:?} (range {range}) — \
+         per-axis structure was erased by their frontend lowering; pending the \
+         frontend-seam decision (ruling 2026-07-29)"
     );
-    let resolved = expr.resolve_vars(dyn_map);
-    let flat_of = |coords: &[usize]| -> Option<i64> {
-        let mut flat = 0usize;
-        for (axis, &coord) in coords.iter().enumerate() {
-            flat = flat * view_dims[axis] + coord;
-        }
-        resolved.exec_single_var_checked(flat).map(|v| v as i64)
-    };
-    // Affine forms (the slice/unfold family) get exact, DIV-FREE
-    // expressions recovered and verified over the whole domain; anything
-    // else falls back to the raw walk (div/mod included).
-    let value_expr = match affine_over(&view_dims, flat_of) {
-        Some((c0, slopes)) => affine_term(c0, &slopes, &view_dims),
-        None => {
-            let flat = flat_index_term(&view_dims);
-            int_expr_term(expr, &flat, dyn_map, &at)?
-        }
-    };
+    let coord = format!("(CoordVar 0 (IntLit {range}))");
+    let value_expr = int_expr_term(expr, &coord, dyn_map, &at)?;
     let shape = shape_term(&view_dims);
     let name = format!("t{node_index}_operand{position}_iota");
     ops_text.push_str(&format!("(let {name} (LogicalIota {value_expr} {shape}))\n"));
@@ -832,77 +782,13 @@ pub fn hlir_to_logical_with_dims(
                     index_dims,
                 )
             } else {
-                let Some((index_expr, index_range)) = iota_exprs.get(&sources[0]) else {
-                    bail!(
-                        "hlir_to_logical: gather at t{idx} over rank-{} data with a \
-                         data-dependent index — later slice",
-                        data_dims.len()
-                    );
-                };
-                let index_tracker = &trackers[0];
-                ensure!(
-                    index_tracker.is_contiguous(),
-                    "hlir_to_logical: gather index view at t{idx} is non-contiguous — later slice"
-                );
-                let out_dims: Vec<usize> = index_tracker
-                    .dims
-                    .iter()
-                    .map(|dim| {
-                        dim.exec(dyn_map)
-                            .with_context(|| format!("hlir_to_logical: unpinned dim at t{idx}"))
-                    })
-                    .collect::<Result<_>>()?;
-                ensure!(
-                    out_dims.iter().product::<usize>() == *index_range,
-                    "hlir_to_logical: gather index view at t{idx} does not cover its range"
-                );
-                // Per-DATA-axis coordinates recovered as VERIFIED affine
-                // forms over the OUT coordinates (the slice/unfold family is
-                // affine; div/mod forms currently trip an egglog support
-                // tripwire — see the seam notes — and affine is better
-                // translation anyway). Non-affine coordinate maps refuse
-                // loudly.
-                let mut data_strides = vec![1usize; data_dims.len()];
-                for k in (0..data_dims.len().saturating_sub(1)).rev() {
-                    data_strides[k] = data_strides[k + 1] * data_dims[k + 1];
-                }
-                let resolved = index_expr.resolve_vars(dyn_map);
-                let value_of = |coords: &[usize]| -> Option<i64> {
-                    let mut flat = 0usize;
-                    for (axis, &coord) in coords.iter().enumerate() {
-                        flat = flat * out_dims[axis] + coord;
-                    }
-                    resolved.exec_single_var_checked(flat).map(|v| v as i64)
-                };
-                let shape = shape_term(&out_dims);
-                let mut coord_names = Vec::new();
-                for (k, (&stride, &dim)) in data_strides.iter().zip(&data_dims).enumerate() {
-                    let coord_of = |coords: &[usize]| -> Option<i64> {
-                        let value = value_of(coords)?;
-                        Some((value / stride as i64) % dim as i64)
-                    };
-                    let Some((c0, slopes)) = affine_over(&out_dims, coord_of) else {
-                        bail!(
-                            "hlir_to_logical: gather at t{idx} has a non-affine coordinate \
-                             map for data axis {k} — later slice"
-                        );
-                    };
-                    let coord_expr = affine_term(c0, &slopes, &out_dims);
-                    let name = format!("t{idx}_coord{k}_iota");
-                    ops_text.push_str(&format!(
-                        "(let {name} (LogicalIota {coord_expr} {shape}))\n"
-                    ));
-                    post_checks.push_str(&format!(
-                        "(check (= ?glo{idx}_{k} (lower-bound-of {coord_expr})))\n\
-                         (check (= ?ghi{idx}_{k} (upper-bound-of {coord_expr})))\n"
-                    ));
-                    coord_names.push(name);
-                }
-                let mut list = "(LogicalTensorNil)".to_string();
-                for name in coord_names.iter().rev() {
-                    list = format!("(LogicalTensorCons {name} {list})");
-                }
-                (list, out_dims)
+                bail!(
+                    "hlir_to_logical: gather at t{idx} over rank-{} data — their frontend \
+                     flattened the per-axis structure (ShapeTracker carries no offsets, so \
+                     slice/unfold lower to flat iota+gather); preserving it is a \
+                     frontend-seam decision, not a recovery problem (ruling 2026-07-29)",
+                    data_dims.len()
+                )
             };
 
             ops_text.push_str(&format!(
