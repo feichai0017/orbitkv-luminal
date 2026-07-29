@@ -529,6 +529,45 @@ mod tests {
         );
     }
 
+    /// PAD differential, 1-D, THROUGH THE BOOL BRIDGE with zero frontend
+    /// changes: their clamp iota (Min/Max terms) + mask iota (Gte/Lt as
+    /// indicator values) + cast + blend translate directly — comparisons
+    /// become IntCastFromBool(BoolLessThanInt ...) indicators, decided
+    /// masks collapse via bounds, undecided ones evaluate in the kernels.
+    /// Zero fill and nonzero fill both compared against their runtime.
+    #[test]
+    fn differential_pad_against_reference_runtime() {
+        for fill in [0.0f32, 2.5f32] {
+            let build = |fill: f32| {
+                let mut cx = Graph::new();
+                let x = cx.tensor(4);
+                let out = x.pad((1, 2), fill).output();
+                (cx, x, out)
+            };
+            let x_data = vec![10.0, 20.0, 30.0, 40.0];
+
+            let (mut cx, x, out) = build(fill);
+            cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+            let mut theirs = cx.search(
+                ReferenceRuntime::default(),
+                CompileOptions::default().search_graph_limit(1),
+            );
+            theirs.set_data(x.id, x_data.clone());
+            theirs.execute(&cx.dyn_map);
+            let expected = theirs.get_f32(out.id).clone();
+
+            let (cx2, x2, out2) = build(fill);
+            let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+            assert!(
+                program.text.contains("IntCastFromBool"),
+                "the mask must ride the bool bridge:\n{}",
+                program.text
+            );
+            let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
+            assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        }
+    }
+
     /// REPEAT differential: tiling strides (z % d) lift into IntTruncRem
     /// map entries.
     #[test]

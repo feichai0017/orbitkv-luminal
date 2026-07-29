@@ -1234,6 +1234,15 @@ mod harness_tests {
         assert_eq!(matmul_out.element_bits, Some(32));
     }
 
+    /// The bool bridge (Austin's design 2026-07-29): decided comparisons
+    /// collapse to their literals, undecided indicators stay bits, and the
+    /// pad pattern's clamp/mask bounds derive — the fixture's checks and
+    /// fail-pins are the proof.
+    #[test]
+    fn bool_bridge_fixture_holds() {
+        let _ = serialize_fixture("bool_bridge_example.egg");
+    }
+
     /// GENOME WALK, consistent-fused: both boundary classes choose the SAME
     /// fused enode; instance dedup (keyed by concrete enode) yields ONE
     /// kernel claiming both output slots into the caller's buffers.
@@ -2389,6 +2398,7 @@ mod harness_tests {
         }
     }
 }
+
 
 
 

@@ -473,7 +473,8 @@ fn int_expr_term(
                 })?;
                 stack.push(format!("(IntLit {value})"));
             }
-            Term::Add | Term::Mul | Term::Sub | Term::Div | Term::Mod => {
+            Term::Add | Term::Mul | Term::Sub | Term::Div | Term::Mod | Term::Min
+            | Term::Max | Term::Gte | Term::Lt => {
                 // Their builders emit RHS terms first, so the stack TOP is
                 // the LEFT operand (verified against as_op + the Sub impl).
                 let (Some(left), Some(right)) = (stack.pop(), stack.pop()) else {
@@ -485,6 +486,17 @@ fn int_expr_term(
                     Term::Sub => format!("(IntAdd {left} (IntMul (IntLit -1) {right}))"),
                     Term::Div => format!("(IntTruncDiv {left} {right})"),
                     Term::Mod => format!("(IntTruncRem {left} {right})"),
+                    Term::Min => format!("(IntMin {left} {right})"),
+                    Term::Max => format!("(IntMax {left} {right})"),
+                    // Comparisons arrive as 0/1 VALUES in their expressions;
+                    // ours are the bool bridge's indicators. Over the discrete
+                    // integers, a >= b is spelled b < a+1 — one constructor.
+                    Term::Lt => {
+                        format!("(IntCastFromBool (BoolLessThanInt {left} {right}))")
+                    }
+                    Term::Gte => format!(
+                        "(IntCastFromBool (BoolLessThanInt {right} (IntAdd {left} (IntLit 1))))"
+                    ),
                     _ => unreachable!(),
                 };
                 stack.push(rendered);
@@ -975,6 +987,48 @@ pub fn hlir_to_logical_with_dims(
                     let_name: format!("t{idx}_logical"),
                     dims: out_dims,
                     dtype: data_source.dtype,
+                },
+            );
+        } else if let Some(cast) = dyn_op.downcast_ref::<crate::hlir::Cast>() {
+            // Shape-preserving; the tracker rides through on the tensor, so
+            // the logical cast applies to the source value directly.
+            let source = *sources.first().ok_or_else(|| {
+                anyhow!("hlir_to_logical: Cast at t{idx} has no source")
+            })?;
+            let source_value = values.get(&source).ok_or_else(|| {
+                anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
+            })?;
+            // A cast directly over a recorded iota (their pad's mask) first
+            // emits the iota at its own flat shape.
+            let (source_name, source_dims) = match iota_exprs.get(&source) {
+                Some((expr, range)) => {
+                    let coord = format!("(CoordVar 0 (IntLit {range}))");
+                    let value_expr =
+                        int_expr_term(expr, &coord, dyn_map, &format!("cast-iota t{idx}"))?;
+                    let shape = shape_term(&[*range]);
+                    let name = format!("t{idx}_source_iota");
+                    ops_text.push_str(&format!(
+                        "(let {name} (LogicalIota {value_expr} {shape}))\n"
+                    ));
+                    post_checks.push_str(&format!(
+                        "(check (= ?clo{idx} (lower-bound-of {value_expr})))\n\
+                         (check (= ?chi{idx} (upper-bound-of {value_expr})))\n"
+                    ));
+                    (name, vec![*range])
+                }
+                None => (source_value.let_name.clone(), source_value.dims.clone()),
+            };
+            let target = cast.1;
+            ops_text.push_str(&format!(
+                "(let t{idx}_logical (LogicalCast {source_name} {}))\n",
+                dtype_term(target)
+            ));
+            values.insert(
+                node,
+                ValueInfo {
+                    let_name: format!("t{idx}_logical"),
+                    dims: source_dims,
+                    dtype: target,
                 },
             );
         } else if let Some(constant) = dyn_op.downcast_ref::<Constant>() {

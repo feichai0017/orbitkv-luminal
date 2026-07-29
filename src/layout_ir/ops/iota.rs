@@ -37,6 +37,11 @@ pub enum IotaExpr {
     TruncDiv(Box<IotaExpr>, Box<IotaExpr>),
     /// Truncated remainder — the preamble's IntTruncRem.
     TruncRem(Box<IotaExpr>, Box<IotaExpr>),
+    Min(Box<IotaExpr>, Box<IotaExpr>),
+    Max(Box<IotaExpr>, Box<IotaExpr>),
+    /// The bool bridge's indicator: `(a < b) as i64` — IntCastFromBool
+    /// over BoolLessThanInt.
+    LessThanCast(Box<IotaExpr>, Box<IotaExpr>),
 }
 
 impl IotaExpr {
@@ -51,6 +56,9 @@ impl IotaExpr {
             // a zero here is a translator bug and deserves the loud panic.
             IotaExpr::TruncDiv(a, b) => a.eval(coords) / b.eval(coords),
             IotaExpr::TruncRem(a, b) => a.eval(coords) % b.eval(coords),
+            IotaExpr::Min(a, b) => a.eval(coords).min(b.eval(coords)),
+            IotaExpr::Max(a, b) => a.eval(coords).max(b.eval(coords)),
+            IotaExpr::LessThanCast(a, b) => (a.eval(coords) < b.eval(coords)) as i64,
         }
     }
 }
@@ -95,6 +103,23 @@ pub(crate) fn parse_int_expr(
         let lhs = parse_int_expr(site, &site.class_of_child(rem, 0)?, depth - 1)?;
         let rhs = parse_int_expr(site, &site.class_of_child(rem, 1)?, depth - 1)?;
         return Some(IotaExpr::TruncRem(Box::new(lhs), Box::new(rhs)));
+    }
+    if let Some(minimum) = site.node_in_class(class, "IntMin") {
+        let lhs = parse_int_expr(site, &site.class_of_child(minimum, 0)?, depth - 1)?;
+        let rhs = parse_int_expr(site, &site.class_of_child(minimum, 1)?, depth - 1)?;
+        return Some(IotaExpr::Min(Box::new(lhs), Box::new(rhs)));
+    }
+    if let Some(maximum) = site.node_in_class(class, "IntMax") {
+        let lhs = parse_int_expr(site, &site.class_of_child(maximum, 0)?, depth - 1)?;
+        let rhs = parse_int_expr(site, &site.class_of_child(maximum, 1)?, depth - 1)?;
+        return Some(IotaExpr::Max(Box::new(lhs), Box::new(rhs)));
+    }
+    if let Some(cast) = site.node_in_class(class, "IntCastFromBool") {
+        let bool_class = site.class_of_child(cast, 0)?;
+        let less_than = site.node_in_class(&bool_class, "BoolLessThanInt")?;
+        let lhs = parse_int_expr(site, &site.class_of_child(less_than, 0)?, depth - 1)?;
+        let rhs = parse_int_expr(site, &site.class_of_child(less_than, 1)?, depth - 1)?;
+        return Some(IotaExpr::LessThanCast(Box::new(lhs), Box::new(rhs)));
     }
     None
 }

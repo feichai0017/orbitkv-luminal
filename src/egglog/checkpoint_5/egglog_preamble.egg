@@ -26,7 +26,7 @@
     ; will learn nothing beyond its seeded RANGE until runtime. Quantified
     ; over that range like any variable — see the possible-valuations
     ; contract.
-(IntVar String)
+   (IntVar String)
     ; A tensor coordinate variable: (axis-from-end, extent of that axis).
     ; Axis is a de Bruijn LEVEL counted from the innermost (last) dimension
     ; — the same convention as the strided-indexing fold that mints these.
@@ -73,6 +73,24 @@
     ; lattice has no inverses to cancel — no stream material).
     (IntMin IntExpr IntExpr)
     (IntMax IntExpr IntExpr)
+    ; THE BOOL BRIDGE (Austin's design, 2026-07-29): comparisons live in
+    ; their OWN SORT, outside the ring — the fence doctrine keeps relations
+    ; from ever mixing into IntExpr rewrites. The ONE bridge back is this
+    ; cast, whose value is the ring-legal indicator (0 or 1); its class
+    ; unions with the literal only when the comparison is DECIDED by
+    ; value-level bounds (see the bool-bridge rules beside the lattice-pair
+    ; bounds — positively gated, monotone-stable like the [n,n] collapse).
+    ; Predication-by-arithmetic: masks are products of indicators.
+    (IntCastFromBool BoolExpr)
+  )
+
+  ; Boolean expressions over the integer world. Deliberately minimal: ONE
+  ; comparison constructor (a < b). Every other comparison is a spelling of
+  ; it over the DISCRETE integers: a >= b is (b < a+1), a <= b is (a < b+1),
+  ; a > b is (b < a) — no negation constructor needed, so no rule can ever
+  ; face a double-negation normal form.
+  (BoolExpr
+    (BoolLessThanInt IntExpr IntExpr)
   )
 
   ; Expression List
@@ -1425,6 +1443,40 @@
     (= ?rhs_upper (upper-bound-of ?rhs))
   )
   ((set (upper-bound-of ?maximum) (max ?lhs_upper ?rhs_upper)))
+)
+
+; BOOL-BRIDGE RULES (Austin's design, 2026-07-29; constructors in the
+; datatype block). The indicator is always a bit:
+(rule
+  ((= ?cast (IntCastFromBool ?bool)))
+  (
+    (set (lower-bound-of ?cast) (bigint 0))
+    (set (upper-bound-of ?cast) (bigint 1))
+  )
+)
+; A comparison DECIDED by value-level bounds is a constant function over
+; the whole box, so its indicator IS the literal — function-equality
+; unions, positively gated on bounds facts, monotone-stable (bounds only
+; tighten, and a decided comparison can never become undecided):
+;   a < b holds everywhere   iff  upper(a) <  lower(b)
+;   a < b fails everywhere   iff  lower(a) >= upper(b)
+(rule
+  (
+    (= ?cast (IntCastFromBool (BoolLessThanInt ?lhs ?rhs)))
+    (= ?lhs_upper (upper-bound-of ?lhs))
+    (= ?rhs_lower (lower-bound-of ?rhs))
+    (< ?lhs_upper ?rhs_lower)
+  )
+  ((union ?cast (IntLit 1)))
+)
+(rule
+  (
+    (= ?cast (IntCastFromBool (BoolLessThanInt ?lhs ?rhs)))
+    (= ?lhs_lower (lower-bound-of ?lhs))
+    (= ?rhs_upper (upper-bound-of ?rhs))
+    (>= ?lhs_lower ?rhs_upper)
+  )
+  ((union ?cast (IntLit 0)))
 )
 
 ; Tripwire (see triage above; the CoordVar gate keeps legal empty axes

@@ -54,6 +54,16 @@ impl OpSlotNames for CastDps {
 }
 
 impl BufferTensorIrOp for CastDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        // The reference runtime stores every dtype's VALUES as f32 (slice
+        // scope), so a cast is value-preserving copy — honest for the
+        // integer/indicator ranges the current programs produce.
+        ctx.unary_elementwise(|x| x)
+    }
+
     fn label(&self) -> &str {
         "CastGeneric" // DPS forms keep the IR name
     }

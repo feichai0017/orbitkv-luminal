@@ -1,0 +1,50 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; The bool bridge (Austin's design, 2026-07-29): BoolExpr is its own sort,
+; IntCastFromBool the one ring-legal bridge (indicator 0/1), and the cast
+; unions with its literal exactly when value-level bounds DECIDE the
+; comparison. Plus the pad pattern's two composite forms: the clamp
+; (min(max(c - before, 0), dim-1)) and the mask indicator product.
+
+; A coordinate over [0, 4) — the undecided fuel.
+(let position (CoordVar 0 (IntLit 4)))
+
+; --- decided comparisons collapse to their literals ---
+(let decided_true (IntCastFromBool (BoolLessThanInt (IntLit 2) (IntLit 5))))
+(let decided_false (IntCastFromBool (BoolLessThanInt (IntLit 7) (IntLit 5))))
+
+; --- undecided: position < 2 varies over the box ---
+(let undecided (IntCastFromBool (BoolLessThanInt position (IntLit 2))))
+
+; --- the pad clamp: min(max(position - 1, 0), 2) over positions [0, 4) ---
+(let clamp
+  (IntMin (IntMax (IntAdd position (IntLit -1)) (IntLit 0)) (IntLit 2)))
+
+; --- the pad mask for before=1, dim=2 over out extent 4:
+;     (position >= 1) · (position < 3), each as an indicator ---
+;     (>= spelled as the discrete a < b+1 rotation: 1 <= p iff 0 < p... we
+;     use before-1 < position: 0 < position.)
+(let mask
+  (IntMul
+    (IntCastFromBool (BoolLessThanInt (IntLit 0) position))
+    (IntCastFromBool (BoolLessThanInt position (IntLit 3)))))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; Decided comparisons ARE their literals.
+(check (= decided_true (IntLit 1)))
+(check (= decided_false (IntLit 0)))
+
+; The undecided indicator stays a bit — bounds [0, 1], unioned with neither.
+(check (= (lower-bound-of undecided) (bigint 0)))
+(check (= (upper-bound-of undecided) (bigint 1)))
+(fail (check (= undecided (IntLit 0))))
+(fail (check (= undecided (IntLit 1))))
+
+; The clamp's bounds derive through Max then Min: [0, 2] — in-bounds for a
+; parent extent of 3, the certificate the pad gather rides.
+(check (= (lower-bound-of clamp) (bigint 0)))
+(check (= (upper-bound-of clamp) (bigint 2)))
+
+; The mask product stays a bit.
+(check (= (lower-bound-of mask) (bigint 0)))
+(check (= (upper-bound-of mask) (bigint 1)))
