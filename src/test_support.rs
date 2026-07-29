@@ -1234,6 +1234,48 @@ mod harness_tests {
         assert_eq!(matmul_out.element_bits, Some(32));
     }
 
+    /// KNOWN ISSUE PIN (bisected 2026-07-29; unfixed, investigation with
+    /// Austin pending): a SOUND program whose gather has div/mod iota
+    /// coordinate expressions AND an available data layout tensor fires the
+    /// axis-support contradiction tripwire. Bisection: bare exprs clean;
+    /// +iotas clean; +gather clean; +data LAYOUT TENSOR fires — the layout
+    /// activates the gather⇄view unification, whose composition machinery
+    /// (subst / composed offsets over the division family) produces the
+    /// colliding support facts. This test documents the bug by EXPECTING
+    /// the loud refusal; when the machinery is fixed, it must flip to a
+    /// clean-run assertion.
+    #[test]
+    fn div_mod_iota_gather_with_layout_still_trips_axis_support() {
+        let body = r#"
+(let flat (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 3)) (CoordVar 0 (IntLit 3))))
+(let value
+  (IntAdd
+    (IntMul (IntAdd (IntTruncRem (IntTruncDiv flat (IntLit 3)) (IntLit 2)) (IntLit 1)) (IntLit 5))
+    (IntAdd (IntTruncRem flat (IntLit 3)) (IntLit 2))))
+(let row_coord (IntTruncDiv value (IntLit 5)))
+(let col_coord (IntTruncRem value (IntLit 5)))
+(let out_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
+(let row_iota (LogicalIota row_coord out_shape))
+(let col_iota (LogicalIota col_coord out_shape))
+(let data_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprCons (IntLit 5) (IntExprNil)))))
+(let data_logical (LogicalTensorInputLit (LogicalIdLit "data") data_shape (F32)))
+(let gathered
+  (LogicalGather data_logical
+    (LogicalTensorCons row_iota (LogicalTensorCons col_iota (LogicalTensorNil)))))
+(let data_layout (RightMajorContiguousElementLayoutLit data_shape (bits-of (F32))))
+(let data_layout_tensor (LayoutTensorLit data_logical data_layout))
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+"#;
+        let full = format!("{}\n\n{}", crate::egglog_snippet::assembled_program(), body);
+        let err = crate::egglog_snippet::new_egraph()
+            .parse_and_run_program(None, &full)
+            .expect_err("the known axis-support issue still fires (fixed? flip this test)");
+        assert!(
+            err.to_string().contains("axis support contradiction"),
+            "different failure than the pinned issue: {err}"
+        );
+    }
+
     /// The bool bridge (Austin's design 2026-07-29): decided comparisons
     /// collapse to their literals, undecided indicators stay bits, and the
     /// pad pattern's clamp/mask bounds derive — the fixture's checks and
@@ -2398,6 +2440,9 @@ mod harness_tests {
         }
     }
 }
+
+
+
 
 
 
