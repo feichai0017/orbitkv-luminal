@@ -30,7 +30,10 @@
 
 (run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
-; Decided comparisons ARE their literals.
+; Decided comparisons ARE their literals — at the BOOL level first, and
+; through the cast's literal mapping at the ring level.
+(check (= (BoolLessThanInt (IntLit 2) (IntLit 5)) (BoolLit true)))
+(check (= (BoolLessThanInt (IntLit 7) (IntLit 5)) (BoolLit false)))
 (check (= decided_true (IntLit 1)))
 (check (= decided_false (IntLit 0)))
 
@@ -39,6 +42,8 @@
 (check (= (upper-bound-of undecided) (bigint 1)))
 (fail (check (= undecided (IntLit 0))))
 (fail (check (= undecided (IntLit 1))))
+(fail (check (= (BoolLessThanInt position (IntLit 2)) (BoolLit true))))
+(fail (check (= (BoolLessThanInt position (IntLit 2)) (BoolLit false))))
 
 ; The clamp's bounds derive through Max then Min: [0, 2] — in-bounds for a
 ; parent extent of 3, the certificate the pad gather rides.

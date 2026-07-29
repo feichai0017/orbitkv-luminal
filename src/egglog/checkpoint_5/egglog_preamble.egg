@@ -90,6 +90,11 @@
   ; a > b is (b < a) — no negation constructor needed, so no rule can ever
   ; face a double-negation normal form.
   (BoolExpr
+    ; The literal, wrapping egglog's primitive bool — the direct analogue
+    ; of (IntLit i64). Decided comparisons UNION with their literal (rules
+    ; beside the lattice-pair bounds), so the decision lives on the
+    ; comparison class itself and every BoolExpr consumer sees it.
+    (BoolLit bool)
     (BoolLessThanInt IntExpr IntExpr)
   )
 
@@ -1455,29 +1460,32 @@
   )
 )
 ; A comparison DECIDED by value-level bounds is a constant function over
-; the whole box, so its indicator IS the literal — function-equality
-; unions, positively gated on bounds facts, monotone-stable (bounds only
-; tighten, and a decided comparison can never become undecided):
+; the whole box, so the comparison class IS its literal — function-equality
+; unions AT THE BOOL LEVEL, positively gated on bounds facts,
+; monotone-stable (bounds only tighten; decided never becomes undecided):
 ;   a < b holds everywhere   iff  upper(a) <  lower(b)
 ;   a < b fails everywhere   iff  lower(a) >= upper(b)
 (rule
   (
-    (= ?cast (IntCastFromBool (BoolLessThanInt ?lhs ?rhs)))
+    (= ?comparison (BoolLessThanInt ?lhs ?rhs))
     (= ?lhs_upper (upper-bound-of ?lhs))
     (= ?rhs_lower (lower-bound-of ?rhs))
     (< ?lhs_upper ?rhs_lower)
   )
-  ((union ?cast (IntLit 1)))
+  ((union ?comparison (BoolLit true)))
 )
 (rule
   (
-    (= ?cast (IntCastFromBool (BoolLessThanInt ?lhs ?rhs)))
+    (= ?comparison (BoolLessThanInt ?lhs ?rhs))
     (= ?lhs_lower (lower-bound-of ?lhs))
     (= ?rhs_upper (upper-bound-of ?rhs))
     (>= ?lhs_lower ?rhs_upper)
   )
-  ((union ?cast (IntLit 0)))
+  ((union ?comparison (BoolLit false)))
 )
+; The cast maps bool literals to the ring's indicators.
+(rewrite (IntCastFromBool (BoolLit true)) (IntLit 1))
+(rewrite (IntCastFromBool (BoolLit false)) (IntLit 0))
 
 ; Tripwire (see triage above; the CoordVar gate keeps legal empty axes
 ; from ever reaching it, so both remaining arms are authoring/soundness
