@@ -588,52 +588,54 @@ impl GraphTensor {
     pub fn pad(self, padding: impl ToPad, elem: f32) -> GraphTensor {
         let mut padding = padding.to_pad_vec();
         padding.extend(vec![(0.into(), 0.into()); self.shape.len() - padding.len()]); // Make sure we have a padding per dim
-        let mut index_expressions = vec![];
-        let mut phys_size = Expression::from(1);
-        let mut new_dims = vec![];
-        for (dim, (start, end)) in self.dims().into_iter().zip(&padding).rev() {
-            let mut ind = Expression::from('z');
-            if *start != 0 {
-                ind = (ind - *start).max(0);
-            }
-            if *end != 0 {
-                ind = ind.min(dim - 1);
-            }
-            index_expressions.push(ind * phys_size);
-            phys_size *= dim;
-            new_dims.push(dim + *start + *end);
+        if padding.iter().all(|(s, e)| *s == 0 && *e == 0) {
+            return self;
         }
-        new_dims.reverse();
-        index_expressions.reverse();
-        let index_expression = flatten_strides(&new_dims, &index_expressions);
-        // get indexed tensor
-        let new_tensor = self.gather(self.graph().iota(index_expression, new_dims.clone()));
-        // mask out padded elements
-        let mut mask_expressions = vec![];
-        for ((start, end), dim) in padding.into_iter().zip(self.dims()) {
-            let mut mask = Expression::from(1);
-            if start != 0 {
-                mask *= Expression::from('z').gte(start);
-            }
-            if end != 0 {
-                mask *= Expression::from('z').lt(start + dim);
-            }
-            mask_expressions.push(mask);
-        }
-        let mut current_elem_size = Expression::from(1);
-        let mut flat_stride = Expression::from(1);
-        for (dim, (range, stride)) in new_dims.iter().zip(mask_expressions).enumerate().rev() {
-            let div = expr('z') / current_elem_size;
-            let m = if dim > 0 { div % range } else { div };
-            flat_stride *= stride.substitute('z', m);
-            current_elem_size *= range;
-        }
-        let mask_expression = flat_stride.simplify();
-        let mask = self
-            .graph()
-            .iota(mask_expression, new_dims)
-            .cast(self.dtype);
-        let masked = new_tensor * mask;
+        // Structure-preserving seam (see SliceView): the read half is a
+        // total clamped VIEW, the mask half a per-axis-structured indicator
+        // iota; both nodes lower to the legacy flat forms for the existing
+        // pipeline via their to_egglog.
+        let dims = self.dims();
+        let befores: Vec<Expression> = padding.iter().map(|(s, _)| *s).collect();
+        let afters: Vec<Expression> = padding.iter().map(|(_, e)| *e).collect();
+        let out_dims: Vec<Expression> = dims
+            .iter()
+            .zip(&padding)
+            .map(|(d, (s, e))| *d + *s + *e)
+            .collect();
+
+        let clamped_id = self.graph().add_op(
+            crate::hlir::ClampView {
+                befores: befores.clone(),
+                afters: afters.clone(),
+                input_shape: self.shape,
+            },
+            &[self.id],
+        );
+        let clamped = GraphTensor::from_id(
+            clamped_id,
+            ShapeTracker::new(out_dims.clone()),
+            self.graph_ref,
+            self.dtype,
+        );
+
+        let mask_id = self.graph().add_op(
+            crate::hlir::MaskIota {
+                befores,
+                afters,
+                in_dims: dims.to_vec(),
+            },
+            &[],
+        );
+        let mask = GraphTensor::from_id(
+            mask_id,
+            ShapeTracker::new(out_dims),
+            self.graph_ref,
+            DType::Int,
+        )
+        .cast(self.dtype);
+
+        let masked = clamped * mask;
         if elem == 0.0 {
             masked
         } else {

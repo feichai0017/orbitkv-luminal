@@ -568,6 +568,43 @@ mod tests {
         }
     }
 
+    /// RANK-2 PAD differential through the seam nodes: asymmetric padding
+    /// on both axes (one axis before-only, one both sides), both fills —
+    /// the case the flat lowering made untranslatable. Their side runs the
+    /// legacy lowerings out of the seam nodes' to_egglog.
+    #[test]
+    fn differential_rank2_pad_against_reference_runtime() {
+        for fill in [0.0f32, -1.5f32] {
+            let build = |fill: f32| {
+                let mut cx = Graph::new();
+                let x = cx.tensor((3, 4));
+                let out = x.pad(((1, 0), (2, 1)), fill).output();
+                (cx, x, out)
+            };
+            let x_data: Vec<f32> = (0..12).map(|v| v as f32 + 1.0).collect();
+
+            let (mut cx, x, out) = build(fill);
+            cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+            let mut theirs = cx.search(
+                ReferenceRuntime::default(),
+                CompileOptions::default().search_graph_limit(1),
+            );
+            theirs.set_data(x.id, x_data.clone());
+            theirs.execute(&cx.dyn_map);
+            let expected = theirs.get_f32(out.id).clone();
+
+            let (cx2, x2, out2) = build(fill);
+            let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+            assert!(
+                program.text.contains("IntMax") && program.text.contains("IntCastFromBool"),
+                "clamp view + indicator mask expected:\n{}",
+                program.text
+            );
+            let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
+            assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        }
+    }
+
     /// REPEAT differential: tiling strides (z % d) lift into IntTruncRem
     /// map entries.
     #[test]

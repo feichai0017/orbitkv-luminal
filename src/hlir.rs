@@ -2468,6 +2468,124 @@ impl HLIROp for UnfoldView {
     }
 }
 
+/// The READ half of pad as a structure-preserving VIEW (logical-SSA seam,
+/// SliceView's sibling): `out[c] = x[min(max(c_k - before_k, 0), dim_k-1)]`
+/// per axis — total (the clamp keeps every read in bounds), so it is a
+/// view in the logical vocabulary. `to_egglog` lowers to the legacy
+/// clamped flat iota + gather.
+#[derive(Debug, Clone, Default)]
+pub struct ClampView {
+    pub befores: Vec<Expression>,
+    pub afters: Vec<Expression>,
+    /// The parent tensor's tracker snapshot at emission.
+    pub input_shape: ShapeTracker,
+}
+
+impl Display for ClampView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ClampView")
+    }
+}
+
+impl HLIROp for ClampView {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
+        // Legacy lowering, verbatim from the pre-seam pad(): per-axis
+        // conditional clamps flattened over the padded shape.
+        let dims = &self.input_shape.dims;
+        let mut index_expressions = vec![];
+        let mut out_dims = vec![];
+        let mut phys_size = Expression::from(1);
+        for ((dim, start), end) in dims.iter().zip(&self.befores).zip(&self.afters).rev() {
+            let mut ind = Expression::from('z');
+            if *start != 0 {
+                ind = (ind - *start).max(0);
+            }
+            if *end != 0 {
+                ind = ind.min(*dim - 1);
+            }
+            index_expressions.push(ind * phys_size);
+            phys_size *= *dim;
+            out_dims.push(*dim + *start + *end);
+        }
+        out_dims.reverse();
+        index_expressions.reverse();
+        let index_expression =
+            crate::shape::flatten_strides(&out_dims, &index_expressions).simplify();
+        let range = out_dims.iter().copied().product::<Expression>().simplify();
+        let index_tracker = ShapeTracker::new(out_dims);
+        let iota_term = format!(
+            "(Op (Iota {} {}) (INil))",
+            index_expression.to_egglog(),
+            range.to_egglog()
+        );
+        format!(
+            "(Op (Gather {} {} {} {}) {})",
+            elist_to_egglog(&index_tracker.dims),
+            elist_to_egglog(&index_tracker.strides),
+            elist_to_egglog(&self.input_shape.dims),
+            elist_to_egglog(&self.input_shape.strides),
+            ilist_egglog(&[&iota_term, &inputs[0].1]),
+        )
+    }
+}
+
+/// The MASK half of pad as a structure-preserving node: the 0/1 interior
+/// indicator over the padded shape, per-axis structure in the fields
+/// (`(p_k >= before_k) · (p_k < before_k + dim_k)` for each padded axis).
+/// Zero inputs. The logical path translates it as an iota of bool-bridge
+/// indicators; `to_egglog` lowers to the legacy flat mask iota. Carried as
+/// one node (not tensor comparisons) deliberately: the reference kernels
+/// only execute F32 arithmetic, so Bool-tensor products are not portable.
+#[derive(Debug, Clone, Default)]
+pub struct MaskIota {
+    pub befores: Vec<Expression>,
+    pub afters: Vec<Expression>,
+    /// The UNPADDED dims (interior extents).
+    pub in_dims: Vec<Expression>,
+}
+
+impl Display for MaskIota {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MaskIota")
+    }
+}
+
+impl HLIROp for MaskIota {
+    fn to_egglog(&self, _inputs: &[(NodeIndex, String)]) -> String {
+        // Legacy lowering, verbatim from the pre-seam pad(): per-axis
+        // gte/lt indicator expressions substituted into the flat coordinate
+        // decomposition.
+        let mut mask_expressions = vec![];
+        let mut out_dims = vec![];
+        for ((start, end), dim) in self.befores.iter().zip(&self.afters).zip(&self.in_dims) {
+            let mut mask = Expression::from(1);
+            if *start != 0 {
+                mask *= Expression::from('z').gte(*start);
+            }
+            if *end != 0 {
+                mask *= Expression::from('z').lt(*start + *dim);
+            }
+            mask_expressions.push(mask);
+            out_dims.push(*dim + *start + *end);
+        }
+        let mut current_elem_size = Expression::from(1);
+        let mut flat_stride = Expression::from(1);
+        for (axis, (range, mask)) in out_dims.iter().zip(mask_expressions).enumerate().rev() {
+            let div = Expression::from('z') / current_elem_size;
+            let m = if axis > 0 { div % *range } else { div };
+            flat_stride *= mask.substitute('z', m);
+            current_elem_size *= *range;
+        }
+        let mask_expression = flat_stride.simplify();
+        let range = out_dims.iter().copied().product::<Expression>().simplify();
+        format!(
+            "(Op (Iota {} {}) (INil))",
+            mask_expression.to_egglog(),
+            range.to_egglog()
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scatter {
     pub dest_shape: Vec<Expression>,

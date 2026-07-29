@@ -25,7 +25,7 @@ use crate::dtype::DType;
 use crate::graph::Graph;
 use crate::hlir::{
     Add, Constant, Exp2, Gather, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip,
-    Scatter, Sin, SliceView, Sqrt, SumReduce, UnfoldView,
+    ClampView, MaskIota, Scatter, Sin, SliceView, Sqrt, SumReduce, UnfoldView,
 };
 use crate::shape::{Expression, Term};
 use std::collections::BTreeMap;
@@ -332,6 +332,9 @@ fn op_input_trackers(op: &dyn crate::op::HLIROp) -> Option<Vec<ShapeTracker>> {
         return Some(vec![op.input_shape]);
     }
     if let Some(op) = op.downcast_ref::<UnfoldView>() {
+        return Some(vec![op.input_shape]);
+    }
+    if let Some(op) = op.downcast_ref::<ClampView>() {
         return Some(vec![op.input_shape]);
     }
     if let Some(op) = op.downcast_ref::<Scatter>() {
@@ -822,6 +825,152 @@ pub fn hlir_to_logical_with_dims(
                     let_name: format!("t{idx}_logical"),
                     dims: out_numeric,
                     dtype: source_value.dtype,
+                },
+            );
+        } else if let Some(clamp) = dyn_op.downcast_ref::<ClampView>() {
+            // Pad's read half: a TOTAL view — per parent axis the entry is
+            // min(max(c_k − before_k, 0), dim_k − 1), with the same
+            // conditional structure the legacy lowering used (the clamp
+            // sides only where padding exists).
+            let source = *sources.first().ok_or_else(|| {
+                anyhow!("hlir_to_logical: ClampView at t{idx} has no source")
+            })?;
+            let source_value = values.get(&source).ok_or_else(|| {
+                anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
+            })?;
+            let (parent_name, parent_dims) = match iota_exprs.get(&source) {
+                Some((expr, range)) => specialize_iota(
+                    &mut ops_text,
+                    &mut post_checks,
+                    expr,
+                    *range,
+                    &clamp.input_shape,
+                    dyn_map,
+                    idx,
+                    0,
+                )?,
+                None => lift_operand(
+                    &mut ops_text,
+                    &clamp.input_shape,
+                    source_value,
+                    dyn_map,
+                    idx,
+                    0,
+                )?,
+            };
+            let rank = parent_dims.len();
+            ensure!(
+                clamp.befores.len() == rank && clamp.afters.len() == rank,
+                "hlir_to_logical: ClampView at t{idx} rank mismatch"
+            );
+            let mut out_terms = Vec::with_capacity(rank);
+            let mut out_numeric = Vec::with_capacity(rank);
+            let mut entries = "(IntExprNil)".to_string();
+            for k in 0..rank {
+                let before = clamp.befores[k].exec(dyn_map).with_context(|| {
+                    format!("hlir_to_logical: unpinned pad-before at t{idx}")
+                })?;
+                let after = clamp.afters[k].exec(dyn_map).with_context(|| {
+                    format!("hlir_to_logical: unpinned pad-after at t{idx}")
+                })?;
+                let dim = parent_dims[k];
+                out_numeric.push(before + dim + after);
+                out_terms.push(format!("(IntLit {})", before + dim + after));
+            }
+            for k in (0..rank).rev() {
+                let before = clamp.befores[k].exec(dyn_map).unwrap_or(0);
+                let after = clamp.afters[k].exec(dyn_map).unwrap_or(0);
+                let dim = parent_dims[k];
+                let coord = format!("(CoordVar {} {})", rank - 1 - k, out_terms[k]);
+                let mut entry = coord;
+                if before != 0 {
+                    entry = format!(
+                        "(IntMax (IntAdd {entry} (IntLit -{before})) (IntLit 0))"
+                    );
+                }
+                if after != 0 {
+                    entry = format!("(IntMin {entry} (IntLit {}))", dim - 1);
+                }
+                entries = format!("(IntExprCons {entry} {entries})");
+            }
+            let shape = shape_term_of(&out_terms);
+            ops_text.push_str(&format!(
+                "(let t{idx}_logical (LogicalIndexMapApply {parent_name} \
+                 (IndexMapLit {entries}) {shape}))\n"
+            ));
+            values.insert(
+                node,
+                ValueInfo {
+                    let_name: format!("t{idx}_logical"),
+                    dims: out_numeric,
+                    dtype: source_value.dtype,
+                },
+            );
+        } else if let Some(mask) = dyn_op.downcast_ref::<MaskIota>() {
+            // Pad's mask half: an iota of bool-bridge indicators — per
+            // padded axis (p_k >= before) · (p_k < before + dim), with
+            // >= spelled as the discrete rotation before-1 < p_k, i.e.
+            // before <= p_k iff before < p_k + 1.
+            let rank = mask.in_dims.len();
+            let mut out_terms = Vec::with_capacity(rank);
+            let mut factors: Vec<String> = Vec::new();
+            for k in 0..rank {
+                let before = mask.befores[k].exec(dyn_map).with_context(|| {
+                    format!("hlir_to_logical: unpinned mask-before at t{idx}")
+                })?;
+                let after = mask.afters[k].exec(dyn_map).with_context(|| {
+                    format!("hlir_to_logical: unpinned mask-after at t{idx}")
+                })?;
+                let dim = mask.in_dims[k].exec(dyn_map).with_context(|| {
+                    format!("hlir_to_logical: unpinned mask dim at t{idx}")
+                })?;
+                out_terms.push(format!("(IntLit {})", before + dim + after));
+                let coord = |terms: &Vec<String>| {
+                    format!("(CoordVar {} {})", rank - 1 - k, terms[k])
+                };
+                if before != 0 {
+                    factors.push(format!(
+                        "(IntCastFromBool (BoolLessThanInt (IntLit {}) (IntAdd {} (IntLit 1))))",
+                        before,
+                        coord(&out_terms)
+                    ));
+                }
+                if after != 0 {
+                    factors.push(format!(
+                        "(IntCastFromBool (BoolLessThanInt {} (IntLit {})))",
+                        coord(&out_terms),
+                        before + dim
+                    ));
+                }
+            }
+            let mut expr = factors.pop().unwrap_or_else(|| "(IntLit 1)".to_string());
+            for factor in factors {
+                expr = format!("(IntMul {factor} {expr})");
+            }
+            let shape = shape_term_of(&out_terms);
+            ops_text.push_str(&format!(
+                "(let t{idx}_logical (LogicalIota {expr} {shape}))\n"
+            ));
+            post_checks.push_str(&format!(
+                "(check (= ?mlo{idx} (lower-bound-of {expr})))\n\
+                 (check (= ?mhi{idx} (upper-bound-of {expr})))\n"
+            ));
+            let out_numeric = mask
+                .befores
+                .iter()
+                .zip(&mask.afters)
+                .zip(&mask.in_dims)
+                .map(|((b, a), d)| {
+                    Some(b.exec(dyn_map)? + a.exec(dyn_map)? + d.exec(dyn_map)?)
+                })
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| anyhow!("hlir_to_logical: unpinned MaskIota dims at t{idx}"))?;
+            values.insert(
+                node,
+                ValueInfo {
+                    let_name: format!("t{idx}_logical"),
+                    dims: out_numeric,
+                    dtype: DType::Int,
                 },
             );
         } else if let Some(scatter) = dyn_op.downcast_ref::<Scatter>() {
