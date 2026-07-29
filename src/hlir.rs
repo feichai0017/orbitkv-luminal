@@ -2398,6 +2398,76 @@ impl HLIROp for SliceView {
     }
 }
 
+/// Sliding-window extraction as a structure-preserving VIEW (the
+/// logical-SSA frontend seam, same pattern as [`SliceView`]). Out shape is
+/// `[windows..., kernel...]`; per parent axis `i` the read index is
+/// `w_i · stride_i + k_i · dilation_i` — two-coordinate affine entries.
+/// `to_egglog` lowers to the legacy flat iota+gather pair, so the existing
+/// pipeline sees a semantically identical program.
+#[derive(Debug, Clone, Default)]
+pub struct UnfoldView {
+    pub kernel: Vec<Expression>,
+    pub strides: Vec<Expression>,
+    pub dilation: Vec<Expression>,
+    /// Per-axis window counts `w_i` (precomputed by the frontend).
+    pub window_counts: Vec<Expression>,
+    /// The parent tensor's tracker snapshot at emission.
+    pub input_shape: ShapeTracker,
+}
+
+impl Display for UnfoldView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UnfoldView")
+    }
+}
+
+impl HLIROp for UnfoldView {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
+        // The legacy lowering, verbatim (see GraphTensor::unfold before the
+        // seam): flat iota over [win..., kernel...] with per-axis
+        // z·stride·in_stride / z·dilation·in_stride contributions, gathered
+        // against the parent snapshot.
+        let dims = &self.input_shape.dims;
+        let n = dims.len();
+        let mut in_strides = vec![Expression::from(1); n];
+        let mut acc = Expression::from(1);
+        for (dim, in_stride) in dims.iter().zip(&mut in_strides).rev() {
+            *in_stride = acc;
+            acc *= *dim;
+        }
+        let mut final_shape: Vec<Expression> = self.window_counts.clone();
+        final_shape.extend(self.kernel.iter().copied());
+        let mut axis_exprs = Vec::with_capacity(2 * n);
+        for i in 0..n {
+            axis_exprs.push(Expression::from('z') * self.strides[i] * in_strides[i]);
+        }
+        for i in 0..n {
+            axis_exprs.push(Expression::from('z') * self.dilation[i] * in_strides[i]);
+        }
+        let index_expression =
+            crate::shape::flatten_strides(&final_shape, &axis_exprs).simplify();
+        let range = final_shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .simplify();
+        let index_tracker = ShapeTracker::new(final_shape);
+        let iota_term = format!(
+            "(Op (Iota {} {}) (INil))",
+            index_expression.to_egglog(),
+            range.to_egglog()
+        );
+        format!(
+            "(Op (Gather {} {} {} {}) {})",
+            elist_to_egglog(&index_tracker.dims),
+            elist_to_egglog(&index_tracker.strides),
+            elist_to_egglog(&self.input_shape.dims),
+            elist_to_egglog(&self.input_shape.strides),
+            ilist_egglog(&[&iota_term, &inputs[0].1]),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scatter {
     pub dest_shape: Vec<Expression>,

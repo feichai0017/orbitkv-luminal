@@ -474,22 +474,26 @@ impl GraphTensor {
         let mut final_shape: Vec<Expression> = win.into_iter().map(|e| e.simplify()).collect();
         final_shape.extend(kernel.iter().copied());
 
-        // Axis exprs must match final_shape axis order: first w axes, then k axes.
-        // idx = Σ_d (w_d * stride_d + k_d * dilation_d) * in_strides[d]
-        let mut axis_exprs = Vec::with_capacity(2 * n);
-
-        // w axes
-        for i in 0..n {
-            axis_exprs.push(Expression::from('z') * strides[i] * in_strides[i]);
-        }
-        // k axes
-        for i in 0..n {
-            axis_exprs.push(Expression::from('z') * dilation[i] * in_strides[i]);
-        }
-
-        let index_expression = flatten_strides(&final_shape, &axis_exprs).simplify();
-        let iota = self.graph().iota(index_expression, final_shape);
-        self.gather(iota)
+        // Structure-preserving seam (see SliceView): the per-axis window
+        // structure stays first-class; UnfoldView::to_egglog reproduces the
+        // legacy flat iota+gather lowering for the existing pipeline.
+        let window_counts = final_shape[..n].to_vec();
+        let id = self.graph().add_op(
+            crate::hlir::UnfoldView {
+                kernel: kernel.to_vec(),
+                strides: strides.to_vec(),
+                dilation: dilation.to_vec(),
+                window_counts,
+                input_shape: self.shape,
+            },
+            &[self.id],
+        );
+        GraphTensor::from_id(
+            id,
+            ShapeTracker::new(final_shape),
+            self.graph_ref,
+            self.dtype,
+        )
     }
 
     /// Take a slice of a tensor along multiple dimensions.

@@ -485,6 +485,50 @@ mod tests {
         assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
     }
 
+    /// UNFOLD differential through the seam: sliding windows (with a
+    /// dilated variant) arrive structure-intact as UnfoldView and translate
+    /// as two-coordinate affine view entries; their side runs the legacy
+    /// flat iota+gather lowering.
+    #[test]
+    fn differential_unfold_against_reference_runtime() {
+        let build = || {
+            let mut cx = Graph::new();
+            let x = cx.tensor(8);
+            let plain = x.unfold(3, 2, 1).output(); // windows at 0,2,4
+            let y = cx.tensor(10);
+            let dilated = y.unfold(3, 2, 2).output(); // effective window 5
+            (cx, x, y, plain, dilated)
+        };
+        let x_data: Vec<f32> = (0..8).map(|v| (v * v) as f32).collect();
+        let y_data: Vec<f32> = (0..10).map(|v| v as f32 * 3.0 - 5.0).collect();
+
+        let (mut cx, x, y, plain, dilated) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(x.id, x_data.clone());
+        theirs.set_data(y.id, y_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected_plain = theirs.get_f32(plain.id).clone();
+        let expected_dilated = theirs.get_f32(dilated.id).clone();
+
+        let (cx2, x2, y2, plain2, dilated2) = build();
+        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+        assert!(
+            program.text.contains("LogicalIndexMapApply"),
+            "unfold must arrive as a view:\n{}",
+            program.text
+        );
+        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        assert_close(ours.get_f32(plain2.id.index() as i64).unwrap(), &expected_plain);
+        assert_close(
+            ours.get_f32(dilated2.id.index() as i64).unwrap(),
+            &expected_dilated,
+        );
+    }
+
     /// REPEAT differential: tiling strides (z % d) lift into IntTruncRem
     /// map entries.
     #[test]

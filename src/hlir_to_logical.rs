@@ -25,7 +25,7 @@ use crate::dtype::DType;
 use crate::graph::Graph;
 use crate::hlir::{
     Add, Constant, Exp2, Gather, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip,
-    Scatter, Sin, SliceView, Sqrt, SumReduce,
+    Scatter, Sin, SliceView, Sqrt, SumReduce, UnfoldView,
 };
 use crate::shape::{Expression, Term};
 use std::collections::BTreeMap;
@@ -329,6 +329,9 @@ fn op_input_trackers(op: &dyn crate::op::HLIROp) -> Option<Vec<ShapeTracker>> {
         return Some(op.input_shapes.clone());
     }
     if let Some(op) = op.downcast_ref::<SliceView>() {
+        return Some(vec![op.input_shape]);
+    }
+    if let Some(op) = op.downcast_ref::<UnfoldView>() {
         return Some(vec![op.input_shape]);
     }
     if let Some(op) = op.downcast_ref::<Scatter>() {
@@ -706,6 +709,94 @@ pub fn hlir_to_logical_with_dims(
                     )?;
                     format!("(IntAdd {coord} {start_term})")
                 };
+                entries = format!("(IntExprCons {entry} {entries})");
+            }
+            let shape = shape_term_of(&out_terms);
+            ops_text.push_str(&format!(
+                "(let t{idx}_logical (LogicalIndexMapApply {parent_name} \
+                 (IndexMapLit {entries}) {shape}))\n"
+            ));
+            values.insert(
+                node,
+                ValueInfo {
+                    let_name: format!("t{idx}_logical"),
+                    dims: out_numeric,
+                    dtype: source_value.dtype,
+                },
+            );
+        } else if let Some(unfold) = dyn_op.downcast_ref::<UnfoldView>() {
+            // Sliding windows as the view they are: out [w..., k...], and per
+            // parent axis i the entry is w_i·stride_i + k_i·dilation_i.
+            let source = *sources.first().ok_or_else(|| {
+                anyhow!("hlir_to_logical: UnfoldView at t{idx} has no source")
+            })?;
+            let source_value = values.get(&source).ok_or_else(|| {
+                anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
+            })?;
+            let (parent_name, parent_dims) = match iota_exprs.get(&source) {
+                Some((expr, range)) => specialize_iota(
+                    &mut ops_text,
+                    &mut post_checks,
+                    expr,
+                    *range,
+                    &unfold.input_shape,
+                    dyn_map,
+                    idx,
+                    0,
+                )?,
+                None => lift_operand(
+                    &mut ops_text,
+                    &unfold.input_shape,
+                    source_value,
+                    dyn_map,
+                    idx,
+                    0,
+                )?,
+            };
+            let n = unfold.window_counts.len();
+            ensure!(
+                parent_dims.len() == n && unfold.kernel.len() == n,
+                "hlir_to_logical: UnfoldView at t{idx} rank mismatch"
+            );
+            let mut out_terms = Vec::with_capacity(2 * n);
+            let mut out_numeric = Vec::with_capacity(2 * n);
+            for (k, dim) in unfold
+                .window_counts
+                .iter()
+                .chain(unfold.kernel.iter())
+                .enumerate()
+            {
+                out_terms.push(dim_term(
+                    dim,
+                    dyn_map,
+                    &mut pinned_vars,
+                    &format!("UnfoldView t{idx} out dim {k}"),
+                )?);
+                out_numeric.push(dim.exec(dyn_map).with_context(|| {
+                    format!("hlir_to_logical: unpinned out dim at UnfoldView t{idx}")
+                })?);
+            }
+            let mut entries = "(IntExprNil)".to_string();
+            for i in (0..n).rev() {
+                // Out axis positions: w_i at i, k_i at n+i (front-indexed);
+                // CoordVar axes are zero-based from the END of the 2n shape.
+                let w_coord = format!("(CoordVar {} {})", 2 * n - 1 - i, out_terms[i]);
+                let k_coord = format!("(CoordVar {} {})", n - 1 - i, out_terms[n + i]);
+                let stride_term = dim_term(
+                    &unfold.strides[i],
+                    dyn_map,
+                    &mut pinned_vars,
+                    &format!("UnfoldView t{idx} stride {i}"),
+                )?;
+                let dilation_term = dim_term(
+                    &unfold.dilation[i],
+                    dyn_map,
+                    &mut pinned_vars,
+                    &format!("UnfoldView t{idx} dilation {i}"),
+                )?;
+                let entry = format!(
+                    "(IntAdd (IntMul {w_coord} {stride_term}) (IntMul {k_coord} {dilation_term}))"
+                );
                 entries = format!("(IntExprCons {entry} {entries})");
             }
             let shape = shape_term_of(&out_terms);
