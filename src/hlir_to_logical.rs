@@ -216,74 +216,215 @@ fn lift_operand(
         parent_strides[k] = parent_strides[k + 1] * parent[k + 1];
     }
 
-    // Match every real view axis to a unique parent axis, structurally.
+    // Match view axes to parent axes, STRUCTURALLY, in three forms:
+    //   exact  — one view axis is one parent axis (c = pstride, d = pdim);
+    //   merge  — one view axis covers a telescoping RUN of parent axes
+    //            (c = the run's innermost pstride, d = the run's extent
+    //            product): entries are div/rem digits of its coordinate;
+    //   split  — several view axes form a MIXED-RADIX group over one
+    //            parent axis (coefficients telescope down to pstride, the
+    //            extents multiply to the parent extent): the entry is the
+    //            group's weighted coordinate sum.
+    // Plus the repeat form as before. Everything is syntax-derived from the
+    // classified stride forms — no evaluation anywhere; unmatched shapes
+    // bail loudly.
     let rank = view_dims.len();
-    let mut consumed: Vec<Option<usize>> = vec![None; parent.len()];
-    let mut repeated: Vec<bool> = vec![false; parent.len()];
+    /// How one parent axis is addressed by the view.
+    enum ParentUse {
+        /// (view axis, wraps via `% extent` — the repeat form)
+        Exact { axis: usize, repeat: bool },
+        /// One view axis whose coordinate holds this axis as a digit:
+        /// (view axis, divisor = run-extent-product inward of this axis,
+        /// needs_rem = not the outermost axis of its run)
+        MergeDigit { axis: usize, divisor: usize, needs_rem: bool },
+        /// Mixed-radix group: (view axis, weight) terms, outermost first.
+        SplitGroup { terms: Vec<(usize, usize)> },
+    }
+    let mut consumed: Vec<Option<ParentUse>> = (0..parent.len()).map(|_| None).collect();
+    let mut matched_view: Vec<bool> = vec![false; rank];
+
+    // Pass 1: exact matches and repeats.
     for (axis, (form, &dim)) in forms.iter().zip(&view_dims).enumerate() {
-        let Some(form) = form else {
-            bail!(
-                "hlir_to_logical: unrecognized stride form at {at} axis {axis} — loud bail, never a guess"
-            );
-        };
+        let Some(form) = form else { continue };
         match form {
-            StrideForm::Zero => continue,
-            _ if dim == 1 => continue,
-            StrideForm::Affine(coefficient) => {
-                let matched = (0..parent.len()).find(|&k| {
-                    consumed[k].is_none()
-                        && parent_strides[k] == *coefficient
-                        && parent[k] == dim
-                });
-                let Some(k) = matched else {
-                    bail!(
-                        "hlir_to_logical: {at} axis {axis} (extent {dim}, stride {coefficient}) \
-                         matches no axis of parent {parent:?} (slice/merge — pending the \
-                         frontend-seam decision)"
-                    );
-                };
-                consumed[k] = Some(axis);
+            StrideForm::Zero => {
+                matched_view[axis] = true; // broadcast
+            }
+            _ if dim == 1 => {
+                matched_view[axis] = true; // degenerate: index always 0
+            }
+            StrideForm::Affine(c) => {
+                if let Some(k) = (0..parent.len()).find(|&k| {
+                    consumed[k].is_none() && parent_strides[k] == *c && parent[k] == dim
+                }) {
+                    consumed[k] = Some(ParentUse::Exact { axis, repeat: false });
+                    matched_view[axis] = true;
+                }
             }
             StrideForm::Repeat { stride, extent } => {
-                let matched = (0..parent.len()).find(|&k| {
+                let Some(k) = (0..parent.len()).find(|&k| {
                     consumed[k].is_none()
                         && parent_strides[k] == *stride
                         && parent[k] == *extent
                         && dim % extent == 0
-                });
-                let Some(k) = matched else {
+                }) else {
                     bail!(
                         "hlir_to_logical: {at} axis {axis} repeat form matches no axis of \
                          parent {parent:?}"
                     );
                 };
-                consumed[k] = Some(axis);
-                repeated[k] = true;
+                consumed[k] = Some(ParentUse::Exact { axis, repeat: true });
+                matched_view[axis] = true;
             }
         }
+    }
+
+    // Pass 2: merges — an unmatched affine view axis whose extent is the
+    // product of a run of unconsumed parent axes ending where its
+    // coefficient sits.
+    for (axis, (form, &dim)) in forms.iter().zip(&view_dims).enumerate() {
+        if matched_view[axis] {
+            continue;
+        }
+        let Some(StrideForm::Affine(c)) = form else { continue };
+        let Some(run_end) = (0..parent.len())
+            .find(|&m| consumed[m].is_none() && parent_strides[m] == *c)
+        else {
+            continue;
+        };
+        let mut product = 1usize;
+        let mut run_start = None;
+        for k in (0..=run_end).rev() {
+            if consumed[k].is_some() {
+                break;
+            }
+            product *= parent[k];
+            if product == dim {
+                run_start = Some(k);
+                break;
+            }
+            if product > dim {
+                break;
+            }
+        }
+        let Some(run_start) = run_start else { continue };
+        let mut divisor = 1usize;
+        for k in (run_start..=run_end).rev() {
+            consumed[k] = Some(ParentUse::MergeDigit {
+                axis,
+                divisor,
+                needs_rem: k != run_start,
+            });
+            divisor *= parent[k];
+        }
+        matched_view[axis] = true;
+    }
+
+    // Pass 3: split groups — remaining affine view axes partition by the
+    // parent axis their coefficient falls inside, then each group must
+    // telescope as a mixed-radix system covering the parent extent.
+    for k in 0..parent.len() {
+        if consumed[k].is_some() {
+            continue;
+        }
+        let lo = parent_strides[k];
+        let hi = lo * parent[k];
+        let mut group: Vec<(usize, usize, usize)> = Vec::new(); // (c, axis, dim)
+        for (axis, (form, &dim)) in forms.iter().zip(&view_dims).enumerate() {
+            if matched_view[axis] {
+                continue;
+            }
+            if let Some(StrideForm::Affine(c)) = form {
+                if *c >= lo && *c < hi && c % lo == 0 {
+                    group.push((*c, axis, dim));
+                }
+            }
+        }
+        if group.is_empty() {
+            continue;
+        }
+        group.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut expected = lo;
+        let mut extent_product = 1usize;
+        let telescopes = group.iter().rev().all(|(c, _, dim)| {
+            let ok = *c == expected;
+            expected = c * dim;
+            extent_product *= dim;
+            ok
+        });
+        ensure!(
+            telescopes && extent_product == parent[k],
+            "hlir_to_logical: {at} split group over parent axis {k} does not telescope \
+             (parent extent {}, group {:?})",
+            parent[k],
+            group
+        );
+        for (_, axis, _) in &group {
+            matched_view[*axis] = true;
+        }
+        consumed[k] = Some(ParentUse::SplitGroup {
+            terms: group
+                .into_iter()
+                .map(|(c, axis, _)| (axis, c / lo))
+                .collect(),
+        });
+    }
+
+    for (axis, matched) in matched_view.iter().enumerate() {
+        ensure!(
+            *matched,
+            "hlir_to_logical: {at} axis {axis} (extent {}, stride form unrecognized or \
+             unmatched) — loud bail, never a guess",
+            view_dims[axis]
+        );
     }
     for k in 0..parent.len() {
         ensure!(
             parent[k] == 1 || consumed[k].is_some(),
-            "hlir_to_logical slice 2: {at} drops parent axis {k} (extent {}) — slicing is a later slice",
+            "hlir_to_logical: {at} drops parent axis {k} (extent {}) — slicing is a \
+             later slice",
             parent[k]
         );
     }
 
-    // Map entries per PARENT axis, outermost inward; CoordVar axes are
+    // Map entries per PARENT axis, outermost inward; CoordVar axes are    // Map entries per PARENT axis, outermost inward; CoordVar axes are
     // zero-based from the innermost of the VIEW shape.
     let mut entries = "(IntExprNil)".to_string();
     for k in (0..parent.len()).rev() {
-        let entry = match consumed[k] {
-            Some(axis) => {
-                let coord =
-                    format!("(CoordVar {} (IntLit {}))", rank - 1 - axis, view_dims[axis]);
-                if repeated[k] {
-                    // Tiling: the view coordinate wraps over the parent extent.
-                    format!("(IntTruncRem {coord} (IntLit {}))", parent[k])
-                } else {
-                    coord
+        let coord = |axis: usize| {
+            format!("(CoordVar {} (IntLit {}))", rank - 1 - axis, view_dims[axis])
+        };
+        let entry = match &consumed[k] {
+            Some(ParentUse::Exact { axis, repeat: false }) => coord(*axis),
+            Some(ParentUse::Exact { axis, repeat: true }) => {
+                format!("(IntTruncRem {} (IntLit {}))", coord(*axis), parent[k])
+            }
+            Some(ParentUse::MergeDigit { axis, divisor, needs_rem }) => {
+                let mut term = coord(*axis);
+                if *divisor > 1 {
+                    term = format!("(IntTruncDiv {term} (IntLit {divisor}))");
                 }
+                if *needs_rem {
+                    term = format!("(IntTruncRem {term} (IntLit {}))", parent[k]);
+                }
+                term
+            }
+            Some(ParentUse::SplitGroup { terms }) => {
+                let mut parts: Vec<String> = terms
+                    .iter()
+                    .map(|(axis, weight)| {
+                        if *weight == 1 {
+                            coord(*axis)
+                        } else {
+                            format!("(IntMul {} (IntLit {weight}))", coord(*axis))
+                        }
+                    })
+                    .collect();
+                let mut term = parts.pop().expect("non-empty split group");
+                while let Some(part) = parts.pop() {
+                    term = format!("(IntAdd {part} {term})");
+                }
+                term
             }
             None => "(IntLit 0)".to_string(),
         };

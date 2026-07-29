@@ -605,6 +605,68 @@ mod tests {
         }
     }
 
+    /// RESHAPE differentials: split (mixed-radix group entries), merge
+    /// (div/rem digit entries), and flatten (a multi-axis merge run) — all
+    /// read structurally off the tracker strides, no seam nodes needed.
+    #[test]
+    fn differential_reshapes_against_reference_runtime() {
+        let build = || {
+            let mut cx = Graph::new();
+            let a = cx.tensor(12);
+            let b = cx.tensor((3, 4));
+            let split_out = (a.split_dims(0, 4) * b).output(); // [12] -> [3,4]
+            let c = cx.tensor((3, 4));
+            let d = cx.tensor(12);
+            let merge_out = (c.merge_dims(0, 1) * d).output(); // [3,4] -> [12]
+            let e = cx.tensor((2, 3, 2));
+            let f = cx.tensor(12);
+            let flatten_out = (e.flatten() * f).output(); // [2,3,2] -> [12]
+            (cx, a, b, c, d, e, f, split_out, merge_out, flatten_out)
+        };
+        let v12a: Vec<f32> = (0..12).map(|v| v as f32 + 1.0).collect();
+        let v12b: Vec<f32> = (0..12).map(|v| v as f32 * 0.5 - 2.0).collect();
+        let v12c: Vec<f32> = (0..12).map(|v| (v * v) as f32).collect();
+        let v12d: Vec<f32> = (0..12).map(|v| v as f32 - 6.0).collect();
+        let v12e: Vec<f32> = (0..12).map(|v| v as f32 * 1.5).collect();
+        let v12f: Vec<f32> = (0..12).map(|v| 12.0 - v as f32).collect();
+
+        let (mut cx, a, b, c, d, e, f, split_out, merge_out, flatten_out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(a.id, v12a.clone());
+        theirs.set_data(b.id, v12b.clone());
+        theirs.set_data(c.id, v12c.clone());
+        theirs.set_data(d.id, v12d.clone());
+        theirs.set_data(e.id, v12e.clone());
+        theirs.set_data(f.id, v12f.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected_split = theirs.get_f32(split_out.id).clone();
+        let expected_merge = theirs.get_f32(merge_out.id).clone();
+        let expected_flatten = theirs.get_f32(flatten_out.id).clone();
+
+        let (cx2, a2, b2, c2, d2, e2, f2, split2, merge2, flatten2) = build();
+        let ours = run_ssa(
+            &cx2,
+            &[
+                (a2.id, v12a),
+                (b2.id, v12b),
+                (c2.id, v12c),
+                (d2.id, v12d),
+                (e2.id, v12e),
+                (f2.id, v12f),
+            ],
+        );
+        assert_close(ours.get_f32(split2.id.index() as i64).unwrap(), &expected_split);
+        assert_close(ours.get_f32(merge2.id.index() as i64).unwrap(), &expected_merge);
+        assert_close(
+            ours.get_f32(flatten2.id.index() as i64).unwrap(),
+            &expected_flatten,
+        );
+    }
+
     /// REPEAT differential: tiling strides (z % d) lift into IntTruncRem
     /// map entries.
     #[test]
