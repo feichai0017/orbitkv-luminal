@@ -510,20 +510,25 @@ impl GraphTensor {
                 .map(|d| (0.into(), *d)),
         ); // Make sure we have a range per dim
         if ranges.iter().any(|(st, _)| *st != 0) {
-            // We have a start slice, need to use an iota because tensors don't have offsets
+            // Start slices are VIEWS. The structure-preserving SliceView node
+            // keeps the per-axis starts first-class (the logical-SSA seam);
+            // its to_egglog lowers to the same iota+gather the frontend used
+            // to build eagerly here, so the existing pipeline is unchanged.
             let mut new_dims = vec![];
-            let mut index_expressions = vec![];
-            let mut phys_size = Expression::from(1);
-            for (dim, (start, end)) in self.dims().into_iter().zip(ranges).rev() {
-                index_expressions.push((Expression::from('z') + start) * phys_size);
-                phys_size *= dim;
+            let mut starts = vec![];
+            for (dim, (start, end)) in self.dims().into_iter().zip(ranges) {
+                starts.push(start);
                 new_dims.push(dim.min(end) - start);
             }
-            new_dims.reverse();
-            index_expressions.reverse();
-            let index_expression = flatten_strides(&new_dims, &index_expressions);
-            let iota = self.graph().iota(index_expression, new_dims);
-            self.gather(iota)
+            let id = self.graph().add_op(
+                crate::hlir::SliceView {
+                    starts,
+                    out_dims: new_dims.clone(),
+                    input_shape: self.shape,
+                },
+                &[self.id],
+            );
+            GraphTensor::from_id(id, ShapeTracker::new(new_dims), self.graph_ref, self.dtype)
         } else {
             // No start slices so no iota needed, just reduce the shape down
             for (sh, (_, end)) in self.shape.dims.iter_mut().zip(ranges) {

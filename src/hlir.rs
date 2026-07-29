@@ -2336,6 +2336,68 @@ impl ReferenceOp for Gather {
 
 // Scatter Op (inverse of Gather)
 
+/// A start-offset slice VIEW, structure-preserving (the logical-SSA
+/// frontend seam, ruling 2026-07-29). The frontend used to lower start
+/// slices EAGERLY to iota+gather, flattening the per-axis structure
+/// (ShapeTracker carries no offsets); this node keeps `starts`/`out_dims`
+/// first-class so the logical path translates the slice as the
+/// IndexMapApply view it is. For the existing pipeline, `to_egglog` lowers
+/// to the SAME iota+gather pair as before (nested in one term), so the
+/// emitted egglog program is semantically identical.
+#[derive(Debug, Clone, Default)]
+pub struct SliceView {
+    /// Per-parent-axis slice starts.
+    pub starts: Vec<Expression>,
+    /// Per-axis output extents: `min(dim, end) - start`.
+    pub out_dims: Vec<Expression>,
+    /// The parent tensor's tracker snapshot at emission.
+    pub input_shape: ShapeTracker,
+}
+
+impl Display for SliceView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SliceView")
+    }
+}
+
+impl HLIROp for SliceView {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
+        // The legacy lowering, verbatim: per-axis (z + start) * phys_size
+        // flattened over the out dims, iota'd, gathered against the parent
+        // snapshot. Kept term-for-term so the existing pipeline sees the
+        // program it always saw.
+        let mut index_expressions = vec![];
+        let mut phys_size = Expression::from(1);
+        for (dim, start) in self.input_shape.dims.iter().zip(&self.starts).rev() {
+            index_expressions.push((Expression::from('z') + *start) * phys_size);
+            phys_size *= *dim;
+        }
+        index_expressions.reverse();
+        let index_expression =
+            crate::shape::flatten_strides(&self.out_dims, &index_expressions).simplify();
+        let range = self
+            .out_dims
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .simplify();
+        let index_tracker = ShapeTracker::new(self.out_dims.clone());
+        let iota_term = format!(
+            "(Op (Iota {} {}) (INil))",
+            index_expression.to_egglog(),
+            range.to_egglog()
+        );
+        format!(
+            "(Op (Gather {} {} {} {}) {})",
+            elist_to_egglog(&index_tracker.dims),
+            elist_to_egglog(&index_tracker.strides),
+            elist_to_egglog(&self.input_shape.dims),
+            elist_to_egglog(&self.input_shape.strides),
+            ilist_egglog(&[&iota_term, &inputs[0].1]),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scatter {
     pub dest_shape: Vec<Expression>,

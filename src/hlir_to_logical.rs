@@ -25,7 +25,7 @@ use crate::dtype::DType;
 use crate::graph::Graph;
 use crate::hlir::{
     Add, Constant, Exp2, Gather, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip,
-    Scatter, Sin, Sqrt, SumReduce,
+    Scatter, Sin, SliceView, Sqrt, SumReduce,
 };
 use crate::shape::{Expression, Term};
 use std::collections::BTreeMap;
@@ -327,6 +327,9 @@ fn op_input_trackers(op: &dyn crate::op::HLIROp) -> Option<Vec<ShapeTracker>> {
     }
     if let Some(op) = op.downcast_ref::<Gather>() {
         return Some(op.input_shapes.clone());
+    }
+    if let Some(op) = op.downcast_ref::<SliceView>() {
+        return Some(vec![op.input_shape]);
     }
     if let Some(op) = op.downcast_ref::<Scatter>() {
         // Source order [dest, indexes, src]; src iterates the index shape.
@@ -637,6 +640,87 @@ pub fn hlir_to_logical_with_dims(
                 anyhow!("hlir_to_logical: Output at t{idx} has no source")
             })?;
             output_nodes.push((node, source, output.node));
+        } else if let Some(slice) = dyn_op.downcast_ref::<SliceView>() {
+            // THE SEAM PAYOFF (ruling 2026-07-29): a start slice arrives with
+            // its per-axis structure intact and translates as the VIEW it is —
+            // one IndexMapApply entry per parent axis, CoordVar + start.
+            let source = *sources.first().ok_or_else(|| {
+                anyhow!("hlir_to_logical: SliceView at t{idx} has no source")
+            })?;
+            let source_value = values.get(&source).ok_or_else(|| {
+                anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
+            })?;
+            let (parent_name, parent_dims) = match iota_exprs.get(&source) {
+                Some((expr, range)) => specialize_iota(
+                    &mut ops_text,
+                    &mut post_checks,
+                    expr,
+                    *range,
+                    &slice.input_shape,
+                    dyn_map,
+                    idx,
+                    0,
+                )?,
+                None => lift_operand(
+                    &mut ops_text,
+                    &slice.input_shape,
+                    source_value,
+                    dyn_map,
+                    idx,
+                    0,
+                )?,
+            };
+            let rank = slice.out_dims.len();
+            ensure!(
+                parent_dims.len() == rank && slice.starts.len() == rank,
+                "hlir_to_logical: SliceView at t{idx} rank mismatch (parent {parent_dims:?}, \
+                 {} starts, {} out dims)",
+                slice.starts.len(),
+                slice.out_dims.len()
+            );
+            let mut out_terms = Vec::with_capacity(rank);
+            let mut out_numeric = Vec::with_capacity(rank);
+            for (k, dim) in slice.out_dims.iter().enumerate() {
+                out_terms.push(dim_term(
+                    dim,
+                    dyn_map,
+                    &mut pinned_vars,
+                    &format!("SliceView t{idx} out dim {k}"),
+                )?);
+                out_numeric.push(dim.exec(dyn_map).with_context(|| {
+                    format!("hlir_to_logical: unpinned out dim at SliceView t{idx}")
+                })?);
+            }
+            let mut entries = "(IntExprNil)".to_string();
+            for k in (0..rank).rev() {
+                let coord = format!("(CoordVar {} {})", rank - 1 - k, out_terms[k]);
+                let start = &slice.starts[k];
+                let entry = if start.exec(dyn_map) == Some(0) {
+                    coord
+                } else {
+                    let start_term = dim_term(
+                        start,
+                        dyn_map,
+                        &mut pinned_vars,
+                        &format!("SliceView t{idx} start {k}"),
+                    )?;
+                    format!("(IntAdd {coord} {start_term})")
+                };
+                entries = format!("(IntExprCons {entry} {entries})");
+            }
+            let shape = shape_term_of(&out_terms);
+            ops_text.push_str(&format!(
+                "(let t{idx}_logical (LogicalIndexMapApply {parent_name} \
+                 (IndexMapLit {entries}) {shape}))\n"
+            ));
+            values.insert(
+                node,
+                ValueInfo {
+                    let_name: format!("t{idx}_logical"),
+                    dims: out_numeric,
+                    dtype: source_value.dtype,
+                },
+            );
         } else if let Some(scatter) = dyn_op.downcast_ref::<Scatter>() {
             // Their scatter: sources [dest, indexes, src]; output = copy(dest)
             // then output[indexes[i]] = src[i] with FLAT positions into the
