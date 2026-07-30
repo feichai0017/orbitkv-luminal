@@ -75,6 +75,24 @@ def _match_step_slots(markers, example_inputs):
     return step_slots
 
 
+def _materialize_skeleton(model):
+    """Make a disk-mapped model traceable. Stock ``from_pretrained(...,
+    device_map={"": "disk"})`` downloads and resolves without materializing —
+    parameters land on the meta device. Allocate storage (``to_empty``:
+    virtual pages; nothing writes the parameters, whose bytes the backend
+    streams from the checkpoint) and restore config-computed buffers (rotary
+    inv_freq) by re-running the model's own ``_init_weights`` on
+    buffer-owning modules only — the same repair HF applies to its own
+    meta-built loads. No-op for normally loaded models."""
+    if not any(p.is_meta for p in model.parameters()):
+        return
+    model.to_empty(device="cpu")
+    with torch.no_grad():
+        for module in model.modules():
+            if next(module.buffers(recurse=False), None) is not None:
+                model._init_weights(module)
+
+
 def _reset_cache_position(cache, position):
     """Point the cache's write cursor at `position` (transformers versions
     that track it; older ones take the position from `cache_position`)."""
@@ -233,6 +251,7 @@ def _compile_and_prefill(
     the prefill logits (the traced call IS the prefill)."""
     from transformers.cache_utils import StaticCache
 
+    _materialize_skeleton(model)
     max_cache_len = max(int(max_cache_length or 0), prompt_len + max_new_tokens)
     # Our own StaticCache replaces whatever HF prepared: it must be allocated
     # BEFORE tracing (so the tensors become graph inputs, not graph-internal

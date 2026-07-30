@@ -234,3 +234,31 @@ def test_errors(device):
             do_sample=False,
             pad_token_id=0,
         )
+
+
+def test_disk_mapped_skeleton_materializes():
+    """Stock from_pretrained(device_map={"": "disk"}) models become traceable
+    on the compile path: storage allocated, config-computed buffers (rotary
+    inv_freq) restored to their true values, parameters left unwritten."""
+    from transformers import AutoModelForCausalLM
+
+    from luminal.generation import _materialize_skeleton
+
+    hub_model = "hf-internal-testing/tiny-random-LlamaForCausalLM"
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            hub_model, device_map={"": "disk"}
+        ).eval()
+        reference = AutoModelForCausalLM.from_pretrained(hub_model).eval()
+    except (OSError, ImportError) as exc:  # offline, or accelerate missing
+        pytest.skip(f"disk-mapped load unavailable: {exc}")
+
+    assert next(model.parameters()).is_meta
+    _materialize_skeleton(model)
+    assert not any(p.is_meta for p in model.parameters())
+    ref_buffers = dict(reference.named_buffers())
+    for name, buf in model.named_buffers():
+        assert torch.equal(buf, ref_buffers[name]), f"buffer {name} differs"
+    # Idempotent / no-op for materialized and normal models alike.
+    _materialize_skeleton(model)
+    _materialize_skeleton(reference)
