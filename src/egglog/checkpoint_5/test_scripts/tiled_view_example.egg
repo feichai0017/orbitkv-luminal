@@ -73,7 +73,8 @@
 ; descent completion: the identity map carries a division term through
 (let identity_rank1_map
   (IndexMapLit (IntExprCons (CoordVar 0 (IntLit 128)) (IntExprNil))))
-(subst-demand direct_quotient identity_rank1_map)
+(let identity_rank1_source_shape (ShapeLit (IntExprCons (IntLit 128) (IntExprNil))))
+(subst-demand direct_quotient identity_rank1_map identity_rank1_source_shape)
 
 (run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
@@ -81,7 +82,7 @@
 ; discovery classifies it completely ---
 (check
   (= (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map)
+       (subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map flat_shape)
        tiled_shape
        (bits-of storage_dtype))
      (StridedElementLayoutLit
@@ -90,7 +91,7 @@
        (bits-of storage_dtype))))
 (check
   (= (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map)
+       (subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map flat_shape)
        tiled_shape
        (bits-of storage_dtype))
      (RightMajorContiguousElementLayoutLit tiled_shape (bits-of storage_dtype))))
@@ -100,7 +101,7 @@
 ; the round trip, as layouts ---
 (check
   (= (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul tiled_element_offset (IntLit 32)) untiling_map)
+       (subst-of (IntMul tiled_element_offset (IntLit 32)) untiling_map tiled_shape)
        flat_shape
        (bits-of storage_dtype))
      (RightMajorContiguousElementLayoutLit flat_shape (bits-of storage_dtype))))
@@ -128,4 +129,4 @@
 (check (= negative_divisor_ceiling (IntCeilDiv (IntMul (IntLit -1) flat_inner_coordinate) (IntLit 64))))
 
 ; --- substitution descends through division constructors ---
-(check (= (subst-of direct_quotient identity_rank1_map) direct_quotient))
+(check (= (subst-of direct_quotient identity_rank1_map identity_rank1_source_shape) direct_quotient))

@@ -136,7 +136,7 @@
 
 ; Substitution pin (the SWAP case — sequential substitution would botch a
 ; transpose): compose the strided input offset with the transpose map.
-(subst-demand x_input_element_offset x_to_z_transpose_map)
+(subst-demand x_input_element_offset x_to_z_transpose_map x_shape)
 
 (run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
@@ -144,7 +144,7 @@
 ; x offset v1*8 + v0*2 over x's coords becomes 8*z_v0 + 2*z_v1 over z's
 ; (entry 0 = z_v1 spans 2, entry 1 = z_v0 spans 4).
 (check
-  (= (subst-of x_input_element_offset x_to_z_transpose_map)
+  (= (subst-of x_input_element_offset x_to_z_transpose_map x_shape)
      (IntAdd
        (IntMul (CoordVar 0 (IntLit 4)) (IntLit 8))
        (IntMul (CoordVar 1 (IntLit 2)) (IntLit 2)))))

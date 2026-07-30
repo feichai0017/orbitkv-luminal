@@ -897,7 +897,10 @@
 ; This contract is what makes substitution (subst-of) well-defined on
 ; classes: substitution images of different representatives of one class
 ; are unioned, which is sound only because the representatives are equal
-; functions.
+; functions — equal OVER THE COORDINATE BOX, so the subst CoordVar arm
+; must (and does) refuse to instantiate any coordinate outside its own
+; range; see the subst-of contract for the full well-definedness
+; argument.
 ;
 ; THE ALGEBRAIC FENCE DOCTRINE (the organizing principle behind every
 ; guard in this file). IntExpr denotes the polynomial ring ZZ[coords][dims].
@@ -1798,6 +1801,16 @@
 (rule
   ((axis-in-support ?expr ?axis) (axis-free ?expr ?axis))
   ((panic "axis support contradiction: unsound union or broken support rule"))
+)
+; Two distinct integer literals in one class is the canonical downstream
+; face of ANY unsound IntExpr union: bounds pins and literal folds drag
+; every corrupted class toward its literals. Catching the collision here
+; fires at the first weld instead of steps later in whatever machinery
+; happens to trip next (the 2026-07 subst corruption surfaced as an
+; axis-support panic long after the literal collision existed).
+(rule
+  ((= ?expr (IntLit ?a)) (= ?expr (IntLit ?b)) (!= ?a ?b))
+  ((panic "distinct integer literals unioned: unsound IntExpr equality"))
 )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -3491,7 +3504,8 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; INDEX-MAP SUBSTITUTION (the composition workhorse)
 ;
-; subst-of(expr, map) = expr with every CoordVar k replaced by the map's
+; subst-of(expr, map, source-shape) = expr with every CoordVar of the
+; SOURCE box (axis k matching the shape's k-th dim) replaced by the map's
 ; k-th-from-end entry — SIMULTANEOUS by construction: the CoordVar rule
 ; reads the ORIGINAL map entry and results are assembled from child
 ; results, never re-demanded, so a transpose map (a swap) composes
@@ -3499,15 +3513,56 @@
 ;
 ; subst-of is a CONSTRUCTOR (egglog's union-on-set idiom): different
 ; representatives of one class yield syntactically different images that
-; MUST union — sound because every IntExpr union is a function identity
-; (equal functions have equal substitution instances). The scaffolding
-; representative left in the result class is inert.
+; MUST union. That union is sound because substitution is COMPOSITION
+; with an assignment map: every IntExpr union asserts equality of
+; functions over the coordinate box (each CoordVar within [0, extent)),
+; and composing two equal functions with one assignment map yields equal
+; results EXACTLY WHEN the map sends every substituted variable into
+; that variable's own range — universal instantiation. An out-of-range
+; instantiation of a box-true equation is not an instance of it and
+; manufactures false equalities (the 2026-07 axis-support corruption: a
+; view-space quotient, box-true equal to 1, instantiated at an image
+; outside the quotient's coordinate box). The range premises on the
+; CoordVar arm below are therefore the WELL-DEFINEDNESS CONDITION of
+; subst-of on classes, not an optimization.
+;
+; IDENTIFICATION (Austin's ruling 2026-07-29): a substitution is
+; identified by (expr, map, SOURCE SHAPE) — the map fixes what each axis
+; is replaced BY; the source shape fixes σ's DOMAIN, i.e. WHICH
+; (axis, extent) variables are replaced — exactly as LogicalIndexMapApply
+; carries its Shape to fix the map's own domain. The shape is part of
+; the subst-of KEY, not merely the demand: an expression mixing two
+; boxes' coordinates has genuinely different images under each box's σ,
+; and a shared slot would union them — asserting cross-box variable
+; equality, an unsoundness the shapeless design only avoided by accident
+; (its maximal "substitute any in-range axis match" σ̂ ignored the shape
+; entirely, so all demands computed one function). Consequently the
+; CoordVar arm carries BOTH premise groups, each with its own meaning:
+; the signature premise answers "is this variable in σ's domain?"; the
+; range premises answer "is this instantiation legal?".
+;
+; Rectangle invariant (dynamic dims): the range premises compare interval
+; bounds, i.e. they enforce containment in the bounds RECTANGLE. That is
+; sufficient because every interval-lattice-derived union is true on the
+; whole rectangle (axes bounded independently). Any future rule deriving
+; equalities true on the box but NOT on the rectangle (relational facts,
+; e.g. conclusions from p < n) re-arms the hazard and must revisit this
+; guard.
+;
+; Audit principle for future rules: WITNESS-style rules (derive a
+; semantic fact about a class's function, any representative as
+; evidence) are congruence-safe by construction; TRANSFORM-style rules
+; (build new expressions from representative syntax and union the
+; outputs) carry a proof obligation that the transform is well-defined
+; on functions. subst-of and its bool-level mirror bool-subst-of are the
+; only transform-style rules in this file; this comment is their proof.
+; The scaffolding representative left in the result class is inert.
 ;
 ; An out-of-range axis leaves expr-list-nth-from-end unset and the rule
 ; silently unmatched — a missed entry on one representative is mere
 ; incompleteness; a panic would be a spurious abort.
-(relation subst-demand (IntExpr IndexMap))
-(constructor subst-of (IntExpr IndexMap) IntExpr)
+(relation subst-demand (IntExpr IndexMap Shape))
+(constructor subst-of (IntExpr IndexMap Shape) IntExpr)
 
 ; NO SEED LITERALS (Stage Z3, user-directed: minimal and correct).
 ; Membership premises like (= ?img (IntLit 0)) are lookups — but every
@@ -3517,44 +3572,65 @@
 ; stalling there is vacuously correct.
 
 (rule
-  ((subst-demand ?expr ?map) (= ?expr (IntLit ?value)))
-  ((set (subst-of ?expr ?map) (IntLit ?value)))
+  ((subst-demand ?expr ?map ?source_shape) (= ?expr (IntLit ?value)))
+  ((set (subst-of ?expr ?map ?source_shape) (IntLit ?value)))
 )
 ; A IntVar is coordinate-free (maps bind coordinates, not unknowns), so substitution is the
 ; identity on it — without this case a symbolic stride anywhere in the
 ; parent offset silently stalls the whole composition (the combine rules
 ; below need BOTH child images).
 (rule
-  ((subst-demand ?expr ?map) (= ?expr (IntVar ?dim_name)))
-  ((set (subst-of ?expr ?map) ?expr))
+  ((subst-demand ?expr ?map ?source_shape) (= ?expr (IntVar ?dim_name)))
+  ((set (subst-of ?expr ?map ?source_shape) ?expr))
 )
 (rule
   (
-    (subst-demand ?expr ?map)
+    (subst-demand ?expr ?map ?source_shape)
     (= ?expr (CoordVar ?axis ?extent))
     (= ?map (IndexMapLit ?entries))
     ; nth-from-end is ZERO-based, matching the 0-based de Bruijn axis
     ; levels: axis k reads entry k directly (no bridge).
     (= ?entry (expr-list-nth-from-end ?entries ?axis))
+    ; DOMAIN MEMBERSHIP (Austin's ruling 2026-07-29 — see IDENTIFICATION
+    ; in the contract above): σ's domain is the SOURCE box. Only a
+    ; coordinate whose (axis, extent) matches the source shape's dim for
+    ; that axis is a variable OF this substitution; foreign coordinates —
+    ; other boxes' variables that sound constant-level unions mixed into
+    ; walked classes — are left fixed, exactly as σ's definition says.
+    (= ?source_shape (ShapeLit ?source_dims))
+    (= ?source_dim (expr-list-nth-from-end ?source_dims ?axis))
+    (= ?extent ?source_dim)
+    ; IN-RANGE INSTANTIATION GUARD (the well-definedness condition — see
+    ; the contract above): the entry's proven range must fit inside the
+    ; coordinate's own range, else the substitution is not an
+    ; instantiation of this class's box-true equations and the image
+    ; union would be unsound. Unknown bounds stall the arm: fail-closed,
+    ; house style — strengthen bounds derivation, never weaken this.
+    (= ?entry_lower (lower-bound-of ?entry))
+    (= ?entry_upper (upper-bound-of ?entry))
+    (= ?coord_lower (lower-bound-of ?expr))
+    (= ?coord_upper (upper-bound-of ?expr))
+    (>= ?entry_lower ?coord_lower)
+    (<= ?entry_upper ?coord_upper)
   )
-  ((set (subst-of ?expr ?map) ?entry))
+  ((set (subst-of ?expr ?map ?source_shape) ?entry))
 )
 (rule
-  ((subst-demand ?expr ?map) (= ?expr (IntAdd ?lhs ?rhs)))
-  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+  ((subst-demand ?expr ?map ?source_shape) (= ?expr (IntAdd ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map ?source_shape) (subst-demand ?rhs ?map ?source_shape))
 )
 (rule
   (
-    (subst-demand ?expr ?map)
+    (subst-demand ?expr ?map ?source_shape)
     (= ?expr (IntAdd ?lhs ?rhs))
-    (= ?lhs_image (subst-of ?lhs ?map))
-    (= ?rhs_image (subst-of ?rhs ?map))
+    (= ?lhs_image (subst-of ?lhs ?map ?source_shape))
+    (= ?rhs_image (subst-of ?rhs ?map ?source_shape))
   )
-  ((set (subst-of ?expr ?map) (IntAdd ?lhs_image ?rhs_image)))
+  ((set (subst-of ?expr ?map ?source_shape) (IntAdd ?lhs_image ?rhs_image)))
 )
 (rule
-  ((subst-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs)))
-  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+  ((subst-demand ?expr ?map ?source_shape) (= ?expr (IntMul ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map ?source_shape) (subst-demand ?rhs ?map ?source_shape))
 )
 ; IntMul images are ZERO-AWARE (the foldr zero-stride precedent, one level
 ; up): a zero factor image collapses the product image to (IntLit 0) DIRECTLY
@@ -3579,30 +3655,30 @@
 ; (union-merge reconciles when both fire).
 (rule
   (
-    (subst-demand ?expr ?map)
+    (subst-demand ?expr ?map ?source_shape)
     (= ?expr (IntMul ?lhs ?rhs))
-    (= ?lhs_image (subst-of ?lhs ?map))
+    (= ?lhs_image (subst-of ?lhs ?map ?source_shape))
     (= ?lhs_image (IntLit 0))
   )
-  ((set (subst-of ?expr ?map) (IntLit 0)))
+  ((set (subst-of ?expr ?map ?source_shape) (IntLit 0)))
 )
 (rule
   (
-    (subst-demand ?expr ?map)
+    (subst-demand ?expr ?map ?source_shape)
     (= ?expr (IntMul ?lhs ?rhs))
-    (= ?rhs_image (subst-of ?rhs ?map))
+    (= ?rhs_image (subst-of ?rhs ?map ?source_shape))
     (= ?rhs_image (IntLit 0))
   )
-  ((set (subst-of ?expr ?map) (IntLit 0)))
+  ((set (subst-of ?expr ?map ?source_shape) (IntLit 0)))
 )
 (rule
   (
-    (subst-demand ?expr ?map)
+    (subst-demand ?expr ?map ?source_shape)
     (= ?expr (IntMul ?lhs ?rhs))
-    (= ?lhs_image (subst-of ?lhs ?map))
-    (= ?rhs_image (subst-of ?rhs ?map))
+    (= ?lhs_image (subst-of ?lhs ?map ?source_shape))
+    (= ?rhs_image (subst-of ?rhs ?map ?source_shape))
   )
-  ((set (subst-of ?expr ?map) (IntMul ?lhs_image ?rhs_image)))
+  ((set (subst-of ?expr ?map ?source_shape) (IntMul ?lhs_image ?rhs_image)))
 )
 
 ; Division-family descent (Stage D3): substitution commutes with every
@@ -3611,69 +3687,113 @@
 ; partial as the original, and consumers gate definedness where they
 ; union). Unconditional, like the IntAdd case.
 (rule
-  ((subst-demand ?expr ?map) (= ?expr (IntTruncDiv ?lhs ?rhs)))
-  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+  ((subst-demand ?expr ?map ?source_shape) (= ?expr (IntTruncDiv ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map ?source_shape) (subst-demand ?rhs ?map ?source_shape))
 )
 (rule
   (
-    (subst-demand ?expr ?map)
+    (subst-demand ?expr ?map ?source_shape)
     (= ?expr (IntTruncDiv ?lhs ?rhs))
-    (= ?lhs_image (subst-of ?lhs ?map))
-    (= ?rhs_image (subst-of ?rhs ?map))
+    (= ?lhs_image (subst-of ?lhs ?map ?source_shape))
+    (= ?rhs_image (subst-of ?rhs ?map ?source_shape))
   )
-  ((set (subst-of ?expr ?map) (IntTruncDiv ?lhs_image ?rhs_image)))
+  ((set (subst-of ?expr ?map ?source_shape) (IntTruncDiv ?lhs_image ?rhs_image)))
 )
 (rule
-  ((subst-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs)))
-  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+  ((subst-demand ?expr ?map ?source_shape) (= ?expr (IntTruncRem ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map ?source_shape) (subst-demand ?rhs ?map ?source_shape))
 )
 (rule
   (
-    (subst-demand ?expr ?map)
+    (subst-demand ?expr ?map ?source_shape)
     (= ?expr (IntTruncRem ?lhs ?rhs))
-    (= ?lhs_image (subst-of ?lhs ?map))
-    (= ?rhs_image (subst-of ?rhs ?map))
+    (= ?lhs_image (subst-of ?lhs ?map ?source_shape))
+    (= ?rhs_image (subst-of ?rhs ?map ?source_shape))
   )
-  ((set (subst-of ?expr ?map) (IntTruncRem ?lhs_image ?rhs_image)))
+  ((set (subst-of ?expr ?map ?source_shape) (IntTruncRem ?lhs_image ?rhs_image)))
 )
 (rule
-  ((subst-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs)))
-  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+  ((subst-demand ?expr ?map ?source_shape) (= ?expr (IntCeilDiv ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map ?source_shape) (subst-demand ?rhs ?map ?source_shape))
 )
 (rule
-  ((subst-demand ?expr ?map) (= ?expr (IntMin ?lhs ?rhs)))
-  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+  ((subst-demand ?expr ?map ?source_shape) (= ?expr (IntMin ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map ?source_shape) (subst-demand ?rhs ?map ?source_shape))
 )
 (rule
   (
-    (subst-demand ?expr ?map)
+    (subst-demand ?expr ?map ?source_shape)
     (= ?expr (IntMin ?lhs ?rhs))
-    (= ?lhs_image (subst-of ?lhs ?map))
-    (= ?rhs_image (subst-of ?rhs ?map))
+    (= ?lhs_image (subst-of ?lhs ?map ?source_shape))
+    (= ?rhs_image (subst-of ?rhs ?map ?source_shape))
   )
-  ((set (subst-of ?expr ?map) (IntMin ?lhs_image ?rhs_image)))
+  ((set (subst-of ?expr ?map ?source_shape) (IntMin ?lhs_image ?rhs_image)))
 )
 (rule
-  ((subst-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs)))
-  ((subst-demand ?lhs ?map) (subst-demand ?rhs ?map))
+  ((subst-demand ?expr ?map ?source_shape) (= ?expr (IntMax ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map ?source_shape) (subst-demand ?rhs ?map ?source_shape))
 )
 (rule
   (
-    (subst-demand ?expr ?map)
+    (subst-demand ?expr ?map ?source_shape)
     (= ?expr (IntMax ?lhs ?rhs))
-    (= ?lhs_image (subst-of ?lhs ?map))
-    (= ?rhs_image (subst-of ?rhs ?map))
+    (= ?lhs_image (subst-of ?lhs ?map ?source_shape))
+    (= ?rhs_image (subst-of ?rhs ?map ?source_shape))
   )
-  ((set (subst-of ?expr ?map) (IntMax ?lhs_image ?rhs_image)))
+  ((set (subst-of ?expr ?map ?source_shape) (IntMax ?lhs_image ?rhs_image)))
 )
 (rule
   (
-    (subst-demand ?expr ?map)
+    (subst-demand ?expr ?map ?source_shape)
     (= ?expr (IntCeilDiv ?lhs ?rhs))
-    (= ?lhs_image (subst-of ?lhs ?map))
-    (= ?rhs_image (subst-of ?rhs ?map))
+    (= ?lhs_image (subst-of ?lhs ?map ?source_shape))
+    (= ?rhs_image (subst-of ?rhs ?map ?source_shape))
   )
-  ((set (subst-of ?expr ?map) (IntCeilDiv ?lhs_image ?rhs_image)))
+  ((set (subst-of ?expr ?map ?source_shape) (IntCeilDiv ?lhs_image ?rhs_image)))
+)
+
+; --- the bool bridge crosses substitution (Austin's ruling 2026-07-29) ---
+; IntCastFromBool's child is a BoolExpr, outside subst-of's IntExpr
+; typing, so the bool level carries its own image constructor — the
+; SECOND transform-style constructor in this file. Its well-definedness
+; rides the same contract with nothing new to prove: the only σ
+; definition site is the guarded CoordVar arm above (the comparison arm
+; below re-enters subst-demand on its INTEGER children), so every
+; bool-level image is composition with the same in-box assignment map,
+; and bool-level unions (a decided comparison welded to its BoolLit by
+; bounds) are box-true equations preserved by in-range instantiation.
+(relation bool-subst-demand (BoolExpr IndexMap Shape))
+(constructor bool-subst-of (BoolExpr IndexMap Shape) BoolExpr)
+
+(rule
+  ((subst-demand ?expr ?map ?source_shape) (= ?expr (IntCastFromBool ?bool)))
+  ((bool-subst-demand ?bool ?map ?source_shape))
+)
+(rule
+  (
+    (subst-demand ?expr ?map ?source_shape)
+    (= ?expr (IntCastFromBool ?bool))
+    (= ?bool_image (bool-subst-of ?bool ?map ?source_shape))
+  )
+  ((set (subst-of ?expr ?map ?source_shape) (IntCastFromBool ?bool_image)))
+)
+; A bool literal is coordinate-free: substitution is the identity on it.
+(rule
+  ((bool-subst-demand ?bool ?map ?source_shape) (= ?bool (BoolLit ?value)))
+  ((set (bool-subst-of ?bool ?map ?source_shape) (BoolLit ?value)))
+)
+(rule
+  ((bool-subst-demand ?bool ?map ?source_shape) (= ?bool (BoolLessThanInt ?lhs ?rhs)))
+  ((subst-demand ?lhs ?map ?source_shape) (subst-demand ?rhs ?map ?source_shape))
+)
+(rule
+  (
+    (bool-subst-demand ?bool ?map ?source_shape)
+    (= ?bool (BoolLessThanInt ?lhs ?rhs))
+    (= ?lhs_image (subst-of ?lhs ?map ?source_shape))
+    (= ?rhs_image (subst-of ?rhs ?map ?source_shape))
+  )
+  ((set (bool-subst-of ?bool ?map ?source_shape) (BoolLessThanInt ?lhs_image ?rhs_image)))
 )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -3696,7 +3816,7 @@
     (= ?in_layout (BitOffsetExpressionLayoutLit ?bit_expr ?in_shape ?bit_width))
   )
   (
-    (subst-demand ?bit_expr ?map)
+    (subst-demand ?bit_expr ?map ?in_shape)
   )
 )
 
@@ -3711,7 +3831,7 @@
     (= ?out_logical (LogicalIndexMapApply ?in_logical ?map ?shape))
     (= ?in_lt (LayoutTensorLit ?in_logical ?in_layout))
     (= ?in_layout (BitOffsetExpressionLayoutLit ?bit_expr ?in_shape ?bit_width))
-    (= ?composed (subst-of ?bit_expr ?map))
+    (= ?composed (subst-of ?bit_expr ?map ?in_shape))
   )
   (
     ; The view keeps its parent's width (views never change element size)

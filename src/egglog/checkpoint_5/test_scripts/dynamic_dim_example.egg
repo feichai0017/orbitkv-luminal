@@ -171,16 +171,16 @@
      (ElementOffsetExpressionLayoutLit storage_offset storage_shape (bits-of storage_dtype))))
 
 ; Path (i) pins. Substitution is the identity on the symbolic constant...
-(check (= (subst-of seq_len row0_map) seq_len))
+(check (= (subst-of seq_len row0_map storage_shape) seq_len))
 ; ...the zero entry annihilates the symbolic-stride summand directly
 ; (zero-aware IntMul image: no stranded IntMul(0, seq_len) scaffolding)...
-(check (= (subst-of storage_offset row0_map) row0_offset))
+(check (= (subst-of storage_offset row0_map storage_shape) row0_offset))
 ; ...and the COMPOSED view layout lands in the hand-written class at the
 ; bit level (the composition acceptance shape, now symbolic).
 (check
   (= row0_view_layout
      (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul storage_offset (IntLit 32)) row0_map)
+       (subst-of (IntMul storage_offset (IntLit 32)) row0_map storage_shape)
        view_shape
        (bits-of storage_dtype))))
 
@@ -196,14 +196,14 @@
 
 ; Transpose pins: substitution lands the symbolic-coefficient offset...
 (let transposed_offset (IntAdd (IntMul (CoordVar 0 (IntLit 4)) seq_len) (CoordVar 1 seq_len)))
-(check (= (subst-of storage_offset transpose_map) transposed_offset))
+(check (= (subst-of storage_offset transpose_map storage_shape) transposed_offset))
 ; ...and SYMBOLIC-STRIDE DISCOVERY (single-occurrence extraction) now
 ; derives the strided form ([1, seq_len] over [seq_len, 4]) — this pin
 ; was a deliberate fail-check while 3b was literal-only; it flipped when
 ; the pointing rules landed...
 (check
   (= (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul storage_offset (IntLit 32)) transpose_map)
+       (subst-of (IntMul storage_offset (IntLit 32)) transpose_map storage_shape)
        transposed_shape
        (bits-of storage_dtype))
      (StridedElementLayoutLit
@@ -216,7 +216,7 @@
 ; classified.
 (check
   (= (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul storage_offset (IntLit 32)) transpose_map)
+       (subst-of (IntMul storage_offset (IntLit 32)) transpose_map storage_shape)
        transposed_shape
        (bits-of storage_dtype))
      (LeftMajorContiguousElementLayoutLit transposed_shape (bits-of storage_dtype))))
@@ -227,12 +227,12 @@
 ; the single-occurrence recursion cannot identify its summand): the
 ; strided form deliberately never derives.
 (check
-  (= (subst-of gap_probe_offset gap_transpose_map)
+  (= (subst-of gap_probe_offset gap_transpose_map gap_probe_shape)
      (IntAdd (IntMul (CoordVar 0 (IntLit 3)) gap_probe_dim) (CoordVar 1 gap_probe_dim))))
 (fail
   (check
     (= (BitOffsetExpressionLayoutLit
-         (subst-of (IntMul gap_probe_offset (IntLit 32)) gap_transpose_map)
+         (subst-of (IntMul gap_probe_offset (IntLit 32)) gap_transpose_map gap_probe_shape)
          gap_transposed_shape
          (bits-of storage_dtype))
        (StridedElementLayoutLit

@@ -85,7 +85,7 @@
 (check
   (= expected_view_layout
      (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul x_element_offset (IntLit 32)) row0_map)
+       (subst-of (IntMul x_element_offset (IntLit 32)) row0_map x_shape)
        row_shape
        (bits-of x_dtype))))
 

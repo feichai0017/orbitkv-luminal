@@ -1,0 +1,58 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Substitution range guard (2026-07-29, Austin-approved): the subst
+; CoordVar arm only fires when the map entry's proven range fits inside
+; the coordinate's own range — the well-definedness condition of
+; subst-of on classes (see the preamble subst contract). This proof
+; pins both faces:
+;   (1) an IN-RANGE view composes: coordinate image, composed offset,
+;       and composed layout tensor all exist;
+;   (2) an OUT-OF-RANGE view stalls fail-closed: no image, no composed
+;       layout — and no panic, no literal corruption anywhere.
+
+(let d_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
+(let d (LogicalTensorInputLit (LogicalIdLit "d") d_shape (F32)))
+(let d_layout (RightMajorContiguousElementLayoutLit d_shape (bits-of (F32))))
+(let d_lt (LayoutTensorLit d d_layout))
+(let c0 (CoordVar 0 (IntLit 3)))
+
+; Reversal view, entry 2 - c0: range [0, 2] — inside the parent box [0, 3).
+(let rev_map
+  (IndexMapLit (IntExprCons (IntAdd (IntLit 2) (IntMul (IntLit -1) c0)) (IntExprNil))))
+(let rev_view (LogicalIndexMapApply d rev_map d_shape))
+
+; Shift view, entry c0 + 1: range [1, 3] — the value 3 is OUTSIDE [0, 3).
+(let oor_map (IndexMapLit (IntExprCons (IntAdd c0 (IntLit 1)) (IntExprNil))))
+(let oor_view (LogicalIndexMapApply d oor_map d_shape))
+
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; (1) The in-range composition completed: the parent bit-offset expression
+; has an image under rev_map, and the composed layout tensor was minted.
+(check
+  (= d_layout (BitOffsetExpressionLayoutLit ?bit d_shape ?bw))
+  (= ?rev_image (subst-of ?bit rev_map d_shape)))
+(check
+  (= d_layout (BitOffsetExpressionLayoutLit ?bit d_shape ?bw))
+  (= ?rev_lt
+     (LayoutTensorLit rev_view
+       (BitOffsetExpressionLayoutLit (subst-of ?bit rev_map d_shape) d_shape ?bw))))
+
+; (2) The out-of-range composition stalled fail-closed: no coordinate
+; image, no root image, no composed layout tensor. (These absence pins
+; are not vacuous: the positive checks above bind the same ?bit.)
+(fail (check (= ?c_image (subst-of c0 oor_map d_shape))))
+(fail (check
+  (= d_layout (BitOffsetExpressionLayoutLit ?bit d_shape ?bw))
+  (= ?oor_image (subst-of ?bit oor_map d_shape))))
+(fail (check
+  (= d_layout (BitOffsetExpressionLayoutLit ?bit d_shape ?bw))
+  (= ?oor_lt
+     (LayoutTensorLit oor_view
+       (BitOffsetExpressionLayoutLit (subst-of ?bit oor_map d_shape) d_shape ?bw)))))
+
+; No corruption anywhere: distinct literals stay distinct (the distinct-
+; literal tripwire would have panicked during the run; these pins document
+; the invariant at check level too).
+(fail (check (= (IntLit 0) (IntLit 1))))
+(fail (check (= (IntLit 1) (IntLit 2))))
+(fail (check (= (IntLit 2) (IntLit 3))))

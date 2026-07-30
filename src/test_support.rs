@@ -1234,18 +1234,19 @@ mod harness_tests {
         assert_eq!(matmul_out.element_bits, Some(32));
     }
 
-    /// KNOWN ISSUE PIN (bisected 2026-07-29; unfixed, investigation with
-    /// Austin pending): a SOUND program whose gather has div/mod iota
-    /// coordinate expressions AND an available data layout tensor fires the
-    /// axis-support contradiction tripwire. Bisection: bare exprs clean;
-    /// +iotas clean; +gather clean; +data LAYOUT TENSOR fires — the layout
-    /// activates the gather⇄view unification, whose composition machinery
-    /// (subst / composed offsets over the division family) produces the
-    /// colliding support facts. This test documents the bug by EXPECTING
-    /// the loud refusal; when the machinery is fixed, it must flip to a
-    /// clean-run assertion.
+    /// FIXED ISSUE PROOF (root-caused and fixed 2026-07-29, Austin-approved):
+    /// this sound div/mod iota gather program once fired the axis-support
+    /// tripwire. Root cause: the subst CoordVar arm instantiated coordinates
+    /// with map entries OUTSIDE the coordinate's own range — an out-of-box
+    /// instantiation of box-true equations (e.g. a view-space quotient
+    /// box-true equal to 1), whose per-representative image unions then
+    /// welded false equalities into literal classes. The in-range
+    /// instantiation guard on that arm (the well-definedness condition of
+    /// subst-of; see the preamble subst contract) removes the corruption;
+    /// this test — the original reproducer, formerly the expect-panic pin —
+    /// now asserts CLEAN saturation and stands as the fix's proof.
     #[test]
-    fn div_mod_iota_gather_with_layout_still_trips_axis_support() {
+    fn div_mod_iota_gather_with_layout_saturates_cleanly() {
         let body = r#"
 (let flat (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 3)) (CoordVar 0 (IntLit 3))))
 (let value
@@ -1267,13 +1268,9 @@ mod harness_tests {
 (run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let full = format!("{}\n\n{}", crate::egglog_snippet::assembled_program(), body);
-        let err = crate::egglog_snippet::new_egraph()
+        crate::egglog_snippet::new_egraph()
             .parse_and_run_program(None, &full)
-            .expect_err("the known axis-support issue still fires (fixed? flip this test)");
-        assert!(
-            err.to_string().contains("axis support contradiction"),
-            "different failure than the pinned issue: {err}"
-        );
+            .expect("sound div/mod gather program saturates cleanly under the subst range guard");
     }
 
     /// The bool bridge (Austin's design 2026-07-29): decided comparisons
@@ -2456,3 +2453,166 @@ mod harness_tests {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#[cfg(test)]
+mod intcoordvar_probe {
+    //! Probes for the (IntCoordVar LogicalTensor i64) constructibility
+    //! analysis. Preamble is never touched on disk; programs assemble in
+    //! memory. Run: cargo test intcoordvar_probe -- --nocapture
+
+    /// Step-by-step runner: prints each step's Ok/Err so every claim is
+    /// separately observable.
+    fn run_steps(egraph: &mut egglog::EGraph, steps: &[(&str, &str)]) {
+        for (label, prog) in steps {
+            match egraph.parse_and_run_program(None, prog) {
+                Ok(lines) => {
+                    println!("X {label}: Ok");
+                    for l in lines {
+                        println!("X {label} out: {l}");
+                    }
+                }
+                Err(e) => println!("X {label}: Err: {e}"),
+            }
+        }
+    }
+
+    /// Two-sort mutually recursive mini-datatype (a stand-in for
+    /// LogicalTensor <-> IndexMap <-> IntCoordVar). Emulates the
+    /// self-referential coordinate tag via the name+union route and
+    /// observes: cyclic-class closure under congruence, extraction, and
+    /// the nonce cost (structurally identical views never merge).
+    #[test]
+    fn x_probe_cyclic_selftag() {
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        run_steps(
+            &mut egraph,
+            &[
+                (
+                    "setup",
+                    r#"
+(datatype*
+  (PT (PTInput String)
+      (PTName String)
+      (PTView PT PMap))
+  (PMap (PMapLit PCoord))
+  (PCoord (PCoordVar PT i64)))
+(let data (PTInput "data"))
+(let nm (PTName "v1"))
+(let v (PTView data (PMapLit (PCoordVar nm 0))))
+(union nm v)
+"#,
+                ),
+                (
+                    "cyclic-check",
+                    "(check (= v (PTView data (PMapLit (PCoordVar v 0)))))",
+                ),
+                ("extract-v", "(extract v)"),
+                ("extract-v-variants", "(extract v 4)"),
+                (
+                    "nonce-no-merge",
+                    r#"
+(let n1 (PTName "nonce1"))
+(let n2 (PTName "nonce2"))
+(let w1 (PTView data (PMapLit (PCoordVar n1 0))))
+(let w2 (PTView data (PMapLit (PCoordVar n2 0))))
+(union n1 w1)
+(union n2 w2)
+(fail (check (= w1 w2)))
+"#,
+                ),
+                (
+                    "hashcons-baseline",
+                    r#"
+(let u1 (PTView data (PMapLit (PCoordVar data 0))))
+(let u2 (PTView data (PMapLit (PCoordVar data 0))))
+(check (= u1 u2))
+"#,
+                ),
+            ],
+        );
+    }
+
+    /// Today's behavior on the user's own discriminating example: a
+    /// 3-vector with slices v[0..2] and v[1..3]. Both slices' coordinate
+    /// is the identical term (CoordVar 0 (IntLit 2)); the VIEW terms stay
+    /// distinct; an identically-written view hash-conses (free CSE).
+    #[test]
+    fn x_probe_slice_views_today() {
+        let mut full = crate::egglog_snippet::assembled_program().to_string();
+        full.push_str(
+            r#"
+(let vec_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
+(let out_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprNil))))
+(let v_in (LogicalTensorInputLit (LogicalIdLit "v") vec_shape (F32)))
+(let coord (CoordVar 0 (IntLit 2)))
+(let slice_a (LogicalIndexMapApply v_in
+  (IndexMapLit (IntExprCons coord (IntExprNil))) out_shape))
+(let slice_b (LogicalIndexMapApply v_in
+  (IndexMapLit (IntExprCons (IntAdd coord (IntLit 1)) (IntExprNil))) out_shape))
+(let slice_a2 (LogicalIndexMapApply v_in
+  (IndexMapLit (IntExprCons (CoordVar 0 (IntLit 2)) (IntExprNil))) out_shape))
+(let v_layout (RightMajorContiguousElementLayoutLit vec_shape (bits-of (F32))))
+(let v_lt (LayoutTensorLit v_in v_layout))
+(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+"#,
+        );
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        match egraph.parse_and_run_program(None, &full) {
+            Ok(_) => println!("X slice-fixture: Ok"),
+            Err(e) => {
+                println!("X slice-fixture: Err: {e}");
+                return;
+            }
+        }
+        run_steps(
+            &mut egraph,
+            &[
+                ("cse-check", "(check (= slice_a slice_a2))"),
+                ("distinct-views", "(fail (check (= slice_a slice_b)))"),
+                (
+                    "shared-coord-term",
+                    "(check (= coord (CoordVar 0 (IntLit 2))))",
+                ),
+                (
+                    "corruption-pairs",
+                    r#"
+(fail (check (= (IntLit 0) (IntLit 1))))
+(fail (check (= (IntLit 0) (IntLit 2))))
+(fail (check (= (IntLit 0) (IntLit 3))))
+(fail (check (= (IntLit 0) (IntLit 4))))
+(fail (check (= (IntLit 0) (IntLit 5))))
+(fail (check (= (IntLit 1) (IntLit 2))))
+(fail (check (= (IntLit 1) (IntLit 3))))
+(fail (check (= (IntLit 1) (IntLit 4))))
+(fail (check (= (IntLit 1) (IntLit 5))))
+(fail (check (= (IntLit 2) (IntLit 3))))
+(fail (check (= (IntLit 2) (IntLit 4))))
+(fail (check (= (IntLit 2) (IntLit 5))))
+(fail (check (= (IntLit 3) (IntLit 4))))
+(fail (check (= (IntLit 3) (IntLit 5))))
+(fail (check (= (IntLit 4) (IntLit 5))))
+"#,
+                ),
+            ],
+        );
+    }
+}
