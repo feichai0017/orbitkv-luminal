@@ -89,8 +89,9 @@ impl BufferTensorIrOp for IndexMapApplyMaterializeDps {
             parent_strides[k] = parent_strides[k + 1] * parent_dims[k + 1];
         }
         let out_rank = out_dims.len();
-        let parent = &ctx.operands[0];
-        for flat in 0..ctx.dests[0].len() {
+        let parent = ctx.operands[0].as_f32()?.clone();
+        let dest = ctx.dests[0].as_f32_mut()?;
+        for flat in 0..dest.len() {
             // Decompose the flat OUT index into row-major coordinates.
             let mut remainder = flat;
             let mut coords = vec![0usize; out_rank];
@@ -108,7 +109,7 @@ impl BufferTensorIrOp for IndexMapApplyMaterializeDps {
                 );
                 parent_flat += index as usize * parent_strides[k];
             }
-            ctx.dests[0][flat] = parent[parent_flat];
+            dest[flat] = parent[parent_flat];
         }
         Ok(())
     }

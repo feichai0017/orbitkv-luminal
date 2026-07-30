@@ -2,7 +2,7 @@
 //! bufferized plans (ruling 2026-07-28: lives in luminal; once the path is
 //! COMPLETE it replaces `ReferenceRuntime` — not before).
 //!
-//! Executes a [`BufferIrGraph`] directly: every buffer is a `Vec<f32>` sized
+//! Executes a [`BufferIrGraph`] directly: every buffer is a [`TypedBuffer`] sized
 //! from the plan's annotated numeric geometry (dims × 32-bit elements —
 //! slice 1 is f32-only and bails loudly otherwise); compute nodes dispatch
 //! through each op's own `reference_execute` kernel (registry-style, no
@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 use petgraph::algo::toposort;
 use rustc_hash::FxHashMap;
 
-use crate::buffer_tensor_ir::ReferenceKernelCtx;
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 use crate::bufferize::{BufferId, BufferIrGraph, BufferNode};
 
 /// The reference backend's implementation inventory: every registered op
@@ -36,8 +36,8 @@ pub struct SsaReferenceRuntime {
     plan: Option<BufferIrGraph>,
     /// Caller-staged data by numeric `BufferLit` id, consumed at `execute`.
     staged: FxHashMap<i64, Vec<f32>>,
-    /// Post-execute storage, kept for `get_f32`.
-    storage: FxHashMap<BufferId, Vec<f32>>,
+    /// Post-execute storage, kept for `get_f32` / `get_bool`.
+    storage: FxHashMap<BufferId, TypedBuffer>,
     /// `BufferLit` id → plan buffer, built at `load_plan`.
     lit_index: FxHashMap<i64, BufferId>,
 }
@@ -67,7 +67,11 @@ impl SsaReferenceRuntime {
 
         // Materialize every buffer: staged caller data where provided
         // (length-checked against the annotated geometry), zeros otherwise.
-        let mut storage: FxHashMap<BufferId, Vec<f32>> = FxHashMap::default();
+        // The element bit width picks the TYPED representation: 32 = f32;
+        // 1 (the logical Bool width) and 8 (the reference binding's
+        // byte-backed Bool layout) are both stored byte-backed. Anything
+        // else refuses loudly.
+        let mut storage: FxHashMap<BufferId, TypedBuffer> = FxHashMap::default();
         for (id, buffer) in &plan.buffers {
             let dims = buffer.dims.as_ref().ok_or_else(|| {
                 anyhow!("buffer {} has no numeric geometry (symbolic dims are not executable yet)", buffer.label)
@@ -75,19 +79,34 @@ impl SsaReferenceRuntime {
             let bits = buffer.element_bits.ok_or_else(|| {
                 anyhow!("buffer {} has no element bit width", buffer.label)
             })?;
-            ensure!(bits == 32, "slice 1 executes f32 only; buffer {} is {bits}-bit", buffer.label);
             let numel = Self::numel(dims);
-            let data = match buffer.lit.and_then(|lit| self.staged.get(&lit)) {
-                Some(staged) => {
+            let staged = buffer.lit.and_then(|lit| self.staged.get(&lit));
+            let data = match bits {
+                32 => match staged {
+                    Some(staged) => {
+                        ensure!(
+                            staged.len() == numel,
+                            "staged data for {} has {} elements, buffer holds {numel}",
+                            buffer.label,
+                            staged.len()
+                        );
+                        TypedBuffer::F32(staged.clone())
+                    }
+                    None => TypedBuffer::F32(vec![0.0; numel]),
+                },
+                1 | 8 => {
                     ensure!(
-                        staged.len() == numel,
-                        "staged data for {} has {} elements, buffer holds {numel}",
-                        buffer.label,
-                        staged.len()
+                        staged.is_none(),
+                        "buffer {} is boolean; set_data stages f32 only (a bool \
+                         staging surface does not exist yet)",
+                        buffer.label
                     );
-                    staged.clone()
+                    TypedBuffer::Bool(vec![0u8; numel])
                 }
-                None => vec![0.0; numel],
+                other => anyhow::bail!(
+                    "buffer {} has unsupported element width {other} bits (f32 and bool only)",
+                    buffer.label
+                ),
             };
             storage.insert(id.clone(), data);
         }
@@ -129,6 +148,12 @@ impl SsaReferenceRuntime {
                         .get_mut(dst)
                         .ok_or_else(|| anyhow!("copy writes unknown buffer"))?;
                     ensure!(data.len() == dest.len(), "copy length mismatch");
+                    ensure!(
+                        data.type_name() == dest.type_name(),
+                        "copy between {} and {} buffers",
+                        data.type_name(),
+                        dest.type_name()
+                    );
                     *dest = data;
                 }
                 BufferNode::Compute { op, reads, writes, .. } => {
@@ -149,11 +174,13 @@ impl SsaReferenceRuntime {
                     }
                     let mut dests = Vec::with_capacity(writes.len());
                     for id in writes {
-                        let len = storage
+                        let existing = storage
                             .get(id)
-                            .ok_or_else(|| anyhow!("{} writes unknown buffer", op.label()))?
-                            .len();
-                        dests.push(vec![0.0; len]);
+                            .ok_or_else(|| anyhow!("{} writes unknown buffer", op.label()))?;
+                        dests.push(match existing {
+                            TypedBuffer::F32(values) => TypedBuffer::F32(vec![0.0; values.len()]),
+                            TypedBuffer::Bool(bits) => TypedBuffer::Bool(vec![0u8; bits.len()]),
+                        });
                     }
                     let mut ctx = ReferenceKernelCtx { operands, operand_dims, dests };
                     op.reference_execute(&mut ctx)
@@ -169,9 +196,19 @@ impl SsaReferenceRuntime {
         Ok(())
     }
 
-    /// The contents of the boundary buffer with this `BufferLit` id.
+    /// The f32 contents of the boundary buffer with this `BufferLit` id.
+    /// Loud on a boolean buffer — use [`Self::get_bool`] for those.
     pub fn get_f32(&self, id: impl Into<i64>) -> Result<&Vec<f32>> {
-        let id = id.into();
+        self.get_typed(id.into())?.as_f32()
+    }
+
+    /// The byte-backed boolean contents of the boundary buffer with this
+    /// `BufferLit` id (each element 0 or 1).
+    pub fn get_bool(&self, id: impl Into<i64>) -> Result<&Vec<u8>> {
+        self.get_typed(id.into())?.as_bool()
+    }
+
+    fn get_typed(&self, id: i64) -> Result<&TypedBuffer> {
         let buffer = self
             .lit_index
             .get(&id)
@@ -603,6 +640,46 @@ mod tests {
             let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
             assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
         }
+    }
+
+    /// TYPED-BUFFERS differential: lt produces a genuinely BOOLEAN
+    /// intermediate (byte-backed u8 in reference storage; the logical dtype
+    /// stays 1-bit), cast bridges it back to f32 as exact 0/1 indicators,
+    /// and blend arithmetic runs downstream — element-for-element against
+    /// their full search + ReferenceRuntime.
+    #[test]
+    fn differential_less_than_cast_against_reference_runtime() {
+        use crate::dtype::DType;
+        let build = || {
+            let mut cx = Graph::new();
+            let x = cx.tensor((2, 3));
+            let y = cx.tensor((2, 3));
+            let out = (x.lt(y).cast(DType::F32) * 3.0 + 1.0).output();
+            (cx, x, y, out)
+        };
+        let x_data = vec![1.0, 5.0, 2.0, 8.0, -1.0, 0.0];
+        let y_data = vec![2.0, 4.0, 2.0, 9.0, -2.0, 0.5];
+
+        let (mut cx, x, y, out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(x.id, x_data.clone());
+        theirs.set_data(y.id, y_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(out.id).clone();
+
+        let (cx2, x2, y2, out2) = build();
+        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+        assert!(
+            program.text.contains("LogicalLessThan") && program.text.contains("LogicalCast"),
+            "comparison + cast expected in the model:\n{}",
+            program.text
+        );
+        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
     }
 
     /// RESHAPE differentials: split (mixed-radix group entries), merge

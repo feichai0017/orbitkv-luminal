@@ -302,12 +302,18 @@ fn scatter_reference(
     for k in (0..rank.saturating_sub(1)).rev() {
         strides[k] = strides[k + 1] * init_dims[k + 1];
     }
-    ctx.dests[0].copy_from_slice(&ctx.operands[0].clone());
-    let src = ctx.operands[1].clone();
+    let init = ctx.operands[0].as_f32()?.clone();
+    let src = ctx.operands[1].as_f32()?.clone();
+    let coord_operands: Vec<Vec<f32>> = ctx.operands[2..2 + rank]
+        .iter()
+        .map(|operand| operand.as_f32().cloned())
+        .collect::<anyhow::Result<_>>()?;
+    let dest = ctx.dests[0].as_f32_mut()?;
+    dest.copy_from_slice(&init);
     for i in 0..src.len() {
         let mut flat = 0usize;
         for axis in 0..rank {
-            let coord = ctx.operands[2 + axis][i] as i64;
+            let coord = coord_operands[axis][i] as i64;
             anyhow::ensure!(
                 coord >= 0 && (coord as usize) < init_dims[axis],
                 "scatter coordinate {coord} out of bounds for axis {axis} (extent {}) — \
@@ -316,7 +322,7 @@ fn scatter_reference(
             );
             flat += coord as usize * strides[axis];
         }
-        ctx.dests[0][flat] = src[i];
+        dest[flat] = src[i];
     }
     Ok(())
 }

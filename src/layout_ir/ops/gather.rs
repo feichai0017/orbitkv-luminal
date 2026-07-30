@@ -100,11 +100,16 @@ impl BufferTensorIrOp for GatherDps {
         for k in (0..self.rank.saturating_sub(1)).rev() {
             data_strides[k] = data_strides[k + 1] * data_dims[k + 1];
         }
-        let data = &ctx.operands[0];
-        for flat in 0..ctx.dests[0].len() {
+        let data = ctx.operands[0].as_f32()?.clone();
+        let coord_operands: Vec<&Vec<f32>> = ctx.operands[1..1 + self.rank]
+            .iter()
+            .map(|operand| operand.as_f32())
+            .collect::<anyhow::Result<_>>()?;
+        let dest = ctx.dests[0].as_f32_mut()?;
+        for flat in 0..dest.len() {
             let mut data_flat = 0usize;
             for axis in 0..self.rank {
-                let coord = ctx.operands[1 + axis][flat];
+                let coord = coord_operands[axis][flat];
                 let coord = coord as i64;
                 anyhow::ensure!(
                     coord >= 0 && (coord as usize) < data_dims[axis],
@@ -114,7 +119,7 @@ impl BufferTensorIrOp for GatherDps {
                 );
                 data_flat += coord as usize * data_strides[axis];
             }
-            ctx.dests[0][flat] = data[data_flat];
+            dest[flat] = data[data_flat];
         }
         Ok(())
     }

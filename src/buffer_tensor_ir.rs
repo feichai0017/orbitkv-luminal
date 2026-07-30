@@ -73,29 +73,88 @@ impl<T: BufferTensorIrOp + Clone + 'static> CloneBufferTensorIrOp for T {
 /// this trait — they have no logical semantics, no egglog constructor, and
 /// never meet the analyzer.
 
+/// Typed reference storage (ruling 2026-07-28: Bool is a REAL dtype, never
+/// an f32 value-encoding). The reference runtime stores floats as f32 and
+/// booleans byte-backed (one u8 per element, 0 or 1 — the reference
+/// binding's 8-bit Bool layout vocabulary; the LOGICAL dtype stays 1-bit).
+/// Access is loud: a kernel asking for the wrong type is a bug in the op's
+/// dtype story, never an implicit coercion.
+#[derive(Debug, Clone)]
+pub enum TypedBuffer {
+    F32(Vec<f32>),
+    Bool(Vec<u8>),
+}
+
+impl TypedBuffer {
+    pub fn len(&self) -> usize {
+        match self {
+            TypedBuffer::F32(values) => values.len(),
+            TypedBuffer::Bool(bits) => bits.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            TypedBuffer::F32(_) => "f32",
+            TypedBuffer::Bool(_) => "bool",
+        }
+    }
+
+    pub fn as_f32(&self) -> Result<&Vec<f32>> {
+        match self {
+            TypedBuffer::F32(values) => Ok(values),
+            other => anyhow::bail!("expected an f32 buffer, found {}", other.type_name()),
+        }
+    }
+
+    pub fn as_f32_mut(&mut self) -> Result<&mut Vec<f32>> {
+        match self {
+            TypedBuffer::F32(values) => Ok(values),
+            other => anyhow::bail!("expected an f32 buffer, found {}", other.type_name()),
+        }
+    }
+
+    pub fn as_bool(&self) -> Result<&Vec<u8>> {
+        match self {
+            TypedBuffer::Bool(bits) => Ok(bits),
+            other => anyhow::bail!("expected a bool buffer, found {}", other.type_name()),
+        }
+    }
+
+    pub fn as_bool_mut(&mut self) -> Result<&mut Vec<u8>> {
+        match self {
+            TypedBuffer::Bool(bits) => Ok(bits),
+            other => anyhow::bail!("expected a bool buffer, found {}", other.type_name()),
+        }
+    }
+}
+
 /// One reference-kernel invocation's storage view: alias-safe by
 /// construction — operand contents are CLONED before any destination is
 /// written, so in-place forms read consistent pre-op data; the runtime
-/// writes `dests` back to the result buffers afterwards. f32 only for now
-/// (slice 1); geometry comes from the plan's annotated buffers.
+/// writes `dests` back to the result buffers afterwards. Storage is typed
+/// ([`TypedBuffer`]); geometry comes from the plan's annotated buffers.
 #[derive(Debug)]
 pub struct ReferenceKernelCtx {
     /// Operand contents in slot order (destinations included, pre-op).
-    pub operands: Vec<Vec<f32>>,
+    pub operands: Vec<TypedBuffer>,
     /// Per-operand dims, from the operand buffers' annotated geometry.
     pub operand_dims: Vec<Vec<usize>>,
     /// Result contents to fill, in result order (zero-initialized).
-    pub dests: Vec<Vec<f32>>,
+    pub dests: Vec<TypedBuffer>,
 }
 
 impl ReferenceKernelCtx {
     /// dest0[i] = f(operand0[i])
     pub fn unary_elementwise(&mut self, f: impl Fn(f32) -> f32) -> Result<()> {
-        anyhow::ensure!(
-            self.operands[0].len() == self.dests[0].len(),
-            "unary kernel length mismatch"
-        );
-        for (out, x) in self.dests[0].iter_mut().zip(&self.operands[0]) {
+        let input = self.operands[0].as_f32()?;
+        let dest = self.dests[0].as_f32_mut()?;
+        anyhow::ensure!(input.len() == dest.len(), "unary kernel length mismatch");
+        for (out, x) in dest.iter_mut().zip(input) {
             *out = f(*x);
         }
         Ok(())
@@ -103,13 +162,14 @@ impl ReferenceKernelCtx {
 
     /// dest0[i] = f(operand0[i], operand1[i])
     pub fn binary_elementwise(&mut self, f: impl Fn(f32, f32) -> f32) -> Result<()> {
+        let lhs = self.operands[0].as_f32()?;
+        let rhs = self.operands[1].as_f32()?;
+        let dest = self.dests[0].as_f32_mut()?;
         anyhow::ensure!(
-            self.operands[0].len() == self.operands[1].len()
-                && self.operands[0].len() == self.dests[0].len(),
+            lhs.len() == rhs.len() && lhs.len() == dest.len(),
             "binary kernel length mismatch"
         );
-        let (lhs, rhs) = (&self.operands[0], &self.operands[1]);
-        for (index, out) in self.dests[0].iter_mut().enumerate() {
+        for (index, out) in dest.iter_mut().enumerate() {
             *out = f(lhs[index], rhs[index]);
         }
         Ok(())
@@ -133,18 +193,19 @@ impl ReferenceKernelCtx {
         let reduced = dims[axis];
         let inner: usize = dims[axis + 1..].iter().product();
         let outer: usize = dims[..axis].iter().product();
+        let input = self.operands[0].as_f32()?;
+        let dest = self.dests[0].as_f32_mut()?;
         anyhow::ensure!(
-            self.dests[0].len() == outer * inner && self.operands[0].len() == outer * reduced * inner,
+            dest.len() == outer * inner && input.len() == outer * reduced * inner,
             "reduce kernel geometry mismatch"
         );
-        let input = &self.operands[0];
         for o in 0..outer {
             for i in 0..inner {
                 let mut acc = init;
                 for r in 0..reduced {
                     acc = fold(acc, input[o * reduced * inner + r * inner + i]);
                 }
-                self.dests[0][o * inner + i] = acc;
+                dest[o * inner + i] = acc;
             }
         }
         Ok(())

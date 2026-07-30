@@ -75,15 +75,17 @@ impl BufferTensorIrOp for MatMulFusedDps {
             "matmul kernel geometry mismatch: {lhs_dims:?} x {rhs_dims:?}"
         );
         let (m, k, n) = (lhs_dims[0], lhs_dims[1], rhs_dims[1]);
-        anyhow::ensure!(ctx.dests[0].len() == m * n, "matmul dest length mismatch");
-        let (lhs, rhs) = (&ctx.operands[0], &ctx.operands[1]);
+        let lhs = ctx.operands[0].as_f32()?.clone();
+        let rhs = ctx.operands[1].as_f32()?.clone();
+        let dest = ctx.dests[0].as_f32_mut()?;
+        anyhow::ensure!(dest.len() == m * n, "matmul dest length mismatch");
         for i in 0..m {
             for j in 0..n {
                 let mut acc = 0.0;
                 for kk in 0..k {
                     acc += lhs[i * k + kk] * rhs[kk * n + j];
                 }
-                ctx.dests[0][i * n + j] = acc;
+                dest[i * n + j] = acc;
             }
         }
         Ok(())

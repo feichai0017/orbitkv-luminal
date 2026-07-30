@@ -59,6 +59,26 @@ impl OpSlotNames for LessThanDps {
 }
 
 impl BufferTensorIrOp for LessThanDps {
+    fn reference_execute(
+        &self,
+        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
+    ) -> anyhow::Result<()> {
+        // The comparison is the one op whose OUTPUT dtype differs from its
+        // inputs by construction: f32 operands, a genuinely boolean result
+        // (byte-backed in reference storage; the logical dtype is 1-bit).
+        let lhs = ctx.operands[0].as_f32()?;
+        let rhs = ctx.operands[1].as_f32()?;
+        let dest = ctx.dests[0].as_bool_mut()?;
+        anyhow::ensure!(
+            lhs.len() == rhs.len() && lhs.len() == dest.len(),
+            "less-than kernel length mismatch"
+        );
+        for (index, out) in dest.iter_mut().enumerate() {
+            *out = u8::from(lhs[index] < rhs[index]);
+        }
+        Ok(())
+    }
+
     fn label(&self) -> &str {
         "LessThanGeneric" // DPS forms keep the IR name
     }

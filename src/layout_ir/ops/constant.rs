@@ -65,7 +65,7 @@ impl BufferTensorIrOp for ConstantDps {
         &self,
         ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
     ) -> anyhow::Result<()> {
-        ctx.dests[0].fill(self.value as f32);
+        ctx.dests[0].as_f32_mut()?.fill(self.value as f32);
         Ok(())
     }
 

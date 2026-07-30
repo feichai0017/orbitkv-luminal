@@ -24,8 +24,8 @@ use rustc_hash::FxHashMap;
 use crate::dtype::DType;
 use crate::graph::Graph;
 use crate::hlir::{
-    Add, Constant, Exp2, Gather, Input, Iota, Log2, MaxReduce, Mod, Mul, Output, Recip,
-    ClampView, MaskIota, Scatter, Sin, SliceView, Sqrt, SumReduce, UnfoldView,
+    Add, Cast, Constant, Exp2, Gather, Input, Iota, LessThan, Log2, MaxReduce, Mod, Mul,
+    Output, Recip, ClampView, MaskIota, Scatter, Sin, SliceView, Sqrt, SumReduce, UnfoldView,
 };
 use crate::shape::{Expression, Term};
 use std::collections::BTreeMap;
@@ -451,6 +451,9 @@ fn op_input_trackers(op: &dyn crate::op::HLIROp) -> Option<Vec<ShapeTracker>> {
     if let Some(op) = op.downcast_ref::<Mod>() {
         return Some(op.input_shapes.clone());
     }
+    if let Some(op) = op.downcast_ref::<LessThan>() {
+        return Some(op.input_shapes.clone());
+    }
     if let Some(op) = op.downcast_ref::<Recip>() {
         return Some(vec![op.input_shape]);
     }
@@ -714,6 +717,17 @@ fn specialize_iota(
     Ok((name, view_dims))
 }
 
+/// The reference binding's element width for a BOUNDARY buffer: byte-backed
+/// bools (ruling 2026-07-28 — the LOGICAL Bool dtype stays 1-bit; 8 bits is
+/// reference-binding vocabulary, the specify-the-form arm), every other
+/// dtype at its own bits-of width.
+fn boundary_width_term(dtype: DType) -> String {
+    match dtype {
+        DType::Bool => "(BitWidthLit 8)".to_string(),
+        other => format!("(bits-of {})", dtype_term(other)),
+    }
+}
+
 fn dtype_term(dtype: DType) -> String {
     format!("({dtype:?})")
 }
@@ -775,10 +789,11 @@ pub fn hlir_to_logical_with_dims(
                 None => shape_term(&dims),
             };
             let dtype = dtype_term(input.dtype);
+            let width = boundary_width_term(input.dtype);
             let label = format!("{}_{idx}", input.label);
             inputs_text.push_str(&format!(
                 "(let t{idx}_logical (LogicalTensorInputLit (LogicalIdLit \"{label}\") {shape} {dtype}))\n\
-                 (let t{idx}_layout (RightMajorContiguousElementLayoutLit {shape} (bits-of {dtype})))\n\
+                 (let t{idx}_layout (RightMajorContiguousElementLayoutLit {shape} {width}))\n\
                  (let t{idx}_layout_tensor (LayoutTensorLit t{idx}_logical t{idx}_layout))\n\
                  (let t{idx}_buffer_id (BufferLit {idx}))\n\
                  (set (buffer-access-of t{idx}_buffer_id) (ReadOnly))\n\
@@ -1360,6 +1375,8 @@ pub fn hlir_to_logical_with_dims(
                 Some(("LogicalMul", 2))
             } else if dyn_op.downcast_ref::<Mod>().is_some() {
                 Some(("LogicalMod", 2))
+            } else if dyn_op.downcast_ref::<LessThan>().is_some() {
+                Some(("LogicalLessThan", 2))
             } else if dyn_op.downcast_ref::<Recip>().is_some() {
                 Some(("LogicalRecip", 1))
             } else if dyn_op.downcast_ref::<Sqrt>().is_some() {
@@ -1432,12 +1449,20 @@ pub fn hlir_to_logical_with_dims(
                     "(let t{idx}_logical ({constructor} {}))\n",
                     operand_names.join(" ")
                 ));
+                // The comparison is the one op whose output dtype differs
+                // from its operands: a genuinely boolean result (the egglog
+                // dtype rules derive the same).
+                let out_dtype = if constructor == "LogicalLessThan" {
+                    DType::Bool
+                } else {
+                    dtype.expect("arity >= 1")
+                };
                 values.insert(
                     node,
                     ValueInfo {
                         let_name: format!("t{idx}_logical"),
                         dims: dims.expect("arity >= 1"),
-                        dtype: dtype.expect("arity >= 1"),
+                        dtype: out_dtype,
                     },
                 );
             } else if let Some((constructor, dim, tracker)) = dyn_op
@@ -1490,6 +1515,32 @@ pub fn hlir_to_logical_with_dims(
                         dtype: source_value.dtype,
                     },
                 );
+            } else if let Some(cast) = dyn_op.downcast_ref::<Cast>() {
+                // Their cast passes the view through unchanged (the shape
+                // continues to the next consumer's tracker), so the operand
+                // is the source VALUE as-is; the span expression in the op
+                // is their runtime's sizing detail, derivable from shape on
+                // our side.
+                let source = *sources.first().ok_or_else(|| {
+                    anyhow!("hlir_to_logical: Cast at t{idx} has no source")
+                })?;
+                let source_value = values.get(&source).ok_or_else(|| {
+                    anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
+                })?;
+                let target = cast.1;
+                ops_text.push_str(&format!(
+                    "(let t{idx}_logical (LogicalCast {} {}))\n",
+                    source_value.let_name,
+                    dtype_term(target),
+                ));
+                values.insert(
+                    node,
+                    ValueInfo {
+                        let_name: format!("t{idx}_logical"),
+                        dims: source_value.dims.clone(),
+                        dtype: target,
+                    },
+                );
             } else {
                 bail!("hlir_to_logical slice 1: unsupported HLIR op {op:?} at node t{idx}");
             }
@@ -1526,10 +1577,10 @@ pub fn hlir_to_logical_with_dims(
             }
         }
         let shape = shape_term(&value.dims);
-        let dtype = dtype_term(value.dtype);
+        let width = boundary_width_term(value.dtype);
         outputs_text.push_str(&format!(
             "(union {name} (LogicalTensorOutputLit (LogicalIdLit \"out_{key}\")))\n\
-             (let out{key}_layout (RightMajorContiguousElementLayoutLit {shape} (bits-of {dtype})))\n\
+             (let out{key}_layout (RightMajorContiguousElementLayoutLit {shape} {width}))\n\
              (let out{key}_layout_tensor (LayoutTensorLit {name} out{key}_layout))\n\
              (let out{key}_buffer_id (BufferLit {key}))\n\
              (set (buffer-access-of out{key}_buffer_id) (ReadWrite))\n\

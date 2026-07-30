@@ -175,14 +175,15 @@ impl BufferTensorIrOp for IotaDps {
         };
         let out_dims = ctx.operand_dims.last().cloned().unwrap_or_default();
         let rank = out_dims.len();
-        for flat in 0..ctx.dests[0].len() {
+        let dest = ctx.dests[0].as_f32_mut()?;
+        for flat in 0..dest.len() {
             let mut remainder = flat;
             let mut coords = vec![0usize; rank];
             for axis in (0..rank).rev() {
                 coords[axis] = remainder % out_dims[axis];
                 remainder /= out_dims[axis];
             }
-            ctx.dests[0][flat] = expr.eval(&coords) as f32;
+            dest[flat] = expr.eval(&coords) as f32;
         }
         Ok(())
     }

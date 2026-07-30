@@ -58,10 +58,37 @@ impl BufferTensorIrOp for CastDps {
         &self,
         ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
     ) -> anyhow::Result<()> {
-        // The reference runtime stores every dtype's VALUES as f32 (slice
-        // scope), so a cast is value-preserving copy — honest for the
-        // integer/indicator ranges the current programs produce.
-        ctx.unary_elementwise(|x| x)
+        // The conversion is driven by the BUFFER types the plan annotated —
+        // the op needs no dtype field of its own. Covered pairs only;
+        // anything else refuses loudly (never a silent reinterpretation).
+        use crate::buffer_tensor_ir::TypedBuffer;
+        match (&ctx.operands[0], &mut ctx.dests[0]) {
+            // Same-type: value-preserving copy (their Int-iota → F32 path
+            // stores integer VALUES in f32, so this stays exact).
+            (TypedBuffer::F32(input), TypedBuffer::F32(dest)) => {
+                anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+                dest.copy_from_slice(input);
+            }
+            (TypedBuffer::Bool(input), TypedBuffer::Bool(dest)) => {
+                anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+                dest.copy_from_slice(input);
+            }
+            // The indicator bridge: bool -> float is exactly 0.0 / 1.0.
+            (TypedBuffer::Bool(input), TypedBuffer::F32(dest)) => {
+                anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+                for (out, bit) in dest.iter_mut().zip(input) {
+                    anyhow::ensure!(*bit <= 1, "bool buffer holds non-indicator value {bit}");
+                    *out = f32::from(*bit);
+                }
+            }
+            (TypedBuffer::F32(_), TypedBuffer::Bool(_)) => {
+                anyhow::bail!(
+                    "cast f32 -> bool has no agreed truth semantics here; \
+                     compare against a constant instead (LessThan)"
+                );
+            }
+        }
+        Ok(())
     }
 
     fn label(&self) -> &str {
