@@ -168,6 +168,24 @@
     ; axes (Zucker's f(x,y)=sin(x) vs f(x)=sin(x)), so identity-composed
     ; views hash-cons into their PARENT's layout class — the confirmed
     ; false cross-rank union. Layout identity = domain x interpretation.
+    ;
+    ; THE PLACEMENT CONTRACT (ruling 2026-07-30): a layout is pure
+    ; PLACEMENT — never value semantics (that is the dtype's business).
+    ; Stride and ACCESS WIDTH are distinct concepts: the bare bit-offset
+    ; form below carries stride inside its expression and width as its
+    ; own field, so "stride 8, width 6" (byte-aligned FP6 cells) is
+    ; representable; the constructor LADDER (Strided/Right/LeftMajor) is
+    ; the PACKED special case (stride = width), not the definition of
+    ; layout. THE POISON PRINCIPLE: the accessed bit set of a view is
+    ; the union over its domain of [offset(c), offset(c)+width); reads
+    ; require every accessed bit defined; bits OUTSIDE the accessed set
+    ; (skipped stride regions, the spare bits of padded cells) are
+    ; poison-permitted and may never be depended on; a write defines
+    ; exactly its accessed set and must preserve live bits outside it —
+    ; which is why sub-byte in-place writes (updating a slice of a
+    ; packed sub-byte array) need a write-granule/read-modify-write
+    ; legality story (a future injectivity-token-style proof) before
+    ; any backend may claim them.
     (BitOffsetExpressionLayoutLit IntExpr Shape BitWidth)
     (ElementOffsetExpressionLayoutLit IntExpr Shape BitWidth)
     (StridedElementLayoutLit Shape IntExprList BitWidth)
@@ -300,12 +318,20 @@
     (BufferOutputLit BufferTensorList)
   )
 
-  ; Fake placeholder dtypes
-  ; The dtype vocabulary is LUMINAL'S, verbatim (all 20 variants, their
-  ; exact egglog names — Int64 spelled out to dodge egglog's builtin I64;
-  ; user ruling 2026-07-24: merge-ready alignment). Bit widths below match
-  ; luminal's DType::bits() exactly, including byte-backed Bool (8) and
-  ; the sub-byte quantized tail.
+  ; The dtype vocabulary is LUMINAL'S, verbatim (their exact egglog names —
+  ; Int64 spelled out to dodge egglog's builtin I64; user ruling
+  ; 2026-07-24: merge-ready alignment), PLUS Bool8 (Austin's ruling
+  ; 2026-07-30, below).
+  ;
+  ; THE DTYPE CONTRACT (ruling 2026-07-30): a dtype is VALUE SEMANTICS —
+  ; a bit width, a set of LEGAL CODES, and their denotation. A dtype
+  ; never implies placement: where an element's bits live is the
+  ; LAYOUT's business (see the layout placement contract beside the
+  ; constructors). Most dtypes' legal-code sets are total; a dtype with
+  ; a PROPER SUBSET of legal codes (Bool8 is the first) makes every
+  ; other pattern ILL-FORMED — not poison, not a value: a loudly
+  ; rejectable state. Writers must emit exact legal codes (never
+  ; partial-bit writes that leave stale bits behind).
   (Dtype
     (F32)
     (F64)
@@ -314,6 +340,20 @@
     (Int)
     (Int64)
     (Bool)
+    ; Bool8 (Austin's ruling 2026-07-30): the C++/device boolean — an
+    ; 8-BIT CODE with exactly TWO legal states, 0x00 = false and
+    ; 0x01 = true; the other 254 patterns are ill-formed. This is NOT
+    ; "Bool plus seven padding bits" (that spelling exists separately as
+    ; 1-bit Bool in an 8-bit-strided layout, where the spare bits are
+    ; poison-permitted and undependable); in a Bool8 cell ALL EIGHT bits
+    ; are value-carrying and constrained. INVARIANT (written contract
+    ; for now; formalizable later): every Bool8 read yields 0 or 1;
+    ; every Bool8 write stores exactly 0x00 or 0x01. Boundary/binding
+    ; vocabulary: models compute in 1-bit Bool; bindings state byte
+    ; representation by casting at the boundary. Matches luminal's
+    ; DType::Bool in practice (their docs: "stored as u8, 0 or 1",
+    ; flagged UNSTABLE — this type is the stable factoring).
+    (Bool8)
     (F4E2M1)
     (F8E4M3)
     (F8E5M2)
@@ -641,9 +681,11 @@
 ; Eager bits-of entries: top-level SETS, not rules — fixture lets evaluate
 ; (bits-of <dtype>) at load time, before any (run), and an unset function
 ; lookup in an action is a loud panic. Bool is ONE bit — a dtype's width is
-; its information content; a target that stores bools byte-per-bool says so
-; with a LAYOUT (an 8-bit-strided map, offered by a rewrite rule when such
-; a target exists), never by widening the dtype.
+; its information content. Byte-backed booleans are the Bool8 DTYPE
+; (ruling 2026-07-30, superseding the earlier layout-widening note that
+; stood here): the two-legal-codes invariant is VALUE semantics, which a
+; layout (pure placement) cannot carry — a width-8 layout of 1-bit Bool
+; is the OTHER thing, a padded cell whose spare bits are poison.
 (set (bits-of (F32)) (BitWidthLit 32))
 (set (bits-of (F64)) (BitWidthLit 64))
 (set (bits-of (F16)) (BitWidthLit 16))
@@ -651,6 +693,7 @@
 (set (bits-of (Int)) (BitWidthLit 32))
 (set (bits-of (Int64)) (BitWidthLit 64))
 (set (bits-of (Bool)) (BitWidthLit 1)) ; DELIBERATE DIVERGENCE from luminal's byte-backed bools (user ruling 2026-07-24: bit-packed Bool is an update we will persist and see through the integration)
+(set (bits-of (Bool8)) (BitWidthLit 8)) ; the C++/device boolean: 8-bit code, two legal states (ruling 2026-07-30; see the Dtype declaration)
 (set (bits-of (F4E2M1)) (BitWidthLit 4))
 (set (bits-of (F8E4M3)) (BitWidthLit 8))
 (set (bits-of (F8E5M2)) (BitWidthLit 8))

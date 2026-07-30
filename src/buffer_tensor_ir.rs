@@ -73,23 +73,25 @@ impl<T: BufferTensorIrOp + Clone + 'static> CloneBufferTensorIrOp for T {
 /// this trait — they have no logical semantics, no egglog constructor, and
 /// never meet the analyzer.
 
-/// Typed reference storage (ruling 2026-07-28: Bool is a REAL dtype, never
-/// an f32 value-encoding). The reference runtime stores floats as f32 and
-/// booleans byte-backed (one u8 per element, 0 or 1 — the reference
-/// binding's 8-bit Bool layout vocabulary; the LOGICAL dtype stays 1-bit).
-/// Access is loud: a kernel asking for the wrong type is a bug in the op's
-/// dtype story, never an implicit coercion.
+/// Typed reference storage (rulings 2026-07-28 and 2026-07-30: booleans
+/// are REAL dtypes, never an f32 value-encoding). Floats live as f32;
+/// booleans live as Bool8 CODES — one u8 per element, exactly 0x00 or
+/// 0x01, every other pattern ill-formed (see the Bool8 contract in the
+/// preamble's Dtype declaration). The Bool8 variant serves both
+/// Bool8-typed buffers and, as an internal representation, buffers of the
+/// 1-bit logical Bool. Access is loud: a kernel asking for the wrong type
+/// is a bug in the op's dtype story, never an implicit coercion.
 #[derive(Debug, Clone)]
 pub enum TypedBuffer {
     F32(Vec<f32>),
-    Bool(Vec<u8>),
+    Bool8(Vec<u8>),
 }
 
 impl TypedBuffer {
     pub fn len(&self) -> usize {
         match self {
             TypedBuffer::F32(values) => values.len(),
-            TypedBuffer::Bool(bits) => bits.len(),
+            TypedBuffer::Bool8(bits) => bits.len(),
         }
     }
 
@@ -100,7 +102,7 @@ impl TypedBuffer {
     pub fn type_name(&self) -> &'static str {
         match self {
             TypedBuffer::F32(_) => "f32",
-            TypedBuffer::Bool(_) => "bool",
+            TypedBuffer::Bool8(_) => "bool8",
         }
     }
 
@@ -118,17 +120,17 @@ impl TypedBuffer {
         }
     }
 
-    pub fn as_bool(&self) -> Result<&Vec<u8>> {
+    pub fn as_bool8(&self) -> Result<&Vec<u8>> {
         match self {
-            TypedBuffer::Bool(bits) => Ok(bits),
-            other => anyhow::bail!("expected a bool buffer, found {}", other.type_name()),
+            TypedBuffer::Bool8(bits) => Ok(bits),
+            other => anyhow::bail!("expected a Bool8 buffer, found {}", other.type_name()),
         }
     }
 
-    pub fn as_bool_mut(&mut self) -> Result<&mut Vec<u8>> {
+    pub fn as_bool8_mut(&mut self) -> Result<&mut Vec<u8>> {
         match self {
-            TypedBuffer::Bool(bits) => Ok(bits),
-            other => anyhow::bail!("expected a bool buffer, found {}", other.type_name()),
+            TypedBuffer::Bool8(bits) => Ok(bits),
+            other => anyhow::bail!("expected a Bool8 buffer, found {}", other.type_name()),
         }
     }
 }

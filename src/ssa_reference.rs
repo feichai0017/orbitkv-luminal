@@ -94,14 +94,17 @@ impl SsaReferenceRuntime {
                     }
                     None => TypedBuffer::F32(vec![0.0; numel]),
                 },
+                // 1 = the logical Bool width, 8 = Bool8 (the boundary
+                // code type, ruling 2026-07-30); both live as Bool8 codes
+                // in reference storage.
                 1 | 8 => {
                     ensure!(
                         staged.is_none(),
-                        "buffer {} is boolean; set_data stages f32 only (a bool \
-                         staging surface does not exist yet)",
+                        "buffer {} is boolean; set_data stages f32 only (a \
+                         Bool8 staging surface does not exist yet)",
                         buffer.label
                     );
-                    TypedBuffer::Bool(vec![0u8; numel])
+                    TypedBuffer::Bool8(vec![0u8; numel])
                 }
                 other => anyhow::bail!(
                     "buffer {} has unsupported element width {other} bits (f32 and bool only)",
@@ -179,7 +182,7 @@ impl SsaReferenceRuntime {
                             .ok_or_else(|| anyhow!("{} writes unknown buffer", op.label()))?;
                         dests.push(match existing {
                             TypedBuffer::F32(values) => TypedBuffer::F32(vec![0.0; values.len()]),
-                            TypedBuffer::Bool(bits) => TypedBuffer::Bool(vec![0u8; bits.len()]),
+                            TypedBuffer::Bool8(bits) => TypedBuffer::Bool8(vec![0u8; bits.len()]),
                         });
                     }
                     let mut ctx = ReferenceKernelCtx { operands, operand_dims, dests };
@@ -202,10 +205,10 @@ impl SsaReferenceRuntime {
         self.get_typed(id.into())?.as_f32()
     }
 
-    /// The byte-backed boolean contents of the boundary buffer with this
-    /// `BufferLit` id (each element 0 or 1).
-    pub fn get_bool(&self, id: impl Into<i64>) -> Result<&Vec<u8>> {
-        self.get_typed(id.into())?.as_bool()
+    /// The Bool8 codes of the boundary buffer with this `BufferLit` id
+    /// (each element exactly 0 or 1 — the two legal codes).
+    pub fn get_bool8(&self, id: impl Into<i64>) -> Result<&Vec<u8>> {
+        self.get_typed(id.into())?.as_bool8()
     }
 
     fn get_typed(&self, id: i64) -> Result<&TypedBuffer> {
@@ -680,6 +683,76 @@ mod tests {
         );
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
         assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+    }
+
+    /// BOOL8 BOUNDARY differential (ruling 2026-07-30): a bare lt output
+    /// crosses the boundary as Bool8 — the translator inserts the
+    /// LogicalCast to Bool8, the boundary layout speaks (bits-of (Bool8)),
+    /// and get_bool8 yields exactly the two legal codes — against their
+    /// runtime's native Vec<bool> for the same graph.
+    #[test]
+    fn differential_bool8_boundary_against_reference_runtime() {
+        let build = || {
+            let mut cx = Graph::new();
+            let x = cx.tensor((2, 3));
+            let y = cx.tensor((2, 3));
+            let out = x.lt(y).output();
+            (cx, x, y, out)
+        };
+        let x_data = vec![1.0, 5.0, 2.0, 8.0, -1.0, 0.0];
+        let y_data = vec![2.0, 4.0, 2.0, 9.0, -2.0, 0.5];
+
+        let (mut cx, x, y, out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(x.id, x_data.clone());
+        theirs.set_data(y.id, y_data.clone());
+        theirs.execute(&cx.dyn_map);
+        // Their get_f32 panics on Bool outputs; read the typed buffer the
+        // way get_f32 locates it and take the native bool vector.
+        let expected: Vec<bool> = {
+            let output_id = theirs
+                .graph
+                .node_indices()
+                .find(|n| {
+                    if let Some(crate::hlir::Output { node, .. }) =
+                        (**theirs.graph[*n]).as_any().downcast_ref::<crate::hlir::Output>()
+                    {
+                        *node == out.id.index()
+                    } else {
+                        false
+                    }
+                })
+                .expect("their output node");
+            theirs.buffers.get(&output_id).expect("their bool buffer").to_bool_vec()
+        };
+
+        let (cx2, x2, y2, out2) = build();
+        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+        assert!(
+            program.text.contains("(LogicalCast t") && program.text.contains("(Bool8)"),
+            "boundary Bool8 cast expected in the binding:\n{}",
+            program.text
+        );
+        assert!(
+            program.text.contains("(bits-of (Bool8))"),
+            "Bool8 boundary layout width expected:\n{}",
+            program.text
+        );
+        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        let codes = ours.get_bool8(out2.id.index() as i64).expect("bool8 boundary");
+        assert_eq!(codes.len(), expected.len());
+        for (index, (code, truth)) in codes.iter().zip(&expected).enumerate() {
+            assert!(*code <= 1, "ill-formed Bool8 code {code} at {index}");
+            assert_eq!(
+                *code == 1,
+                *truth,
+                "element {index}: our code {code} vs their {truth}"
+            );
+        }
     }
 
     /// RESHAPE differentials: split (mixed-radix group entries), merge

@@ -717,17 +717,6 @@ fn specialize_iota(
     Ok((name, view_dims))
 }
 
-/// The reference binding's element width for a BOUNDARY buffer: byte-backed
-/// bools (ruling 2026-07-28 — the LOGICAL Bool dtype stays 1-bit; 8 bits is
-/// reference-binding vocabulary, the specify-the-form arm), every other
-/// dtype at its own bits-of width.
-fn boundary_width_term(dtype: DType) -> String {
-    match dtype {
-        DType::Bool => "(BitWidthLit 8)".to_string(),
-        other => format!("(bits-of {})", dtype_term(other)),
-    }
-}
-
 fn dtype_term(dtype: DType) -> String {
     format!("({dtype:?})")
 }
@@ -789,7 +778,7 @@ pub fn hlir_to_logical_with_dims(
                 None => shape_term(&dims),
             };
             let dtype = dtype_term(input.dtype);
-            let width = boundary_width_term(input.dtype);
+            let width = format!("(bits-of {dtype})");
             let label = format!("{}_{idx}", input.label);
             inputs_text.push_str(&format!(
                 "(let t{idx}_logical (LogicalTensorInputLit (LogicalIdLit \"{label}\") {shape} {dtype}))\n\
@@ -1528,6 +1517,19 @@ pub fn hlir_to_logical_with_dims(
                     anyhow!("hlir_to_logical: t{idx} reads untranslated t{}", source.index())
                 })?;
                 let target = cast.1;
+                // Their Cast(x, Bool) is defined as x != 0 — a PROJECTION
+                // from a many-state type, not a reinterpretation (Bool8
+                // ruling 2026-07-30). It must enter the model as an explicit
+                // comparison; refuse until that predicate translation is
+                // designed, rather than emitting a cast whose semantics
+                // silently differ from theirs.
+                if target == DType::Bool {
+                    bail!(
+                        "hlir_to_logical: Cast-to-Bool at t{idx} is their != 0 \
+                         projection; needs an explicit comparison translation, \
+                         not a cast"
+                    );
+                }
                 ops_text.push_str(&format!(
                     "(let t{idx}_logical (LogicalCast {} {}))\n",
                     source_value.let_name,
@@ -1577,7 +1579,25 @@ pub fn hlir_to_logical_with_dims(
             }
         }
         let shape = shape_term(&value.dims);
-        let width = boundary_width_term(value.dtype);
+        // Boundary representation (Bool8 ruling 2026-07-30): models compute
+        // in 1-bit Bool; the binding states byte representation by CASTING
+        // at the boundary. A Bool output crosses as Bool8 (the two-legal-
+        // codes byte type — our egglog vocabulary, deliberately absent from
+        // their DType enum), so the boundary tensor, its layout width, and
+        // the buffer all speak Bool8. Every other dtype crosses as itself.
+        let (boundary_name, width) = if value.dtype == DType::Bool {
+            let bool8_name = format!("out{key}_bool8");
+            outputs_text.push_str(&format!(
+                "(let {bool8_name} (LogicalCast {} (Bool8)))\n",
+                value.let_name
+            ));
+            (bool8_name, "(bits-of (Bool8))".to_string())
+        } else {
+            (
+                value.let_name.clone(),
+                format!("(bits-of {})", dtype_term(value.dtype)),
+            )
+        };
         outputs_text.push_str(&format!(
             "(union {name} (LogicalTensorOutputLit (LogicalIdLit \"out_{key}\")))\n\
              (let out{key}_layout (RightMajorContiguousElementLayoutLit {shape} {width}))\n\
@@ -1586,7 +1606,7 @@ pub fn hlir_to_logical_with_dims(
              (set (buffer-access-of out{key}_buffer_id) (ReadWrite))\n\
              (set (buffer-freed-by out{key}_buffer_id) (CallerFrees))\n\
              (let out{key}_buffer_tensor (BufferTensorLit out{key}_layout_tensor out{key}_buffer_id))\n\n",
-            name = value.let_name,
+            name = boundary_name,
         ));
         output_slots.push((*key, *key as u64));
     }

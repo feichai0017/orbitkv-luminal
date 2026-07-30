@@ -69,22 +69,26 @@ impl BufferTensorIrOp for CastDps {
                 anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
                 dest.copy_from_slice(input);
             }
-            (TypedBuffer::Bool(input), TypedBuffer::Bool(dest)) => {
+            (TypedBuffer::Bool8(input), TypedBuffer::Bool8(dest)) => {
                 anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
                 dest.copy_from_slice(input);
             }
             // The indicator bridge: bool -> float is exactly 0.0 / 1.0.
-            (TypedBuffer::Bool(input), TypedBuffer::F32(dest)) => {
+            (TypedBuffer::Bool8(input), TypedBuffer::F32(dest)) => {
                 anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
-                for (out, bit) in dest.iter_mut().zip(input) {
-                    anyhow::ensure!(*bit <= 1, "bool buffer holds non-indicator value {bit}");
-                    *out = f32::from(*bit);
+                for (out, code) in dest.iter_mut().zip(input) {
+                    // The Bool8 invariant, enforced at the read: only the
+                    // two legal codes exist; anything else is ill-formed
+                    // data, not a truthy byte.
+                    anyhow::ensure!(*code <= 1, "Bool8 buffer holds ill-formed code {code}");
+                    *out = f32::from(*code);
                 }
             }
-            (TypedBuffer::F32(_), TypedBuffer::Bool(_)) => {
+            (TypedBuffer::F32(_), TypedBuffer::Bool8(_)) => {
                 anyhow::bail!(
-                    "cast f32 -> bool has no agreed truth semantics here; \
-                     compare against a constant instead (LessThan)"
+                    "cast f32 -> Bool8 is not a reinterpretation: the != 0 \
+                     reading is a PROJECTION and must appear as an explicit \
+                     comparison in the model (LessThan), never as a cast"
                 );
             }
         }
