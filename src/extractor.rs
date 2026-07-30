@@ -936,7 +936,7 @@ impl<'a> ClassRenderer<'a> {
     fn logical_name_from_logical(&self, class: &ClassId) -> Option<String> {
         for node_id in self.class_nodes.get(class)? {
             let node = self.egraph.nodes.get(node_id)?;
-            if node.op != "LogicalTensorInputLit" && node.op != "LogicalTensorOutputLit" {
+            if node.op != "LogicalTensorInputLit" && node.op != "LogicalTensorNamed" {
                 continue;
             }
             let id_class = child_class(self.egraph, node, 0)?;
@@ -2587,7 +2587,7 @@ const RENDER_PREFERRED_OPS: &[&str] = &[
     "LogicalIdLit",
     "LayoutTensorLit",
     "LogicalTensorInputLit",
-    "LogicalTensorOutputLit",
+    "LogicalTensorNamed",
     "RightMajorContiguousElementLayoutLit",
     "LeftMajorContiguousElementLayoutLit",
     "StridedElementLayoutLit",

@@ -1583,7 +1583,7 @@ pub fn hlir_to_logical_with_dims(
         // owns representation — the Bool8 cast, layout, and buffer (M3
         // Step 1 split; Bool8 ruling 2026-07-30).
         outputs_text.push_str(&format!(
-            "(union {} (LogicalTensorOutputLit (LogicalIdLit \"out_{key}\")))\n",
+            "(union {} (LogicalTensorNamed (LogicalIdLit \"out_{key}\")))\n",
             value.let_name
         ));
         outputs_text.push_str(&crate::reference_binding::output_binding(
@@ -1597,13 +1597,6 @@ pub fn hlir_to_logical_with_dims(
     }
 
     // Signature lists + boundary lists, in slot order.
-    let logical_list = |items: &[String]| {
-        let mut term = "(LogicalTensorNil)".to_string();
-        for item in items.iter().rev() {
-            term = format!("(LogicalTensorCons {item} {term})");
-        }
-        term
-    };
     let buffer_list = |items: &[String]| {
         let mut term = "(BufferTensorNil)".to_string();
         for item in items.iter().rev() {
@@ -1611,17 +1604,9 @@ pub fn hlir_to_logical_with_dims(
         }
         term
     };
-    let input_logicals: Vec<String> = input_slots
-        .iter()
-        .map(|(node, _)| format!("t{}_logical", node.index()))
-        .collect();
     let input_buffers: Vec<String> = input_slots
         .iter()
         .map(|(node, _)| format!("t{}_buffer_tensor", node.index()))
-        .collect();
-    let output_logicals: Vec<String> = output_nodes
-        .iter()
-        .map(|(_, source, _)| values[source].let_name.clone())
         .collect();
     let output_buffers: Vec<String> = output_nodes
         .iter()
@@ -1647,15 +1632,11 @@ pub fn hlir_to_logical_with_dims(
     let text = format!(
         "; hlir_to_logical (slice 1: contiguous, static) — {} nodes\n\n\
          {seeds_text}\n{inputs_text}{ops_text}\n{outputs_text}\
-         (let model_inputs (LogicalInputLit {model_inputs}))\n\
-         (let model_outputs (LogicalOutputLit {model_outputs}))\n\
          (let input_boundary (BufferInputLit {input_boundary}))\n\
          (let output (BufferOutputLit {output_boundary}))\n\n\
          (run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))\n\n\
          {post_checks}",
         graph.graph.node_count(),
-        model_inputs = logical_list(&input_logicals),
-        model_outputs = logical_list(&output_logicals),
         input_boundary = buffer_list(&input_buffers),
         output_boundary = buffer_list(&output_buffers),
     );

@@ -115,17 +115,24 @@
   )
 
   ; Logical Tensor : this is the logical dataflow object described by HLIR.
-  ; The two boundary constructors (naming: LogicalTensor*Lit = ONE tensor;
-  ; the plain LogicalInputLit/LogicalOutputLit below wrap the signature
-  ; LISTS — same split as BufferTensorLit vs BufferInputLit):
-  ; LogicalTensorInputLit DECLARES one input — the shape/dtype ARE the
-  ; declaration, and every dataflow leaf is one. LogicalTensorOutputLit is
-  ; a pure NAME — no shape, no dtype (ruling 2026-07-27): the model unions
-  ; it with the value it designates, whose own derivation supplies both,
-  ; so nothing is restated and nothing can disagree.
+  ; LogicalTensorInputLit DECLARES one runtime-provided input — the id,
+  ; shape and dtype ARE the declaration (the id must live IN the
+  ; constructor: hash-consing would conflate two same-shaped inputs
+  ; without it), and every dataflow leaf is one. LogicalTensorNamed is a
+  ; pure NAME annotation, unionable with ANY tensor (ruling 2026-07-30,
+  ; generalizing the old output designator): no shape, no dtype — the
+  ; named value's own derivation supplies both, so nothing is restated
+  ; and nothing can disagree. MODELS HAVE NO SIGNATURE (the old
+  ; LogicalInputLit/LogicalOutputLit list wrappers are GONE): an
+  ; "output" is nothing but a named tensor a BINDING attaches a buffer
+  ; to (BufferOutputLit below is binding vocabulary and remains); an
+  ; intermediate becomes observable by naming and binding it — never by
+  ; changing the model. Name uniqueness is enforced at authoring/render
+  ; time: a duplicated name would silently union two distinct values,
+  ; undetectable after the merge.
   (LogicalTensor
     (LogicalTensorInputLit LogicalId Shape Dtype)
-    (LogicalTensorOutputLit LogicalId)
+    (LogicalTensorNamed LogicalId)
   )
 
   ; A list of logical tensors — gather's per-axis coordinate suppliers.
@@ -288,26 +295,13 @@
     (BufferTensorNil)
   )
 
-  ; MODEL SIGNATURE (boundary-free, ruling 2026-07-24): a model designates
-  ; its inputs and outputs as LOGICAL tensors only — no layouts, no
-  ; buffers. Each input is a declared LogicalTensorInputLit; each output
-  ; VALUE gets its name by union with a LogicalTensorOutputLit. These
-  ; wrappers hold the ORDERED signature lists, and they exist as dedicated
-  ; sorts (rather than bare LogicalTensorLists) to be FINDABLE TAGS in the
-  ; e-graph (ruling 2026-07-27) — the affordance module composition needs:
-  ; grabbing a model's output list to splice it into a larger program,
-  ; without consulting frontend state. The BINDING (below) attaches buffer
-  ; conditions to the designated tensors in the language of a backend.
-  (LogicalInput
-    (LogicalInputLit LogicalTensorList)
-  )
-
-  (LogicalOutput
-    (LogicalOutputLit LogicalTensorList)
-  )
+  ; (The LogicalInput/LogicalOutput signature-list sorts that stood here
+  ; are GONE — ruling 2026-07-30: models have no signature; composition
+  ; happens by hierarchical NAME. The findable-tags affordance the lists
+  ; provided served signatures and died with them.)
 
   ; BINDING: the buffer-level input boundary — backend-vocabulary
-  ; conditions attached to the model's designated inputs.
+  ; conditions attached to the model's named tensors.
   (BufferInput
     (BufferInputLit BufferTensorList)
   )

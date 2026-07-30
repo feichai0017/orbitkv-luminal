@@ -770,31 +770,12 @@ impl CudaRuntime {
             .insert(id.to_id(), (device_ptr, n_bytes));
     }
 
-    /// Allocate a user-owned, statically sized, zeroed device buffer and
-    /// register it as BOTH the input buffer for `input` and the output
-    /// buffer for `output` — the in-place persistent-state idiom (KV
-    /// caches, sampling masks). A step is then just execute(): in-place
-    /// candidates write through the alias, materializing candidates pay a
-    /// graph-visible copy the search prices. Call before compile so search
-    /// profiling sees the same economics; hold the returned buffer as long
-    /// as the runtime uses these tensors.
-    pub fn alias_state(
-        &mut self,
-        input: impl ToId,
-        output: impl ToId,
-        bytes: usize,
-    ) -> CudaSlice<u8> {
-        let buf = self
-            .cuda_stream
-            .alloc_zeros::<u8>(bytes)
-            .expect("failed to allocate aliased state buffer");
-        let ptr = buf.device_ptr(&self.cuda_stream).0;
-        unsafe {
-            self.set_device_ptr(input, ptr, bytes);
-            self.set_output_device_ptr(output, ptr, bytes);
-        }
-        buf
-    }
+    // alias_state is GONE (ruling 2026-07-30): the in-place
+    // persistent-state idiom is stated with BINDINGS — two bind calls
+    // registering one caller-owned buffer for both slots (the shared-
+    // BufferId boundary pattern; see boundary_scatter, the KV-cache
+    // exemplar). No special API required.
+
 
     pub fn output_is_zero_copy(&self, id: impl ToId) -> bool {
         let producer = self.find_producer_node(id);

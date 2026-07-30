@@ -35,14 +35,9 @@
 (let product_logical (LogicalMul lhs_expanded rhs_expanded))
 (let matmul_logical (LogicalReduceSum product_logical 0))
 
-; MODEL SIGNATURE: output named by union with the name-only lit; ordered
-; signature lists.
-(union matmul_logical (LogicalTensorOutputLit (LogicalIdLit "matmul_out")))
-(let model_inputs
-  (LogicalInputLit
-    (LogicalTensorCons lhs_logical (LogicalTensorCons rhs_logical (LogicalTensorNil)))))
-(let model_outputs
-  (LogicalOutputLit (LogicalTensorCons matmul_logical (LogicalTensorNil))))
+; NAMING (no model signature — ruling 2026-07-30): the result is named;
+; bindings attach buffers by name.
+(union matmul_logical (LogicalTensorNamed (LogicalIdLit "matmul_out")))
 
 ; BINDING: contiguous inputs in caller buffers, output into a caller buffer.
 (let lhs_layout (RightMajorContiguousElementLayoutLit lhs_shape (bits-of data_dtype)))
@@ -84,7 +79,7 @@
 (check (= (shape-of matmul_logical) out_shape))
 
 ; The naming union held.
-(check (= matmul_logical (LogicalTensorOutputLit (LogicalIdLit "matmul_out"))))
+(check (= matmul_logical (LogicalTensorNamed (LogicalIdLit "matmul_out"))))
 
 ; FUSED route matched: inputs are the ORIGINAL operands, output the result —
 ; views and product absent from both lists.

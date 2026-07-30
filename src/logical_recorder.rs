@@ -716,28 +716,14 @@ impl LogicalRecorder {
             return Err(format!("recorder poisoned: {reason}"));
         }
         let mut text = self.ops_text.clone();
+        // Models have no signature (ruling 2026-07-30): naming is the
+        // whole story — bindings attach buffers by name.
         for (source, key) in &self.outputs {
             let name = &self.node_values[source].name;
             text.push_str(&format!(
-                "(union {name} (LogicalTensorOutputLit (LogicalIdLit \"out_{key}\")))\n"
+                "(union {name} (LogicalTensorNamed (LogicalIdLit \"out_{key}\")))\n"
             ));
         }
-        let list = |nodes: &[usize]| {
-            let mut term = "(LogicalTensorNil)".to_string();
-            for node in nodes.iter().rev() {
-                term = format!(
-                    "(LogicalTensorCons {} {term})",
-                    self.node_values[node].name
-                );
-            }
-            term
-        };
-        let output_nodes: Vec<usize> = self.outputs.iter().map(|(source, _)| *source).collect();
-        text.push_str(&format!(
-            "(let rec_model_inputs (LogicalInputLit {}))\n(let rec_model_outputs (LogicalOutputLit {}))\n",
-            list(&self.inputs),
-            list(&output_nodes),
-        ));
         Ok(text)
     }
 

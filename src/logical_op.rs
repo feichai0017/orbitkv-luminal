@@ -112,27 +112,27 @@ impl LogicalOp for LogicalTensorInputLit {
 /// with the value it names, whose own derivation supplies both — so the
 /// naming can never disagree with the value.
 #[derive(Debug, Clone, Copy)]
-pub struct LogicalTensorOutputLit;
+pub struct LogicalTensorNamed;
 
-impl LogicalOp for LogicalTensorOutputLit {
+impl LogicalOp for LogicalTensorNamed {
     fn egglog_constructor(&self) -> &'static str {
-        "LogicalTensorOutputLit"
+        "LogicalTensorNamed"
     }
 
     fn display_name(&self) -> &'static str {
-        "LogicalTensorOutputLit"
+        "LogicalTensorNamed"
     }
 
     fn display_label(&self, node: &Node, ctx: &mut dyn LogicalRender) -> String {
         ctx.child_short(node, 0, 2, Some("LogicalIdLit"))
-            .unwrap_or_else(|| "LogicalTensorOutputLit".to_string())
+            .unwrap_or_else(|| "LogicalTensorNamed".to_string())
     }
 
     fn readable_expr(&self, node: &Node, ctx: &mut dyn LogicalRender) -> String {
         let id = ctx
             .child_short(node, 0, 2, Some("LogicalIdLit"))
             .unwrap_or_else(|| "?".to_string());
-        format!("LogicalTensorOutputLit({id})")
+        format!("LogicalTensorNamed({id})")
     }
 }
 
@@ -186,7 +186,7 @@ pub fn built_in_logical_ops() -> &'static [Box<dyn LogicalOp + Send + Sync>] {
     OPS.get_or_init(|| {
         vec![
             Box::new(LogicalTensorInputLit),
-            Box::new(LogicalTensorOutputLit),
+            Box::new(LogicalTensorNamed),
             Box::new(LogicalSqrt),
             Box::new(LogicalExp),
             Box::new(LogicalAdd),
