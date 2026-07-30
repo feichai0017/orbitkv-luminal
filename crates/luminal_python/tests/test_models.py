@@ -2497,6 +2497,26 @@ class SdpaGqaModel(torch.nn.Module):
         )
 
 
+class MixedIntMinimumModel(torch.nn.Module):
+    """`torch.minimum` between int64 and int32 tensors — torch promotes to
+    int64 inside the kernel, so the exported graph carries mixed operand
+    dtypes with no explicit cast."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        cap = torch.full_like(x, 4, dtype=torch.int32)
+        return torch.minimum(x, cap).to(torch.float32)
+
+
+class WideIntCompareModel(torch.nn.Module):
+    """int64-vs-int32 comparison where the int64 side exceeds i32 range —
+    detects wrong-direction promotion (truncating i64 to i32 flips the
+    comparison for values beyond 2^31)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        small = torch.full_like(x, 5, dtype=torch.int32)
+        return (x > small).to(torch.float32)
+
+
 class RepeatModel(torch.nn.Module):
     """`Tensor.repeat(*repeats)` — tiles `repeats[d]` copies along each dim;
     when `len(repeats) > ndim`, size-1 leading dims are prepended first."""

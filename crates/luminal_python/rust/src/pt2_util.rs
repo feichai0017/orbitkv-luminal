@@ -83,8 +83,16 @@ pub fn ensure_same_dtype(a: GraphTensor, b: GraphTensor) -> (GraphTensor, GraphT
     if a.dtype == b.dtype {
         return (a, b);
     }
+    // Promotion lattice mirroring torch: wider wins, floats beat ints,
+    // differing 16-bit float pairs promote to f32. The old table promoted
+    // (Int, Int64) to Int, silently truncating the 64-bit side.
     let target = match (a.dtype, b.dtype) {
+        (DType::F64, _) | (_, DType::F64) => DType::F64,
         (DType::F32, _) | (_, DType::F32) => DType::F32,
+        (DType::F16, DType::Bf16) | (DType::Bf16, DType::F16) => DType::F32,
+        (DType::F16, _) | (_, DType::F16) => DType::F16,
+        (DType::Bf16, _) | (_, DType::Bf16) => DType::Bf16,
+        (DType::I64, _) | (_, DType::I64) => DType::I64,
         (DType::Int, _) | (_, DType::Int) => DType::Int,
         _ => DType::F32,
     };

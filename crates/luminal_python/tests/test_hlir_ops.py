@@ -2162,6 +2162,36 @@ def test_sdpa_f32_unaffected_by_upcast(device: torch.device):
     )
 
 
+# ---- mixed-dtype operand unification ---------------------------------------
+
+
+def test_minimum_mixed_int_widths(device: torch.device):
+    """`torch.minimum(int64, int32)`: operands must be dtype-unified before
+    the core compare (panics with "Dtypes must match" otherwise). The
+    T5-family relative-position bucketing hits exactly this."""
+    from test_models import MixedIntMinimumModel
+
+    model: torch.nn.Module = MixedIntMinimumModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.tensor([[1, 3, 7, 9]], dtype=torch.int64, device=device)
+    expected: torch.Tensor = model(x)
+    actual: torch.Tensor = compiled(x)
+    assert torch.equal(actual, expected)
+
+
+def test_compare_promotes_to_int64(device: torch.device):
+    """Mixed int widths must promote UP to int64 (torch semantics) — an
+    int64 operand beyond i32 range flips the comparison if truncated."""
+    from test_models import WideIntCompareModel
+
+    model: torch.nn.Module = WideIntCompareModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.tensor([[3_000_000_000, 2, 6_000_000_000]], dtype=torch.int64, device=device)
+    expected: torch.Tensor = model(x)  # [1, 0, 1]
+    actual: torch.Tensor = compiled(x)
+    assert torch.equal(actual, expected), f"{actual=} {expected=}"
+
+
 def test_mlp_block(device: torch.device):
     """Test two-layer MLP: Linear(8,16) -> ReLU -> Linear(16,4) on input (2,8)."""
     model: torch.nn.Module = MLPBlockModel().to(device)
