@@ -253,7 +253,7 @@ impl BenchmarkPattern for GatherBench {
 
         let data = cx.tensor(size.value);
         // Indices must be integer type for gather operation
-        let indices = cx.tensor(num_indices).as_dtype(luminal::dtype::DType::Int);
+        let indices = cx.tensor_dtyped(num_indices, luminal::dtype::DType::Int);
         let _ = data.gather(indices).output();
     }
 }

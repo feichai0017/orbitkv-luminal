@@ -180,21 +180,7 @@ impl GraphTensor {
         GraphTensor::from_id(id, shape, self.graph_ref, dtype)
     }
 
-    /// Sets this tensor's dtype without doing a cast
-    pub fn as_dtype(mut self, dtype: DType) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("as_dtype at t{} (recorder Phase B)", self.id.index()));
-        self.dtype = dtype;
-        self.shape.element_stride_bits = dtype.bits();
-        if let Some(gmem) = self.graph().try_get_op_mut::<Input>(self.id) {
-            gmem.dtype = dtype;
-        }
-        if let Some((_, d)) = self.graph().input_meta.get_mut(&self.id) {
-            *d = dtype;
-        }
-        self
-    }
+
 }
 
 #[cfg(test)]

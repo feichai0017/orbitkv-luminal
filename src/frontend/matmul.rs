@@ -132,8 +132,8 @@ mod tests {
     #[test]
     fn fp8_matmul_promotes_products_and_accumulation_to_f32() {
         let mut cx = Graph::new();
-        let lhs = cx.tensor((2, 4)).as_dtype(DType::F8E4M3);
-        let rhs = cx.tensor((4, 3)).as_dtype(DType::F8E4M3);
+        let lhs = cx.tensor_dtyped((2, 4), DType::F8E4M3);
+        let rhs = cx.tensor_dtyped((4, 3), DType::F8E4M3);
 
         let out = lhs.matmul(rhs);
 

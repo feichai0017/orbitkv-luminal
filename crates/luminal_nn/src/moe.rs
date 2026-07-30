@@ -452,11 +452,9 @@ mod tests {
         let x = cx.tensor(('s', hidden));
         let router = cx.tensor((n_experts, hidden));
         let gate_up_weights = cx
-            .tensor((n_experts, intermediate * 2, hidden))
-            .as_dtype(DType::Bf16);
+            .tensor_dtyped((n_experts, intermediate * 2, hidden), DType::Bf16);
         let down_weights = cx
-            .tensor((n_experts, hidden, intermediate))
-            .as_dtype(DType::Bf16);
+            .tensor_dtyped((n_experts, hidden, intermediate), DType::Bf16);
 
         let n = x.dims().len(); // 2
         let e_dim = *router.dims().first().unwrap(); // E

@@ -37,11 +37,9 @@ fn build_qwen_moe_graph() -> QwenMoeGraph {
     let x = cx.tensor(('s', HIDDEN));
     let router = cx.tensor((NUM_EXPERTS, HIDDEN));
     let gate_up_weights = cx
-        .tensor((NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN), DType::Bf16);
     let down_weights = cx
-        .tensor((NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE), DType::Bf16);
 
     let n = x.dims().len();
     let e_dim = *router.dims().first().unwrap();
@@ -91,11 +89,9 @@ fn build_gemma_moe_graph() -> GemmaMoeGraph {
     let router_proj = cx.tensor((NUM_EXPERTS, HIDDEN));
     let per_expert_scale = cx.tensor(NUM_EXPERTS);
     let gate_up_weights = cx
-        .tensor((NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN), DType::Bf16);
     let down_weights = cx
-        .tensor((NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE), DType::Bf16);
 
     let n = router_input.dims().len();
     let e_dim = *router_proj.dims().first().unwrap();

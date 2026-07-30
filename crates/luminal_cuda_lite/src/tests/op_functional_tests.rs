@@ -583,7 +583,7 @@ fn run_embed_test(vocab_size: usize, embed_dim: usize, seq_len: usize, seed: u64
     };
 
     let mut cx = Graph::default();
-    let token_ids = cx.tensor(seq_len).as_dtype(luminal::dtype::DType::Int);
+    let token_ids = cx.tensor_dtyped(seq_len, luminal::dtype::DType::Int);
     let embed_table = cx.tensor((vocab_size, embed_dim));
     let output = embed_table
         .gather(
@@ -649,7 +649,7 @@ fn flattened_dynamic_row_gather_embed_candidates_are_equivalent() {
     const SEED: u64 = 0xE6BE_DD1A;
 
     let mut cx = Graph::default();
-    let dynamic_rows = cx.tensor(PICKS).as_dtype(DType::Int);
+    let dynamic_rows = cx.tensor_dtyped(PICKS, DType::Int);
     let table = cx.tensor((ROWS, ROW_STRIDE));
     let flat_table = table.flatten();
     let flat_indices =
@@ -717,7 +717,7 @@ fn kernel_embed_rejects_noncontiguous_index_view() {
     const SIDE: usize = 4;
 
     let mut cx = Graph::default();
-    let dynamic_rows = cx.tensor(SIDE).as_dtype(DType::Int);
+    let dynamic_rows = cx.tensor_dtyped(SIDE, DType::Int);
     let table = cx.tensor(SIDE * SIDE);
     let flat_indices =
         (dynamic_rows * SIDE).expand_dim(1, SIDE) + cx.arange(SIDE).expand_dim(0, SIDE);
@@ -740,7 +740,7 @@ fn kernel_embed_rejects_noncontiguous_table_view() {
     const WIDTH: usize = 4;
 
     let mut cx = Graph::default();
-    let dynamic_rows = cx.tensor(ROWS).as_dtype(DType::Int);
+    let dynamic_rows = cx.tensor_dtyped(ROWS, DType::Int);
     let storage = cx.tensor((WIDTH, ROWS));
     let table = storage.permute((1, 0));
     let flat_indices =

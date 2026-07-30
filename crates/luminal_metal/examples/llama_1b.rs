@@ -426,10 +426,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .to_vec();
 
     let mut cx = Graph::default();
-    let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
-    let q_pos_t = cx.named_tensor("q_pos", 's').as_dtype(DType::Int);
-    let scatter_idx_t = cx.named_tensor("scatter_idx", 's').as_dtype(DType::Int);
-    let gather_idx_t = cx.named_tensor("gather_idx", 'c').as_dtype(DType::Int);
+    let input = cx.named_tensor_dtyped("input", 's', DType::Int);
+    let q_pos_t = cx.named_tensor_dtyped("q_pos", 's', DType::Int);
+    let scatter_idx_t = cx.named_tensor_dtyped("scatter_idx", 's', DType::Int);
+    let gather_idx_t = cx.named_tensor_dtyped("gather_idx", 'c', DType::Int);
     let attn_mask_t = cx.named_tensor("attn_mask", ('s', 'c'));
     let kv_cache = KVCache::new(&mut cx, MAX_SEQ_LEN);
     let (logits, cache_outputs) = Llama::init(&mut cx).forward(

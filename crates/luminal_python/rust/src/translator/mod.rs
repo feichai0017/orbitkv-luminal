@@ -116,8 +116,7 @@ impl<'a> Translator<'a> {
                     let dtype = pt2_util::torch_dtype_int_to_luminal(meta.dtype);
                     let tensor = self
                         .graph
-                        .named_tensor(original_name, shape)
-                        .as_dtype(dtype);
+                        .named_tensor_dtyped(original_name, shape, dtype);
                     tensor.persist();
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
@@ -133,8 +132,7 @@ impl<'a> Translator<'a> {
                     let dtype = pt2_util::torch_dtype_int_to_luminal(meta.dtype);
                     let tensor = self
                         .graph
-                        .named_tensor(original_name, shape)
-                        .as_dtype(dtype);
+                        .named_tensor_dtyped(original_name, shape, dtype);
                     tensor.persist();
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
@@ -145,7 +143,7 @@ impl<'a> Translator<'a> {
                         .with_context(|| format!("Missing tensor meta for input {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
                     let dtype = pt2_util::torch_dtype_int_to_luminal(meta.dtype);
-                    let tensor = self.graph.named_tensor(graph_name, shape).as_dtype(dtype);
+                    let tensor = self.graph.named_tensor_dtyped(graph_name, shape, dtype);
                     self.user_input_ids.push((graph_name.clone(), tensor.id));
                     self.tensors.insert(graph_name.clone(), tensor);
                 }

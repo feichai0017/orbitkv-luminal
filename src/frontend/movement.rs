@@ -1118,10 +1118,10 @@ mod tests {
     fn test_gather_and_scatter_inverse() {
         let mut cx = Graph::new();
         let data = cx.tensor((2, 3));
-        let indexes = cx.tensor(4).as_dtype(DType::Int);
+        let indexes = cx.tensor_dtyped(4, DType::Int);
         let gathered = data.gather(indexes).output();
         // Inverse permutation via scatter: scatter arange at perm positions into zeros
-        let perm = cx.tensor(6).as_dtype(DType::Int);
+        let perm = cx.tensor_dtyped(6, DType::Int);
         let values = cx.arange(6);
         let zeros = cx.iota(Expression::from(0usize), 6);
         let inv = values.scatter(perm, zeros).cast(DType::F32).output();
@@ -1142,7 +1142,7 @@ mod tests {
     fn test_scatter_basic() {
         let mut cx = Graph::new();
         let src = cx.tensor(3);
-        let indexes = cx.tensor(3).as_dtype(DType::Int);
+        let indexes = cx.tensor_dtyped(3, DType::Int);
         let dest = cx.tensor(5);
         let result = src.scatter(indexes, dest).output();
         cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
@@ -1161,7 +1161,7 @@ mod tests {
     fn test_scatter_into_nonzero_dest() {
         let mut cx = Graph::new();
         let src = cx.tensor(1);
-        let indexes = cx.tensor(1).as_dtype(DType::Int);
+        let indexes = cx.tensor_dtyped(1, DType::Int);
         let dest = cx.tensor(5);
         let result = src.scatter(indexes, dest).output();
         cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
@@ -1180,7 +1180,7 @@ mod tests {
     fn test_scatter_all_positions() {
         let mut cx = Graph::new();
         let src = cx.tensor(4);
-        let indexes = cx.tensor(4).as_dtype(DType::Int);
+        let indexes = cx.tensor_dtyped(4, DType::Int);
         let dest = cx.tensor(4);
         let result = src.scatter(indexes, dest).output();
         cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());

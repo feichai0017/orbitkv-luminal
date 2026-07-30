@@ -163,7 +163,7 @@ mod tests {
     fn test_gather_rows() {
         let mut cx = Graph::new();
         let data = cx.tensor((4, 3)); // 4 rows, 3 cols
-        let indices = cx.tensor(3).as_dtype(DType::Int);
+        let indices = cx.tensor_dtyped(3, DType::Int);
         let result = gather_rows(data, indices, 3).output();
 
         cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
@@ -191,7 +191,7 @@ mod tests {
     fn test_scatter_rows() {
         let mut cx = Graph::new();
         let src = cx.tensor((2, 3));
-        let indices = cx.tensor(2).as_dtype(DType::Int);
+        let indices = cx.tensor_dtyped(2, DType::Int);
         let dest = cx.tensor((4, 3));
         let result = scatter_rows(src, indices, dest, 3).output();
 
@@ -216,9 +216,9 @@ mod tests {
     fn test_scatter_then_gather_roundtrip() {
         let mut cx = Graph::new();
         let kv_new = cx.tensor((2, 4)); // 2 new rows, dim=4
-        let scatter_idx = cx.tensor(2).as_dtype(DType::Int);
+        let scatter_idx = cx.tensor_dtyped(2, DType::Int);
         let cache = cx.tensor((6, 4)); // 6 slots
-        let gather_idx = cx.tensor(2).as_dtype(DType::Int);
+        let gather_idx = cx.tensor_dtyped(2, DType::Int);
 
         // Scatter new rows into cache, then gather them back
         let updated_cache = scatter_rows(kv_new, scatter_idx, cache, 4);
@@ -259,8 +259,8 @@ mod tests {
         let v_new = cx.tensor((1, kv_dim));
         let k_cache = cx.tensor((num_slots, kv_dim));
         let v_cache = cx.tensor((num_slots, kv_dim));
-        let gather_idx = cx.tensor(3).as_dtype(DType::Int); // 3 context tokens
-        let scatter_idx = cx.tensor(1).as_dtype(DType::Int); // 1 new token
+        let gather_idx = cx.tensor_dtyped(3, DType::Int); // 3 context tokens
+        let scatter_idx = cx.tensor_dtyped(1, DType::Int); // 1 new token
 
         // prev_seq=2: this is the 3rd token (positions 0,1 cached, position 2 is new)
         let (attn_out, k_cache_new, v_cache_new) = paged_attention(
@@ -336,8 +336,8 @@ mod tests {
         let v_new = cx.tensor((1, kv_dim));
         let k_cache = cx.tensor((num_slots, kv_dim));
         let v_cache = cx.tensor((num_slots, kv_dim));
-        let gather_idx = cx.tensor(2).as_dtype(DType::Int);
-        let scatter_idx = cx.tensor(1).as_dtype(DType::Int);
+        let gather_idx = cx.tensor_dtyped(2, DType::Int);
+        let scatter_idx = cx.tensor_dtyped(1, DType::Int);
 
         // prev_seq=1: 1 cached token + 1 new token, context len=2
         // Query at absolute position 1 can attend to context positions 0 and 1
@@ -410,8 +410,8 @@ mod tests {
         let v_new = cx.tensor((2, kv_dim));
         let k_cache = cx.tensor((num_slots, kv_dim));
         let v_cache = cx.tensor((num_slots, kv_dim));
-        let gather_idx = cx.tensor(3).as_dtype(DType::Int); // 3 context (1 cached + 2 new)
-        let scatter_idx = cx.tensor(2).as_dtype(DType::Int);
+        let gather_idx = cx.tensor_dtyped(3, DType::Int); // 3 context (1 cached + 2 new)
+        let scatter_idx = cx.tensor_dtyped(2, DType::Int);
 
         // prev_seq=1: 1 cached token, 2 new tokens → context len=3
         // Query 0 at absolute pos 1: can see ctx 0,1 (not 2)

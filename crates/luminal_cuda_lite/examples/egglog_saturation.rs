@@ -224,12 +224,12 @@ fn build_flux_block(cx: &mut Graph, blocks: usize) -> GraphTensor {
     let hd = dim / heads;
     let mlp = dim * 2;
     let attn_scale = 1.0f32 / (hd as f32).sqrt();
-    let mut x = cx.tensor((seq, dim)).as_dtype(DType::F16);
+    let mut x = cx.tensor_dtyped((seq, dim), DType::F16);
     for _ in 0..blocks {
         // adaLN modulation: a Linear from a conditioning vector produces 6 (dim,)
         // chunks (shift/scale/gate ×2), each broadcast over seq.
-        let temb = cx.tensor((1, dim)).as_dtype(DType::F16);
-        let mod_lin = cx.tensor((dim, dim * 6)).as_dtype(DType::F16);
+        let temb = cx.tensor_dtyped((1, dim), DType::F16);
+        let mod_lin = cx.tensor_dtyped((dim, dim * 6), DType::F16);
         let m = temb.matmul(mod_lin); // (1, 6*dim)
         let chunk = |mm: GraphTensor, i: usize| {
             mm.slice((.., i * dim..(i + 1) * dim))
@@ -240,10 +240,10 @@ fn build_flux_block(cx: &mut Graph, blocks: usize) -> GraphTensor {
         let (shift2, scale2, gate2) = (chunk(m, 3), chunk(m, 4), chunk(m, 5));
         // ── attention sublayer ──
         let h = x.layer_norm(1, 1e-5) * (scale1 + 1.0) + shift1;
-        let qw = cx.tensor((dim, dim)).as_dtype(DType::F16);
-        let kw = cx.tensor((dim, dim)).as_dtype(DType::F16);
-        let vw = cx.tensor((dim, dim)).as_dtype(DType::F16);
-        let ow = cx.tensor((dim, dim)).as_dtype(DType::F16);
+        let qw = cx.tensor_dtyped((dim, dim), DType::F16);
+        let kw = cx.tensor_dtyped((dim, dim), DType::F16);
+        let vw = cx.tensor_dtyped((dim, dim), DType::F16);
+        let ow = cx.tensor_dtyped((dim, dim), DType::F16);
         let q = h.matmul(qw).split_dims(1, hd).permute((1, 0, 2));
         let k = h.matmul(kw).split_dims(1, hd).permute((1, 0, 2));
         let v = h.matmul(vw).split_dims(1, hd).permute((1, 0, 2));
@@ -256,8 +256,8 @@ fn build_flux_block(cx: &mut Graph, blocks: usize) -> GraphTensor {
         x += gate1 * attn;
         // ── gelu MLP sublayer ──
         let h2 = x.layer_norm(1, 1e-5) * (scale2 + 1.0) + shift2;
-        let up = cx.tensor((dim, mlp)).as_dtype(DType::F16);
-        let down = cx.tensor((mlp, dim)).as_dtype(DType::F16);
+        let up = cx.tensor_dtyped((dim, mlp), DType::F16);
+        let down = cx.tensor_dtyped((mlp, dim), DType::F16);
         x += gate2 * h2.matmul(up).gelu().matmul(down);
     }
     x
@@ -268,11 +268,9 @@ fn build_qwen_moe(cx: &mut Graph) -> GraphTensor {
     let x = cx.tensor(('s', MOE_HIDDEN));
     let router = cx.tensor((MOE_NUM_EXPERTS, MOE_HIDDEN));
     let gate_up_weights = cx
-        .tensor((MOE_NUM_EXPERTS, MOE_INTERMEDIATE * 2, MOE_HIDDEN))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((MOE_NUM_EXPERTS, MOE_INTERMEDIATE * 2, MOE_HIDDEN), DType::Bf16);
     let down_weights = cx
-        .tensor((MOE_NUM_EXPERTS, MOE_HIDDEN, MOE_INTERMEDIATE))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((MOE_NUM_EXPERTS, MOE_HIDDEN, MOE_INTERMEDIATE), DType::Bf16);
 
     let n = x.dims().len();
     let e_dim = *router.dims().first().unwrap();
@@ -311,11 +309,9 @@ fn build_gemma_moe(cx: &mut Graph) -> GraphTensor {
     let router_proj = cx.tensor((MOE_NUM_EXPERTS, MOE_HIDDEN));
     let per_expert_scale = cx.tensor(MOE_NUM_EXPERTS);
     let gate_up_weights = cx
-        .tensor((MOE_NUM_EXPERTS, MOE_INTERMEDIATE * 2, MOE_HIDDEN))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((MOE_NUM_EXPERTS, MOE_INTERMEDIATE * 2, MOE_HIDDEN), DType::Bf16);
     let down_weights = cx
-        .tensor((MOE_NUM_EXPERTS, MOE_HIDDEN, MOE_INTERMEDIATE))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((MOE_NUM_EXPERTS, MOE_HIDDEN, MOE_INTERMEDIATE), DType::Bf16);
 
     let n = router_input.dims().len();
     let e_dim = *router_proj.dims().first().unwrap();

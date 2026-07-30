@@ -1270,7 +1270,7 @@ fn test_cast_producer_absorbed_into_region() {
     // grow-Cast-FS: a bf16 input cast to f32 then consumed by a unary chain
     // should pull the cast inside the region.
     let mut cx = Graph::new();
-    let a = cx.tensor(16).as_dtype(luminal::dtype::DType::Bf16);
+    let a = cx.tensor_dtyped(16, luminal::dtype::DType::Bf16);
     let _b = a.cast(luminal::dtype::DType::F32).sin().output();
 
     let regions = extract_all_fused_regions(&mut cx);

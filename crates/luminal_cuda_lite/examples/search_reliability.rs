@@ -141,8 +141,8 @@ struct Model {
 fn build_model() -> Model {
     let mut cx = Graph::default();
     let x_in = cx.named_tensor("x", ('s', HIDDEN));
-    let scatter_idx = cx.named_tensor("scatter_idx", 's').as_dtype(DType::Int);
-    let gather_idx = cx.named_tensor("gather_idx", 'c').as_dtype(DType::Int);
+    let scatter_idx = cx.named_tensor_dtyped("scatter_idx", 's', DType::Int);
+    let gather_idx = cx.named_tensor_dtyped("gather_idx", 'c', DType::Int);
     let mut layers = Vec::new();
     let mut cache_outs = Vec::new();
     let mut x = x_in;
@@ -154,11 +154,9 @@ fn build_model() -> Model {
             wo: cx.named_tensor(format!("wo{layer}"), (HIDDEN, HIDDEN)),
             router: cx.named_tensor(format!("router{layer}"), (NUM_EXPERTS, HIDDEN)),
             gate_up: cx
-                .named_tensor(format!("gu{layer}"), (NUM_EXPERTS, MOE_INTER * 2, HIDDEN))
-                .as_dtype(DType::Bf16),
+                .named_tensor_dtyped(format!("gu{layer}"), (NUM_EXPERTS, MOE_INTER * 2, HIDDEN), DType::Bf16),
             down: cx
-                .named_tensor(format!("dn{layer}"), (NUM_EXPERTS, HIDDEN, MOE_INTER))
-                .as_dtype(DType::Bf16),
+                .named_tensor_dtyped(format!("dn{layer}"), (NUM_EXPERTS, HIDDEN, MOE_INTER), DType::Bf16),
             k_cache: cx.named_tensor(format!("kc{layer}"), (MAX_SEQ, KV_DIM)),
             v_cache: cx.named_tensor(format!("vc{layer}"), (MAX_SEQ, KV_DIM)),
         };

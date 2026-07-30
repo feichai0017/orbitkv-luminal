@@ -52,7 +52,7 @@ fn test_bf16_constant_folds_into_kernel_constant() {
     // and the fold rule must offer a Bf16 KernelConstant in the Cast's
     // eclass.
     let mut cx = Graph::default();
-    let a = cx.tensor(8).as_dtype(DType::Bf16);
+    let a = cx.tensor_dtyped(8, DType::Bf16);
     let b = (a * 2.5_f32).output();
 
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
@@ -101,8 +101,8 @@ fn test_embed_bf16_table() {
     // bit-exact row gathers under every extractable candidate.
     let (vocab_size, embed_dim, seq_len) = (40usize, 32usize, 6usize);
     let mut cx = Graph::default();
-    let token_ids = cx.tensor(seq_len).as_dtype(DType::Int);
-    let embed_table = cx.tensor((vocab_size, embed_dim)).as_dtype(DType::Bf16);
+    let token_ids = cx.tensor_dtyped(seq_len, DType::Int);
+    let embed_table = cx.tensor_dtyped((vocab_size, embed_dim), DType::Bf16);
     let output = embed_table
         .gather(
             (token_ids * embed_dim).expand_dim(1, embed_dim)
@@ -163,7 +163,7 @@ fn test_bf16_cast_sum_cast_fuses_with_f32_accumulator() {
     // rounding.
     let (rows, cols) = (4usize, 64usize);
     let mut cx = Graph::default();
-    let a = cx.tensor((rows, cols)).as_dtype(DType::Bf16);
+    let a = cx.tensor_dtyped((rows, cols), DType::Bf16);
     let out = a.cast(DType::F32).sum(1).cast(DType::Bf16).output();
 
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
@@ -326,7 +326,7 @@ fn bf16_cast_sandwich_rejects_only_selected_cyclic_llir() {
     use crate::resource::{ResourceViolation, plan_static_llir_resources};
 
     let mut cx = Graph::default();
-    let a = cx.tensor((4, 64)).as_dtype(DType::Bf16);
+    let a = cx.tensor_dtyped((4, 64), DType::Bf16);
     // Two f32 norm-ish sandwiches with bf16 residuals, mimicking llama layers.
     let n1 = (a.cast(DType::F32).sqrt() * 2.0_f32).cast(DType::Bf16);
     let x1 = a + n1;
@@ -444,7 +444,7 @@ fn run_mini_transformer(bf16: bool, weight_data: &[Vec<f32>], x_data: &[f32]) ->
     let stream = get_cuda_stream().unwrap();
     let act = if bf16 { DType::Bf16 } else { DType::F32 };
     let mut cx = Graph::default();
-    let x = cx.tensor((SEQ, HID)).as_dtype(act);
+    let x = cx.tensor_dtyped((SEQ, HID), act);
     let shapes: [(usize, usize); 9] = [
         (1, HID),
         (HID, HID),
@@ -462,7 +462,7 @@ fn run_mini_transformer(bf16: bool, weight_data: &[Vec<f32>], x_data: &[f32]) ->
         if r == 1 {
             cx.tensor(c) // norm weights stay f32
         } else {
-            cx.tensor((r, c)).as_dtype(act)
+            cx.tensor_dtyped((r, c), act)
         }
     });
     let mut out = mini_layer(x, &weights, bf16);
@@ -556,8 +556,8 @@ fn probe_bf16_subpaths() {
      -> Vec<f32> {
         let act = if bf16_mode { DType::Bf16 } else { DType::F32 };
         let mut cx = Graph::default();
-        let x = cx.tensor((4, N)).as_dtype(act);
-        let w = cx.tensor((N, N)).as_dtype(act);
+        let x = cx.tensor_dtyped((4, N), act);
+        let w = cx.tensor_dtyped((N, N), act);
         let mut out = f(x, w);
         if out.dtype != DType::F32 {
             out = out.cast(DType::F32);
@@ -721,26 +721,21 @@ fn pure_matmul_chain_cuda_graph_materializes() {
     };
     const INT: usize = 14336;
     let mut cx = Graph::default();
-    let x0 = cx.tensor((1, N)).as_dtype(DType::Bf16);
+    let x0 = cx.tensor_dtyped((1, N), DType::Bf16);
     let wq = cx
-        .named_tensor("w0", (N, N))
-        .as_dtype(DType::Bf16)
+        .named_tensor_dtyped("w0", (N, N), DType::Bf16)
         .persist();
     let wo = cx
-        .named_tensor("w1", (N, N))
-        .as_dtype(DType::Bf16)
+        .named_tensor_dtyped("w1", (N, N), DType::Bf16)
         .persist();
     let wg = cx
-        .named_tensor("w2", (INT, N))
-        .as_dtype(DType::Bf16)
+        .named_tensor_dtyped("w2", (INT, N), DType::Bf16)
         .persist();
     let wu = cx
-        .named_tensor("w3", (INT, N))
-        .as_dtype(DType::Bf16)
+        .named_tensor_dtyped("w3", (INT, N), DType::Bf16)
         .persist();
     let wd = cx
-        .named_tensor("w4", (N, INT))
-        .as_dtype(DType::Bf16)
+        .named_tensor_dtyped("w4", (N, INT), DType::Bf16)
         .persist();
     let attn = x0.matmul(wq.t()).matmul(wo.t());
     let x1 = x0 + attn;
@@ -836,7 +831,7 @@ fn fused_rms_norm_matches_decomposed() {
 
     // bf16 fused kernel
     let mut cx2 = Graph::default();
-    let x2 = cx2.tensor((ROWS, COLS)).as_dtype(DType::Bf16);
+    let x2 = cx2.tensor_dtyped((ROWS, COLS), DType::Bf16);
     let w2 = cx2.tensor(COLS);
     let out2 = fused_rms_norm(x2, w2, 1e-5).cast(DType::F32).output();
     cx2.build_search_space::<CudaRuntime>(CompileOptions::default());
@@ -939,7 +934,7 @@ fn fused_swiglu_matches_decomposed() {
 
     // bf16 fused kernel
     let mut cx2 = Graph::default();
-    let x2 = cx2.tensor((ROWS, 2 * I)).as_dtype(DType::Bf16);
+    let x2 = cx2.tensor_dtyped((ROWS, 2 * I), DType::Bf16);
     let out2 = fused_swiglu(x2, I).cast(DType::F32).output();
     cx2.build_search_space::<CudaRuntime>(CompileOptions::default());
     let mut rt2 = CudaRuntime::initialize(stream.clone());
@@ -974,8 +969,8 @@ fn gemv_m1_bf16_survives_constant_folded_witness_strides() {
     // ((z*2048)*512) only exists constant-folded (z*1048576) in the e-graph,
     // which used to fail the exact-layout witness and drop GEMV/cuBLASLt.
     let mut cx = Graph::default();
-    let x = cx.tensor((1, 2048)).as_dtype(DType::Bf16);
-    let w = cx.tensor((512, 2048)).as_dtype(DType::Bf16);
+    let x = cx.tensor_dtyped((1, 2048), DType::Bf16);
+    let w = cx.tensor_dtyped((512, 2048), DType::Bf16);
     x.matmul(w.t()).output();
 
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
@@ -993,8 +988,8 @@ fn gemv_m1_bf16_accepts_merged_head_view_activation() {
     // non-canonical m-row stride (z*head_dim). With m = 1 that stride is
     // never advanced, so GEMV must still apply.
     let mut cx = Graph::default();
-    let attn = cx.tensor((32, 1, 128)).as_dtype(DType::Bf16);
-    let w_o = cx.tensor((2048, 4096)).as_dtype(DType::Bf16);
+    let attn = cx.tensor_dtyped((32, 1, 128), DType::Bf16);
+    let w_o = cx.tensor_dtyped((2048, 4096), DType::Bf16);
     let x = attn.permute((1, 0, 2)).merge_dims(1, 2);
     x.matmul(w_o.t()).output();
 
@@ -1008,8 +1003,8 @@ fn gemv_m1_bf16_accepts_merged_head_view_activation() {
 #[test]
 fn gemv_m1_bf16_preserves_only_wide_accumulator_backends() {
     let mut cx = Graph::default();
-    let x = cx.tensor((1, 64)).as_dtype(DType::Bf16);
-    let w = cx.tensor((96, 64)).as_dtype(DType::Bf16);
+    let x = cx.tensor_dtyped((1, 64), DType::Bf16);
+    let w = cx.tensor_dtyped((96, 64), DType::Bf16);
     x.matmul(w.t()).output();
 
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
@@ -1031,8 +1026,8 @@ fn low_precision_multirow_matmul_excludes_product_rounding_reduction() {
     // Building the egraph is shape-symbolic and does not allocate that tensor.
     for dtype in [DType::F16, DType::Bf16] {
         let mut cx = Graph::default();
-        let x = cx.tensor((4, 2048)).as_dtype(dtype);
-        let w = cx.tensor((128_256, 2048)).as_dtype(dtype);
+        let x = cx.tensor_dtyped((4, 2048), dtype);
+        let w = cx.tensor_dtyped((128_256, 2048), dtype);
         x.matmul(w.t()).output();
 
         cx.build_search_space::<CudaRuntime>(CompileOptions::default());
@@ -1078,8 +1073,8 @@ fn gemv_m1_case(n: usize, k: usize, seed: u64) {
         .collect();
 
     let mut cx = Graph::default();
-    let x = cx.tensor((1, K)).as_dtype(DType::Bf16);
-    let w = cx.tensor((N, K)).as_dtype(DType::Bf16);
+    let x = cx.tensor_dtyped((1, K), DType::Bf16);
+    let w = cx.tensor_dtyped((N, K), DType::Bf16);
     let out = x.matmul(w.t()).cast(DType::F32).output();
 
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
@@ -1154,8 +1149,8 @@ fn quant_f8_linear_chain_matches_reference() {
     let w_data: Vec<f32> = w_idx.iter().map(|&i| W_VALUES[i]).collect();
 
     let mut cx = Graph::default();
-    let x = cx.tensor((1, K)).as_dtype(DType::Bf16);
-    let w = cx.tensor((N, K)).as_dtype(DType::F8E4M3);
+    let x = cx.tensor_dtyped((1, K), DType::Bf16);
+    let w = cx.tensor_dtyped((N, K), DType::F8E4M3);
     let in_scale = cx.tensor(());
     let w_scale = cx.tensor(());
     let xf = x.cast(DType::F32);
@@ -1255,8 +1250,8 @@ fn gemv_f8_unaligned_shape_matches_reference() {
     let w_data: Vec<f32> = w_idx.iter().map(|&i| W_VALUES[i]).collect();
 
     let mut cx = Graph::default();
-    let x = cx.tensor((1, K)).as_dtype(DType::Bf16);
-    let w = cx.tensor((N, K)).as_dtype(DType::F8E4M3);
+    let x = cx.tensor_dtyped((1, K), DType::Bf16);
+    let w = cx.tensor_dtyped((N, K), DType::F8E4M3);
     let in_scale = cx.tensor(());
     let w_scale = cx.tensor(());
     let xf = x.cast(DType::F32);
@@ -1311,11 +1306,11 @@ fn rope_half_scatter_fusion_requires_exact_shape_and_layout() {
     const KVD: usize = H * D;
     const PITCH: usize = 32;
     let mut cx = Graph::default();
-    let x = cx.tensor((S, PITCH)).as_dtype(DType::Bf16);
+    let x = cx.tensor_dtyped((S, PITCH), DType::Bf16);
     let cos = cx.tensor((S, D / 2));
     let sin = cx.tensor((S, D / 2));
     let rope = apply_rope_half(x, 8, H, D, cos, sin);
-    let dest = cx.tensor((10, KVD)).as_dtype(DType::Bf16).persist();
+    let dest = cx.tensor_dtyped((10, KVD), DType::Bf16).persist();
 
     // Same logical dimensions but a non-contiguous source view.
     let z = Expression::from('z');
@@ -1325,7 +1320,7 @@ fn rope_half_scatter_fusion_requires_exact_shape_and_layout() {
         rope.graph_ref,
         rope.dtype,
     );
-    let layout_indexes = cx.tensor((S, KVD)).as_dtype(DType::Int);
+    let layout_indexes = cx.tensor_dtyped((S, KVD), DType::Int);
     wrong_layout.scatter(layout_indexes, dest).output();
 
     // Contiguous, but not RoPEHalf's declared `(s, out_width)` grid.
@@ -1335,7 +1330,7 @@ fn rope_half_scatter_fusion_requires_exact_shape_and_layout() {
         rope.graph_ref,
         rope.dtype,
     );
-    let shape_indexes = cx.tensor((1, S * KVD)).as_dtype(DType::Int);
+    let shape_indexes = cx.tensor_dtyped((1, S * KVD), DType::Int);
     wrong_shape.scatter(shape_indexes, dest).output();
 
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
@@ -1382,11 +1377,11 @@ fn rope_scatter_fusion_matches_reference() {
     let idx_data: Vec<i32> = vec![4, 7, 2];
 
     let mut cx = Graph::default();
-    let x = cx.tensor((S, PITCH)).as_dtype(DType::Bf16);
+    let x = cx.tensor_dtyped((S, PITCH), DType::Bf16);
     let cos = cx.tensor((S, HALF));
     let sin = cx.tensor((S, HALF));
-    let cache = cx.tensor((SLOTS, KVD)).as_dtype(DType::Bf16);
-    let idx = cx.tensor(S).as_dtype(DType::Int);
+    let cache = cx.tensor_dtyped((SLOTS, KVD), DType::Bf16);
+    let idx = cx.tensor_dtyped(S, DType::Int);
     let k_rope = apply_rope_half(x, OFFSET, H, D, cos, sin);
     let out = scatter_rows(k_rope, idx, cache, KVD)
         .cast(DType::F32)
@@ -1523,11 +1518,11 @@ fn fused_norm_quant_linear_chain_matches_reference() {
     let w_data: Vec<f32> = w_idx.iter().map(|&i| W_VALUES[i]).collect();
 
     let mut cx = Graph::default();
-    let x = cx.tensor((ROWS, COLS)).as_dtype(DType::Bf16);
+    let x = cx.tensor_dtyped((ROWS, COLS), DType::Bf16);
     let nw = cx.tensor(COLS);
     let in_scale = cx.tensor(());
     let w_scale = cx.tensor(());
-    let w = cx.tensor((N, COLS)).as_dtype(DType::F8E4M3);
+    let w = cx.tensor_dtyped((N, COLS), DType::F8E4M3);
     let q = fused_rms_norm_quant(x, nw, EPS, in_scale);
     let deq = q.matmul(w.t()).cast(DType::F32);
     let out = (deq * (in_scale * w_scale).expand_rhs(deq.dims()))
@@ -1637,8 +1632,8 @@ fn moe_gemv_matches_hlir_reference() {
         } else {
             cx.tensor((s_dim, D))
         };
-        let idx = cx.tensor((s_dim, K)).as_dtype(DType::Int);
-        let w = cx.tensor((E, O, D)).as_dtype(DType::Bf16);
+        let idx = cx.tensor_dtyped((s_dim, K), DType::Int);
+        let w = cx.tensor_dtyped((E, O, D), DType::Bf16);
 
         let gathered = gather_experts(idx, w).cast(DType::F32); // [S,K,O,D]
         let x_exp = if per_expert {

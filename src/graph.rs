@@ -1486,24 +1486,42 @@ impl Graph {
 
     /// Create a new tensor with shape S
     pub fn tensor(&mut self, shape: impl ToShape) -> GraphTensor {
-        self.named_tensor("", shape)
+        self.named_tensor_dtyped("", shape, DType::default())
+    }
+
+    /// Create a new tensor with shape S and this dtype. Dtype is DECLARED
+    /// at creation (purity ruling 2026-07-30: as_dtype is gone — a
+    /// different dtype downstream is a logical cast, never a mutation of
+    /// the declaration).
+    pub fn tensor_dtyped(&mut self, shape: impl ToShape, dtype: DType) -> GraphTensor {
+        self.named_tensor_dtyped("", shape, dtype)
     }
 
     /// Create a new tensor with shape S and a name. This name will show up on the graph when displayed
     pub fn named_tensor(&mut self, name: impl ToString, shape: impl ToShape) -> GraphTensor {
+        self.named_tensor_dtyped(name, shape, DType::default())
+    }
+
+    /// Named + dtyped input declaration — the one true constructor.
+    pub fn named_tensor_dtyped(
+        &mut self,
+        name: impl ToString,
+        shape: impl ToShape,
+        dtype: DType,
+    ) -> GraphTensor {
         let name = name.to_string();
         let id = self.graph.add_node(Box::new(crate::hlir::Input {
             node: 0,
             label: name.clone(),
-            dtype: DType::default(),
+            dtype,
         }));
         self.get_op_mut::<crate::hlir::Input>(id).node = id.index();
-        self.input_meta.insert(id, (name.clone(), DType::default()));
+        self.input_meta.insert(id, (name.clone(), dtype));
         let tensor = GraphTensor {
             id,
             graph_ref: self,
-            shape: ShapeTracker::new(shape),
-            dtype: DType::default(),
+            shape: ShapeTracker::new(shape).with_element_bits(dtype.bits()),
+            dtype,
             logical_view: None,
         };
         self.logical

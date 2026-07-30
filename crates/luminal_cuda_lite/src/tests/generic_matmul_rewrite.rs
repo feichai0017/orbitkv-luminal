@@ -99,8 +99,8 @@ fn generic_matmul_fp8_fallback_accumulates_and_outputs_f32() {
     }
 
     let mut cx = Graph::default();
-    let a = cx.tensor((1, K)).as_dtype(DType::F8E4M3);
-    let b_storage = cx.tensor((1, K)).as_dtype(DType::F8E4M3);
+    let a = cx.tensor_dtyped((1, K), DType::F8E4M3);
+    let b_storage = cx.tensor_dtyped((1, K), DType::F8E4M3);
     // Keep the spelling used by existing FP8 model code. The trailing cast is
     // now a no-op because GraphTensor::matmul itself returns F32.
     let output = a.matmul(b_storage.t()).cast(DType::F32).output();
@@ -135,8 +135,8 @@ fn kernel_gemv_f8_absorbs_promoted_casts_and_reads_raw_fp8() {
     }
 
     let mut cx = Graph::default();
-    let x = cx.tensor((1, K)).as_dtype(DType::Bf16);
-    let weight = cx.tensor((N, K)).as_dtype(DType::F8E4M3);
+    let x = cx.tensor_dtyped((1, K), DType::Bf16);
+    let weight = cx.tensor_dtyped((N, K), DType::F8E4M3);
     let input_scale = cx.tensor(());
     let weight_scale = cx.tensor(());
     let x_f32 = x.cast(DType::F32);

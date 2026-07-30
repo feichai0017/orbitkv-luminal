@@ -288,7 +288,7 @@ fn embedding_rows_train_through_gather() {
 
     let mut cx = Graph::new();
     let table = cx.tensor((n_rows, dim));
-    let rows = cx.tensor(4).as_dtype(DType::Int);
+    let rows = cx.tensor_dtyped(4, DType::Int);
     let targets = cx.tensor((4, dim));
     // Flat gather indices: row_id * dim + column
     let dim_const = cx.constant(dim).expand_dim(0, 4).expand_dim(1, dim);

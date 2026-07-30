@@ -226,21 +226,21 @@ fn build_mini_qwen(act: DType) -> MiniQwen {
 fn build_mini_qwen_stage(act: DType, stage: usize) -> MiniQwen {
     let mut cx = Graph::default();
     cx.set_dim('p', 0);
-    let x = cx.tensor((S, H)).as_dtype(act);
-    let pos = cx.tensor(S).as_dtype(DType::Int);
+    let x = cx.tensor_dtyped((S, H), act);
+    let pos = cx.tensor_dtyped(S, DType::Int);
     let k_cache = cx.tensor((N_KV_HEADS, MAX_SEQ, HEAD_DIM));
     let v_cache = cx.tensor((N_KV_HEADS, MAX_SEQ, HEAD_DIM));
-    let q_w = cx.tensor((Q_DIM, H)).as_dtype(act);
-    let k_w = cx.tensor((KV_DIM, H)).as_dtype(act);
-    let v_w = cx.tensor((KV_DIM, H)).as_dtype(act);
-    let o_w = cx.tensor((H, Q_DIM)).as_dtype(act);
+    let q_w = cx.tensor_dtyped((Q_DIM, H), act);
+    let k_w = cx.tensor_dtyped((KV_DIM, H), act);
+    let v_w = cx.tensor_dtyped((KV_DIM, H), act);
+    let o_w = cx.tensor_dtyped((H, Q_DIM), act);
     let attn_norm_w = cx.tensor(H);
     let mlp_norm_w = cx.tensor(H);
     let q_norm_w = cx.tensor(HEAD_DIM);
     let k_norm_w = cx.tensor(HEAD_DIM);
     let router_w = cx.tensor((NUM_EXPERTS, H));
-    let gate_up_w = cx.tensor((NUM_EXPERTS, 2 * MOE_I, H)).as_dtype(DType::Bf16);
-    let down_w = cx.tensor((NUM_EXPERTS, H, MOE_I)).as_dtype(DType::Bf16);
+    let gate_up_w = cx.tensor_dtyped((NUM_EXPERTS, 2 * MOE_I, H), DType::Bf16);
+    let down_w = cx.tensor_dtyped((NUM_EXPERTS, H, MOE_I), DType::Bf16);
 
     let to_f32_out = |t: GraphTensor| -> GraphTensor {
         if t.dtype == DType::F32 {
@@ -586,7 +586,7 @@ fn mini_rotary_f32_genomes_agree() {
 
     let mut cx = Graph::default();
     let x = cx.tensor((S, Q_DIM));
-    let pos = cx.tensor(S).as_dtype(DType::Int);
+    let pos = cx.tensor_dtyped(S, DType::Int);
     let out = rotary(x, pos, N_HEADS).output();
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
 
@@ -804,7 +804,7 @@ fn rms_norm_rule_fires_on_mini_layer() {
 #[ignore = "debug instrument: dump norm chain egglog text"]
 fn dump_norm_chain_egglog() {
     let mut cx = Graph::default();
-    let x = cx.tensor((3, 64)).as_dtype(DType::Bf16);
+    let x = cx.tensor_dtyped((3, 64), DType::Bf16);
     let w = cx.tensor(64);
     let _out = norm_in_f32(x, w).output();
     let (program, _root) = luminal::egglog_utils::hlir_to_egglog(&cx);
@@ -834,7 +834,7 @@ fn rope_rule_fires_and_matches() {
     let mut cx = Graph::default();
     let x_in = cx.tensor((S, Q_DIM));
     let x = x_in.cast(DType::Bf16);
-    let pos = cx.tensor(S).as_dtype(DType::Int);
+    let pos = cx.tensor_dtyped(S, DType::Int);
     let out = rotary(x, pos, N_HEADS).cast(DType::F32).output();
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
 
@@ -905,10 +905,10 @@ fn rope_scatter_fused_and_materialized_alternatives_coexist() {
     use luminal_nn::scatter_rows;
 
     let mut cx = Graph::default();
-    let x = cx.tensor((S, Q_DIM)).as_dtype(DType::Bf16);
-    let pos = cx.tensor(S).as_dtype(DType::Int);
-    let scatter_idx = cx.tensor(S).as_dtype(DType::Int);
-    let cache = cx.tensor((MAX_SEQ, Q_DIM)).as_dtype(DType::Bf16).persist();
+    let x = cx.tensor_dtyped((S, Q_DIM), DType::Bf16);
+    let pos = cx.tensor_dtyped(S, DType::Int);
+    let scatter_idx = cx.tensor_dtyped(S, DType::Int);
+    let cache = cx.tensor_dtyped((MAX_SEQ, Q_DIM), DType::Bf16).persist();
     let k_rope = rotary(x, pos, N_HEADS);
     scatter_rows(k_rope, scatter_idx, cache, Q_DIM).output();
 
@@ -938,7 +938,7 @@ fn rope_scatter_fused_and_materialized_alternatives_coexist() {
 fn dump_rotary_post_egglog() {
     let mut cx = Graph::default();
     let x = cx.tensor((S, Q_DIM)).cast(DType::Bf16);
-    let pos = cx.tensor(S).as_dtype(DType::Int);
+    let pos = cx.tensor_dtyped(S, DType::Int);
     let _out = rotary(x, pos, N_HEADS).cast(DType::F32).output();
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
     let egraph = cx.egraph().unwrap();
@@ -1068,22 +1068,22 @@ fn egglog_six_distinct_layers_build_time() {
     // when a single-instance graph is fast.
     let mut cx = Graph::default();
     cx.set_dim('p', 0);
-    let mut xr = cx.tensor((S, H)).as_dtype(DType::Bf16);
-    let pos = cx.tensor(S).as_dtype(DType::Int);
+    let mut xr = cx.tensor_dtyped((S, H), DType::Bf16);
+    let pos = cx.tensor_dtyped(S, DType::Int);
     for _l in 0..6 {
         let k_cache = cx.tensor((N_KV_HEADS, MAX_SEQ, HEAD_DIM));
         let v_cache = cx.tensor((N_KV_HEADS, MAX_SEQ, HEAD_DIM));
-        let q_w = cx.tensor((Q_DIM, H)).as_dtype(DType::Bf16);
-        let k_w = cx.tensor((KV_DIM, H)).as_dtype(DType::Bf16);
-        let v_w = cx.tensor((KV_DIM, H)).as_dtype(DType::Bf16);
-        let o_w = cx.tensor((H, Q_DIM)).as_dtype(DType::Bf16);
+        let q_w = cx.tensor_dtyped((Q_DIM, H), DType::Bf16);
+        let k_w = cx.tensor_dtyped((KV_DIM, H), DType::Bf16);
+        let v_w = cx.tensor_dtyped((KV_DIM, H), DType::Bf16);
+        let o_w = cx.tensor_dtyped((H, Q_DIM), DType::Bf16);
         let attn_norm_w = cx.tensor(H);
         let mlp_norm_w = cx.tensor(H);
         let q_norm_w = cx.tensor(HEAD_DIM);
         let k_norm_w = cx.tensor(HEAD_DIM);
         let router_w = cx.tensor((NUM_EXPERTS, H));
-        let gate_up_w = cx.tensor((NUM_EXPERTS, 2 * MOE_I, H)).as_dtype(DType::Bf16);
-        let down_w = cx.tensor((NUM_EXPERTS, H, MOE_I)).as_dtype(DType::Bf16);
+        let gate_up_w = cx.tensor_dtyped((NUM_EXPERTS, 2 * MOE_I, H), DType::Bf16);
+        let down_w = cx.tensor_dtyped((NUM_EXPERTS, H, MOE_I), DType::Bf16);
 
         let x_attn = norm_in_f32(xr, attn_norm_w);
         let q = x_attn.matmul(q_w.t());
@@ -1115,7 +1115,7 @@ fn egglog_six_distinct_layers_build_time() {
 fn dump_rotary_chain_egglog() {
     let mut cx = Graph::default();
     let x = cx.tensor((S, Q_DIM)).cast(DType::Bf16);
-    let pos = cx.tensor(S).as_dtype(DType::Int);
+    let pos = cx.tensor_dtyped(S, DType::Int);
     let _out = rotary(x, pos, N_HEADS).output();
     let (program, _root) = luminal::egglog_utils::hlir_to_egglog(&cx);
     println!("{program}");

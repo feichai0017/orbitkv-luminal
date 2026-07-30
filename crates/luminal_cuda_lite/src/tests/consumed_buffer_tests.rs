@@ -109,7 +109,7 @@ fn test_scatter_copy_and_nocopy_coexist_when_dest_unshared() {
     // dest: a 10-element buffer, src: 3 values, indexes: 3 indices
     let dest = cx.tensor(10).persist();
     let src = cx.tensor(3).persist();
-    let indexes = cx.tensor(3).as_dtype(DType::Int).persist();
+    let indexes = cx.tensor_dtyped(3, DType::Int).persist();
 
     // scatter src into dest at indexes
     let _result = src.scatter(indexes, dest).output();
@@ -134,7 +134,7 @@ fn test_scatter_nocopy_rejected_when_old_dest_is_observed_output() {
     let dest = cx.tensor(10);
     dest.output();
     let src = cx.tensor(3).persist();
-    let indexes = cx.tensor(3).as_dtype(DType::Int).persist();
+    let indexes = cx.tensor_dtyped(3, DType::Int).persist();
     src.scatter(indexes, dest).output();
 
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
@@ -165,7 +165,7 @@ fn test_scatter_nocopy_candidate_rejected_when_dest_has_unordered_read() {
     // dest: a 10-element buffer, src: 3 values, indexes: 3 indices
     let dest = cx.tensor(10).persist();
     let src = cx.tensor(3).persist();
-    let indexes = cx.tensor(3).as_dtype(DType::Int).persist();
+    let indexes = cx.tensor_dtyped(3, DType::Int).persist();
 
     // scatter src into dest at indexes
     let scatter_result = src.scatter(indexes, dest);
@@ -203,8 +203,8 @@ fn test_scatter_nocopy_candidate_rejected_for_unordered_later_input_read() {
 
     let dest = cx.tensor(10).persist();
     let src = cx.tensor(3).persist();
-    let scatter_indexes = cx.tensor(3).as_dtype(DType::Int).persist();
-    let read_indexes = cx.tensor(1).as_dtype(DType::Int).persist();
+    let scatter_indexes = cx.tensor_dtyped(3, DType::Int).persist();
+    let read_indexes = cx.tensor_dtyped(1, DType::Int).persist();
 
     let scatter_result = src.scatter(scatter_indexes, dest);
     let _dest_also_read = dest.gather(read_indexes).output();
@@ -228,7 +228,7 @@ fn test_scatter_nocopy_allows_ordered_prior_read() {
     let mut cx = Graph::default();
     let dest = cx.tensor(5).persist();
     let delta = cx.tensor(5).persist();
-    let indexes = cx.tensor(5).as_dtype(DType::Int).persist();
+    let indexes = cx.tensor_dtyped(5, DType::Int).persist();
     let src = dest + delta;
     src.scatter(indexes, dest).output();
 
@@ -251,7 +251,7 @@ fn test_scatter_nocopy_not_selected_for_expanded_dest_layout() {
 
     let dest = cx.tensor(128).expand_dim(0, 4).persist();
     let src = cx.tensor((4, 128)).persist();
-    let indexes = cx.tensor((4, 128)).as_dtype(DType::Int).persist();
+    let indexes = cx.tensor_dtyped((4, 128), DType::Int).persist();
 
     let _result = src.scatter(indexes, dest).output();
 
@@ -284,7 +284,7 @@ fn test_scatter_execution_correctness() {
     // src: [10.0, 20.0, 30.0]
     let src = cx.tensor(3).persist();
     // indexes: [1, 3, 4]
-    let indexes = cx.tensor(3).as_dtype(DType::Int).persist();
+    let indexes = cx.tensor_dtyped(3, DType::Int).persist();
 
     let result = src.scatter(indexes, dest).output();
 
@@ -338,7 +338,7 @@ fn test_scatter_kv_cache_roundtrip() {
     // New value to scatter: [1] element
     let src = cx.tensor(1).persist();
     // Index: [1] element (position to write)
-    let indexes = cx.tensor(1).as_dtype(DType::Int).persist();
+    let indexes = cx.tensor_dtyped(1, DType::Int).persist();
 
     // scatter src into cache at index position
     let cache_out = src.scatter(indexes, cache_in);
@@ -441,7 +441,7 @@ fn test_scatter_dual_cache() {
     // Input values
     let k_new = cx.tensor(1).persist();
     let v_new = cx.tensor(1).persist();
-    let indexes = cx.tensor(1).as_dtype(DType::Int).persist();
+    let indexes = cx.tensor_dtyped(1, DType::Int).persist();
 
     // Scatter into both caches
     let k_out = k_new.scatter(indexes, k_cache);
@@ -572,7 +572,7 @@ fn test_scatter_dual_cache_accumulates_without_roundtrip() {
     let v_cache = cx.named_tensor("v_cache", 5).persist();
     let k_new = cx.tensor(1).persist();
     let v_new = cx.tensor(1).persist();
-    let indexes = cx.tensor(1).as_dtype(DType::Int).persist();
+    let indexes = cx.tensor_dtyped(1, DType::Int).persist();
 
     let k_out = k_new.scatter(indexes, k_cache);
     let v_out = v_new.scatter(indexes, v_cache);
@@ -639,12 +639,10 @@ fn test_scatter_rows_dynamic_prefill_roundtrip() {
     let mut cx = Graph::default();
     let src = cx.named_tensor("src", ('s', D)).persist();
     let scatter_idx = cx
-        .named_tensor("scatter_idx", 's')
-        .as_dtype(DType::Int)
+        .named_tensor_dtyped("scatter_idx", 's', DType::Int)
         .persist();
     let gather_idx = cx
-        .named_tensor("gather_idx", 's')
-        .as_dtype(DType::Int)
+        .named_tensor_dtyped("gather_idx", 's', DType::Int)
         .persist();
     let cache = cx.named_tensor("cache", (SLOTS, D)).persist();
 
@@ -825,12 +823,10 @@ fn test_tiny_gqa_attention_batched_matches_sequential_prefill() {
     let k = cx.named_tensor("k", ('s', KV_DIM)).persist();
     let v = cx.named_tensor("v", ('s', KV_DIM)).persist();
     let scatter_idx = cx
-        .named_tensor("scatter_idx", 's')
-        .as_dtype(DType::Int)
+        .named_tensor_dtyped("scatter_idx", 's', DType::Int)
         .persist();
     let gather_idx = cx
-        .named_tensor("gather_idx", 'c')
-        .as_dtype(DType::Int)
+        .named_tensor_dtyped("gather_idx", 'c', DType::Int)
         .persist();
     let attn_mask = cx.named_tensor("attn_mask", ('s', 'c')).persist();
     let k_cache = cx.named_tensor("k_cache", (SLOTS, KV_DIM)).persist();
@@ -1590,8 +1586,7 @@ fn test_dynamic_2d_to_3d_gather_rows() {
 
     let mut cx = Graph::default();
     let data = cx
-        .named_tensor("data", ('s', E))
-        .as_dtype(DType::Int)
+        .named_tensor_dtyped("data", ('s', E), DType::Int)
         .persist();
     let z = Expression::from('z');
     let row = z / (E * E);
@@ -1640,8 +1635,7 @@ fn test_batched_gather_experts_matches_cpu() {
 
     let mut cx = Graph::default();
     let topk = cx
-        .named_tensor("topk", ('s', K))
-        .as_dtype(DType::Int)
+        .named_tensor_dtyped("topk", ('s', K), DType::Int)
         .persist();
     let weights = cx.named_tensor("weights", (E, D1, D2)).persist();
     let io = D1 * D2;

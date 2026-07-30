@@ -733,20 +733,15 @@ fn build_paged_attention_graph_with_mask_and_cache_provenance(
     let k_cache = cx.named_tensor("k_cache", (2048, kv_dim)).persist();
     let v_cache = cx.named_tensor("v_cache", (2048, kv_dim)).persist();
     let scatter_idx = cx
-        .named_tensor("scatter_idx", 's')
-        .as_dtype(luminal::dtype::DType::Int);
+        .named_tensor_dtyped("scatter_idx", 's', luminal::dtype::DType::Int);
     let gather_idx = cx
-        .named_tensor("gather_idx", 'c')
-        .as_dtype(luminal::dtype::DType::Int);
+        .named_tensor_dtyped("gather_idx", 'c', luminal::dtype::DType::Int);
     let q_pos = cx
-        .named_tensor("q_pos", 's')
-        .as_dtype(luminal::dtype::DType::Int);
+        .named_tensor_dtyped("q_pos", 's', luminal::dtype::DType::Int);
     let qo_indptr = cx
-        .named_tensor("qo_indptr", 'r')
-        .as_dtype(luminal::dtype::DType::Int);
+        .named_tensor_dtyped("qo_indptr", 'r', luminal::dtype::DType::Int);
     let kv_indptr = cx
-        .named_tensor("kv_indptr", 'r')
-        .as_dtype(luminal::dtype::DType::Int);
+        .named_tensor_dtyped("kv_indptr", 'r', luminal::dtype::DType::Int);
 
     let k_dest = cache_dest_with_provenance(&mut cx, k_cache, "k_cache_alt", kv_dim, k_provenance);
     let v_dest = cache_dest_with_provenance(&mut cx, v_cache, "v_cache_alt", kv_dim, v_provenance);
@@ -953,8 +948,7 @@ fn flashinfer_rule_does_not_fire_on_unrelated_matmuls() {
     let mut cx = Graph::default();
     let cache = cx.named_tensor("cache", (4096, KV_DIM)).persist();
     let gather_idx = cx
-        .named_tensor("gather_idx", 'c')
-        .as_dtype(luminal::dtype::DType::Int);
+        .named_tensor_dtyped("gather_idx", 'c', luminal::dtype::DType::Int);
     let weight = cx.named_tensor("weight", (HIDDEN, KV_DIM)).persist();
 
     let n = gather_idx.dims1();
@@ -1735,14 +1729,14 @@ fn egraph_choice_eclass_census() {
     const HEADS: usize = 2;
     const KVH: usize = 1;
     let mut cx = Graph::default();
-    let q = cx.tensor(('s', HEADS * HD)).as_dtype(DType::Bf16);
-    let k = cx.tensor(('s', KVH * HD)).as_dtype(DType::Bf16);
-    let v = cx.tensor(('s', KVH * HD)).as_dtype(DType::Bf16);
-    let k_cache = cx.tensor((16, KVH * HD)).as_dtype(DType::Bf16);
-    let v_cache = cx.tensor((16, KVH * HD)).as_dtype(DType::Bf16);
-    let scatter_idx = cx.tensor('s').as_dtype(DType::Int);
-    let gather_idx = cx.tensor('c').as_dtype(DType::Int);
-    let q_pos = cx.tensor('s').as_dtype(DType::Int);
+    let q = cx.tensor_dtyped(('s', HEADS * HD), DType::Bf16);
+    let k = cx.tensor_dtyped(('s', KVH * HD), DType::Bf16);
+    let v = cx.tensor_dtyped(('s', KVH * HD), DType::Bf16);
+    let k_cache = cx.tensor_dtyped((16, KVH * HD), DType::Bf16);
+    let v_cache = cx.tensor_dtyped((16, KVH * HD), DType::Bf16);
+    let scatter_idx = cx.tensor_dtyped('s', DType::Int);
+    let gather_idx = cx.tensor_dtyped('c', DType::Int);
+    let q_pos = cx.tensor_dtyped('s', DType::Int);
     let out = gemma_mini_paged_attention(
         q,
         k,
@@ -1845,14 +1839,14 @@ fn dump_gemma_sliding_attention_egglog() {
     const HEADS: usize = 2;
     const KVH: usize = 1;
     let mut cx = Graph::default();
-    let q = cx.tensor(('s', HEADS * HD)).as_dtype(DType::Bf16);
-    let k = cx.tensor(('s', KVH * HD)).as_dtype(DType::Bf16);
-    let v = cx.tensor(('s', KVH * HD)).as_dtype(DType::Bf16);
-    let k_cache = cx.tensor((16, KVH * HD)).as_dtype(DType::Bf16);
-    let v_cache = cx.tensor((16, KVH * HD)).as_dtype(DType::Bf16);
-    let scatter_idx = cx.tensor('s').as_dtype(DType::Int);
-    let gather_idx = cx.tensor('c').as_dtype(DType::Int);
-    let q_pos = cx.tensor('s').as_dtype(DType::Int);
+    let q = cx.tensor_dtyped(('s', HEADS * HD), DType::Bf16);
+    let k = cx.tensor_dtyped(('s', KVH * HD), DType::Bf16);
+    let v = cx.tensor_dtyped(('s', KVH * HD), DType::Bf16);
+    let k_cache = cx.tensor_dtyped((16, KVH * HD), DType::Bf16);
+    let v_cache = cx.tensor_dtyped((16, KVH * HD), DType::Bf16);
+    let scatter_idx = cx.tensor_dtyped('s', DType::Int);
+    let gather_idx = cx.tensor_dtyped('c', DType::Int);
+    let q_pos = cx.tensor_dtyped('s', DType::Int);
     let out = gemma_mini_paged_attention(
         q,
         k,
@@ -1882,14 +1876,14 @@ fn flashinfer_rule_fires_on_gemma_sliding_mask() {
     const HEADS: usize = 2;
     const KVH: usize = 1;
     let mut cx = Graph::default();
-    let q = cx.tensor(('s', HEADS * HD)).as_dtype(DType::Bf16);
-    let k = cx.tensor(('s', KVH * HD)).as_dtype(DType::Bf16);
-    let v = cx.tensor(('s', KVH * HD)).as_dtype(DType::Bf16);
-    let k_cache = cx.tensor((16, KVH * HD)).as_dtype(DType::Bf16);
-    let v_cache = cx.tensor((16, KVH * HD)).as_dtype(DType::Bf16);
-    let scatter_idx = cx.tensor('s').as_dtype(DType::Int);
-    let gather_idx = cx.tensor('c').as_dtype(DType::Int);
-    let q_pos = cx.tensor('s').as_dtype(DType::Int);
+    let q = cx.tensor_dtyped(('s', HEADS * HD), DType::Bf16);
+    let k = cx.tensor_dtyped(('s', KVH * HD), DType::Bf16);
+    let v = cx.tensor_dtyped(('s', KVH * HD), DType::Bf16);
+    let k_cache = cx.tensor_dtyped((16, KVH * HD), DType::Bf16);
+    let v_cache = cx.tensor_dtyped((16, KVH * HD), DType::Bf16);
+    let scatter_idx = cx.tensor_dtyped('s', DType::Int);
+    let gather_idx = cx.tensor_dtyped('c', DType::Int);
+    let q_pos = cx.tensor_dtyped('s', DType::Int);
     let out = gemma_mini_paged_attention(
         q,
         k,
@@ -1923,14 +1917,14 @@ fn flashinfer_rule_fires_on_gemma_scale_free_mask() {
     const HEADS: usize = 2;
     const KVH: usize = 1;
     let mut cx = Graph::default();
-    let q = cx.tensor(('s', HEADS * HD)).as_dtype(DType::Bf16);
-    let k = cx.tensor(('s', KVH * HD)).as_dtype(DType::Bf16);
-    let v = cx.tensor(('s', KVH * HD)).as_dtype(DType::Bf16);
-    let k_cache = cx.tensor((16, KVH * HD)).as_dtype(DType::Bf16);
-    let v_cache = cx.tensor((16, KVH * HD)).as_dtype(DType::Bf16);
-    let scatter_idx = cx.tensor('s').as_dtype(DType::Int);
-    let gather_idx = cx.tensor('c').as_dtype(DType::Int);
-    let q_pos = cx.tensor('s').as_dtype(DType::Int);
+    let q = cx.tensor_dtyped(('s', HEADS * HD), DType::Bf16);
+    let k = cx.tensor_dtyped(('s', KVH * HD), DType::Bf16);
+    let v = cx.tensor_dtyped(('s', KVH * HD), DType::Bf16);
+    let k_cache = cx.tensor_dtyped((16, KVH * HD), DType::Bf16);
+    let v_cache = cx.tensor_dtyped((16, KVH * HD), DType::Bf16);
+    let scatter_idx = cx.tensor_dtyped('s', DType::Int);
+    let gather_idx = cx.tensor_dtyped('c', DType::Int);
+    let q_pos = cx.tensor_dtyped('s', DType::Int);
     let out = gemma_mini_paged_attention(
         q,
         k,
@@ -1962,16 +1956,16 @@ fn gemma_fi_rules_six_instances_build_time() {
     const HEADS: usize = 2;
     const KVH: usize = 1;
     let mut cx = Graph::default();
-    let scatter_idx = cx.tensor('s').as_dtype(DType::Int);
-    let gather_idx = cx.tensor('c').as_dtype(DType::Int);
-    let q_pos = cx.tensor('s').as_dtype(DType::Int);
+    let scatter_idx = cx.tensor_dtyped('s', DType::Int);
+    let gather_idx = cx.tensor_dtyped('c', DType::Int);
+    let q_pos = cx.tensor_dtyped('s', DType::Int);
     let mut outs = Vec::new();
     for i in 0..6 {
-        let q = cx.tensor(('s', HEADS * HD)).as_dtype(DType::Bf16);
-        let k = cx.tensor(('s', KVH * HD)).as_dtype(DType::Bf16);
-        let v = cx.tensor(('s', KVH * HD)).as_dtype(DType::Bf16);
-        let k_cache = cx.tensor((16, KVH * HD)).as_dtype(DType::Bf16);
-        let v_cache = cx.tensor((16, KVH * HD)).as_dtype(DType::Bf16);
+        let q = cx.tensor_dtyped(('s', HEADS * HD), DType::Bf16);
+        let k = cx.tensor_dtyped(('s', KVH * HD), DType::Bf16);
+        let v = cx.tensor_dtyped(('s', KVH * HD), DType::Bf16);
+        let k_cache = cx.tensor_dtyped((16, KVH * HD), DType::Bf16);
+        let v_cache = cx.tensor_dtyped((16, KVH * HD), DType::Bf16);
         let sliding = if i % 2 == 0 { Some(8) } else { None };
         let out = gemma_mini_paged_attention(
             q,
@@ -2002,8 +1996,8 @@ fn gemma_fi_rules_six_instances_build_time() {
 fn dump_llama_swiglu_chain_egglog() {
     const I: usize = 8;
     let mut cx = Graph::default();
-    let xgu = cx.tensor(('s', 2 * I)).as_dtype(DType::Bf16);
-    let scale = cx.tensor(()).as_dtype(DType::F32);
+    let xgu = cx.tensor_dtyped(('s', 2 * I), DType::Bf16);
+    let scale = cx.tensor_dtyped((), DType::F32);
     let gate = xgu.slice((.., ..I));
     let up = xgu.slice((.., I..));
     let h = gate.swish() * up;

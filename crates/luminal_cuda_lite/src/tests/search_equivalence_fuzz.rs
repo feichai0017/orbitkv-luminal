@@ -76,10 +76,10 @@ fn llama_architecture_search_space_equivalence_fuzz() {
     cx.set_dim('s', SEQ);
     cx.set_dim('c', CTX);
 
-    let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
-    let q_pos = cx.named_tensor("q_pos", 's').as_dtype(DType::Int);
-    let scatter_idx = cx.named_tensor("scatter_idx", 's').as_dtype(DType::Int);
-    let gather_idx = cx.named_tensor("gather_idx", 'c').as_dtype(DType::Int);
+    let input = cx.named_tensor_dtyped("input", 's', DType::Int);
+    let q_pos = cx.named_tensor_dtyped("q_pos", 's', DType::Int);
+    let scatter_idx = cx.named_tensor_dtyped("scatter_idx", 's', DType::Int);
+    let gather_idx = cx.named_tensor_dtyped("gather_idx", 'c', DType::Int);
     let kv_cache = llama_model::KVCache::new_with_config(&mut cx, SLOTS, config);
     let llama = llama_model::Llama::init_with_config(&mut cx, config);
 
@@ -211,11 +211,9 @@ fn moe_architecture_search_space_equivalence_fuzz() {
     let router_proj = cx.tensor((NUM_EXPERTS, HIDDEN));
     let per_expert_scale = cx.tensor(NUM_EXPERTS);
     let gate_up_weights = cx
-        .tensor((NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN), DType::Bf16);
     let down_weights = cx
-        .tensor((NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE), DType::Bf16);
 
     let n = router_input.dims().len();
     let e_dim = *router_proj.dims().first().unwrap();
@@ -304,11 +302,9 @@ fn moe_architecture_reference_runtime_fuzz() {
     let input = cx.tensor(('s', HIDDEN));
     let router = cx.tensor((NUM_EXPERTS, HIDDEN));
     let gate_up_weights = cx
-        .tensor((NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN), DType::Bf16);
     let down_weights = cx
-        .tensor((NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE))
-        .as_dtype(DType::Bf16);
+        .tensor_dtyped((NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE), DType::Bf16);
 
     let n = input.dims().len();
     let e_dim = *router.dims().first().unwrap();

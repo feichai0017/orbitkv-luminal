@@ -560,15 +560,15 @@ fn permute_matmul_columns(tensor: GraphTensor) -> GraphTensor {
 #[test]
 fn cublaslt_and_gemv_reject_permuted_mul_to_sum_layout() {
     let mut cx = Graph::new();
-    let activation = cx.tensor((1usize, 5usize)).as_dtype(DType::Bf16);
-    let weight = cx.tensor((6usize, 5usize)).as_dtype(DType::Bf16);
+    let activation = cx.tensor_dtyped((1usize, 5usize), DType::Bf16);
+    let weight = cx.tensor_dtyped((6usize, 5usize), DType::Bf16);
     matmul_with_permuted_reduction_columns(activation, weight.t()).output();
 
     // Mirror GraphTensor::matmul's explicit FP8 -> F32 semantic promotion so
     // the same malformed reduction also exercises the FP8 cuBLASLt/GEMV
     // consumers, not only the ordinary 16-bit families.
-    let fp8_activation = cx.tensor((1usize, 5usize)).as_dtype(DType::F8E4M3);
-    let fp8_weight = cx.tensor((6usize, 5usize)).as_dtype(DType::F8E4M3);
+    let fp8_activation = cx.tensor_dtyped((1usize, 5usize), DType::F8E4M3);
+    let fp8_weight = cx.tensor_dtyped((6usize, 5usize), DType::F8E4M3);
     matmul_with_permuted_reduction_columns(
         fp8_activation.cast(DType::F32),
         fp8_weight.t().cast(DType::F32),
@@ -714,7 +714,7 @@ fn cublaslt_rank4_matmuls_do_not_drop_leading_batch_axes() {
     // could otherwise reach both the ordinary F32 and FP8-specific batched
     // rules after GraphTensor::matmul inserts its semantic F32 casts.
     let activation = cx.tensor((outer, batch, m, k));
-    let weight_storage = cx.tensor((outer, batch, n, k)).as_dtype(DType::F8E4M3);
+    let weight_storage = cx.tensor_dtyped((outer, batch, n, k), DType::F8E4M3);
     let input_scale = cx.tensor(());
     let weight_scale = cx.tensor(());
     let quantized = (activation / input_scale.expand_rhs((outer, batch, m, k))).cast(DType::F8E4M3);
@@ -1561,10 +1561,10 @@ fn cublaslt_fp8_e4m3_beta_candidate_executes_2d_matmul_plus_f32_c() {
 
     let (m, n, k) = (16, 16, 16);
     let mut cx = Graph::new();
-    let a = cx.tensor((m, k)).as_dtype(DType::F8E4M3);
-    let b_input = cx.tensor((n, k)).as_dtype(DType::F8E4M3);
+    let a = cx.tensor_dtyped((m, k), DType::F8E4M3);
+    let b_input = cx.tensor_dtyped((n, k), DType::F8E4M3);
     let b = b_input.t();
-    let c = cx.tensor((m, n)).as_dtype(DType::F32);
+    let c = cx.tensor_dtyped((m, n), DType::F32);
     let out = (a.matmul(b).cast(DType::F32) + c).output();
     let expected_tuple = (
         DType::F8E4M3,
@@ -1615,7 +1615,7 @@ fn cublaslt_fp8_scaled_candidate_executes_2d_matmul_f32_output() {
     let a = cx.tensor((m, k));
     let a_scale = cx.tensor(());
     let b_scale = cx.tensor(());
-    let b_input = cx.tensor((n, k)).as_dtype(DType::F8E4M3);
+    let b_input = cx.tensor_dtyped((n, k), DType::F8E4M3);
     let b = b_input.t();
     let scaled_a = (a / a_scale.expand_rhs((m, k))).cast(DType::F8E4M3);
     let out =
@@ -1670,7 +1670,7 @@ fn cublaslt_fp8_scaled_candidate_reaches_fused_output_scale_consumer() {
     let a = cx.tensor((m, k));
     let a_scale = cx.tensor(());
     let b_scale = cx.tensor(());
-    let b_input = cx.tensor((n, k)).as_dtype(DType::F8E4M3);
+    let b_input = cx.tensor_dtyped((n, k), DType::F8E4M3);
     let b = b_input.t();
     let side = cx.tensor((m, n));
     let scaled_a = (a / a_scale.expand_rhs((m, k))).cast(DType::F8E4M3);
@@ -1699,8 +1699,8 @@ fn cublaslt_fp8_scaled_candidates_reach_fused_mlp_consumer() {
     let gate_weight_scale = cx.tensor(());
     let up_input_scale = cx.tensor(());
     let up_weight_scale = cx.tensor(());
-    let gate_weight = cx.tensor((n, k)).as_dtype(DType::F8E4M3);
-    let up_weight = cx.tensor((n, k)).as_dtype(DType::F8E4M3);
+    let gate_weight = cx.tensor_dtyped((n, k), DType::F8E4M3);
+    let up_weight = cx.tensor_dtyped((n, k), DType::F8E4M3);
 
     let scaled_gate_a = (a / gate_input_scale.expand_rhs((m, k))).cast(DType::F8E4M3);
     let gate = scaled_gate_a.matmul(gate_weight.t()).cast(DType::F32)
@@ -1738,7 +1738,7 @@ fn cublaslt_fp8_scaled_candidate_executes_batched_matmul_f32_output() {
     let a = cx.tensor((batch, m, k));
     let a_scale = cx.tensor(());
     let b_scale = cx.tensor(());
-    let b_input = cx.tensor((batch, n, k)).as_dtype(DType::F8E4M3);
+    let b_input = cx.tensor_dtyped((batch, n, k), DType::F8E4M3);
     let b = b_input.transpose(1, 2);
     let scaled_a = (a / a_scale.expand_rhs((batch, m, k))).cast(DType::F8E4M3);
     let matmul = scaled_a.matmul(b);
@@ -1886,8 +1886,8 @@ fn build_fp8_2d_cast_matmul_f32_graph(
     n: usize,
     k: usize,
 ) -> (GraphTensor, GraphTensor, GraphTensor) {
-    let a = cx.tensor((m, k)).as_dtype(a_dtype);
-    let b_input = cx.tensor((n, k)).as_dtype(b_dtype);
+    let a = cx.tensor_dtyped((m, k), a_dtype);
+    let b_input = cx.tensor_dtyped((n, k), b_dtype);
     let b = b_input.t();
 
     let out = a.matmul(b).output();
@@ -1903,8 +1903,8 @@ fn build_fp8_batched_cast_matmul_f32_graph(
     n: usize,
     k: usize,
 ) -> (GraphTensor, GraphTensor, GraphTensor) {
-    let a = cx.tensor((batch, m, k)).as_dtype(a_dtype);
-    let b_input = cx.tensor((batch, n, k)).as_dtype(b_dtype);
+    let a = cx.tensor_dtyped((batch, m, k), a_dtype);
+    let b_input = cx.tensor_dtyped((batch, n, k), b_dtype);
     let b = b_input.transpose(1, 2);
 
     let out = a.matmul(b).output();
@@ -3162,11 +3162,9 @@ fn build_2d_layout_graph(
     let (m, n, k) = (7, 11, 5);
     let mut cx = Graph::new();
     let a = cx
-        .tensor(if case.a_col_major { (k, m) } else { (m, k) })
-        .as_dtype(a_dtype);
+        .tensor_dtyped(if case.a_col_major { (k, m) } else { (m, k) }, a_dtype);
     let b = cx
-        .tensor(if case.b_col_major { (n, k) } else { (k, n) })
-        .as_dtype(b_dtype);
+        .tensor_dtyped(if case.b_col_major { (n, k) } else { (k, n) }, b_dtype);
     let a = if case.a_col_major { a.t() } else { a };
     let b = if case.b_col_major { b.t() } else { b };
     build(&mut cx, a, b, m, n, k).output();
@@ -3190,19 +3188,17 @@ fn build_batched_layout_graph(
     let (batch, m, n, k) = (3, 7, 11, 5);
     let mut cx = Graph::new();
     let a = cx
-        .tensor(if case.a_col_major {
+        .tensor_dtyped(if case.a_col_major {
             (batch, k, m)
         } else {
             (batch, m, k)
-        })
-        .as_dtype(a_dtype);
+        }, a_dtype);
     let b = cx
-        .tensor(if case.b_col_major {
+        .tensor_dtyped(if case.b_col_major {
             (batch, n, k)
         } else {
             (batch, k, n)
-        })
-        .as_dtype(b_dtype);
+        }, b_dtype);
     let a = if case.a_col_major {
         a.transpose(1, 2)
     } else {
@@ -3231,14 +3227,14 @@ fn build_2d_matmul_graph(case: LayoutCase, dtype: DType) -> Graph {
 
 fn build_2d_matmul_plus_c_graph(case: LayoutCase, dtype: DType, commuted: bool) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let c = cx.tensor((m, n)).as_dtype(dtype);
+        let c = cx.tensor_dtyped((m, n), dtype);
         add_commuted(a.matmul(b), c, commuted)
     })
 }
 
 fn build_2d_matmul_plus_sliced_c_graph(case: LayoutCase, dtype: DType, commuted: bool) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let c = cx.tensor((m, n + 3)).as_dtype(dtype).slice((0..m, 0..n));
+        let c = cx.tensor_dtyped((m, n + 3), dtype).slice((0..m, 0..n));
         add_commuted(a.matmul(b), c, commuted)
     })
 }
@@ -3246,8 +3242,7 @@ fn build_2d_matmul_plus_sliced_c_graph(case: LayoutCase, dtype: DType, commuted:
 fn build_2d_matmul_plus_offset_c_graph(case: LayoutCase, dtype: DType, commuted: bool) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
         let c = cx
-            .tensor((m + 2, n + 3))
-            .as_dtype(dtype)
+            .tensor_dtyped((m + 2, n + 3), dtype)
             .slice((1..(m + 1), 2..(n + 2)));
         add_commuted(a.matmul(b), c, commuted)
     })
@@ -3259,28 +3254,28 @@ fn build_2d_matmul_plus_transposed_c_graph(
     commuted: bool,
 ) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let c = cx.tensor((n, m)).as_dtype(dtype).t();
+        let c = cx.tensor_dtyped((n, m), dtype).t();
         add_commuted(a.matmul(b), c, commuted)
     })
 }
 
 fn build_2d_scaled_alpha_beta_graph(case: LayoutCase, dtype: DType, commuted: bool) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let c = cx.tensor((m, n)).as_dtype(dtype);
+        let c = cx.tensor_dtyped((m, n), dtype);
         add_commuted(a.matmul(b) * 1.5, c * 0.5, commuted)
     })
 }
 
 fn build_2d_matmul_plus_column_bias_graph(case: LayoutCase, dtype: DType, commuted: bool) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let bias = cx.tensor(n).as_dtype(dtype).expand_dim(0, m);
+        let bias = cx.tensor_dtyped(n, dtype).expand_dim(0, m);
         add_commuted(a.matmul(b), bias, commuted)
     })
 }
 
 fn build_2d_matmul_plus_row_bias_graph(case: LayoutCase, dtype: DType, commuted: bool) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let bias = cx.tensor(m).as_dtype(dtype).expand_dim(1, n);
+        let bias = cx.tensor_dtyped(m, dtype).expand_dim(1, n);
         add_commuted(a.matmul(b), bias, commuted)
     })
 }
@@ -3291,7 +3286,7 @@ fn build_2d_matmul_plus_column_bias_relu_graph(
     commuted: bool,
 ) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let bias = cx.tensor(n).as_dtype(dtype).expand_dim(0, m);
+        let bias = cx.tensor_dtyped(n, dtype).expand_dim(0, m);
         add_commuted(a.matmul(b), bias, commuted).relu()
     })
 }
@@ -3302,7 +3297,7 @@ fn build_2d_matmul_plus_column_bias_gelu_graph(
     commuted: bool,
 ) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let bias = cx.tensor(n).as_dtype(dtype).expand_dim(0, m);
+        let bias = cx.tensor_dtyped(n, dtype).expand_dim(0, m);
         add_commuted(a.matmul(b), bias, commuted).gelu_fast_tanh_approximation()
     })
 }
@@ -3314,8 +3309,8 @@ fn build_2d_matmul_plus_column_bias_activation_plus_c_graph(
     activation: impl FnOnce(GraphTensor) -> GraphTensor,
 ) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let bias = cx.tensor(n).as_dtype(dtype).expand_dim(0, m);
-        let residual = cx.tensor((m, n)).as_dtype(dtype);
+        let bias = cx.tensor_dtyped(n, dtype).expand_dim(0, m);
+        let residual = cx.tensor_dtyped((m, n), dtype);
         add_commuted(activation(a.matmul(b) + bias), residual, commuted)
     })
 }
@@ -3326,7 +3321,7 @@ fn build_2d_matmul_plus_column_bias_scaled_graph(
     commuted: bool,
 ) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let bias = cx.tensor(n).as_dtype(dtype).expand_dim(0, m);
+        let bias = cx.tensor_dtyped(n, dtype).expand_dim(0, m);
         add_commuted(a.matmul(b), bias, commuted) * 1.5
     })
 }
@@ -3337,7 +3332,7 @@ fn build_2d_matmul_plus_row_bias_relu_graph(
     commuted: bool,
 ) -> Graph {
     build_same_dtype_2d_graph(case, dtype, |cx, a, b, m, n, _| {
-        let bias = cx.tensor(m).as_dtype(dtype).expand_dim(1, n);
+        let bias = cx.tensor_dtyped(m, dtype).expand_dim(1, n);
         add_commuted(a.matmul(b), bias, commuted).relu()
     })
 }
@@ -3358,7 +3353,7 @@ fn build_batched_matmul_graph(case: LayoutCase, dtype: DType) -> Graph {
 
 fn build_batched_matmul_plus_c_graph(case: LayoutCase, dtype: DType, commuted: bool) -> Graph {
     build_same_dtype_batched_graph(case, dtype, |cx, a, b, batch, m, n, _| {
-        let c = cx.tensor((batch, m, n)).as_dtype(dtype);
+        let c = cx.tensor_dtyped((batch, m, n), dtype);
         add_commuted(a.matmul(b), c, commuted)
     })
 }
@@ -3370,8 +3365,7 @@ fn build_batched_matmul_plus_sliced_c_graph(
 ) -> Graph {
     build_same_dtype_batched_graph(case, dtype, |cx, a, b, batch, m, n, _| {
         let c = cx
-            .tensor((batch, m, n + 3))
-            .as_dtype(dtype)
+            .tensor_dtyped((batch, m, n + 3), dtype)
             .slice((0..batch, 0..m, 0..n));
         add_commuted(a.matmul(b), c, commuted)
     })
@@ -3383,7 +3377,7 @@ fn build_batched_matmul_plus_offset_c_graph(
     commuted: bool,
 ) -> Graph {
     build_same_dtype_batched_graph(case, dtype, |cx, a, b, batch, m, n, _| {
-        let c = cx.tensor((batch + 1, m + 2, n + 3)).as_dtype(dtype).slice((
+        let c = cx.tensor_dtyped((batch + 1, m + 2, n + 3), dtype).slice((
             1..(batch + 1),
             1..(m + 1),
             2..(n + 2),
@@ -3398,14 +3392,14 @@ fn build_batched_matmul_plus_transposed_c_graph(
     commuted: bool,
 ) -> Graph {
     build_same_dtype_batched_graph(case, dtype, |cx, a, b, batch, m, n, _| {
-        let c = cx.tensor((batch, n, m)).as_dtype(dtype).transpose(1, 2);
+        let c = cx.tensor_dtyped((batch, n, m), dtype).transpose(1, 2);
         add_commuted(a.matmul(b), c, commuted)
     })
 }
 
 fn build_batched_scaled_alpha_beta_graph(case: LayoutCase, dtype: DType, commuted: bool) -> Graph {
     build_same_dtype_batched_graph(case, dtype, |cx, a, b, batch, m, n, _| {
-        let c = cx.tensor((batch, m, n)).as_dtype(dtype);
+        let c = cx.tensor_dtyped((batch, m, n), dtype);
         add_commuted(a.matmul(b) * 1.5, c * 0.5, commuted)
     })
 }
@@ -3417,8 +3411,7 @@ fn build_batched_matmul_plus_column_bias_graph(
 ) -> Graph {
     build_same_dtype_batched_graph(case, dtype, |cx, a, b, batch, m, n, _| {
         let bias = cx
-            .tensor(n)
-            .as_dtype(dtype)
+            .tensor_dtyped(n, dtype)
             .expand_dim(0, m)
             .expand_dim(0, batch);
         add_commuted(a.matmul(b), bias, commuted)
@@ -3432,8 +3425,7 @@ fn build_batched_matmul_plus_row_bias_graph(
 ) -> Graph {
     build_same_dtype_batched_graph(case, dtype, |cx, a, b, batch, m, n, _| {
         let bias = cx
-            .tensor(m)
-            .as_dtype(dtype)
+            .tensor_dtyped(m, dtype)
             .expand_dim(1, n)
             .expand_dim(0, batch);
         add_commuted(a.matmul(b), bias, commuted)
@@ -3447,8 +3439,7 @@ fn build_batched_matmul_plus_column_bias_relu_graph(
 ) -> Graph {
     build_same_dtype_batched_graph(case, dtype, |cx, a, b, batch, m, n, _| {
         let bias = cx
-            .tensor(n)
-            .as_dtype(dtype)
+            .tensor_dtyped(n, dtype)
             .expand_dim(0, m)
             .expand_dim(0, batch);
         add_commuted(a.matmul(b), bias, commuted).relu()
@@ -3462,8 +3453,7 @@ fn build_batched_matmul_plus_column_bias_gelu_graph(
 ) -> Graph {
     build_same_dtype_batched_graph(case, dtype, |cx, a, b, batch, m, n, _| {
         let bias = cx
-            .tensor(n)
-            .as_dtype(dtype)
+            .tensor_dtyped(n, dtype)
             .expand_dim(0, m)
             .expand_dim(0, batch);
         add_commuted(a.matmul(b), bias, commuted).gelu_fast_tanh_approximation()
@@ -3477,8 +3467,7 @@ fn build_batched_matmul_plus_row_bias_relu_graph(
 ) -> Graph {
     build_same_dtype_batched_graph(case, dtype, |cx, a, b, batch, m, n, _| {
         let bias = cx
-            .tensor(m)
-            .as_dtype(dtype)
+            .tensor_dtyped(m, dtype)
             .expand_dim(1, n)
             .expand_dim(0, batch);
         add_commuted(a.matmul(b), bias, commuted).relu()
