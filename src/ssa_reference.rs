@@ -31,6 +31,19 @@ pub fn reference_allow_list() -> Vec<&'static str> {
         .collect()
 }
 
+/// M3 Step 2: what `load` captured from a natively-recorded Graph — the
+/// pre-schedule program text (model + reference-binding defaults), the
+/// I/O slots, the post-schedule authoring checks, plus whatever the
+/// binding calls accumulate before `search` assembles and saturates.
+struct NativeSpec {
+    pre_schedule: String,
+    input_slots: Vec<(petgraph::graph::NodeIndex, u64)>,
+    output_slots: Vec<(usize, u64)>,
+    post_checks: String,
+    binding_seeds: String,
+    ops: Option<Vec<&'static str>>,
+}
+
 #[derive(Default)]
 pub struct SsaReferenceRuntime {
     plan: Option<BufferIrGraph>,
@@ -40,6 +53,8 @@ pub struct SsaReferenceRuntime {
     storage: FxHashMap<BufferId, TypedBuffer>,
     /// `BufferLit` id → plan buffer, built at `load_plan`.
     lit_index: FxHashMap<i64, BufferId>,
+    /// M3 Step 2 native-ladder state (`load` → bind → `with_ops` → `search`).
+    native: Option<NativeSpec>,
 }
 
 impl SsaReferenceRuntime {
@@ -51,6 +66,88 @@ impl SsaReferenceRuntime {
             .collect();
         self.plan = Some(plan);
         self.storage.clear();
+    }
+
+    /// M3 Step 2, the native entry ladder: LOAD a natively-recorded graph
+    /// (the model + reference-binding defaults; loud if the recorder is
+    /// poisoned) — then bind, choose allowable ops, and `search`.
+    pub fn load(graph: &crate::graph::Graph) -> Result<Self> {
+        let (pre_schedule, input_slots, output_slots, post_checks) = graph
+            .logical
+            .native_parts()
+            .map_err(|reason| anyhow!("native load refused: {reason}"))?;
+        let mut runtime = Self::default();
+        runtime.native = Some(NativeSpec {
+            pre_schedule,
+            input_slots,
+            output_slots,
+            post_checks,
+            binding_seeds: String::new(),
+            ops: None,
+        });
+        Ok(runtime)
+    }
+
+    /// BINDING: seed a dynamic dim's range (bounds-on-vars — never a pin).
+    pub fn bind_dyn_range(&mut self, var: char, lower: u64, upper: u64) -> Result<()> {
+        let spec = self.native.as_mut().ok_or_else(|| anyhow!("bind before load"))?;
+        spec.binding_seeds.push_str(&format!(
+            "(set (lower-bound-of (IntVar \"{var}\")) (bigint {lower}))\n\
+             (set (upper-bound-of (IntVar \"{var}\")) (bigint {upper}))\n"
+        ));
+        Ok(())
+    }
+
+    /// The ALLOWABLE-OPS inventory for this runtime (per-runtime API,
+    /// deliberately unstandardized — ruling 2026-07-30).
+    pub fn with_ops(&mut self, ops: Vec<&'static str>) -> Result<()> {
+        let spec = self.native.as_mut().ok_or_else(|| anyhow!("with_ops before load"))?;
+        spec.ops = Some(ops);
+        Ok(())
+    }
+
+    /// SEARCH: one saturation to fixpoint discovers the implementations;
+    /// selection then prices every candidate by EXECUTING its bufferized
+    /// plan on this runtime with the given data; the winner loads.
+    pub fn search(
+        &mut self,
+        input_data: &FxHashMap<i64, Vec<f32>>,
+        options: &crate::implementation_search::ImplementationSearchOptions,
+    ) -> Result<crate::implementation_search::SearchOutcome> {
+        let spec = self.native.take().ok_or_else(|| anyhow!("search before load"))?;
+        let text = format!(
+            "{}{}{}{}",
+            spec.pre_schedule,
+            spec.binding_seeds,
+            crate::reference_binding::SCHEDULE,
+            spec.post_checks
+        );
+        let program = crate::hlir_to_logical::LogicalProgram {
+            text,
+            input_slots: spec.input_slots,
+            output_slots: spec.output_slots,
+        };
+        let full = format!(
+            "{}\n\n{}",
+            crate::egglog_snippet::assembled_program(),
+            program.text
+        );
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph
+            .parse_and_run_program(None, &full)
+            .map_err(|err| anyhow!("native saturation failed: {err}"))?;
+        let serialized = egraph
+            .serialize(egglog::SerializeConfig::default())
+            .egraph;
+        let outcome = crate::implementation_search::search_implementations_with_ops(
+            &serialized,
+            &program,
+            input_data,
+            options,
+            spec.ops,
+        )?;
+        self.load_plan(outcome.best_plan.clone());
+        Ok(outcome)
     }
 
     /// Stage caller data for the boundary buffer with this `BufferLit` id.
@@ -834,7 +931,53 @@ mod tests {
         certify_recorder(&cx);
     }
 
-    /// Uncovered constructs POISON the recorder with an attributable    /// Uncovered constructs POISON the recorder with an attributable
+    /// M3 STEP 2 PROOF: the whole native entry ladder — load (model +
+    /// binding defaults) → search (one saturation, then selection priced
+    /// by EXECUTION on this runtime) → execute — against their runtime.
+    #[test]
+    fn native_ladder_load_search_execute() {
+        let build = || {
+            let mut cx = Graph::new();
+            let b = cx.tensor(3);
+            let c = cx.tensor(3);
+            let g = cx.tensor(3);
+            let a = (b * c + g).output();
+            (cx, b, c, g, a)
+        };
+        let b_data = vec![1.0, 2.0, 3.0];
+        let c_data = vec![4.0, 5.0, 6.0];
+        let g_data = vec![0.5, -1.5, 2.5];
+
+        let (mut cx, b, c, g, a) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(b.id, b_data.clone());
+        theirs.set_data(c.id, c_data.clone());
+        theirs.set_data(g.id, g_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(a.id).clone();
+
+        let (cx2, b2, c2, g2, a2) = build();
+        let mut ours = SsaReferenceRuntime::load(&cx2).expect("native load");
+        let mut input_data: FxHashMap<i64, Vec<f32>> = FxHashMap::default();
+        input_data.insert(b2.id.index() as i64, b_data.clone());
+        input_data.insert(c2.id.index() as i64, c_data.clone());
+        input_data.insert(g2.id.index() as i64, g_data.clone());
+        let outcome = ours
+            .search(&input_data, &Default::default())
+            .expect("native search");
+        assert!(outcome.plans_profiled > 0, "selection profiled real plans");
+        ours.set_data(b2.id.index() as i64, b_data);
+        ours.set_data(c2.id.index() as i64, c_data);
+        ours.set_data(g2.id.index() as i64, g_data);
+        ours.execute().expect("executes");
+        assert_close(ours.get_f32(a2.id.index() as i64).unwrap(), &expected);
+    }
+
+    /// Uncovered constructs POISON the recorder with an attributable
     /// reason — the native path refuses loudly, never mistranslates.
     #[test]
     fn recorder_poisons_on_uncovered_family() {

@@ -1,4 +1,9 @@
-//! The logical-SSA selection search: a mutation-only hill climb over
+//! IMPLEMENTATION search (renamed from logical_search, ruling 2026-07-30):
+//! there is NO search at the logical level — saturation discovers
+//! implementations; this module only SELECTS among them, pricing every
+//! candidate by executing its bufferized plan on the runtime.
+//!
+//! A mutation-only hill climb over
 //! per-value producer genomes, profiled on the real `SsaReferenceRuntime` —
 //! luminal's search shape (no cost models, profile the real thing, keep the
 //! best, mutate) over our genome representation.
@@ -23,7 +28,7 @@ use crate::hlir_to_logical::LogicalProgram;
 use crate::ssa_reference::SsaReferenceRuntime;
 
 #[derive(Debug, Clone)]
-pub struct LogicalSearchOptions {
+pub struct ImplementationSearchOptions {
     pub generations: usize,
     pub generation_size: usize,
     /// Point mutations per offspring. Mutations hit ANY producer class —
@@ -34,7 +39,7 @@ pub struct LogicalSearchOptions {
     pub seed: u64,
 }
 
-impl Default for LogicalSearchOptions {
+impl Default for ImplementationSearchOptions {
     fn default() -> Self {
         Self {
             generations: 8,
@@ -59,13 +64,25 @@ pub struct SearchOutcome {
 
 /// Search the saturated e-graph for the fastest executable plan, profiling
 /// with the given caller data. Deterministic for a fixed seed.
-pub fn search_logical(
+pub fn search_implementations(
     egraph: &egraph_serialize::EGraph,
     program: &LogicalProgram,
     input_data: &FxHashMap<i64, Vec<f32>>,
-    options: &LogicalSearchOptions,
+    options: &ImplementationSearchOptions,
 ) -> Result<SearchOutcome> {
-    let allow = crate::ssa_reference::reference_allow_list();
+    search_implementations_with_ops(egraph, program, input_data, options, None)
+}
+
+/// As [`search_implementations`], with the runtime's ALLOWABLE-OPS
+/// inventory made explicit (M3 Step 2: per-runtime, unstandardized).
+pub fn search_implementations_with_ops(
+    egraph: &egraph_serialize::EGraph,
+    program: &LogicalProgram,
+    input_data: &FxHashMap<i64, Vec<f32>>,
+    options: &ImplementationSearchOptions,
+    allow_override: Option<Vec<&'static str>>,
+) -> Result<SearchOutcome> {
+    let allow = allow_override.unwrap_or_else(crate::ssa_reference::reference_allow_list);
     let index = extractor::producer_index_with_ops(egraph, Some(&allow));
     ensure!(!index.is_empty(), "no producer classes to search over");
     let classes: Vec<_> = index.keys().cloned().collect();
@@ -206,11 +223,11 @@ pub struct BucketPlan {
 /// Slice note (documented divergence from their symbolic LLIR): each
 /// winning plan is STATIC at its representative; executing at another pin
 /// re-renders — genome transfer across renders is future work.
-pub fn bucketed_search_logical(
+pub fn bucketed_search_implementations(
     graph: &crate::graph::Graph,
     dim_buckets: &BTreeMap<char, Vec<crate::graph::DimBucket>>,
     input_data: impl Fn(&FxHashMap<char, usize>) -> FxHashMap<i64, Vec<f32>>,
-    options: &LogicalSearchOptions,
+    options: &ImplementationSearchOptions,
 ) -> Result<Vec<BucketPlan>> {
     use crate::hlir_to_logical::hlir_to_logical_with_dims;
     ensure!(!dim_buckets.is_empty(), "no dim buckets supplied");
@@ -268,7 +285,7 @@ pub fn bucketed_search_logical(
             .map_err(|err| anyhow!("bucket {ranges:?} representative render fails: {err}"))?;
         let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
         let data = input_data(&representative);
-        let outcome = search_logical(&serialized, &program, &data, options)?;
+        let outcome = search_implementations(&serialized, &program, &data, options)?;
         plans.push(BucketPlan { ranges, representative, program, outcome });
     }
     Ok(plans)
@@ -340,11 +357,11 @@ mod tests {
         let mut inputs = FxHashMap::default();
         inputs.insert(x2.id.index() as i64, x_data.clone());
         inputs.insert(y2.id.index() as i64, y_data.clone());
-        let outcome = search_logical(
+        let outcome = search_implementations(
             &serialized,
             &program,
             &inputs,
-            &LogicalSearchOptions::default(),
+            &ImplementationSearchOptions::default(),
         )
         .expect("search finds an executable plan");
 
@@ -407,11 +424,11 @@ mod tests {
             data.insert(y.id.index() as i64, (0..n).map(|v| v as f32 * 0.5).collect());
             data
         };
-        let plans = bucketed_search_logical(
+        let plans = bucketed_search_implementations(
             &cx,
             &buckets,
             data_for,
-            &LogicalSearchOptions::default(),
+            &ImplementationSearchOptions::default(),
         )
         .expect("bucketed search completes");
         assert_eq!(plans.len(), 2, "one plan per bucket");

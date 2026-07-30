@@ -762,6 +762,29 @@ impl LogicalRecorder {
     /// binding vocabulary is the reference runtime's — a different runtime
     /// binds differently against the same model.
     pub fn native_program(&self) -> Result<crate::hlir_to_logical::LogicalProgram, String> {
+        let (pre, input_slots, output_slots, post_checks) = self.native_parts()?;
+        Ok(crate::hlir_to_logical::LogicalProgram {
+            text: format!("{pre}{}{post_checks}", crate::reference_binding::SCHEDULE),
+            input_slots,
+            output_slots,
+        })
+    }
+
+    /// The native assembly SPLIT at the schedule, so a runtime can inject
+    /// binding seeds (dynamic-dim bounds) before saturation: returns
+    /// (pre-schedule text, input slots, output slots, post-schedule checks).
+    #[allow(clippy::type_complexity)]
+    pub fn native_parts(
+        &self,
+    ) -> Result<
+        (
+            String,
+            Vec<(petgraph::graph::NodeIndex, u64)>,
+            Vec<(usize, u64)>,
+            String,
+        ),
+        String,
+    > {
         let mut text = self.model_text()?;
         let mut input_slots = Vec::new();
         let mut input_buffer_tensors = Vec::new();
@@ -801,12 +824,6 @@ impl LogicalRecorder {
             "nat_input_boundary",
             "nat_output_boundary",
         ));
-        text.push_str(crate::reference_binding::SCHEDULE);
-        text.push_str(&self.post_checks);
-        Ok(crate::hlir_to_logical::LogicalProgram {
-            text,
-            input_slots,
-            output_slots,
-        })
+        Ok((text, input_slots, output_slots, self.post_checks.clone()))
     }
 }
