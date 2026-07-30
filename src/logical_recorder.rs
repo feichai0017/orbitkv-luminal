@@ -39,7 +39,48 @@ pub enum MapEntry {
     /// The consuming view's coordinate, zero-based FROM THE END (the
     /// de Bruijn house convention), with its extent.
     Coord { from_end: usize, extent: Expression },
-    Lit(i64),
+    /// A dim-expression literal (a number or a symbolic dim var).
+    Lit(Expression),
+    Add(Box<MapEntry>, Box<MapEntry>),
+    Mul(Box<MapEntry>, Expression),
+    Div(Box<MapEntry>, Expression),
+    Rem(Box<MapEntry>, Expression),
+    Min(Box<MapEntry>, Box<MapEntry>),
+    Max(Box<MapEntry>, Box<MapEntry>),
+}
+
+impl MapEntry {
+    /// Substitute every Coord leaf (a previous-out coordinate) with its
+    /// replacement in the new out space — the movement-composition step.
+    fn substitute(&self, replacement: &[MapEntry], prev_rank: usize) -> MapEntry {
+        match self {
+            MapEntry::Coord { from_end, .. } => {
+                replacement[prev_rank - 1 - from_end].clone()
+            }
+            MapEntry::Lit(value) => MapEntry::Lit(value.clone()),
+            MapEntry::Add(a, b) => MapEntry::Add(
+                Box::new(a.substitute(replacement, prev_rank)),
+                Box::new(b.substitute(replacement, prev_rank)),
+            ),
+            MapEntry::Mul(a, e) => {
+                MapEntry::Mul(Box::new(a.substitute(replacement, prev_rank)), e.clone())
+            }
+            MapEntry::Div(a, e) => {
+                MapEntry::Div(Box::new(a.substitute(replacement, prev_rank)), e.clone())
+            }
+            MapEntry::Rem(a, e) => {
+                MapEntry::Rem(Box::new(a.substitute(replacement, prev_rank)), e.clone())
+            }
+            MapEntry::Min(a, b) => MapEntry::Min(
+                Box::new(a.substitute(replacement, prev_rank)),
+                Box::new(b.substitute(replacement, prev_rank)),
+            ),
+            MapEntry::Max(a, b) => MapEntry::Max(
+                Box::new(a.substitute(replacement, prev_rank)),
+                Box::new(b.substitute(replacement, prev_rank)),
+            ),
+        }
+    }
 }
 
 /// A tracker-level view: `base_node` seen through `entries` (listed from
@@ -62,6 +103,16 @@ pub enum Movement {
     ExpandDim { axis: usize, size: Expression },
     /// Size-1 front dim at `axis` removed (the squeeze).
     RemoveDim { axis: usize },
+    /// dims[axis] = old/inner (outer), inner inserted after (their
+    /// split_dims): parent coord = outer·inner_size + inner.
+    SplitDims { axis: usize, inner: Expression },
+    /// axis2 moved adjacent then merged into axis1 (their merge_dims):
+    /// axis1 reads merged/inner, axis2 reads merged%inner.
+    MergeDims { axis1: usize, axis2: usize },
+    /// Per-axis tile (their repeat): dim → dim·r, coord reads % old dim.
+    Repeat(Vec<Expression>),
+    /// Zero-start slice: same coords, smaller extents (in-bounds shrink).
+    Shrink { new_dims: Vec<Expression> },
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +173,43 @@ impl LogicalRecorder {
 
     fn dtype_term(dtype: DType) -> String {
         format!("({dtype:?})")
+    }
+
+    fn entry_term(entry: &MapEntry) -> Result<String, String> {
+        Ok(match entry {
+            MapEntry::Coord { from_end, extent } => {
+                format!("(CoordVar {from_end} {})", Self::dim_term(extent)?)
+            }
+            MapEntry::Lit(value) => Self::dim_term(value)?,
+            MapEntry::Add(a, b) => format!(
+                "(IntAdd {} {})",
+                Self::entry_term(a)?,
+                Self::entry_term(b)?
+            ),
+            MapEntry::Mul(a, e) => {
+                format!("(IntMul {} {})", Self::entry_term(a)?, Self::dim_term(e)?)
+            }
+            MapEntry::Div(a, e) => format!(
+                "(IntTruncDiv {} {})",
+                Self::entry_term(a)?,
+                Self::dim_term(e)?
+            ),
+            MapEntry::Rem(a, e) => format!(
+                "(IntTruncRem {} {})",
+                Self::entry_term(a)?,
+                Self::dim_term(e)?
+            ),
+            MapEntry::Min(a, b) => format!(
+                "(IntMin {} {})",
+                Self::entry_term(a)?,
+                Self::entry_term(b)?
+            ),
+            MapEntry::Max(a, b) => format!(
+                "(IntMax {} {})",
+                Self::entry_term(a)?,
+                Self::entry_term(b)?
+            ),
+        })
     }
 
     /// Record an input declaration. Name matches the interim translator's
@@ -193,12 +281,7 @@ impl LogicalRecorder {
             .clone();
         let mut entries_term = "(IntExprNil)".to_string();
         for entry in view.entries.iter().rev() {
-            let entry_term = match entry {
-                MapEntry::Coord { from_end, extent } => {
-                    format!("(CoordVar {from_end} {})", Self::dim_term(extent)?)
-                }
-                MapEntry::Lit(value) => format!("(IntLit {value})"),
-            };
+            let entry_term = Self::entry_term(entry)?;
             entries_term = format!("(IntExprCons {entry_term} {entries_term})");
         }
         let shape = Self::shape_term(&view.dims)?;
@@ -272,7 +355,7 @@ impl LogicalRecorder {
                     self.poison(format!("permute arity {} vs rank {prev_rank}", axes.len()));
                     return None;
                 }
-                let mut replacement = vec![MapEntry::Lit(0); prev_rank];
+                let mut replacement = vec![MapEntry::Lit(0.into()); prev_rank];
                 for (q, &p) in axes.iter().enumerate() {
                     replacement[p] = MapEntry::Coord {
                         from_end: prev_rank - 1 - q,
@@ -312,7 +395,7 @@ impl LogicalRecorder {
                 let replacement = (0..prev_rank)
                     .map(|p| {
                         if p == axis {
-                            MapEntry::Lit(0)
+                            MapEntry::Lit(0.into())
                         } else {
                             let q = if p < axis { p } else { p - 1 };
                             MapEntry::Coord {
@@ -326,19 +409,126 @@ impl LogicalRecorder {
                 new_dims.remove(axis);
                 (replacement, new_dims)
             }
+            Movement::SplitDims { axis, inner } => {
+                if axis >= prev_rank {
+                    self.poison(format!("split_dims axis {axis} vs rank {prev_rank}"));
+                    return None;
+                }
+                let outer = (prev_dims[axis] / inner.clone()).simplify();
+                let new_rank = prev_rank + 1;
+                let replacement = (0..prev_rank)
+                    .map(|p| {
+                        if p == axis {
+                            MapEntry::Add(
+                                Box::new(MapEntry::Mul(
+                                    Box::new(MapEntry::Coord {
+                                        from_end: new_rank - 1 - axis,
+                                        extent: outer.clone(),
+                                    }),
+                                    inner.clone(),
+                                )),
+                                Box::new(MapEntry::Coord {
+                                    from_end: new_rank - 1 - (axis + 1),
+                                    extent: inner.clone(),
+                                }),
+                            )
+                        } else {
+                            let q = if p < axis { p } else { p + 1 };
+                            MapEntry::Coord {
+                                from_end: new_rank - 1 - q,
+                                extent: prev_dims[p].clone(),
+                            }
+                        }
+                    })
+                    .collect();
+                let mut new_dims = prev_dims.clone();
+                new_dims[axis] = outer;
+                new_dims.insert(axis + 1, inner);
+                (replacement, new_dims)
+            }
+            Movement::MergeDims { axis1, axis2 } => {
+                if axis1 >= axis2 || axis2 >= prev_rank {
+                    self.poison(format!("merge_dims ({axis1},{axis2}) vs rank {prev_rank}"));
+                    return None;
+                }
+                let inner = prev_dims[axis2].clone();
+                let merged = (prev_dims[axis1] * prev_dims[axis2]).simplify();
+                let new_rank = prev_rank - 1;
+                let merged_coord = MapEntry::Coord {
+                    from_end: new_rank - 1 - axis1,
+                    extent: merged.clone(),
+                };
+                let replacement = (0..prev_rank)
+                    .map(|p| {
+                        if p == axis1 {
+                            MapEntry::Div(Box::new(merged_coord.clone()), inner.clone())
+                        } else if p == axis2 {
+                            MapEntry::Rem(Box::new(merged_coord.clone()), inner.clone())
+                        } else {
+                            let q = if p < axis2 { p } else { p - 1 };
+                            MapEntry::Coord {
+                                from_end: new_rank - 1 - q,
+                                extent: prev_dims[p].clone(),
+                            }
+                        }
+                    })
+                    .collect();
+                let mut new_dims = prev_dims.clone();
+                new_dims[axis1] = merged;
+                new_dims.remove(axis2);
+                (replacement, new_dims)
+            }
+            Movement::Repeat(repeats) => {
+                if repeats.len() != prev_rank {
+                    self.poison(format!("repeat arity {} vs rank {prev_rank}", repeats.len()));
+                    return None;
+                }
+                let replacement = (0..prev_rank)
+                    .map(|p| {
+                        if repeats[p].to_usize() == Some(1) {
+                            MapEntry::Coord {
+                                from_end: prev_rank - 1 - p,
+                                extent: prev_dims[p].clone(),
+                            }
+                        } else {
+                            let tiled = (prev_dims[p] * repeats[p]).simplify();
+                            MapEntry::Rem(
+                                Box::new(MapEntry::Coord {
+                                    from_end: prev_rank - 1 - p,
+                                    extent: tiled,
+                                }),
+                                prev_dims[p].clone(),
+                            )
+                        }
+                    })
+                    .collect();
+                let new_dims = prev_dims
+                    .iter()
+                    .zip(&repeats)
+                    .map(|(d, r)| (*d * *r).simplify())
+                    .collect();
+                (replacement, new_dims)
+            }
+            Movement::Shrink { new_dims } => {
+                if new_dims.len() != prev_rank {
+                    self.poison(format!("shrink arity {} vs rank {prev_rank}", new_dims.len()));
+                    return None;
+                }
+                let replacement = (0..prev_rank)
+                    .map(|p| MapEntry::Coord {
+                        from_end: prev_rank - 1 - p,
+                        extent: new_dims[p].clone(),
+                    })
+                    .collect();
+                (replacement, new_dims)
+            }
         };
 
-        // Substitute: every Coord(from_end fe) in the base entries reads
-        // previous-out front position p = prev_rank-1-fe, replaced by the
-        // movement's replacement for p.
+        // Substitute: every Coord leaf in the base entries reads a
+        // previous-out coordinate, replaced by the movement's replacement.
         let composed = entries
             .iter()
-            .map(|entry| match entry {
-                MapEntry::Coord { from_end, .. } => {
-                    replacement[prev_rank - 1 - from_end].clone()
-                }
-                MapEntry::Lit(value) => MapEntry::Lit(*value),
-            })
+            .map(|entry| entry.substitute(&replacement, prev_rank))
             .collect();
         let id = ViewId(self.views.len() as u32);
         self.views.push(ViewValue {
@@ -381,6 +571,51 @@ impl LogicalRecorder {
         self.ops_text.push_str(&format!(
             "(let {name} ({constructor} {}{extra}))\n",
             names.join(" ")
+        ));
+        self.node_values.insert(
+            node,
+            NodeValue {
+                name,
+                dims: out_dims,
+                dtype: out_dtype,
+            },
+        );
+    }
+
+    /// Record a seam-node view op: the node's logical value is an
+    /// IndexMapApply of its operand through entries built DIRECTLY from
+    /// the seam node's own parameters (SliceView starts, UnfoldView
+    /// window arithmetic, ClampView clamps) — the source of truth.
+    pub fn view_op(
+        &mut self,
+        node: usize,
+        operand: (usize, Option<ViewId>, Vec<Expression>),
+        entries: &[MapEntry],
+        out_dims: Vec<Expression>,
+        out_dtype: DType,
+    ) {
+        if self.poisoned.is_some() {
+            return;
+        }
+        let (op_node, view, tracker_dims) = operand;
+        let operand_name = match self.resolve(op_node, view, &tracker_dims) {
+            Ok(name) => name,
+            Err(reason) => return self.poison(format!("view op at t{node}: {reason}")),
+        };
+        let mut entries_term = "(IntExprNil)".to_string();
+        for entry in entries.iter().rev() {
+            match Self::entry_term(entry) {
+                Ok(term) => entries_term = format!("(IntExprCons {term} {entries_term})"),
+                Err(reason) => return self.poison(format!("view op at t{node}: {reason}")),
+            }
+        }
+        let shape = match Self::shape_term(&out_dims) {
+            Ok(shape) => shape,
+            Err(reason) => return self.poison(format!("view op at t{node}: {reason}")),
+        };
+        let name = format!("rec_t{node}");
+        self.ops_text.push_str(&format!(
+            "(let {name} (LogicalIndexMapApply {operand_name} (IndexMapLit {entries_term}) {shape}))\n"
         ));
         self.node_values.insert(
             node,

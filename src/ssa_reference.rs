@@ -733,15 +733,116 @@ mod tests {
         certify_recorder(&cx);
     }
 
-    /// Uncovered constructs POISON the recorder with an attributable
+    /// Reshapes CANNOT be certified against the translator: its lifter
+    /// RECONSTRUCTS input shapes from consumer views (declaring a [12]
+    /// input as [3,4] — the reconstruction hack that dies with it), while
+    /// the recorder declares the graph's truth plus an explicit view. The
+    /// honest certification is the NATIVE differential against their
+    /// runtime.
+    #[test]
+    fn differential_native_recorder_reshapes() {
+        let build = || {
+            let mut cx = Graph::new();
+            let a = cx.tensor(12);
+            let b = cx.tensor((3, 4));
+            let split_out = (a.split_dims(0, 4) * b).output();
+            let c = cx.tensor((3, 4));
+            let d = cx.tensor(12);
+            let merge_out = (c.merge_dims(0, 1) * d).output();
+            let e = cx.tensor((2, 3, 2));
+            let f = cx.tensor(12);
+            let flatten_out = (e.flatten() * f).output();
+            (cx, a, b, c, d, e, f, split_out, merge_out, flatten_out)
+        };
+        let v12a: Vec<f32> = (0..12).map(|v| v as f32 + 1.0).collect();
+        let v12b: Vec<f32> = (0..12).map(|v| v as f32 * 0.5 - 2.0).collect();
+
+        let (mut cx, a, b, c, d, e, f, split_out, merge_out, flatten_out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(a.id, v12a.clone());
+        theirs.set_data(b.id, v12b.clone());
+        theirs.set_data(c.id, v12b.clone());
+        theirs.set_data(d.id, v12a.clone());
+        theirs.set_data(e.id, v12a.clone());
+        theirs.set_data(f.id, v12b.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected_split = theirs.get_f32(split_out.id).clone();
+        let expected_merge = theirs.get_f32(merge_out.id).clone();
+        let expected_flatten = theirs.get_f32(flatten_out.id).clone();
+
+        let (cx2, a2, b2, c2, d2, e2, f2, split2, merge2, flatten2) = build();
+        let program = cx2.logical.native_program().expect("native program");
+        let ours = run_ssa_program(
+            program,
+            &[
+                (a2.id, v12a.clone()),
+                (b2.id, v12b.clone()),
+                (c2.id, v12b.clone()),
+                (d2.id, v12a.clone()),
+                (e2.id, v12a),
+                (f2.id, v12b),
+            ],
+        );
+        assert_close(ours.get_f32(split2.id.index() as i64).unwrap(), &expected_split);
+        assert_close(ours.get_f32(merge2.id.index() as i64).unwrap(), &expected_merge);
+        assert_close(
+            ours.get_f32(flatten2.id.index() as i64).unwrap(),
+            &expected_flatten,
+        );
+    }
+
+    #[test]
+    fn certify_recorder_repeat() {
+        let mut cx = Graph::new();
+        let x = cx.tensor(3);
+        let y = cx.tensor(6);
+        let _out = (x.repeat(2) * y).output();
+        certify_recorder(&cx);
+    }
+
+    #[test]
+    fn certify_recorder_slices() {
+        let mut cx = Graph::new();
+        let x = cx.tensor(8);
+        let _flat = (x.slice(2..6) + x.slice(1..5)).output();
+        let y = cx.tensor((4, 5));
+        let z = cx.tensor((2, 3));
+        let _two_dim = (y.slice((1..3, 2..5)) * z).output();
+        certify_recorder(&cx);
+    }
+
+    #[test]
+    fn certify_recorder_unfold() {
+        let mut cx = Graph::new();
+        let x = cx.tensor(8);
+        let _plain = x.unfold(3, 2, 1).output();
+        let y = cx.tensor(10);
+        let _dilated = y.unfold(3, 2, 2).output();
+        certify_recorder(&cx);
+    }
+
+    #[test]
+    fn certify_recorder_arange() {
+        let mut cx = Graph::new();
+        let x = cx.tensor(4);
+        let idx = cx.arange(4);
+        let _out = (x + idx.cast(crate::dtype::DType::F32)).output();
+        certify_recorder(&cx);
+    }
+
+    /// Uncovered constructs POISON the recorder with an attributable    /// Uncovered constructs POISON the recorder with an attributable
     /// reason — the native path refuses loudly, never mistranslates.
     #[test]
     fn recorder_poisons_on_uncovered_family() {
         let mut cx = Graph::new();
         let x = cx.tensor((2, 3));
-        let _out = x.repeat((2, 1)).output();
-        let reason = cx.logical.poisoned().expect("repeat poisons the recorder");
-        assert!(reason.contains("repeat"), "attributable reason: {reason}");
+        let _out = x.pad(((1, 0), (0, 0)), 0.0).output();
+        let reason = cx.logical.poisoned().expect("pad poisons the recorder");
+        assert!(reason.contains("pad"), "attributable reason: {reason}");
         assert!(cx.logical.native_program().is_err());
     }
 

@@ -84,41 +84,36 @@ pub(crate) fn parse_int_expr(
             site.node_in_class_parse_i64(&axis_class)? as usize,
         ));
     }
-    if let Some(add) = site.node_in_class(class, "IntAdd") {
-        let lhs = parse_int_expr(site, &site.class_of_child(add, 0)?, depth - 1)?;
-        let rhs = parse_int_expr(site, &site.class_of_child(add, 1)?, depth - 1)?;
-        return Some(IotaExpr::Add(Box::new(lhs), Box::new(rhs)));
+    // Binary kinds: BACKTRACK across every representation in the class —
+    // a saturated class holds many equal spellings, and the first node of
+    // a kind may have children outside the parsed subset while a sibling
+    // spelling parses fine.
+    let binary_kinds: [(&str, fn(Box<IotaExpr>, Box<IotaExpr>) -> IotaExpr); 6] = [
+        ("IntAdd", |a, b| IotaExpr::Add(a, b)),
+        ("IntMul", |a, b| IotaExpr::Mul(a, b)),
+        ("IntTruncDiv", |a, b| IotaExpr::TruncDiv(a, b)),
+        ("IntTruncRem", |a, b| IotaExpr::TruncRem(a, b)),
+        ("IntMin", |a, b| IotaExpr::Min(a, b)),
+        ("IntMax", |a, b| IotaExpr::Max(a, b)),
+    ];
+    for (kind, build) in binary_kinds {
+        for node in site.nodes_in_class(class, kind) {
+            let Some(lhs_class) = site.class_of_child(node, 0) else { continue };
+            let Some(rhs_class) = site.class_of_child(node, 1) else { continue };
+            let Some(lhs) = parse_int_expr(site, &lhs_class, depth - 1) else { continue };
+            let Some(rhs) = parse_int_expr(site, &rhs_class, depth - 1) else { continue };
+            return Some(build(Box::new(lhs), Box::new(rhs)));
+        }
     }
-    if let Some(mul) = site.node_in_class(class, "IntMul") {
-        let lhs = parse_int_expr(site, &site.class_of_child(mul, 0)?, depth - 1)?;
-        let rhs = parse_int_expr(site, &site.class_of_child(mul, 1)?, depth - 1)?;
-        return Some(IotaExpr::Mul(Box::new(lhs), Box::new(rhs)));
-    }
-    if let Some(div) = site.node_in_class(class, "IntTruncDiv") {
-        let lhs = parse_int_expr(site, &site.class_of_child(div, 0)?, depth - 1)?;
-        let rhs = parse_int_expr(site, &site.class_of_child(div, 1)?, depth - 1)?;
-        return Some(IotaExpr::TruncDiv(Box::new(lhs), Box::new(rhs)));
-    }
-    if let Some(rem) = site.node_in_class(class, "IntTruncRem") {
-        let lhs = parse_int_expr(site, &site.class_of_child(rem, 0)?, depth - 1)?;
-        let rhs = parse_int_expr(site, &site.class_of_child(rem, 1)?, depth - 1)?;
-        return Some(IotaExpr::TruncRem(Box::new(lhs), Box::new(rhs)));
-    }
-    if let Some(minimum) = site.node_in_class(class, "IntMin") {
-        let lhs = parse_int_expr(site, &site.class_of_child(minimum, 0)?, depth - 1)?;
-        let rhs = parse_int_expr(site, &site.class_of_child(minimum, 1)?, depth - 1)?;
-        return Some(IotaExpr::Min(Box::new(lhs), Box::new(rhs)));
-    }
-    if let Some(maximum) = site.node_in_class(class, "IntMax") {
-        let lhs = parse_int_expr(site, &site.class_of_child(maximum, 0)?, depth - 1)?;
-        let rhs = parse_int_expr(site, &site.class_of_child(maximum, 1)?, depth - 1)?;
-        return Some(IotaExpr::Max(Box::new(lhs), Box::new(rhs)));
-    }
-    if let Some(cast) = site.node_in_class(class, "IntCastFromBool") {
-        let bool_class = site.class_of_child(cast, 0)?;
-        let less_than = site.node_in_class(&bool_class, "BoolLessThanInt")?;
-        let lhs = parse_int_expr(site, &site.class_of_child(less_than, 0)?, depth - 1)?;
-        let rhs = parse_int_expr(site, &site.class_of_child(less_than, 1)?, depth - 1)?;
+    for cast in site.nodes_in_class(class, "IntCastFromBool") {
+        let Some(bool_class) = site.class_of_child(cast, 0) else { continue };
+        let Some(less_than) = site.node_in_class(&bool_class, "BoolLessThanInt") else {
+            continue;
+        };
+        let Some(lhs_class) = site.class_of_child(less_than, 0) else { continue };
+        let Some(rhs_class) = site.class_of_child(less_than, 1) else { continue };
+        let Some(lhs) = parse_int_expr(site, &lhs_class, depth - 1) else { continue };
+        let Some(rhs) = parse_int_expr(site, &rhs_class, depth - 1) else { continue };
         return Some(IotaExpr::LessThanCast(Box::new(lhs), Box::new(rhs)));
     }
     None

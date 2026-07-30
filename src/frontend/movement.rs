@@ -66,9 +66,14 @@ impl GraphTensor {
 
     /// Tile a tensor along its existing dimensions without materializing a new buffer.
     pub fn repeat(mut self, repeats: impl ToShape) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("repeat at t{} (recorder Phase B)", self.id.index()));
+        let repeats = repeats.to_shape();
+        let current_dims = self.shape.dims.to_vec();
+        self.logical_view = self.graph().logical.apply_movement(
+            self.id.index(),
+            self.logical_view,
+            &current_dims,
+            crate::logical_recorder::Movement::Repeat(repeats.clone()),
+        );
         self.shape.repeat(repeats);
         self
     }
@@ -100,27 +105,38 @@ impl GraphTensor {
 
     /// Merge two dimensions together
     pub fn merge_dims(mut self, axis1: usize, axis2: usize) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("merge_dims at t{} (recorder Phase B)", self.id.index()));
+        let current_dims = self.shape.dims.to_vec();
+        self.logical_view = self.graph().logical.apply_movement(
+            self.id.index(),
+            self.logical_view,
+            &current_dims,
+            crate::logical_recorder::Movement::MergeDims { axis1, axis2 },
+        );
         self.shape.merge_dims(axis1, axis2);
         self
     }
 
     /// Flatten all dimensions into a single 1D tensor.
     pub fn flatten(mut self) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("flatten at t{} (recorder Phase B)", self.id.index()));
-        self.shape.flatten();
+        while self.shape.len() > 1 {
+            self = self.merge_dims(0, 1);
+        }
         self
     }
 
     //// Split a dim into 2 dims, new dim is placed directly after original dim
     pub fn split_dims(mut self, axis: usize, new_dim_size: impl Into<Expression>) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("split_dims at t{} (recorder Phase B)", self.id.index()));
+        let new_dim_size = new_dim_size.into();
+        let current_dims = self.shape.dims.to_vec();
+        self.logical_view = self.graph().logical.apply_movement(
+            self.id.index(),
+            self.logical_view,
+            &current_dims,
+            crate::logical_recorder::Movement::SplitDims {
+                axis,
+                inner: new_dim_size,
+            },
+        );
         self.shape.split_dims(axis, new_dim_size);
         self
     }
@@ -489,9 +505,7 @@ impl GraphTensor {
         strides: impl ToShape,
         dilation: impl ToShape,
     ) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("unfold at t{} (recorder Phase B)", self.id.index()));
+
         let (kernel, strides, dilation) =
             (kernel.to_shape(), strides.to_shape(), dilation.to_shape());
 
@@ -541,10 +555,42 @@ impl GraphTensor {
                 kernel: kernel.to_vec(),
                 strides: strides.to_vec(),
                 dilation: dilation.to_vec(),
-                window_counts,
+                window_counts: window_counts.clone(),
                 input_shape: self.shape,
             },
             &[self.id],
+        );
+        // Out shape [win..., k...] (rank 2n): parent axis p reads
+        // win_p·stride_p + k_p·dilation_p — window arithmetic straight
+        // from the unfold's own parameters.
+        let out_rank = 2 * n;
+        let entries: Vec<crate::logical_recorder::MapEntry> = (0..n)
+            .map(|p| {
+                crate::logical_recorder::MapEntry::Add(
+                    Box::new(crate::logical_recorder::MapEntry::Mul(
+                        Box::new(crate::logical_recorder::MapEntry::Coord {
+                            from_end: out_rank - 1 - p,
+                            extent: window_counts[p],
+                        }),
+                        strides[p].into(),
+                    )),
+                    Box::new(crate::logical_recorder::MapEntry::Mul(
+                        Box::new(crate::logical_recorder::MapEntry::Coord {
+                            from_end: out_rank - 1 - (n + p),
+                            extent: kernel[p],
+                        }),
+                        dilation[p].into(),
+                    )),
+                )
+            })
+            .collect();
+        let operand = (self.id.index(), self.logical_view, self.dims());
+        self.graph().logical.view_op(
+            id.index(),
+            operand,
+            &entries,
+            final_shape.clone(),
+            self.dtype,
         );
         GraphTensor::from_id(
             id,
@@ -564,9 +610,6 @@ impl GraphTensor {
     /// assert_eq!(b.dims(), vec![Expression::from(2), Expression::from(9)]);
     /// ```
     pub fn slice(mut self, slice: impl ToSlice) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("slice at t{} (recorder Phase B)", self.id.index()));
         let mut ranges = slice.to_range_vec();
         ranges.extend(
             self.dims()
@@ -587,17 +630,57 @@ impl GraphTensor {
             }
             let id = self.graph().add_op(
                 crate::hlir::SliceView {
-                    starts,
+                    starts: starts.clone(),
                     out_dims: new_dims.clone(),
                     input_shape: self.shape,
                 },
                 &[self.id],
             );
+            // The seam node's own parameters ARE the view: parent axis p
+            // reads out coordinate p plus its start.
+            let rank = new_dims.len();
+            let entries: Vec<crate::logical_recorder::MapEntry> = (0..rank)
+                .map(|p| {
+                    let coord = crate::logical_recorder::MapEntry::Coord {
+                        from_end: rank - 1 - p,
+                        extent: new_dims[p],
+                    };
+                    if starts[p] == Expression::from(0) {
+                        coord
+                    } else {
+                        crate::logical_recorder::MapEntry::Add(
+                            Box::new(coord),
+                            Box::new(crate::logical_recorder::MapEntry::Lit(starts[p])),
+                        )
+                    }
+                })
+                .collect();
+            let operand = (self.id.index(), self.logical_view, self.dims());
+            self.graph().logical.view_op(
+                id.index(),
+                operand,
+                &entries,
+                new_dims.clone(),
+                self.dtype,
+            );
             GraphTensor::from_id(id, ShapeTracker::new(new_dims), self.graph_ref, self.dtype)
         } else {
             // No start slices so no iota needed, just reduce the shape down
-            for (sh, (_, end)) in self.shape.dims.iter_mut().zip(ranges) {
-                *sh = sh.min(end);
+            let mut new_dims = self.shape.dims.to_vec();
+            for (sh, (_, end)) in new_dims.iter_mut().zip(&ranges) {
+                *sh = sh.min(*end);
+            }
+            let current_dims = self.shape.dims.to_vec();
+            self.logical_view = self.graph().logical.apply_movement(
+                self.id.index(),
+                self.logical_view,
+                &current_dims,
+                crate::logical_recorder::Movement::Shrink {
+                    new_dims: new_dims.clone(),
+                },
+            );
+            for (sh, new_dim) in self.shape.dims.iter_mut().zip(new_dims) {
+                *sh = new_dim;
             }
             self
         }

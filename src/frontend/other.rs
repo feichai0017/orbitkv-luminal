@@ -4,14 +4,14 @@ use crate::prelude::*;
 impl Graph {
     /// A scalar expression constant
     pub fn constant(&mut self, i: impl Into<Expression>) -> GraphTensor {
+        let expr = i.into();
         let tensor = GraphTensor::from_id(
-            self.add_op(Iota(i.into(), 1.into()), &[]),
+            self.add_op(Iota(expr, 1.into()), &[]),
             ShapeTracker::new(()),
             self,
             DType::Int,
         );
-        self.logical
-            .poison(format!("Iota constant at t{} (recorder Phase B)", tensor.id.index()));
+        self.record_iota(tensor.id.index(), &expr, &[], 1);
         tensor
     }
 
@@ -36,21 +36,68 @@ impl Graph {
     /// Iota expression
     pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
         let sh = shape.to_shape();
+        let expr = i.into().simplify();
+        let range = sh.iter().copied().product::<Expression>().simplify();
         let tensor = GraphTensor::from_id(
-            self.add_op(
-                Iota(
-                    i.into().simplify(),
-                    sh.iter().copied().product::<Expression>().simplify(),
-                ),
-                &[],
-            ),
-            ShapeTracker::new(sh),
+            self.add_op(Iota(expr, range), &[]),
+            ShapeTracker::new(sh.clone()),
             self,
             DType::Int,
         );
-        self.logical
-            .poison(format!("Iota at t{} (recorder Phase B)", tensor.id.index()));
+        let range_value = range.to_usize().unwrap_or(0);
+        self.record_iota(tensor.id.index(), &expr, &sh, range_value);
         tensor
+    }
+
+    /// Record a LogicalIota for the recorder: the iota's value expression
+    /// over its FLAT coordinate (z -> CoordVar(0, range)), plus the
+    /// authoring-contract bounds check pair. Rank-0 (range 1) iotas emit
+    /// over the empty shape — a scalar.
+    fn record_iota(
+        &mut self,
+        node: usize,
+        expr: &Expression,
+        dims: &[Expression],
+        range: usize,
+    ) {
+        let coord = if range <= 1 {
+            "(IntLit 0)".to_string()
+        } else {
+            format!("(CoordVar 0 (IntLit {range}))")
+        };
+        let value_expr = match crate::hlir_to_logical::int_expr_term(
+            expr,
+            &coord,
+            &Default::default(),
+            &format!("recorder iota t{node}"),
+        ) {
+            Ok(text) => text,
+            Err(err) => {
+                self.logical.poison(format!("iota at t{node}: {err}"));
+                return;
+            }
+        };
+        let shape = if dims.is_empty() {
+            "(ShapeLit (IntExprNil))".to_string()
+        } else if dims.len() == 1 {
+            format!("(ShapeLit (IntExprCons (IntLit {range}) (IntExprNil)))")
+        } else {
+            self.logical.poison(format!(
+                "iota at t{node} over multi-dim shape {dims:?} (flat consumption only)"
+            ));
+            return;
+        };
+        self.logical.source_op(
+            node,
+            "LogicalIota",
+            &format!("{value_expr} {shape}"),
+            dims.to_vec(),
+            DType::Int,
+        );
+        self.logical.post_check(&format!(
+            "(check (= ?reclo{node} (lower-bound-of {value_expr})))\n\
+             (check (= ?rechi{node} (upper-bound-of {value_expr})))\n"
+        ));
     }
 
     /// ARange from 0 to N

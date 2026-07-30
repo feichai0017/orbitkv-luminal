@@ -603,7 +603,7 @@ fn shape_term_of(dims: &[String]) -> String {
 /// replaced by the given coordinate term and dyn vars resolved via the
 /// pins. Add/Mul only for now (their slice path is affine); anything else
 /// bails loudly.
-fn int_expr_term(
+pub(crate) fn int_expr_term(
     expr: &Expression,
     coord_term: &str,
     dyn_map: &FxHashMap<char, usize>,

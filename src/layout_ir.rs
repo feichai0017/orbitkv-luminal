@@ -279,6 +279,19 @@ impl ExtractionSite<'_> {
             .find(|node| node.eclass == *class && node.op == op && !node.subsumed)
     }
 
+    /// EVERY non-subsumed node of this op in the class — for parsers that
+    /// must backtrack across a saturated class's many representations.
+    pub fn nodes_in_class<'a>(
+        &'a self,
+        class: &'a egraph_serialize::ClassId,
+        op: &'a str,
+    ) -> impl Iterator<Item = &'a egraph_serialize::Node> + 'a {
+        self.egraph
+            .nodes
+            .values()
+            .filter(move |node| node.eclass == *class && node.op == op && !node.subsumed)
+    }
+
     /// Any literal-i64 node inside an arbitrary class.
     pub fn node_in_class_parse_i64(&self, class: &egraph_serialize::ClassId) -> Option<i64> {
         self.egraph
