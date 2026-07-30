@@ -81,6 +81,14 @@ impl GraphTensor {
             },
             &[self.id],
         );
+        self.graph().logical.op(
+            new_id.index(),
+            "LogicalLog2",
+            &[(self.id.index(), self.logical_view, self.dims())],
+            "",
+            self.dims(),
+            self.dtype,
+        );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
@@ -92,6 +100,14 @@ impl GraphTensor {
                 ..Default::default()
             },
             &[self.id],
+        );
+        self.graph().logical.op(
+            new_id.index(),
+            "LogicalExp2",
+            &[(self.id.index(), self.logical_view, self.dims())],
+            "",
+            self.dims(),
+            self.dtype,
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -115,6 +131,14 @@ impl GraphTensor {
             },
             &[self.id],
         );
+        self.graph().logical.op(
+            new_id.index(),
+            "LogicalRecip",
+            &[(self.id.index(), self.logical_view, self.dims())],
+            "",
+            self.dims(),
+            self.dtype,
+        );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
@@ -126,6 +150,14 @@ impl GraphTensor {
                 ..Default::default()
             },
             &[self.id],
+        );
+        self.graph().logical.op(
+            new_id.index(),
+            "LogicalSin",
+            &[(self.id.index(), self.logical_view, self.dims())],
+            "",
+            self.dims(),
+            self.dtype,
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -148,6 +180,14 @@ impl GraphTensor {
                 ..Default::default()
             },
             &[self.id],
+        );
+        self.graph().logical.op(
+            new_id.index(),
+            "LogicalSqrt",
+            &[(self.id.index(), self.logical_view, self.dims())],
+            "",
+            self.dims(),
+            self.dtype,
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }

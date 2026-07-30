@@ -7,7 +7,12 @@ impl GraphTensor {
         let (mut shape, mut id) = (self.shape, self.id);
         // Sum reduce each dimension
         let mut axes = axes.to_axes();
+        // Recorder operand for the FIRST reduce is self (view and all);
+        // later reduces consume the previous reduce's plain result.
+        let mut operand_view = self.logical_view;
         for dim in 0..axes.len() {
+            let operand_id = id;
+            let operand_dims = shape.dims.to_vec();
             id = self.graph().add_op(
                 SumReduce {
                     dim: axes[dim],
@@ -16,6 +21,21 @@ impl GraphTensor {
                 },
                 &[id],
             );
+            {
+                let rank = operand_dims.len();
+                let axis_from_end = rank - 1 - axes[dim];
+                let mut out_dims = operand_dims.clone();
+                out_dims.remove(axes[dim]);
+                self.graph().logical.op(
+                    id.index(),
+                    "LogicalReduceSum",
+                    &[(operand_id.index(), operand_view, operand_dims)],
+                    &axis_from_end.to_string(),
+                    out_dims,
+                    self.dtype,
+                );
+                operand_view = None;
+            }
             shape.remove_dim(axes[dim]);
             shape = shape.contiguous();
             let axis = axes[dim];
@@ -33,7 +53,12 @@ impl GraphTensor {
         let (mut shape, mut id) = (self.shape, self.id);
         // Max reduce each dimension
         let mut axes = axes.to_axes();
+        // Recorder operand for the FIRST reduce is self (view and all);
+        // later reduces consume the previous reduce's plain result.
+        let mut operand_view = self.logical_view;
         for dim in 0..axes.len() {
+            let operand_id = id;
+            let operand_dims = shape.dims.to_vec();
             id = self.graph().add_op(
                 MaxReduce {
                     dim: axes[dim],
@@ -42,6 +67,21 @@ impl GraphTensor {
                 },
                 &[id],
             );
+            {
+                let rank = operand_dims.len();
+                let axis_from_end = rank - 1 - axes[dim];
+                let mut out_dims = operand_dims.clone();
+                out_dims.remove(axes[dim]);
+                self.graph().logical.op(
+                    id.index(),
+                    "LogicalReduceMax",
+                    &[(operand_id.index(), operand_view, operand_dims)],
+                    &axis_from_end.to_string(),
+                    out_dims,
+                    self.dtype,
+                );
+                operand_view = None;
+            }
             shape.remove_dim(axes[dim]);
             shape = shape.contiguous();
             let axis = axes[dim];

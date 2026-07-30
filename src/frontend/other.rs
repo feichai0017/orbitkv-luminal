@@ -4,28 +4,39 @@ use crate::prelude::*;
 impl Graph {
     /// A scalar expression constant
     pub fn constant(&mut self, i: impl Into<Expression>) -> GraphTensor {
-        GraphTensor::from_id(
+        let tensor = GraphTensor::from_id(
             self.add_op(Iota(i.into(), 1.into()), &[]),
             ShapeTracker::new(()),
             self,
             DType::Int,
-        )
+        );
+        self.logical
+            .poison(format!("Iota constant at t{} (recorder Phase B)", tensor.id.index()));
+        tensor
     }
 
     /// A scalar float constant
     pub fn constant_float(&mut self, i: f32) -> GraphTensor {
-        GraphTensor::from_id(
+        let tensor = GraphTensor::from_id(
             self.add_op(Constant(i), &[]),
             ShapeTracker::new(()),
             self,
             DType::F32,
-        )
+        );
+        self.logical.source_op(
+            tensor.id.index(),
+            "LogicalConstant",
+            &format!("{:?}", i as f64),
+            Vec::new(),
+            DType::F32,
+        );
+        tensor
     }
 
     /// Iota expression
     pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
         let sh = shape.to_shape();
-        GraphTensor::from_id(
+        let tensor = GraphTensor::from_id(
             self.add_op(
                 Iota(
                     i.into().simplify(),
@@ -36,7 +47,10 @@ impl Graph {
             ShapeTracker::new(sh),
             self,
             DType::Int,
-        )
+        );
+        self.logical
+            .poison(format!("Iota at t{} (recorder Phase B)", tensor.id.index()));
+        tensor
     }
 
     /// ARange from 0 to N
@@ -98,11 +112,32 @@ impl GraphTensor {
             .add_op(Cast(self.shape.physical_span(), dtype), &[self.id]);
         let mut shape = self.shape;
         shape.element_stride_bits = dtype.bits();
+        if dtype == DType::Bool {
+            // Their Cast-to-Bool is the != 0 projection — an explicit
+            // comparison in our model, never a cast (Bool8 ruling).
+            self.graph()
+                .logical
+                .poison(format!("Cast-to-Bool at t{} (the != 0 projection)", id.index()));
+        } else {
+            let operand = (self.id.index(), self.logical_view, self.dims());
+            let out_dims = self.dims();
+            self.graph().logical.op(
+                id.index(),
+                "LogicalCast",
+                &[operand],
+                &format!("({dtype:?})"),
+                out_dims,
+                dtype,
+            );
+        }
         GraphTensor::from_id(id, shape, self.graph_ref, dtype)
     }
 
     /// Sets this tensor's dtype without doing a cast
     pub fn as_dtype(mut self, dtype: DType) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("as_dtype at t{} (recorder Phase B)", self.id.index()));
         self.dtype = dtype;
         self.shape.element_stride_bits = dtype.bits();
         if let Some(gmem) = self.graph().try_get_op_mut::<Input>(self.id) {

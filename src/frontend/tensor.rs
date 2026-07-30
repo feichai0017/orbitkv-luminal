@@ -22,6 +22,10 @@ pub struct GraphTensor {
     pub graph_ref: *mut Graph,
     pub shape: ShapeTracker,
     pub dtype: DType,
+    /// M3 recorder view handle: `None` = "my logical value is the
+    /// recorder's value for `id`"; `Some` = a tracker-level view emitted
+    /// by the movement API (see [`crate::logical_recorder`]).
+    pub logical_view: Option<crate::logical_recorder::ViewId>,
 }
 
 impl From<&GraphTensor> for GraphTensor {
@@ -41,6 +45,7 @@ impl GraphTensor {
         Self {
             id,
             graph_ref,
+            logical_view: None,
             shape,
             dtype,
         }
@@ -86,6 +91,20 @@ impl GraphTensor {
             },
             &[source.id],
         );
+        if persist_only {
+            self.graph().logical.poison(format!(
+                "persist_only output of t{} (recorder Phase B)",
+                source.id.index()
+            ));
+        } else {
+            let dims = source.shape.dims.to_vec();
+            self.graph().logical.output(
+                source.id.index(),
+                source.logical_view,
+                &dims,
+                source.id.index(),
+            );
+        }
         source
     }
 

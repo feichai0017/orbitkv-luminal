@@ -512,6 +512,9 @@ fn panic_initial_filter_limit(filter_fails: usize, last_rejection: Option<&str>)
 pub struct Graph {
     /// A map of dynamic dimensions to concrete dimension sizes
     pub dyn_map: FxHashMap<char, usize>,
+    /// M3 Step 0: the logical-model recorder — GraphTensor methods emit
+    /// their logical ops here beside the HLIR emission.
+    pub logical: crate::logical_recorder::LogicalRecorder,
     /// Edge weights: (Input index, Output index, Input shape)
     pub graph: HLIRGraph,
     /// E-Graph search spaces. Bucketed compilation stores one egraph per
@@ -1496,12 +1499,16 @@ impl Graph {
         }));
         self.get_op_mut::<crate::hlir::Input>(id).node = id.index();
         self.input_meta.insert(id, (name.clone(), DType::default()));
-        GraphTensor {
+        let tensor = GraphTensor {
             id,
             graph_ref: self,
             shape: ShapeTracker::new(shape),
             dtype: DType::default(),
-        }
+            logical_view: None,
+        };
+        self.logical
+            .input(id.index(), &name, &tensor.shape.dims.to_vec(), tensor.dtype);
+        tensor
     }
 
     /// Get the sources of a node given it's id

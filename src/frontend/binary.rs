@@ -24,6 +24,17 @@ impl Add for GraphTensor {
             },
             &[self.id, rhs.id],
         );
+        self.graph().logical.op(
+            new_id.index(),
+            "LogicalAdd",
+            &[
+                (self.id.index(), self.logical_view, self.dims()),
+                (rhs.id.index(), rhs.logical_view, rhs.dims()),
+            ],
+            "",
+            self.dims(),
+            self.dtype,
+        );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 }
@@ -91,6 +102,17 @@ impl Mul for GraphTensor {
             },
             &[self.id, rhs.id],
         );
+        self.graph().logical.op(
+            new_id.index(),
+            "LogicalMul",
+            &[
+                (self.id.index(), self.logical_view, self.dims()),
+                (rhs.id.index(), rhs.logical_view, rhs.dims()),
+            ],
+            "",
+            self.dims(),
+            self.dtype,
+        );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 }
@@ -155,6 +177,17 @@ impl Rem<GraphTensor> for GraphTensor {
                 ..Default::default()
             },
             &[self.id, rhs.id],
+        );
+        self.graph().logical.op(
+            new_id.index(),
+            "LogicalMod",
+            &[
+                (self.id.index(), self.logical_view, self.dims()),
+                (rhs.id.index(), rhs.logical_view, rhs.dims()),
+            ],
+            "",
+            self.dims(),
+            self.dtype,
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -306,6 +339,17 @@ impl GraphTensor {
                 ..Default::default()
             },
             &[self.id, rhs.id],
+        );
+        self.graph().logical.op(
+            new_id.index(),
+            "LogicalLessThan",
+            &[
+                (self.id.index(), self.logical_view, self.dims()),
+                (rhs.id.index(), rhs.logical_view, rhs.dims()),
+            ],
+            "",
+            self.dims(),
+            DType::Bool,
         );
         // Comparison operations always output Bool
         GraphTensor::from_id(

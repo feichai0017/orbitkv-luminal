@@ -28,7 +28,7 @@ impl GraphTensor {
             // Sum Reduce
             let mut ret = mul.sum(2);
             if vec {
-                ret.shape.remove_dim(0);
+                ret = ret.squeeze(0);
             }
             ret
         } else if self.shape.len() == 3 {

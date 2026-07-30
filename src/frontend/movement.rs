@@ -8,7 +8,15 @@ use crate::{
 impl GraphTensor {
     /// Swap dimensions of the tensor
     pub fn permute(mut self, axes: impl ToAxes) -> GraphTensor {
-        self.shape.permute(axes.to_axes());
+        let axes = axes.to_axes();
+        let current_dims = self.shape.dims.to_vec();
+        self.logical_view = self.graph().logical.apply_movement(
+            self.id.index(),
+            self.logical_view,
+            &current_dims,
+            crate::logical_recorder::Movement::Permute(axes.clone()),
+        );
+        self.shape.permute(axes);
         self
     }
 
@@ -32,6 +40,17 @@ impl GraphTensor {
 
     /// Broadcast tensor along a new dimension
     pub fn expand_dim(mut self, axis: usize, size: impl Into<Expression>) -> GraphTensor {
+        let size = size.into();
+        let current_dims = self.shape.dims.to_vec();
+        self.logical_view = self.graph().logical.apply_movement(
+            self.id.index(),
+            self.logical_view,
+            &current_dims,
+            crate::logical_recorder::Movement::ExpandDim {
+                axis,
+                size: size.clone(),
+            },
+        );
         self.shape.expand_dim(axis, size);
         self
     }
@@ -40,13 +59,16 @@ impl GraphTensor {
     pub fn expand_rhs(mut self, shape: impl ToShape) -> GraphTensor {
         let orig_dims = self.shape.len();
         for (i, s) in shape.to_shape().into_iter().enumerate() {
-            self.shape.expand_dim(orig_dims + i, s);
+            self = self.expand_dim(orig_dims + i, s);
         }
         self
     }
 
     /// Tile a tensor along its existing dimensions without materializing a new buffer.
     pub fn repeat(mut self, repeats: impl ToShape) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("repeat at t{} (recorder Phase B)", self.id.index()));
         self.shape.repeat(repeats);
         self
     }
@@ -54,7 +76,7 @@ impl GraphTensor {
     /// Broadcast tensor along new dimensions on the left-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
     pub fn expand_lhs(mut self, shape: impl ToShape) -> GraphTensor {
         for (i, s) in shape.to_shape().into_iter().enumerate() {
-            self.shape.expand_dim(i, s);
+            self = self.expand_dim(i, s);
         }
         self
     }
@@ -64,6 +86,9 @@ impl GraphTensor {
         shape: impl ToShape,
         axes: impl ToAxes,
     ) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("expand_to_shape_on_axes at t{} (recorder Phase B)", self.id.index()));
         let shape = shape.to_shape();
         let axes = axes.to_axes();
         assert_eq!(shape.len(), self.shape.len() + axes.len());
@@ -75,27 +100,35 @@ impl GraphTensor {
 
     /// Merge two dimensions together
     pub fn merge_dims(mut self, axis1: usize, axis2: usize) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("merge_dims at t{} (recorder Phase B)", self.id.index()));
         self.shape.merge_dims(axis1, axis2);
         self
     }
 
     /// Flatten all dimensions into a single 1D tensor.
     pub fn flatten(mut self) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("flatten at t{} (recorder Phase B)", self.id.index()));
         self.shape.flatten();
         self
     }
 
     //// Split a dim into 2 dims, new dim is placed directly after original dim
     pub fn split_dims(mut self, axis: usize, new_dim_size: impl Into<Expression>) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("split_dims at t{} (recorder Phase B)", self.id.index()));
         self.shape.split_dims(axis, new_dim_size);
         self
     }
 
     /// add a new dimension of size 1 at the specified place
-    pub fn unsqueeze(mut self, dim: usize) -> GraphTensor {
+    pub fn unsqueeze(self, dim: usize) -> GraphTensor {
         assert!(self.shape.len() < 10, "Shape is maxed out at 10 dimensions");
-        self.shape.expand_dim(dim, 1);
-        self
+        self.expand_dim(dim, 1)
     }
 
     /// remove a dimension of size 1
@@ -104,6 +137,13 @@ impl GraphTensor {
             self.dims()[axis],
             Expression::from(1),
             "Only dimensions of size 1 can be squeezed!"
+        );
+        let current_dims = self.shape.dims.to_vec();
+        self.logical_view = self.graph().logical.apply_movement(
+            self.id.index(),
+            self.logical_view,
+            &current_dims,
+            crate::logical_recorder::Movement::RemoveDim { axis },
         );
         self.shape.remove_dim(axis);
         self
@@ -115,6 +155,9 @@ impl GraphTensor {
     ///
     /// indices must have the same rank as self and the same shape as the output.
     pub fn gather_elements(self, indexes: GraphTensor, axis: usize) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("gather_elements at t{} (recorder Phase B)", self.id.index()));
         let dims = self.dims();
         let rank = dims.len();
         let out_shape: Vec<usize> = indexes
@@ -189,6 +232,9 @@ impl GraphTensor {
         updates: GraphTensor,
         axis: usize,
     ) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("scatter_elements at t{} (recorder Phase B)", self.id.index()));
         let data_dims = self.dims();
         let rank = data_dims.len();
         let idx_shape: Vec<usize> = indices
@@ -273,6 +319,9 @@ impl GraphTensor {
     ///   multi_idx = indices[s0, ..., sq-2, :]
     ///   output[multi_idx[0], ..., multi_idx[K-1], :, ..] = updates[s0, ..., sq-2, :, ..]
     pub fn scatter_nd(self, indices: GraphTensor, updates: GraphTensor) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("scatter_nd at t{} (recorder Phase B)", self.id.index()));
         let indices = indices.cast(DType::Int);
         let data_dims = self.dims();
         let data_rank = data_dims.len();
@@ -380,6 +429,9 @@ impl GraphTensor {
     }
 
     pub fn gather(self, indexes: GraphTensor) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("gather at t{} (recorder Phase B)", self.id.index()));
         assert_eq!(
             indexes.dtype,
             DType::Int,
@@ -398,6 +450,9 @@ impl GraphTensor {
     /// Scatter self (src) into dest at flat 1D positions given by indexes.
     /// output = copy(dest); output[indexes[i]] = src[i]
     pub fn scatter(self, indexes: GraphTensor, dest: GraphTensor) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("scatter at t{} (recorder Phase B)", self.id.index()));
         assert_eq!(
             indexes.dtype,
             DType::Int,
@@ -434,6 +489,9 @@ impl GraphTensor {
         strides: impl ToShape,
         dilation: impl ToShape,
     ) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("unfold at t{} (recorder Phase B)", self.id.index()));
         let (kernel, strides, dilation) =
             (kernel.to_shape(), strides.to_shape(), dilation.to_shape());
 
@@ -506,6 +564,9 @@ impl GraphTensor {
     /// assert_eq!(b.dims(), vec![Expression::from(2), Expression::from(9)]);
     /// ```
     pub fn slice(mut self, slice: impl ToSlice) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("slice at t{} (recorder Phase B)", self.id.index()));
         let mut ranges = slice.to_range_vec();
         ranges.extend(
             self.dims()
@@ -586,6 +647,9 @@ impl GraphTensor {
 
     /// Pad out dimensions of a tensor with an element
     pub fn pad(self, padding: impl ToPad, elem: f32) -> GraphTensor {
+        self.graph()
+            .logical
+            .poison(format!("pad at t{} (recorder Phase B)", self.id.index()));
         let mut padding = padding.to_pad_vec();
         padding.extend(vec![(0.into(), 0.into()); self.shape.len() - padding.len()]); // Make sure we have a padding per dim
         if padding.iter().all(|(s, e)| *s == 0 && *e == 0) {

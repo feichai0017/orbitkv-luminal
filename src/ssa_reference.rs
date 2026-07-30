@@ -234,6 +234,15 @@ mod tests {
     /// Their graph → our whole pipeline → an executed plan.
     fn run_ssa(cx: &Graph, inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)]) -> SsaReferenceRuntime {
         let program = hlir_to_logical(cx).expect("translates");
+        run_ssa_program(program, inputs)
+    }
+
+    /// The pipeline from an assembled LogicalProgram — shared by the
+    /// translator path (run_ssa) and the native recorder path (M3).
+    fn run_ssa_program(
+        program: crate::hlir_to_logical::LogicalProgram,
+        inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)],
+    ) -> SsaReferenceRuntime {
         let text = format!(
             "{}\n\n{}",
             crate::egglog_snippet::assembled_program(),
@@ -643,6 +652,146 @@ mod tests {
             let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
             assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
         }
+    }
+
+    /// M3 STEP 0 CERTIFICATION: the recorder's natively-emitted model and
+    /// the interim translator's derivation of the same graph must land
+    /// every output in ONE e-class. Inputs unify by constructor identity
+    /// (same LogicalTensorInputLit args); the checks then assert the
+    /// derived outputs merged under saturation.
+    fn certify_recorder(cx: &Graph) {
+        let translated = hlir_to_logical(cx).expect("translates");
+        let rec_text = cx
+            .logical
+            .certification_text()
+            .expect("recorder is clean for a covered graph")
+            .to_string();
+        let mut checks = String::new();
+        for (source, _) in &translated.output_slots {
+            let rec_name = cx
+                .logical
+                .value_name(*source)
+                .expect("recorder covered the output");
+            checks.push_str(&format!("(check (= t{source}_logical {rec_name}))\n"));
+        }
+        let full = format!(
+            "{}\n\n{}\n{}\n(run-schedule (saturate (run)))\n{}",
+            crate::egglog_snippet::assembled_program(),
+            translated.text,
+            rec_text,
+            checks,
+        );
+        crate::egglog_snippet::new_egraph()
+            .parse_and_run_program(None, &full)
+            .expect("recorder ≡ translator certification");
+    }
+
+    #[test]
+    fn certify_recorder_simple_elementwise() {
+        let mut cx = Graph::new();
+        let b = cx.tensor(3);
+        let c = cx.tensor(3);
+        let g = cx.tensor(3);
+        let e = cx.tensor(3);
+        let _a = (b * c + g).output();
+        let _d = (b * c / e).sin().output();
+        certify_recorder(&cx);
+    }
+
+    #[test]
+    fn certify_recorder_permuted_mul() {
+        let mut cx = Graph::new();
+        let x = cx.tensor((2, 3));
+        let y = cx.tensor((3, 2));
+        let _out = (x.permute((1, 0)) * y).output();
+        certify_recorder(&cx);
+    }
+
+    #[test]
+    fn certify_recorder_matmul() {
+        let mut cx = Graph::new();
+        let a = cx.tensor((2, 3));
+        let b = cx.tensor((3, 4));
+        let _c = a.matmul(b).output();
+        certify_recorder(&cx);
+    }
+
+    #[test]
+    fn certify_recorder_lt_cast_scalar_blend() {
+        let mut cx = Graph::new();
+        let x = cx.tensor((2, 3));
+        let y = cx.tensor((2, 3));
+        let _out = (x.lt(y).cast(crate::dtype::DType::F32) * 3.0 + 1.0).output();
+        certify_recorder(&cx);
+    }
+
+    #[test]
+    fn certify_recorder_reduce() {
+        let mut cx = Graph::new();
+        let x = cx.tensor((2, 4));
+        let _out = x.sum(1).output();
+        certify_recorder(&cx);
+    }
+
+    /// Uncovered constructs POISON the recorder with an attributable
+    /// reason — the native path refuses loudly, never mistranslates.
+    #[test]
+    fn recorder_poisons_on_uncovered_family() {
+        let mut cx = Graph::new();
+        let x = cx.tensor((2, 3));
+        let _out = x.repeat((2, 1)).output();
+        let reason = cx.logical.poisoned().expect("repeat poisons the recorder");
+        assert!(reason.contains("repeat"), "attributable reason: {reason}");
+        assert!(cx.logical.native_program().is_err());
+    }
+
+    /// M3 STEP 1: THE FIRST NATIVE DIFFERENTIAL — the recorder's model +
+    /// the reference binding generator, with NO translator anywhere,
+    /// against their full search + runtime.
+    #[test]
+    fn differential_native_recorder_simple_elementwise() {
+        let build = || {
+            let mut cx = Graph::new();
+            let b = cx.tensor(3);
+            let c = cx.tensor(3);
+            let g = cx.tensor(3);
+            let e = cx.tensor(3);
+            let a = (b * c + g).output();
+            let d = (b * c / e).sin().output();
+            (cx, b, c, g, e, a, d)
+        };
+        let b_data = vec![1.0, 2.0, 3.0];
+        let c_data = vec![4.0, 5.0, 6.0];
+        let g_data = vec![0.5, -1.5, 2.5];
+        let e_data = vec![2.0, 4.0, 8.0];
+
+        let (mut cx, b, c, g, e, a, d) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(b.id, b_data.clone());
+        theirs.set_data(c.id, c_data.clone());
+        theirs.set_data(g.id, g_data.clone());
+        theirs.set_data(e.id, e_data.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected_a = theirs.get_f32(a.id).clone();
+        let expected_d = theirs.get_f32(d.id).clone();
+
+        let (cx2, b2, c2, g2, e2, a2, d2) = build();
+        let program = cx2.logical.native_program().expect("native program");
+        let ours = run_ssa_program(
+            program,
+            &[
+                (b2.id, b_data),
+                (c2.id, c_data),
+                (g2.id, g_data),
+                (e2.id, e_data),
+            ],
+        );
+        assert_close(ours.get_f32(a2.id.index() as i64).unwrap(), &expected_a);
+        assert_close(ours.get_f32(d2.id.index() as i64).unwrap(), &expected_d);
     }
 
     /// TYPED-BUFFERS differential: lt produces a genuinely BOOLEAN
