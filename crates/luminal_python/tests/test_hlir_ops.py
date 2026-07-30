@@ -2165,6 +2165,21 @@ def test_sdpa_f32_unaffected_by_upcast(device: torch.device):
 # ---- mixed-dtype operand unification ---------------------------------------
 
 
+def test_expand_rank_extending(device: torch.device):
+    """1-D -> 3-D expand with -1 must resolve source dims right-aligned
+    (torch prepends new dims); left-aligned indexing walks off the end."""
+    from test_models import ExpandRankExtendModel
+
+    model: torch.nn.Module = ExpandRankExtendModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.randn(2, 3, 16, device=device)
+    expected: torch.Tensor = model(x)
+    actual: torch.Tensor = compiled(x)
+    assert torch.allclose(actual, expected, atol=1e-5), (
+        f"max_diff={torch.max(torch.abs(actual - expected)).item():.2e}"
+    )
+
+
 def test_minimum_mixed_int_widths(device: torch.device):
     """`torch.minimum(int64, int32)`: operands must be dtype-unified before
     the core compare (panics with "Dtypes must match" otherwise). The

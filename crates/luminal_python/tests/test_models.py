@@ -2497,6 +2497,21 @@ class SdpaGqaModel(torch.nn.Module):
         )
 
 
+class ExpandRankExtendModel(torch.nn.Module):
+    """Rank-extending `expand` with `-1`: a 1-D parameter grown to 3-D
+    (`class_embedding.expand(B, 1, -1)` — the CLIP vision-tower pattern).
+    torch prepends the new dims, so `-1`/existing sizes resolve
+    RIGHT-aligned against the source shape."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.emb = torch.nn.Parameter(torch.randn(16))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        cls = self.emb.expand(x.shape[0], 1, -1)
+        return torch.cat([cls, x], dim=1)
+
+
 class MixedIntMinimumModel(torch.nn.Module):
     """`torch.minimum` between int64 and int32 tensors — torch promotes to
     int64 inside the kernel, so the exported graph carries mixed operand
