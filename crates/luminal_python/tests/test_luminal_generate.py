@@ -290,3 +290,58 @@ def test_aot_compile_accepts_disk_mapped_model(device):
     assert any(torch.is_tensor(t) and t.shape[-1] == vocab for t in outputs), (
         "no vocab-shaped output from the compiled skeleton"
     )
+
+
+def test_aot_compile_with_weight_sources_matches_reference(device):
+    """The full deferred AOT story: disk-mapped skeleton + checkpoint manifest
+    -> compile -> weights settle post-search straight from the safetensors
+    files -> outputs match a normally-loaded model. The host never holds the
+    model (one-tensor streaming window)."""
+    import json
+    import os
+
+    from transformers import AutoModelForCausalLM
+    from transformers.utils import (
+        SAFE_WEIGHTS_INDEX_NAME,
+        SAFE_WEIGHTS_NAME,
+        cached_file,
+    )
+
+    from luminal.pt2 import compile as luminal_compile
+
+    hub_model = "hf-internal-testing/tiny-random-LlamaForCausalLM"
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            hub_model, device_map={"": "disk"}, use_cache=False
+        ).eval()
+        reference = AutoModelForCausalLM.from_pretrained(
+            hub_model, use_cache=False
+        ).eval()
+        index_path = cached_file(
+            hub_model,
+            SAFE_WEIGHTS_INDEX_NAME,
+            _raise_exceptions_for_missing_entries=False,
+        )
+        if index_path is not None:
+            weight_map = json.load(open(index_path))["weight_map"]
+            folder = os.path.dirname(index_path)
+            manifest = {n: (os.path.join(folder, f), n) for n, f in weight_map.items()}
+        else:
+            single = cached_file(hub_model, SAFE_WEIGHTS_NAME)
+            from safetensors import safe_open
+
+            with safe_open(single, framework="pt") as handle:
+                manifest = {n: (single, n) for n in handle.keys()}
+    except (OSError, ImportError) as exc:
+        pytest.skip(f"hub unavailable: {exc}")
+
+    input_ids = torch.tensor([[1, 2, 3, 4]])
+    compiled = luminal_compile(
+        model, input_ids, search_iterations=1, weight_sources=manifest
+    )
+    (logits,) = compiled(input_ids)
+    with torch.inference_mode():
+        ref = reference(input_ids).logits
+    assert torch.allclose(logits, ref, atol=1e-4), (
+        f"max diff {(logits - ref).abs().max().item():.2e}"
+    )

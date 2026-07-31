@@ -67,6 +67,38 @@ def _load_cpu_weights(compiled_graph, cpu_weights):
         compiled_graph.set_weight_from_ptr(name, ptr, n_bytes, dtype_code)
 
 
+def _stream_weight_sources(compiled_graph, weight_sources):
+    """Settle checkpoint-backed weights into a compiled graph, one at a time.
+
+    `weight_sources` maps graph label -> (safetensors path, tensor name).
+    Like `_load_cpu_weights`, this runs after compilation — the search
+    profiles on seed data and the label map only stabilizes post-search —
+    but the bytes come straight from the checkpoint mmap through a
+    one-tensor host window (`set_weight_from_ptr` copies synchronously), so
+    the model as a whole never occupies host memory. Labels the compiled
+    graph doesn't have (e.g. pruned by export) are skipped.
+    """
+    from safetensors import safe_open
+
+    by_path = {}
+    for label, (path, tensor_name) in weight_sources.items():
+        by_path.setdefault(path, []).append((label, tensor_name))
+    for path, entries in by_path.items():
+        with safe_open(path, framework="pt") as handle:
+            for label, tensor_name in entries:
+                t = handle.get_tensor(tensor_name).contiguous()
+                try:
+                    compiled_graph.set_weight_from_ptr(
+                        label,
+                        t.data_ptr(),
+                        t.numel() * t.element_size(),
+                        _torch_dtype_code(t.dtype),
+                    )
+                except KeyError:
+                    pass  # label not in this graph
+                del t
+
+
 # ---------------------------------------------------------------------------
 # Backend registration
 # ---------------------------------------------------------------------------

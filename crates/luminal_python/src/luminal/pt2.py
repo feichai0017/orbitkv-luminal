@@ -14,7 +14,12 @@ import torch
 
 from .compiled_model import CompiledModel
 from .luminal import process_pt2
-from .main import _collect_weight_pointers, _detect_factory_capsule, _load_cpu_weights
+from .main import (
+    _collect_weight_pointers,
+    _detect_factory_capsule,
+    _load_cpu_weights,
+    _stream_weight_sources,
+)
 
 # ---------------------------------------------------------------------------
 # DynamicCache <> pytree registration
@@ -164,7 +169,12 @@ def _collect_input_device_ptrs(ep, user_inputs):
 
 
 def _save_and_compile(
-    ep_or_path, factory, search_iterations, user_indices=None, input_device_ptrs=None
+    ep_or_path,
+    factory,
+    search_iterations,
+    user_indices=None,
+    input_device_ptrs=None,
+    weight_sources=None,
 ):
     """Compile a PT2 model via Rust, return CompiledModel.
 
@@ -174,6 +184,11 @@ def _save_and_compile(
             ep.state_dict (the AOT compile() path); torch.compile graphs carry
             weights as ordinary inputs and have an empty state_dict.
         factory: PyCapsule wrapping the BackendFactory to use.
+        weight_sources: optional {name: (safetensors path, tensor name)} —
+            checkpoint-backed weights settled post-compile straight from the
+            file mmap (see `_stream_weight_sources`), taking precedence over
+            the corresponding state_dict entries (which, for skeleton models,
+            hold unwritten storage).
     """
     owns_tmpdir = not isinstance(ep_or_path, str)
     tmpdir = tempfile.mkdtemp(prefix="luminal_") if owns_tmpdir else None
@@ -185,6 +200,10 @@ def _save_and_compile(
         else:
             pt2_path = ep_or_path
             weight_source = {}
+        if weight_sources:
+            weight_source = {
+                k: v for k, v in weight_source.items() if k not in weight_sources
+            }
 
         # Collect weight pointers for Rust (avoids duplicate GPU buffer allocation)
         keep_alive, weight_device_ptrs, cpu_weights = _collect_weight_pointers(
@@ -198,8 +217,12 @@ def _save_and_compile(
             pt2_path, "", search_iterations, factory, weight_device_ptrs
         )
 
-        # Load CPU weights after compilation
+        # Weights settle after compilation: the search profiles on seed data
+        # and the label map only stabilizes post-search (cf. compile_backend's
+        # post-search load in dyn_backend.rs).
         _load_cpu_weights(compiled, cpu_weights)
+        if weight_sources:
+            _stream_weight_sources(compiled, weight_sources)
 
         return CompiledModel(
             compiled, weight_refs=keep_alive, user_indices=user_indices
@@ -378,6 +401,7 @@ def compile(
     export_kwargs=None,
     dynamic_dim=None,
     dynamic_shapes=None,
+    weight_sources=None,
 ):
     """Compile a PyTorch model to run on Luminal via PT2 pipeline.
 
@@ -396,6 +420,10 @@ def compile(
                 * `"auto"`: mark every non-trivial dim (size > 1) of the
                   first input as `Dim.AUTO` — works for floating-point and
                   integer inputs alike.
+        weight_sources: {parameter name: (safetensors path, tensor name)} —
+            settle these weights from the checkpoint files after compilation
+            instead of from the model's (possibly unwritten) storage. This is
+            how a disk-mapped skeleton model compiles to a *correct* artifact.
         dynamic_shapes: Direct passthrough to `torch.export.export`'s
             `dynamic_shapes` argument. When provided, takes precedence over
             `dynamic_dim`. Use this for full control: per-input specs,
@@ -465,7 +493,9 @@ def compile(
         )
         ep = ep.run_decompositions(_decomp_table())
 
-    return _save_and_compile(ep, factory, search_iterations)
+    return _save_and_compile(
+        ep, factory, search_iterations, weight_sources=weight_sources
+    )
 
 
 def _drop_input_guards(ep):
