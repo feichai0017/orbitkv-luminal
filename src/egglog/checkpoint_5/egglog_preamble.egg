@@ -3301,8 +3301,24 @@
   ((coeff-axis-demand ?expr ?axis) (= ?expr (IntLit ?value)))
   ((set (coeff-of ?expr ?axis) 0))
 )
+; DEGENERATE-AXIS GATE (Step 4b, AWAITING RATIFICATION): the coeff-1
+; rule fires only when the extent's LOWER bound is >= 2 (shrink-stable —
+; lower bounds only rise). Without the gate, the user-ratified EXTENT-1
+; COLLAPSE (CoordVar over a provably-1 extent unions with (IntLit 0))
+; puts a coeff-1 and a coeff-0 representative in one class and the
+; :no-merge contract panics — but on domain {0} the forms c->c and c->0
+; are EQUAL functions with different coefficients, so the disagreement is
+; not a soundness bug; any stride is valid for a degenerate axis. With
+; the gate, a collapsed axis takes the canonical coeff 0 through the
+; (IntLit 0) representative, and an UNKNOWN extent [1, n] conservatively
+; discovers nothing (the symbolic-strides precedent).
 (rule
-  ((coeff-axis-demand ?expr ?axis) (= ?expr (CoordVar ?axis ?extent)))
+  (
+    (coeff-axis-demand ?expr ?axis)
+    (= ?expr (CoordVar ?axis ?extent))
+    (= ?extent_lower (lower-bound-of ?extent))
+    (>= ?extent_lower (bigint 2))
+  )
   ((set (coeff-of ?expr ?axis) 1))
 )
 (rule
