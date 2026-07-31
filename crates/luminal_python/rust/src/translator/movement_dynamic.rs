@@ -204,7 +204,7 @@ pub fn pt2_scatter_nd(
             for _ in 0..ti {
                 ar_shaped = ar_shaped.expand_dim(0, 1);
             }
-            ar_shaped.legacy_tracker_mut().expand(trailing_shape.clone());
+            crate::pt2_util::tracker_expand(ar_shaped.legacy_tracker_mut(), trailing_shape.clone());
             let mut ar_flat = ar_shaped;
             *ar_flat.legacy_tracker_mut() = ShapeTracker::new(vec![trailing_numel]);
             ar_flat = ar_flat.expand_dim(0, batch_numel);

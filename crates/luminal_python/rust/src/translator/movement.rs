@@ -217,7 +217,7 @@ impl<'a> Translator<'a> {
                 .map(|(i, e)| if e == neg1_expr { a.legacy_tracker_ref().dims[i] } else { e })
                 .collect()
         };
-        a.legacy_tracker_mut().expand(target_shape);
+        crate::pt2_util::tracker_expand(a.legacy_tracker_mut(), target_shape);
         Ok(a)
     }
 
@@ -427,7 +427,7 @@ impl<'a> Translator<'a> {
                     let idx_dim_size = expanded.legacy_tracker_ref().dims[first_non_none_dim];
                     let mut target: Vec<Expression> = src_dims.to_vec();
                     target[first_non_none_dim] = idx_dim_size;
-                    expanded.legacy_tracker_mut().expand(target);
+                    crate::pt2_util::tracker_expand(expanded.legacy_tracker_mut(), target);
                     return Ok(super::movement_dynamic::pt2_gather_elements(
                         source,
                         expanded,

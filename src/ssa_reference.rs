@@ -977,15 +977,26 @@ mod tests {
         assert_close(ours.get_f32(a2.id.index() as i64).unwrap(), &expected);
     }
 
-    /// Uncovered constructs POISON the recorder with an attributable
+    #[test]
+    fn certify_recorder_pad() {
+        let mut cx = Graph::new();
+        let x = cx.tensor(4);
+        let _zero_fill = x.pad((1, 2), 0.0).output();
+        let y = cx.tensor((3, 4));
+        let _rank2 = y.pad(((1, 0), (2, 1)), -1.5).output();
+        certify_recorder(&cx);
+    }
+
+    /// Uncovered constructs POISON the recorder with an attributable    /// Uncovered constructs POISON the recorder with an attributable
     /// reason — the native path refuses loudly, never mistranslates.
     #[test]
     fn recorder_poisons_on_uncovered_family() {
         let mut cx = Graph::new();
         let x = cx.tensor((2, 3));
-        let _out = x.pad(((1, 0), (0, 0)), 0.0).output();
-        let reason = cx.logical.poisoned().expect("pad poisons the recorder");
-        assert!(reason.contains("pad"), "attributable reason: {reason}");
+        let y = cx.tensor_dtyped(6, crate::dtype::DType::Int);
+        let _out = x.flatten().gather(y).output();
+        let reason = cx.logical.poisoned().expect("gather poisons the recorder");
+        assert!(reason.contains("gather"), "attributable reason: {reason}");
         assert!(cx.logical.native_program().is_err());
     }
 

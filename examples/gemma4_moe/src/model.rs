@@ -650,7 +650,7 @@ impl Gemma4SparseMoE {
         let down_out = hidden_exp.matmul(down_gathered.transpose(2, 3)).squeeze(2);
 
         let mut weights_exp = top_k_weights.unsqueeze(top_k_weights.dims().len());
-        weights_exp.legacy_tracker_mut().expand(down_out.dims());
+        let weights_exp = weights_exp.expand(down_out.dims());
         (down_out * weights_exp).sum(n - 1)
     }
 }

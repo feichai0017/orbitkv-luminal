@@ -221,3 +221,44 @@ pub fn torch_dtype_int_to_luminal(dtype: u32) -> DType {
         }),
     }
 }
+
+
+/// LOCAL FOSSIL of the destroyed ShapeTracker::expand (Austin 2026-07-31):
+/// PyTorch-broadcast on tracker state, kept only until this translator's
+/// rework onto explicit logical views.
+pub fn tracker_expand(tracker: &mut ShapeTracker, new_shape: impl luminal::prelude::ToShape) {
+    let new_shape = new_shape.to_shape();
+    assert!(
+        new_shape.len() >= tracker.len(),
+        "Cannot expand from {} dims to {} dims",
+        tracker.len(),
+        new_shape.len()
+    );
+    while tracker.len() < new_shape.len() {
+        tracker.expand_dim(0, 1);
+    }
+    for (axis, ((size, dim), stride)) in new_shape
+        .into_iter()
+        .zip(&mut tracker.dims)
+        .zip(&mut tracker.strides)
+        .enumerate()
+    {
+        if *dim == size {
+            continue;
+        }
+        if dim.to_usize() == Some(1) {
+            *dim = size;
+            *stride = 0.into();
+        } else {
+            let (dim_simplified, size_simplified) = (dim.simplify(), size.simplify());
+            if dim_simplified == size_simplified {
+                *dim = size;
+            } else {
+                panic!(
+                    "Cannot expand dim {axis} from {dim} to {size} \
+                     (simplified: {dim_simplified} vs {size_simplified})",
+                );
+            }
+        }
+    }
+}

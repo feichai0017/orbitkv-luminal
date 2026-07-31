@@ -652,6 +652,65 @@ impl LogicalRecorder {
         );
     }
 
+    /// Record a pad-mask indicator iota (the MaskIota seam node): per
+    /// padded axis, (before <= p) · (p < before + dim), each indicator a
+    /// bool-bridge cast, >= spelled as the discrete rotation
+    /// before < p + 1 — the translator's exact forms, factor order and
+    /// fold associativity included (certification depends on it).
+    pub fn record_mask_iota(
+        &mut self,
+        node: usize,
+        befores: &[Expression],
+        afters: &[Expression],
+        in_dims: &[Expression],
+    ) {
+        if self.poisoned.is_some() {
+            return;
+        }
+        let rank = in_dims.len();
+        let mut out_dims = Vec::with_capacity(rank);
+        let mut out_terms = Vec::with_capacity(rank);
+        for k in 0..rank {
+            let out_dim = (befores[k] + in_dims[k] + afters[k]).simplify();
+            match Self::dim_term(&out_dim) {
+                Ok(term) => out_terms.push(term),
+                Err(reason) => return self.poison(format!("mask iota at t{node}: {reason}")),
+            }
+            out_dims.push(out_dim);
+        }
+        let mut factors: Vec<String> = Vec::new();
+        for k in 0..rank {
+            let coord = format!("(CoordVar {} {})", rank - 1 - k, out_terms[k]);
+            let before = befores[k];
+            let after = afters[k];
+            let (Ok(before_term), Ok(bound_term)) = (
+                Self::dim_term(&before),
+                Self::dim_term(&(before + in_dims[k]).simplify()),
+            ) else {
+                return self.poison(format!("mask iota at t{node}: symbolic pad bound"));
+            };
+            if before != Expression::from(0) {
+                factors.push(format!(
+                    "(IntCastFromBool (BoolLessThanInt {before_term} (IntAdd {coord} (IntLit 1))))"
+                ));
+            }
+            if after != Expression::from(0) {
+                factors.push(format!(
+                    "(IntCastFromBool (BoolLessThanInt {coord} {bound_term}))"
+                ));
+            }
+        }
+        let mut expr = factors.pop().unwrap_or_else(|| "(IntLit 1)".to_string());
+        for factor in factors {
+            expr = format!("(IntMul {factor} {expr})");
+        }
+        let shape = match Self::shape_term(&out_dims) {
+            Ok(shape) => shape,
+            Err(reason) => return self.poison(format!("mask iota at t{node}: {reason}")),
+        };
+        self.source_op(node, "LogicalIota", &format!("{expr} {shape}"), out_dims, DType::Int);
+    }
+
     /// Append post-schedule authoring checks (iota bounds pairs).
     pub fn post_check(&mut self, text: &str) {
         self.post_checks.push_str(text);

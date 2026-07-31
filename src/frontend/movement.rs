@@ -112,9 +112,6 @@ impl GraphTensor {
         shape: impl ToShape,
         axes: impl ToAxes,
     ) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("expand_to_shape_on_axes at t{} (recorder Phase B)", self.id.index()));
         let shape = shape.to_shape();
         let axes = axes.to_axes();
         assert_eq!(shape.len(), self.legacy_tracker.len() + axes.len());
@@ -433,7 +430,7 @@ impl GraphTensor {
                 for _ in 0..ti {
                     ar_shaped = ar_shaped.expand_dim(0, 1);
                 }
-                ar_shaped.legacy_tracker.expand(trailing_shape.clone());
+                ar_shaped = ar_shaped.expand(trailing_shape.clone());
                 // Flatten trailing dims using materialize + reshape
                 let mut ar_flat = ar_shaped;
                 ar_flat.legacy_tracker = ShapeTracker::new(vec![trailing_numel]);
@@ -751,9 +748,6 @@ impl GraphTensor {
 
     /// Pad out dimensions of a tensor with an element
     pub fn pad(self, padding: impl ToPad, elem: f32) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("pad at t{} (recorder Phase B)", self.id.index()));
         let mut padding = padding.to_pad_vec();
         padding.extend(vec![(0.into(), 0.into()); self.legacy_tracker.len() - padding.len()]); // Make sure we have a padding per dim
         if padding.iter().all(|(s, e)| *s == 0 && *e == 0) {
@@ -780,6 +774,49 @@ impl GraphTensor {
             },
             &[self.id],
         );
+        // Pad's read half recorded as the TOTAL clamped view — per parent
+        // axis min(max(c - before, 0), dim - 1), clamp sides only where
+        // padding exists (the translator's conditional forms).
+        {
+            let rank = dims.len();
+            let entries: Vec<crate::logical_recorder::MapEntry> = (0..rank)
+                .map(|k| {
+                    let coord = crate::logical_recorder::MapEntry::Coord {
+                        from_end: rank - 1 - k,
+                        extent: out_dims[k],
+                    };
+                    let mut entry = coord;
+                    if befores[k] != Expression::from(0) {
+                        entry = crate::logical_recorder::MapEntry::Max(
+                            Box::new(crate::logical_recorder::MapEntry::Add(
+                                Box::new(entry),
+                                Box::new(crate::logical_recorder::MapEntry::Lit(
+                                    (Expression::from(0) - befores[k]).simplify(),
+                                )),
+                            )),
+                            Box::new(crate::logical_recorder::MapEntry::Lit(0.into())),
+                        );
+                    }
+                    if afters[k] != Expression::from(0) {
+                        entry = crate::logical_recorder::MapEntry::Min(
+                            Box::new(entry),
+                            Box::new(crate::logical_recorder::MapEntry::Lit(
+                                (dims[k] - 1).simplify(),
+                            )),
+                        );
+                    }
+                    entry
+                })
+                .collect();
+            let operand = (self.id.index(), self.logical_view, dims.clone());
+            self.graph().logical.view_op(
+                clamped_id.index(),
+                operand,
+                &entries,
+                out_dims.clone(),
+                self.dtype,
+            );
+        }
         let clamped = GraphTensor::from_id(
             clamped_id,
             ShapeTracker::new(out_dims.clone()),
@@ -789,12 +826,15 @@ impl GraphTensor {
 
         let mask_id = self.graph().add_op(
             crate::hlir::MaskIota {
-                befores,
-                afters,
+                befores: befores.clone(),
+                afters: afters.clone(),
                 in_dims: dims.to_vec(),
             },
             &[],
         );
+        self.graph()
+            .logical
+            .record_mask_iota(mask_id.index(), &befores, &afters, &dims);
         let mask = GraphTensor::from_id(
             mask_id,
             ShapeTracker::new(out_dims),

@@ -109,45 +109,12 @@ impl ShapeTracker {
         self.add_dim(axis, dim, 0);
     }
 
-    /// Expand this shape to a new shape following PyTorch semantics
-    pub fn expand(&mut self, new_shape: impl ToShape) {
-        let new_shape = new_shape.to_shape();
-        assert!(
-            new_shape.len() >= self.len(),
-            "Cannot expand from {} dims to {} dims",
-            self.len(),
-            new_shape.len()
-        );
+    // ShapeTracker::expand is DESTROYED (Austin 2026-07-31): the
+    // PyTorch-broadcast view transform belongs to the PURE GraphTensor
+    // API (GraphTensor::expand — squeeze + broadcast per size-1 axis),
+    // never to tracker state. The torch-FX translator carries its own
+    // local fossil until its rework.
 
-        while self.len() < new_shape.len() {
-            self.expand_dim(0, 1);
-        }
-
-        for (axis, ((size, dim), stride)) in new_shape
-            .into_iter()
-            .zip(&mut self.dims)
-            .zip(&mut self.strides)
-            .enumerate()
-        {
-            if *dim == size {
-                continue;
-            }
-            if dim.to_usize() == Some(1) {
-                *dim = size;
-                *stride = 0.into();
-            } else {
-                let (dim_simplified, size_simplified) = (dim.simplify(), size.simplify());
-                if dim_simplified == size_simplified {
-                    *dim = size;
-                } else {
-                    panic!(
-                        "Cannot expand dim {axis} from {dim} to {size} \
-                         (simplified: {dim_simplified} vs {size_simplified})",
-                    );
-                }
-            }
-        }
-    }
 
     /// Tile the tensor along each existing dimension without materializing new storage.
     pub fn repeat(&mut self, repeats: impl ToShape) {
@@ -614,16 +581,7 @@ mod tests {
                     expr(a)
                 ]
             );
-            let mut tracker = ShapeTracker::new((1, c));
-            tracker.expand((expand_a, c));
-            assert_eq!(
-                tracker.dims.as_slice(),
-                &[expr(expand_a), expr(c)]
-            );
-            assert_eq!(
-                tracker.strides.as_slice(),
-                &[expr(0), z]
-            );
+
         }
     }
 
