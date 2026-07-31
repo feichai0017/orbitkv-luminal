@@ -142,7 +142,7 @@ fn rmsnorm(x: GraphTensor, weight: GraphTensor, eps: f32) -> GraphTensor {
 /// LayerNorm with no affine parameters (mean-norm + std-norm only).
 /// Matches `nn.LayerNorm(dim, elementwise_affine=False)` in PyTorch.
 fn layernorm_noaffine(x: GraphTensor, eps: f32) -> GraphTensor {
-    let last = x.shape.last_axis();
+    let last = x.legacy_tracker_ref().last_axis();
     x.layer_norm(last, eps)
 }
 
@@ -295,12 +295,10 @@ impl FeedForward {
     fn new(prefix: &str, dim: usize, mlp_hidden: usize, cx: &mut Graph) -> Self {
         Self {
             linear_in: cx
-                .named_tensor(format!("{prefix}.linear_in.weight"), (mlp_hidden * 2, dim))
-                .as_dtype(WEIGHT_DTYPE)
+                .named_tensor_dtyped(format!("{prefix}.linear_in.weight"), (mlp_hidden * 2, dim), WEIGHT_DTYPE)
                 .persist(),
             linear_out: cx
-                .named_tensor(format!("{prefix}.linear_out.weight"), (dim, mlp_hidden))
-                .as_dtype(WEIGHT_DTYPE)
+                .named_tensor_dtyped(format!("{prefix}.linear_out.weight"), (dim, mlp_hidden), WEIGHT_DTYPE)
                 .persist(),
         }
     }
@@ -334,8 +332,7 @@ struct DoubleStreamAttn {
 impl DoubleStreamAttn {
     fn new(prefix: &str, cx: &mut Graph) -> Self {
         let lin = |n: &str, cx: &mut Graph| -> GraphTensor {
-            cx.named_tensor(format!("{prefix}.{n}"), (HIDDEN, HIDDEN))
-                .as_dtype(WEIGHT_DTYPE)
+            cx.named_tensor_dtyped(format!("{prefix}.{n}"), (HIDDEN, HIDDEN), WEIGHT_DTYPE)
                 .persist()
         };
         Self {
@@ -346,20 +343,16 @@ impl DoubleStreamAttn {
             add_k_proj: lin("add_k_proj.weight", cx),
             add_v_proj: lin("add_v_proj.weight", cx),
             norm_q: cx
-                .named_tensor(format!("{prefix}.norm_q.weight"), HEAD_DIM)
-                .as_dtype(WEIGHT_DTYPE)
+                .named_tensor_dtyped(format!("{prefix}.norm_q.weight"), HEAD_DIM, WEIGHT_DTYPE)
                 .persist(),
             norm_k: cx
-                .named_tensor(format!("{prefix}.norm_k.weight"), HEAD_DIM)
-                .as_dtype(WEIGHT_DTYPE)
+                .named_tensor_dtyped(format!("{prefix}.norm_k.weight"), HEAD_DIM, WEIGHT_DTYPE)
                 .persist(),
             norm_added_q: cx
-                .named_tensor(format!("{prefix}.norm_added_q.weight"), HEAD_DIM)
-                .as_dtype(WEIGHT_DTYPE)
+                .named_tensor_dtyped(format!("{prefix}.norm_added_q.weight"), HEAD_DIM, WEIGHT_DTYPE)
                 .persist(),
             norm_added_k: cx
-                .named_tensor(format!("{prefix}.norm_added_k.weight"), HEAD_DIM)
-                .as_dtype(WEIGHT_DTYPE)
+                .named_tensor_dtyped(format!("{prefix}.norm_added_k.weight"), HEAD_DIM, WEIGHT_DTYPE)
                 .persist(),
             to_out: lin("to_out.0.weight", cx),
             to_add_out: lin("to_add_out.weight", cx),
@@ -449,26 +442,20 @@ impl SingleStreamAttn {
         let qkv_mlp_out = 3 * HIDDEN + 2 * MLP_HIDDEN; // 18432 + 36864 = 55296
         Self {
             to_qkv_mlp_proj: cx
-                .named_tensor(
+                .named_tensor_dtyped(
                     format!("{prefix}.to_qkv_mlp_proj.weight"),
-                    (qkv_mlp_out, HIDDEN),
-                )
-                .as_dtype(WEIGHT_DTYPE)
+                    (qkv_mlp_out, HIDDEN), WEIGHT_DTYPE)
                 .persist(),
             norm_q: cx
-                .named_tensor(format!("{prefix}.norm_q.weight"), HEAD_DIM)
-                .as_dtype(WEIGHT_DTYPE)
+                .named_tensor_dtyped(format!("{prefix}.norm_q.weight"), HEAD_DIM, WEIGHT_DTYPE)
                 .persist(),
             norm_k: cx
-                .named_tensor(format!("{prefix}.norm_k.weight"), HEAD_DIM)
-                .as_dtype(WEIGHT_DTYPE)
+                .named_tensor_dtyped(format!("{prefix}.norm_k.weight"), HEAD_DIM, WEIGHT_DTYPE)
                 .persist(),
             to_out: cx
-                .named_tensor(
+                .named_tensor_dtyped(
                     format!("{prefix}.to_out.weight"),
-                    (HIDDEN, HIDDEN + MLP_HIDDEN),
-                )
-                .as_dtype(WEIGHT_DTYPE)
+                    (HIDDEN, HIDDEN + MLP_HIDDEN), WEIGHT_DTYPE)
                 .persist(),
         }
     }
@@ -733,10 +720,10 @@ impl Flux2Transformer {
     pub fn init(cx: &mut Graph) -> Self {
         let bf16 = WEIGHT_DTYPE;
         let mk = |name: &str, shape: (usize, usize), cx: &mut Graph| -> GraphTensor {
-            cx.named_tensor(name, shape).as_dtype(bf16).persist()
+            cx.named_tensor_dtyped(name, shape, bf16).persist()
         };
         let mk1 = |name: &str, n: usize, cx: &mut Graph| -> GraphTensor {
-            cx.named_tensor(name, n).as_dtype(bf16).persist()
+            cx.named_tensor_dtyped(name, n, bf16).persist()
         };
 
         let x_embedder = mk("x_embedder.weight", (HIDDEN, IN_CHANNELS), cx);
@@ -927,8 +914,7 @@ mod tests {
 
         let x = cx.named_tensor("x", (3usize, 4usize));
         let w = cx
-            .named_tensor("w", (5usize, 4usize))
-            .as_dtype(WEIGHT_DTYPE);
+            .named_tensor_dtyped("w", (5usize, 4usize), WEIGHT_DTYPE);
         let _ = linear_no_bias(x, w).output();
 
         let q = cx.named_tensor("q", (2usize, 3usize, 4usize));

@@ -191,13 +191,11 @@ impl MistralLayer {
     fn new(idx: usize, cx: &mut Graph) -> Self {
         let prefix = format!("language_model.model.layers.{idx}");
         let mk = |name: &str, shape: (usize, usize), cx: &mut Graph| -> GraphTensor {
-            cx.named_tensor(format!("{prefix}.{name}"), shape)
-                .as_dtype(WEIGHT_DTYPE)
+            cx.named_tensor_dtyped(format!("{prefix}.{name}"), shape, WEIGHT_DTYPE)
                 .persist()
         };
         let mk1 = |name: &str, n: usize, cx: &mut Graph| -> GraphTensor {
-            cx.named_tensor(format!("{prefix}.{name}"), n)
-                .as_dtype(WEIGHT_DTYPE)
+            cx.named_tensor_dtyped(format!("{prefix}.{name}"), n, WEIGHT_DTYPE)
                 .persist()
         };
         Self {
@@ -264,11 +262,9 @@ pub struct Mistral3TextEncoder {
 impl Mistral3TextEncoder {
     pub fn init(cx: &mut Graph) -> Self {
         let embed_tokens = cx
-            .named_tensor(
+            .named_tensor_dtyped(
                 "language_model.model.embed_tokens.weight",
-                (VOCAB_SIZE, HIDDEN),
-            )
-            .as_dtype(WEIGHT_DTYPE)
+                (VOCAB_SIZE, HIDDEN), WEIGHT_DTYPE)
             .persist();
         let layers = (0..NUM_LAYERS_USED)
             .map(|i| MistralLayer::new(i, cx))
@@ -402,8 +398,7 @@ mod tests {
 
         let x = cx.named_tensor("x", (2usize, 3usize));
         let w = cx
-            .named_tensor("w", (4usize, 3usize))
-            .as_dtype(WEIGHT_DTYPE);
+            .named_tensor_dtyped("w", (4usize, 3usize), WEIGHT_DTYPE);
         let _ = linear_no_bias(x, w).output();
 
         let q = cx.named_tensor("q", (1usize, 2usize, HEAD_DIM));

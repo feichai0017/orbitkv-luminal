@@ -87,14 +87,14 @@ pub(crate) fn classify_view(view: &ShapeTracker, producer_dims: &[Expression]) -
 /// Copy a possibly-strided view into a fresh contiguous buffer in logical
 /// order (the same gather-an-identity-iota trick `GraphTensor::output` uses).
 pub(crate) fn materialize(g: GraphTensor) -> GraphTensor {
-    if is_contiguous_view(&g.shape) {
+    if is_contiguous_view(&g.legacy_tracker_ref()) {
         return g;
     }
     let dims = g.dims();
     let total = dims.iter().copied().product::<Expression>();
     let idx = g.graph().iota('z', total);
     let mut m = g.gather(idx);
-    m.shape = ShapeTracker::new(&dims[..]).with_element_bits(g.dtype.bits());
+    *m.legacy_tracker_mut() = ShapeTracker::new(&dims[..]).with_element_bits(g.dtype.bits());
     m
 }
 
@@ -102,7 +102,7 @@ pub(crate) fn materialize(g: GraphTensor) -> GraphTensor {
 /// contiguous; otherwise materializes first.
 pub(crate) fn reinterpret(g: GraphTensor, dims: &[Expression]) -> GraphTensor {
     let mut m = materialize(g);
-    m.shape = ShapeTracker::new(dims).with_element_bits(m.dtype.bits());
+    *m.legacy_tracker_mut() = ShapeTracker::new(dims).with_element_bits(m.dtype.bits());
     m
 }
 

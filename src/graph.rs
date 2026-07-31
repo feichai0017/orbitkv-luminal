@@ -1520,12 +1520,12 @@ impl Graph {
         let tensor = GraphTensor {
             id,
             graph_ref: self,
-            shape: ShapeTracker::new(shape).with_element_bits(dtype.bits()),
+            legacy_tracker: ShapeTracker::new(shape).with_element_bits(dtype.bits()),
             dtype,
             logical_view: None,
         };
         self.logical
-            .input(id.index(), &name, &tensor.shape.dims.to_vec(), tensor.dtype);
+            .input(id.index(), &name, &tensor.legacy_tracker.dims.to_vec(), tensor.dtype);
         tensor
     }
 
@@ -1554,12 +1554,12 @@ impl Graph {
     /// # use luminal::prelude::*;
     /// # let mut cx = Graph::new();
     /// let a = cx.tensor(3);
-    /// let b_id = cx.add_op(
-    ///     luminal::hlir::Mul { input_shapes: vec![a.shape, a.shape], ..Default::default() },
-    ///     &[a.id],
-    /// );
-    /// let b = GraphTensor::from_id(b_id, a.shape, a.graph(), a.dtype);
+    /// let b = a * a;
+    /// assert_eq!(b.dims(), a.dims());
     /// ```
+    ///
+    /// (Direct `add_op` calls construct HLIR ops from crate-internal
+    /// tracker state — frontend methods are the public door.)
     pub fn add_op<O: HLIROp + 'static>(&mut self, op: O, inputs: &[NodeIndex]) -> NodeIndex {
         let id = self.graph.add_node(Box::new(op));
         for &src in inputs {

@@ -13,12 +13,12 @@ fn normalize_equal_dims(
     b: &mut GraphTensor,
     sym_ranges: &FxHashMap<char, ExprBounds>,
 ) {
-    for i in 0..a.shape.len() {
-        let lhs = a.shape.dims[i];
-        let rhs = b.shape.dims[i];
+    for i in 0..a.legacy_tracker_ref().len() {
+        let lhs = a.legacy_tracker_ref().dims[i];
+        let rhs = b.legacy_tracker_ref().dims[i];
         if let Some(canonical) = canonical_equal_expr(lhs, rhs, sym_ranges) {
-            a.shape.dims[i] = canonical;
-            b.shape.dims[i] = canonical;
+            a.legacy_tracker_mut().dims[i] = canonical;
+            b.legacy_tracker_mut().dims[i] = canonical;
         }
     }
 }
@@ -99,7 +99,7 @@ impl<'a> Translator<'a> {
             .graph
             .constant_float(val)
             .cast(a.dtype)
-            .expand_rhs(a.shape);
+            .expand_rhs(a.dims());
         match op {
             BinaryOp::Add => a + scalar,
             BinaryOp::Mul => a * scalar,

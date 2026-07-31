@@ -45,10 +45,10 @@ impl KVCache {
             // Row-paged layout (num_slots, kv_dim) in bf16 — the spelling the
             // FlashInfer attention rewrites match.
             k_caches.push(
-                persist(cx, format!("kv_cache.{l}.k"), (max_seq, KV_DIM)).as_dtype(DType::Bf16),
+                persist_dtyped(cx, format!("kv_cache.{l}.k"), (max_seq, KV_DIM), DType::Bf16),
             );
             v_caches.push(
-                persist(cx, format!("kv_cache.{l}.v"), (max_seq, KV_DIM)).as_dtype(DType::Bf16),
+                persist_dtyped(cx, format!("kv_cache.{l}.v"), (max_seq, KV_DIM), DType::Bf16),
             );
         }
         Self { k_caches, v_caches }
@@ -82,9 +82,8 @@ impl Gemma {
     pub fn init(cx: &mut Graph) -> Self {
         Self {
             // bf16 table rows feed the layer stack directly; norms stay F32.
-            embedding: persist(cx, "model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN))
-                .as_dtype(DType::Bf16),
-            lm_head: persist(cx, "lm_head.weight", (VOCAB_SIZE, HIDDEN)).as_dtype(DType::Bf16),
+            embedding: persist_dtyped(cx, "model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN), DType::Bf16),
+            lm_head: persist_dtyped(cx, "lm_head.weight", (VOCAB_SIZE, HIDDEN), DType::Bf16),
             layers: (0..LAYERS).map(|l| GemmaLayer::init(cx, l)).collect(),
             lm_norm: gemma_norm(HIDDEN, "model.norm.weight", cx),
         }
@@ -181,15 +180,13 @@ impl GemmaLayer {
     fn init(cx: &mut Graph, l: usize) -> Self {
         let is_local = !(l + 1).is_multiple_of(SLIDING_WINDOW_PATTERN);
         Self {
-            up: layer_weight(cx, l, "mlp.up_proj", (INTERMEDIATE, HIDDEN)).as_dtype(DType::Bf16),
-            gate: layer_weight(cx, l, "mlp.gate_proj", (INTERMEDIATE, HIDDEN))
-                .as_dtype(DType::Bf16),
-            down: layer_weight(cx, l, "mlp.down_proj", (HIDDEN, INTERMEDIATE))
-                .as_dtype(DType::Bf16),
-            q_proj: layer_weight(cx, l, "self_attn.q_proj", (Q_DIM, HIDDEN)).as_dtype(DType::Bf16),
-            k_proj: layer_weight(cx, l, "self_attn.k_proj", (KV_DIM, HIDDEN)).as_dtype(DType::Bf16),
-            v_proj: layer_weight(cx, l, "self_attn.v_proj", (KV_DIM, HIDDEN)).as_dtype(DType::Bf16),
-            o_proj: layer_weight(cx, l, "self_attn.o_proj", (HIDDEN, Q_DIM)).as_dtype(DType::Bf16),
+            up: layer_weight_dtyped(cx, l, "mlp.up_proj", (INTERMEDIATE, HIDDEN), DType::Bf16),
+            gate: layer_weight_dtyped(cx, l, "mlp.gate_proj", (INTERMEDIATE, HIDDEN), DType::Bf16),
+            down: layer_weight_dtyped(cx, l, "mlp.down_proj", (HIDDEN, INTERMEDIATE), DType::Bf16),
+            q_proj: layer_weight_dtyped(cx, l, "self_attn.q_proj", (Q_DIM, HIDDEN), DType::Bf16),
+            k_proj: layer_weight_dtyped(cx, l, "self_attn.k_proj", (KV_DIM, HIDDEN), DType::Bf16),
+            v_proj: layer_weight_dtyped(cx, l, "self_attn.v_proj", (KV_DIM, HIDDEN), DType::Bf16),
+            o_proj: layer_weight_dtyped(cx, l, "self_attn.o_proj", (HIDDEN, Q_DIM), DType::Bf16),
             // q/k norms stay F32 (applied inside the F32 norm sandwich).
             q_norm: layer_weight(cx, l, "self_attn.q_norm", HEAD_DIM),
             k_norm: layer_weight(cx, l, "self_attn.k_norm", HEAD_DIM),
@@ -266,6 +263,15 @@ fn persist(
     cx.named_tensor(name, shape).persist()
 }
 
+fn persist_dtyped(
+    cx: &mut Graph,
+    name: impl ToString,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
+) -> GraphTensor {
+    cx.named_tensor_dtyped(name, shape, dtype).persist()
+}
+
 fn layer_weight(
     cx: &mut Graph,
     layer: usize,
@@ -273,6 +279,16 @@ fn layer_weight(
     shape: impl luminal::prelude::ToShape,
 ) -> GraphTensor {
     persist(cx, format!("model.layers.{layer}.{suffix}.weight"), shape)
+}
+
+fn layer_weight_dtyped(
+    cx: &mut Graph,
+    layer: usize,
+    suffix: &str,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
+) -> GraphTensor {
+    persist_dtyped(cx, format!("model.layers.{layer}.{suffix}.weight"), shape, dtype)
 }
 
 fn layer_norm(cx: &mut Graph, layer: usize, name: &str) -> LayerNorm {

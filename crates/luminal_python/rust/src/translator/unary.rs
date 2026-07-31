@@ -34,7 +34,7 @@ impl<'a> Translator<'a> {
         } else {
             false
         };
-        let dim = crate::pt2_util::normalize_dim(dim, a.shape.len());
+        let dim = crate::pt2_util::normalize_dim(dim, a.legacy_tracker_ref().len());
         // PyTorch's `torch.argsort` returns int64 unconditionally;
         // luminal's frontend `stable_argsort` returns i32 (storage-
         // efficient default for native Rust callers). Cast at the
@@ -107,7 +107,7 @@ impl<'a> Translator<'a> {
         let normalized_shape = self.get_ints_arg(node, 1)?;
 
         // Axes to normalize over = last N dims where N = len(normalized_shape)
-        let ndim = input.shape.len();
+        let ndim = input.legacy_tracker_ref().len();
         let num_norm_dims = normalized_shape.len();
         let axes: Vec<usize> = ((ndim - num_norm_dims)..ndim).collect();
 
@@ -139,7 +139,7 @@ impl<'a> Translator<'a> {
         let input = self.get_input_tensor(node, 0)?;
         let normalized_shape = self.get_ints_arg(node, 1)?;
 
-        let ndim = input.shape.len();
+        let ndim = input.legacy_tracker_ref().len();
         let num_norm_dims = normalized_shape.len();
         anyhow::ensure!(
             num_norm_dims <= ndim,
@@ -216,7 +216,7 @@ impl<'a> Translator<'a> {
         // Flatten everything after the batch dim into one axis: (N, C, ...) -> (N, M),
         // where M = C * spatial. Group volumes are contiguous in this layout.
         let mut t = input;
-        while t.shape.len() > 2 {
+        while t.legacy_tracker_ref().len() > 2 {
             t = t.merge_dims(1, 2);
         }
         // (N, M) -> (N, num_groups, group_volume): M / group_volume == num_groups.
@@ -240,13 +240,13 @@ impl<'a> Translator<'a> {
         let non_channel_axes: Vec<usize> = (0..ndim).filter(|&a| a != 1).collect();
         if let Some(weight_name) = node.inputs.get(1).and_then(|i| i.arg.as_tensor_name()) {
             let w = self.get_tensor(weight_name)?;
-            let w = w.expand_to_shape_on_axes(t.shape, non_channel_axes.clone());
+            let w = w.expand_to_shape_on_axes(t.dims(), non_channel_axes.clone());
             let (r, w) = broadcast_binary(t, w);
             t = r * w;
         }
         if let Some(bias_name) = node.inputs.get(2).and_then(|i| i.arg.as_tensor_name()) {
             let b = self.get_tensor(bias_name)?;
-            let b = b.expand_to_shape_on_axes(t.shape, non_channel_axes);
+            let b = b.expand_to_shape_on_axes(t.dims(), non_channel_axes);
             let (r, b) = broadcast_binary(t, b);
             t = r + b;
         }
@@ -260,7 +260,7 @@ impl<'a> Translator<'a> {
             .graph
             .constant_float(0.0)
             .cast(a.dtype)
-            .expand_rhs(a.shape);
+            .expand_rhs(a.dims());
         let pos = a.gt(zero).cast(DType::Int);
         let neg = a.lt(zero).cast(DType::Int);
         let signed = pos - neg;
@@ -279,7 +279,7 @@ impl<'a> Translator<'a> {
                     .graph
                     .constant_float(1.0)
                     .cast(DType::Int)
-                    .expand_rhs(a.shape);
+                    .expand_rhs(a.dims());
                 (one - a.cast(DType::Int)).cast(DType::Bool)
             }
             DType::Int => (a + 1) * -1.0,
@@ -311,12 +311,12 @@ impl<'a> Translator<'a> {
         let fill = self.get_float_arg(node, MASKED_FILL_VALUE_ARG)? as f32;
         let out_dtype = input.dtype;
         // Build fill_t exactly like translate_full_like does:
-        //   constant_float(val).cast(dtype).expand_rhs(reference.shape)
+        //   constant_float(val).cast(dtype).expand_rhs(reference.legacy_tracker_ref())
         let fill_t = self
             .graph
             .constant_float(fill)
             .cast(out_dtype)
-            .expand_rhs(input.shape);
+            .expand_rhs(input.dims());
         Ok(self.where_formula(mask, fill_t, input, out_dtype))
     }
 
@@ -333,7 +333,7 @@ impl<'a> Translator<'a> {
             self.graph
                 .constant_float(scalar)
                 .cast(a.dtype)
-                .expand_rhs(a.shape)
+                .expand_rhs(a.dims())
         };
         let (a, b) = crate::pt2_util::ensure_same_dtype(a, b);
         let (a, b) = broadcast_binary(a, b);
@@ -361,7 +361,7 @@ impl<'a> Translator<'a> {
             self.graph
                 .constant_float(scalar)
                 .cast(a.dtype)
-                .expand_rhs(a.shape)
+                .expand_rhs(a.dims())
         };
         let (a, b) = crate::pt2_util::ensure_same_dtype(a, b);
         let (a, b) = broadcast_binary(a, b);

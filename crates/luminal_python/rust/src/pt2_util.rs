@@ -42,8 +42,8 @@ pub fn normalize_slice_bound(bound: Expression, dim_size: Expression) -> Express
 /// Broadcast two tensors following NumPy broadcasting rules.
 /// Right-aligns dims, unsqueezes shorter, expands size-1 dims.
 pub fn broadcast_binary(mut a: GraphTensor, mut b: GraphTensor) -> (GraphTensor, GraphTensor) {
-    let a_ndim = a.shape.len();
-    let b_ndim = b.shape.len();
+    let a_ndim = a.legacy_tracker_ref().len();
+    let b_ndim = b.legacy_tracker_ref().len();
 
     // Right-align: unsqueeze the shorter tensor on the left
     if a_ndim < b_ndim {
@@ -57,21 +57,21 @@ pub fn broadcast_binary(mut a: GraphTensor, mut b: GraphTensor) -> (GraphTensor,
     }
 
     // Now both have same ndim. Expand size-1 dims to match.
-    let ndim = a.shape.len();
+    let ndim = a.legacy_tracker_ref().len();
     for i in 0..ndim {
-        let a_dim = a.shape.dims[i];
-        let b_dim = b.shape.dims[i];
+        let a_dim = a.legacy_tracker_ref().dims[i];
+        let b_dim = b.legacy_tracker_ref().dims[i];
 
         if same_dim(a_dim, b_dim) {
             continue;
         }
 
         if a_dim.to_usize() == Some(1) {
-            a.shape.dims[i] = b_dim;
-            a.shape.strides[i] = Expression::from(0usize);
+            a.legacy_tracker_mut().dims[i] = b_dim;
+            a.legacy_tracker_mut().strides[i] = Expression::from(0usize);
         } else if b_dim.to_usize() == Some(1) {
-            b.shape.dims[i] = a_dim;
-            b.shape.strides[i] = Expression::from(0usize);
+            b.legacy_tracker_mut().dims[i] = a_dim;
+            b.legacy_tracker_mut().strides[i] = Expression::from(0usize);
         }
     }
 
@@ -93,15 +93,16 @@ pub fn ensure_same_dtype(a: GraphTensor, b: GraphTensor) -> (GraphTensor, GraphT
     (a, b)
 }
 
-/// Reshape a GraphTensor by replacing its ShapeTracker (view-only, no new node).
+/// Reshape a GraphTensor by replacing its ShapeTracker (view-only, no new
+/// node). LEGACY: this is the torch-FX translator's own pipeline; the
+/// wholesale tracker replacement goes through the A2 escape hatch and
+/// clears any recorder view handle (the recorder path is not maintained
+/// by this translator).
 pub fn reshape_tensor(t: GraphTensor, shape: Vec<Expression>) -> GraphTensor {
-    let new_shape = ShapeTracker::new(shape);
-    GraphTensor {
-        id: t.id,
-        graph_ref: t.graph_ref,
-        shape: new_shape,
-        dtype: t.dtype,
-    }
+    let mut out = t;
+    *out.legacy_tracker_mut() = ShapeTracker::new(shape);
+    out.logical_view = None;
+    out
 }
 
 /// Resolve -1 in a reshape target shape.

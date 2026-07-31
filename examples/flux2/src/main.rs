@@ -152,17 +152,15 @@ fn run_text_encoder(prompt: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>
     println!("Building text encoder graph...");
     let mut cx = Graph::default();
     let input_ids = cx
-        .named_tensor("__input_ids", text_len)
-        .as_dtype(DType::Int);
-    let pos_ids = cx.named_tensor("__pos_ids", text_len).as_dtype(DType::Int);
+        .named_tensor_dtyped("__input_ids", text_len, DType::Int);
+    let pos_ids = cx.named_tensor_dtyped("__pos_ids", text_len, DType::Int);
     // Attention mask: 1 for real tokens (positions 0..real_len), 0 for
     // padding. Mistral 3 self-attention masks padding keys so padding
     // queries only attend to the real prefix; without it our padding
     // hidden states drift wildly from diffusers (cos_sim ~0.65 on the
     // 15360-dim text features even when token IDs match exactly).
     let attention_mask = cx
-        .named_tensor("__attention_mask", text_len)
-        .as_dtype(DType::F32);
+        .named_tensor_dtyped("__attention_mask", text_len, DType::F32);
     let encoder = text_encoder::Mistral3TextEncoder::init(&mut cx);
     let features = encoder.forward(input_ids, pos_ids, attention_mask).output();
     // Memory-budget enforcement is opt-in (the estimator over-counts; see

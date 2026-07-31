@@ -152,7 +152,7 @@ impl<'a> Translator<'a> {
             }
         } else {
             let mut w_flat = weight;
-            w_flat.shape = ShapeTracker::new_with_element_bits(
+            *w_flat.legacy_tracker_mut() = ShapeTracker::new_with_element_bits(
                 vec![ch_out, ch_in * kernel_product],
                 weight.dtype.bits(),
             );
@@ -224,8 +224,7 @@ fn slice_weight_group(
     // following flatten safe for the sliced weight buffer.
     let w_sliced = w.slice(slices) + 0.0;
     let mut w_flat = w_sliced;
-    w_flat.shape =
-        ShapeTracker::new_with_element_bits(vec![group_out, flat_inner], w_sliced.dtype.bits());
+    *w_flat.legacy_tracker_mut() = ShapeTracker::new_with_element_bits(vec![group_out, flat_inner], w_sliced.dtype.bits());
     w_flat
 }
 
@@ -382,8 +381,7 @@ fn depthwise_conv(
 
     // Weight [C * group_out, 1, *kernel] -> [C, group_out, kernel_product]
     let mut w_flat = w;
-    w_flat.shape =
-        ShapeTracker::new_with_element_bits(vec![ch, group_out, kernel_product], w.dtype.bits());
+    *w_flat.legacy_tracker_mut() = ShapeTracker::new_with_element_bits(vec![ch, group_out, kernel_product], w.dtype.bits());
 
     // patches: [N, C, out_spatial_product, kernel_product]
     // Expand to [N, C, group_out, out_spatial_product, kernel_product]

@@ -15,8 +15,8 @@ impl GraphTensor {
             rhs = rhs.cast(DType::F32);
         }
 
-        if (self.shape.len() == 1 || self.shape.len() == 2) && rhs.shape.len() == 2 {
-            let vec = self.shape.len() == 1;
+        if (self.legacy_tracker.len() == 1 || self.legacy_tracker.len() == 2) && rhs.legacy_tracker.len() == 2 {
+            let vec = self.legacy_tracker.len() == 1;
             if vec {
                 self = self.expand_dim(0, 1);
             }
@@ -31,10 +31,10 @@ impl GraphTensor {
                 ret = ret.squeeze(0);
             }
             ret
-        } else if self.shape.len() == 3 {
+        } else if self.legacy_tracker.len() == 3 {
             let d = *rhs.dims().last().unwrap();
             let (a, b, _) = self.dims3();
-            if rhs.shape.len() == 2 {
+            if rhs.legacy_tracker.len() == 2 {
                 // ABCxCD -> ABD
                 // Reshape
                 let w = rhs.permute((1, 0));
@@ -44,7 +44,7 @@ impl GraphTensor {
 
                 // Sum Reduce
                 mul.sum(3)
-            } else if rhs.shape.len() == 3 {
+            } else if rhs.legacy_tracker.len() == 3 {
                 // Reshape
                 let w = rhs.permute((0, 2, 1));
 
@@ -60,9 +60,9 @@ impl GraphTensor {
                     rhs.dims()
                 )
             }
-        } else if self.shape.len() == 4 {
+        } else if self.legacy_tracker.len() == 4 {
             let (a, b, c, _) = self.dims4();
-            if rhs.shape.len() == 2 {
+            if rhs.legacy_tracker.len() == 2 {
                 // ABCDxDE -> ABCE
                 let (_, e) = rhs.dims2();
                 // Reshape
@@ -73,7 +73,7 @@ impl GraphTensor {
 
                 // Sum Reduce
                 mul.sum(4)
-            } else if rhs.shape.len() == 4 {
+            } else if rhs.legacy_tracker.len() == 4 {
                 assert_eq!(self.dims()[0], rhs.dims()[0]);
                 assert_eq!(self.dims()[1], rhs.dims()[1]);
                 // ABCDxABDE -> ABCE
@@ -93,7 +93,7 @@ impl GraphTensor {
                     rhs.dims()
                 )
             }
-        } else if self.shape.len() == 5 && rhs.shape.len() == 5 {
+        } else if self.legacy_tracker.len() == 5 && rhs.legacy_tracker.len() == 5 {
             // ABCDExABCEF -> ABCDF
             let (a, b, c, _, f) = rhs.dims5();
             let (_, _, _, d, _) = self.dims5();
@@ -106,7 +106,7 @@ impl GraphTensor {
 
             // Sum Reduce
             let mut r = mul.sum(3);
-            r.shape = ShapeTracker::new_with_element_bits((a, b, c, d, f), r.dtype.bits());
+            r.legacy_tracker = ShapeTracker::new_with_element_bits((a, b, c, d, f), r.dtype.bits());
             r
         } else {
             panic!(

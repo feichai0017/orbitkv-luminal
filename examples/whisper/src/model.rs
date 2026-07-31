@@ -181,8 +181,8 @@ fn decoder_self_attention(
     // LUM-545: model invariant `prev + seq <= max_seq`, but the frontend
     // cannot yet propagate expression-bound assertions, so `slice` reports
     // `min(max_seq, p+s)`. Normalize the visible cache axis to `total`.
-    k_full.shape.dims[1] = total;
-    v_full.shape.dims[1] = total;
+    k_full.legacy_tracker_mut().dims[1] = total;
+    v_full.legacy_tracker_mut().dims[1] = total;
 
     let q = split_heads(q);
 

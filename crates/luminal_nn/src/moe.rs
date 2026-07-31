@@ -62,7 +62,7 @@ impl MoE {
 
         // 6. Weighted sum over experts: [batch.., k, out] * [batch.., k, 1] → sum(k) → [batch.., out]
         let mut weights_exp = top_k_values.unsqueeze(top_k_values.dims().len()); // [batch.., k, 1]
-        weights_exp.shape.expand(expert_out.dims());
+        let weights_exp = weights_exp.expand(expert_out.dims());
         (expert_out * weights_exp).sum(n - 1)
     }
 }
@@ -493,7 +493,7 @@ mod tests {
 
         // 7. Weighted sum over k experts → [s, H]
         let mut weights_exp = top_k_values.unsqueeze(top_k_values.dims().len()); // [s, k, 1]
-        weights_exp.shape.expand(down_out.dims());
+        let weights_exp = weights_exp.expand(down_out.dims());
         let _output = (down_out * weights_exp).sum(n - 1).output();
 
         // Dump the HLIR to egglog

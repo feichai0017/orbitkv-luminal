@@ -58,8 +58,8 @@ fn main() {
     // Build graph
     let mut cx = Graph::default();
     let mel_tensor = cx.named_tensor("mel", (N_MELS, N_FRAMES)).persist();
-    let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
-    let pos_ids = cx.named_tensor("pos_ids", 's').as_dtype(DType::Int);
+    let input = cx.named_tensor_dtyped("input", 's', DType::Int);
+    let pos_ids = cx.named_tensor_dtyped("pos_ids", 's', DType::Int);
     let kv_cache = KVCache::new(&mut cx, max_target_pos);
 
     let whisper = Whisper::init(&mut cx);

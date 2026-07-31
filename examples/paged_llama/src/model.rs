@@ -35,12 +35,10 @@ impl PagedKVCache {
         let mut v_caches = Vec::with_capacity(LAYERS);
         for l in 0..LAYERS {
             k_caches.push(
-                cx.named_tensor(format!("kv_cache.{l}.k"), (num_slots, KV_DIM))
-                    .as_dtype(ACT_DTYPE),
+                cx.named_tensor_dtyped(format!("kv_cache.{l}.k"), (num_slots, KV_DIM), ACT_DTYPE),
             );
             v_caches.push(
-                cx.named_tensor(format!("kv_cache.{l}.v"), (num_slots, KV_DIM))
-                    .as_dtype(ACT_DTYPE),
+                cx.named_tensor_dtyped(format!("kv_cache.{l}.v"), (num_slots, KV_DIM), ACT_DTYPE),
             );
         }
         Self { k_caches, v_caches }
@@ -58,10 +56,9 @@ impl Llama {
     pub fn init(cx: &mut Graph) -> Self {
         Self {
             // bf16 table rows feed the layer stack directly.
-            embedding: persist(cx, "model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN))
-                .as_dtype(ACT_DTYPE),
+            embedding: persist_dtyped(cx, "model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN), ACT_DTYPE),
             layers: (0..LAYERS).map(|l| LlamaLayer::init(cx, l)).collect(),
-            lm_head: persist(cx, "lm_head.weight", (VOCAB_SIZE, HIDDEN)).as_dtype(ACT_DTYPE),
+            lm_head: persist_dtyped(cx, "lm_head.weight", (VOCAB_SIZE, HIDDEN), ACT_DTYPE),
             lm_norm: rms_norm(cx, "model.norm.weight"),
         }
     }
@@ -194,13 +191,22 @@ fn persist(
     cx.named_tensor(name, shape).persist()
 }
 
+fn persist_dtyped(
+    cx: &mut Graph,
+    name: impl ToString,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
+) -> GraphTensor {
+    cx.named_tensor_dtyped(name, shape, dtype).persist()
+}
+
 fn layer_weight(
     cx: &mut Graph,
     layer: usize,
     suffix: &str,
     shape: impl luminal::prelude::ToShape,
 ) -> GraphTensor {
-    persist(cx, format!("model.layers.{layer}.{suffix}.weight"), shape).as_dtype(ACT_DTYPE)
+    persist_dtyped(cx, format!("model.layers.{layer}.{suffix}.weight"), shape, ACT_DTYPE)
 }
 
 const RMS_NORM_EPS: f32 = 1e-5;

@@ -99,9 +99,9 @@ impl<'a> Translator<'a> {
         let max = self.get_float_arg(node, 3).unwrap_or(0.0);
 
         anyhow::ensure!(
-            input.shape.len() == 1,
+            input.legacy_tracker_ref().len() == 1,
             "histc: only 1D input is supported, got {}D",
-            input.shape.len()
+            input.legacy_tracker_ref().len()
         );
         anyhow::ensure!(
             bins_i64 > 0,
@@ -120,7 +120,7 @@ impl<'a> Translator<'a> {
         );
 
         let bins_u = bins_i64 as usize;
-        let n = input.shape.dims[0];
+        let n = input.legacy_tracker_ref().dims[0];
 
         // arange(bins) [bins] → cast to input dtype, optionally shift by min,
         // broadcast to [bins, N], compare for equality with input broadcast.
@@ -133,7 +133,7 @@ impl<'a> Translator<'a> {
                 .graph
                 .constant_float(min_i as f32)
                 .cast(bins_arange.dtype)
-                .expand_rhs(bins_arange.shape);
+                .expand_rhs(bins_arange.dims());
             bins_arange += shift;
         }
         let bins_expanded = bins_arange.cast(input.dtype).expand_dim(1, n);
@@ -177,7 +177,7 @@ impl<'a> Translator<'a> {
         };
         let dtype = self.output_meta_dtype(node)?;
         let value = self.graph.constant_float(val).cast(dtype);
-        Ok(value.expand_rhs(reference.shape))
+        Ok(value.expand_rhs(reference.dims()))
     }
 
     fn output_meta_dtype(&self, node: &Node) -> Result<DType> {
@@ -223,25 +223,25 @@ impl<'a> Translator<'a> {
         let out_dtype = self.output_meta_dtype(node)?;
 
         anyhow::ensure!(
-            input.shape.len() == 2,
+            input.legacy_tracker_ref().len() == 2,
             "_grouped_mm: input must be 2D, got {}D",
-            input.shape.len()
+            input.legacy_tracker_ref().len()
         );
         anyhow::ensure!(
-            weight.shape.len() == 3,
+            weight.legacy_tracker_ref().len() == 3,
             "_grouped_mm: weight must be 3D, got {}D",
-            weight.shape.len()
+            weight.legacy_tracker_ref().len()
         );
         anyhow::ensure!(
-            offs.shape.len() == 1,
+            offs.legacy_tracker_ref().len() == 1,
             "_grouped_mm: offs must be 1D, got {}D",
-            offs.shape.len()
+            offs.legacy_tracker_ref().len()
         );
 
-        let s = input.shape.dims[0];
-        let g = weight.shape.dims[0];
-        let k = weight.shape.dims[1];
-        let n = weight.shape.dims[2];
+        let s = input.legacy_tracker_ref().dims[0];
+        let g = weight.legacy_tracker_ref().dims[0];
+        let k = weight.legacy_tracker_ref().dims[1];
+        let n = weight.legacy_tracker_ref().dims[2];
 
         // expert_id[m] = number of g s.t. m >= offs[g], clamped to [0, G-1].
         // Same value as HF MoE's `expert_ids.clamp(0, num_experts-1)` for
@@ -339,7 +339,7 @@ impl<'a> Translator<'a> {
         let out_dtype = x.dtype;
         // Build a tensor for the scalar `other` matching `x`'s shape so we
         // can route through the shared where_formula helper.
-        let other = self.graph.constant_float(other_val).expand_rhs(x.shape);
+        let other = self.graph.constant_float(other_val).expand_rhs(x.dims());
         Ok(self.where_formula(cond, x, other, out_dtype))
     }
 
@@ -358,7 +358,7 @@ impl<'a> Translator<'a> {
         } else {
             0
         };
-        let dims = a.shape.dims;
+        let dims = a.legacy_tracker_ref().dims;
         let rows = dims[dims.len() - 2];
         let cols = dims[dims.len() - 1];
         let (r_val, c_val) = match (rows.to_usize(), cols.to_usize()) {
@@ -392,7 +392,7 @@ impl<'a> Translator<'a> {
         } else {
             -1
         };
-        let dim = normalize_dim(dim, a.shape.len());
+        let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
 
         // Determine output names
         let tuple_outputs = node.outputs.first().and_then(|o| o.as_tensors.as_ref());
@@ -447,7 +447,7 @@ impl<'a> Translator<'a> {
         } else {
             false
         };
-        let dim = normalize_dim(dim, a.shape.len());
+        let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
 
         // Determine output names (sort returns (values, indices))
         let values_name = node

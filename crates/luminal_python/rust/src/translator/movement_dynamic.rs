@@ -62,12 +62,12 @@ fn normalize_negative_index(indices: GraphTensor, axis_dim: Expression) -> Graph
     let zero = idx_f32
         .graph()
         .constant_float(0.0)
-        .expand_rhs(idx_f32.shape);
+        .expand_rhs(idx_f32.dims());
     let adj = idx_f32
         .graph()
         .constant(axis_dim)
         .cast(DType::F32)
-        .expand_rhs(idx_f32.shape);
+        .expand_rhs(idx_f32.dims());
     let is_neg = idx_f32.lt(zero).cast(DType::F32);
     (idx_f32 + (is_neg * adj)).cast(DType::Int)
 }
@@ -89,7 +89,7 @@ pub fn pt2_gather_elements(data: GraphTensor, indexes: GraphTensor, axis: usize)
     let stride_tensor = data
         .graph()
         .constant(strides[axis])
-        .expand_rhs(idx_normalized.shape);
+        .expand_rhs(idx_normalized.dims());
     let flat_idx = non_axis_flat + idx_normalized * stride_tensor;
 
     data.gather(flat_idx)
@@ -113,7 +113,7 @@ pub fn pt2_scatter_elements(
     let stride_tensor = data
         .graph()
         .constant(strides[axis])
-        .expand_rhs(idx_normalized.shape);
+        .expand_rhs(idx_normalized.dims());
     let flat_dest = non_axis_flat + idx_normalized * stride_tensor;
 
     let flat_dest_1d = flat_dest.flatten();
@@ -125,7 +125,7 @@ pub fn pt2_scatter_elements(
     // View-only reshape back to data shape; the buffer is already laid
     // out row-major from the scatter, so swapping the tracker is safe.
     let mut result = output_flat;
-    result.shape = ShapeTracker::new(data_dims);
+    *result.legacy_tracker_mut() = ShapeTracker::new(data_dims);
     result
 }
 
@@ -166,7 +166,7 @@ pub fn pt2_scatter_nd(
     // Flatten batch dims of indices to [batch_numel, K] via view reshape.
     let mut indices_flat = indices;
     if idx_rank > 2 {
-        indices_flat.shape = ShapeTracker::new(vec![batch_numel, Expression::from(k)]);
+        *indices_flat.legacy_tracker_mut() = ShapeTracker::new(vec![batch_numel, Expression::from(k)]);
     }
 
     let mut flat_base: Option<GraphTensor> = None;
@@ -174,7 +174,7 @@ pub fn pt2_scatter_nd(
         let idx_k = indices_flat.slice_along(k_dim..k_dim + 1, indices_flat.dims().len() - 1);
         let idx_k = idx_k.squeeze(idx_k.dims().len() - 1);
 
-        let stride_tensor = data.graph().constant(stride).expand_rhs(idx_k.shape);
+        let stride_tensor = data.graph().constant(stride).expand_rhs(idx_k.dims());
         let contribution = idx_k * stride_tensor;
 
         flat_base = Some(match flat_base {
@@ -204,15 +204,15 @@ pub fn pt2_scatter_nd(
             for _ in 0..ti {
                 ar_shaped = ar_shaped.expand_dim(0, 1);
             }
-            ar_shaped.shape.expand(trailing_shape.clone());
+            ar_shaped.legacy_tracker_mut().expand(trailing_shape.clone());
             let mut ar_flat = ar_shaped;
-            ar_flat.shape = ShapeTracker::new(vec![trailing_numel]);
+            *ar_flat.legacy_tracker_mut() = ShapeTracker::new(vec![trailing_numel]);
             ar_flat = ar_flat.expand_dim(0, batch_numel);
 
             let stride_tensor = data
                 .graph()
                 .constant(data_strides[d])
-                .expand_rhs(ar_flat.shape);
+                .expand_rhs(ar_flat.dims());
             base_expanded += ar_flat * stride_tensor;
         }
         base_expanded
@@ -226,6 +226,6 @@ pub fn pt2_scatter_nd(
     let output_flat = flat_updates.scatter(full_flat_dest, flat_data);
 
     let mut result = output_flat;
-    result.shape = ShapeTracker::new(data_dims);
+    *result.legacy_tracker_mut() = ShapeTracker::new(data_dims);
     result
 }

@@ -47,10 +47,10 @@ pub fn backward(cx: &mut Graph, loss: GraphTensor, params: &[GraphTensor]) -> Ve
     let mut dtypes: FxHashMap<NodeIndex, DType> = FxHashMap::default();
     for p in params {
         assert!(
-            p.shape.is_contiguous(),
+            p.legacy_tracker_ref().is_contiguous(),
             "parameters passed to backward must be contiguous tensors (param {:?} has view {})",
             p.id,
-            p.shape
+            p.legacy_tracker_ref()
         );
         dims.insert(p.id, p.dims());
         dtypes.insert(p.id, p.dtype);

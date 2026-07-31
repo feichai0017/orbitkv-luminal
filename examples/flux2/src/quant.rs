@@ -74,16 +74,13 @@ impl Nvfp4Linear {
         let in_blocks = in_dim / NVFP4_BLOCK;
         Self {
             weight: cx
-                .named_tensor(format!("{prefix}.weight"), (out_dim, in_dim))
-                .as_dtype(DType::F4E2M1)
+                .named_tensor_dtyped(format!("{prefix}.weight"), (out_dim, in_dim), DType::F4E2M1)
                 .persist(),
             weight_scale: cx
-                .named_tensor(format!("{prefix}.weight_scale"), (out_dim, in_blocks))
-                .as_dtype(DType::F8E4M3)
+                .named_tensor_dtyped(format!("{prefix}.weight_scale"), (out_dim, in_blocks), DType::F8E4M3)
                 .persist(),
             weight_scale_2: cx
-                .named_tensor(format!("{prefix}.weight_scale_2"), 1)
-                .as_dtype(DType::F32)
+                .named_tensor_dtyped(format!("{prefix}.weight_scale_2"), 1, DType::F32)
                 .persist(),
         }
     }

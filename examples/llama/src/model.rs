@@ -119,12 +119,10 @@ impl KVCache {
         let mut v_caches = Vec::with_capacity(config.layers);
         for l in 0..config.layers {
             k_caches.push(
-                cx.named_tensor(format!("kv_cache.{l}.k"), (num_slots, kv_dim))
-                    .as_dtype(dtype),
+                cx.named_tensor_dtyped(format!("kv_cache.{l}.k"), (num_slots, kv_dim), dtype),
             );
             v_caches.push(
-                cx.named_tensor(format!("kv_cache.{l}.v"), (num_slots, kv_dim))
-                    .as_dtype(dtype),
+                cx.named_tensor_dtyped(format!("kv_cache.{l}.v"), (num_slots, kv_dim), dtype),
             );
         }
         Self { k_caches, v_caches }
@@ -178,17 +176,14 @@ impl Llama {
         Self {
             config,
             precision,
-            embedding: persist(
+            embedding: persist_dtyped(
                 cx,
                 "model.embed_tokens.weight",
-                (config.vocab_size, config.hidden),
-            )
-            .as_dtype(table_dtype),
+                (config.vocab_size, config.hidden), table_dtype),
             layers: (0..config.layers)
                 .map(|l| LlamaLayer::init(cx, l, config, precision))
                 .collect(),
-            lm_head: persist(cx, "lm_head.weight", (config.vocab_size, config.hidden))
-                .as_dtype(table_dtype),
+            lm_head: persist_dtyped(cx, "lm_head.weight", (config.vocab_size, config.hidden), table_dtype),
             lm_norm: rms_norm(cx, config.hidden, "model.norm.weight"),
         }
     }
@@ -356,7 +351,7 @@ impl LlamaLayer {
         let unfused_weight = |cx: &mut Graph, suffix: &str, shape: (usize, usize)| {
             if fused {
                 // Placeholder: unnamed, unreachable, never loaded.
-                cx.tensor((1, 1)).as_dtype(precision.weight_dtype())
+                cx.tensor_dtyped((1, 1), precision.weight_dtype())
             } else {
                 layer_linear_weight(cx, l, suffix, shape, precision)
             }
@@ -574,14 +569,22 @@ fn persist(
     cx.named_tensor(name, shape).persist()
 }
 
+fn persist_dtyped(
+    cx: &mut Graph,
+    name: impl ToString,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
+) -> GraphTensor {
+    cx.named_tensor_dtyped(name, shape, dtype).persist()
+}
+
 fn linear_weight(
     cx: &mut Graph,
     prefix: impl ToString,
     shape: impl luminal::prelude::ToShape,
     precision: LlamaPrecision,
 ) -> GraphTensor {
-    cx.named_tensor(format!("{}.weight", prefix.to_string()), shape)
-        .as_dtype(precision.weight_dtype())
+    cx.named_tensor_dtyped(format!("{}.weight", prefix.to_string()), shape, precision.weight_dtype())
         .persist()
 }
 

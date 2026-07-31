@@ -30,9 +30,9 @@ impl LayerNorm {
 impl LayerNorm {
     pub fn forward(&self, mut input: GraphTensor) -> GraphTensor {
         if self.mean_norm {
-            input = input.mean_norm(input.shape.last_axis());
+            input = input.mean_norm(input.rank() - 1);
         }
-        input = input.std_norm(input.shape.last_axis(), self.epsilon);
+        input = input.std_norm(input.rank() - 1, self.epsilon);
         if let Some(w) = self.weight {
             input *= w.expand_lhs(&input.dims()[..input.dims().len() - 1]);
         }

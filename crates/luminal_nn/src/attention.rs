@@ -149,8 +149,10 @@ pub fn paged_attention(
 
     // ── Phase 5: Reshape output ──
     // (n_kv_heads, kv_groups, s, head_dim) → (s, n_kv_heads, kv_groups, head_dim)
-    let mut out = out.permute((2, 0, 1, 3));
-    out.shape = ShapeTracker::new((s, n_heads * head_dim));
+    // Head merge as an EXPLICIT view (A2: no tracker reassignment —
+    // the old code silently reinterpreted the permuted view as fresh
+    // contiguous storage): (s, n_kv, groups, hd) -> (s, n_heads*hd).
+    let out = out.permute((2, 0, 1, 3)).merge_dims(1, 2).merge_dims(1, 2);
 
     (out, k_cache, v_cache)
 }

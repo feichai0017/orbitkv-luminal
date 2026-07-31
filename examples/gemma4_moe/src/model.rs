@@ -86,12 +86,10 @@ impl KVCache {
             // Row-paged layout (num_slots, kv_dim) in bf16 — the spelling the
             // FlashInfer attention rewrites match.
             k_caches.push(
-                persist(cx, format!("kv_cache.{layer}.k"), (max_seq, spec.kv_dim))
-                    .as_dtype(DType::Bf16),
+                persist_dtyped(cx, format!("kv_cache.{layer}.k"), (max_seq, spec.kv_dim), DType::Bf16),
             );
             v_caches.push(
-                persist(cx, format!("kv_cache.{layer}.v"), (max_seq, spec.kv_dim))
-                    .as_dtype(DType::Bf16),
+                persist_dtyped(cx, format!("kv_cache.{layer}.v"), (max_seq, spec.kv_dim), DType::Bf16),
             );
         }
         Self { k_caches, v_caches }
@@ -108,9 +106,8 @@ pub struct Gemma4MoE {
 impl Gemma4MoE {
     pub fn init(cx: &mut Graph) -> Self {
         Self {
-            embedding: persist(cx, "model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN))
-                .as_dtype(DType::Bf16),
-            lm_head: persist(cx, "lm_head.weight", (VOCAB_SIZE, HIDDEN)).as_dtype(DType::Bf16),
+            embedding: persist_dtyped(cx, "model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN), DType::Bf16),
+            lm_head: persist_dtyped(cx, "lm_head.weight", (VOCAB_SIZE, HIDDEN), DType::Bf16),
             layers: (0..LAYERS)
                 .map(|layer| Gemma4Layer::init(cx, layer))
                 .collect(),
@@ -220,22 +217,15 @@ impl Gemma4Layer {
         let spec = layer_spec(layer);
         Self {
             spec,
-            gate: layer_weight(cx, layer, "mlp.gate_proj", (INTERMEDIATE, HIDDEN))
-                .as_dtype(DType::Bf16),
-            up: layer_weight(cx, layer, "mlp.up_proj", (INTERMEDIATE, HIDDEN))
-                .as_dtype(DType::Bf16),
-            down: layer_weight(cx, layer, "mlp.down_proj", (HIDDEN, INTERMEDIATE))
-                .as_dtype(DType::Bf16),
-            q_proj: layer_weight(cx, layer, "self_attn.q_proj", (spec.q_dim, HIDDEN))
-                .as_dtype(DType::Bf16),
-            k_proj: layer_weight(cx, layer, "self_attn.k_proj", (spec.kv_dim, HIDDEN))
-                .as_dtype(DType::Bf16),
+            gate: layer_weight_dtyped(cx, layer, "mlp.gate_proj", (INTERMEDIATE, HIDDEN), DType::Bf16),
+            up: layer_weight_dtyped(cx, layer, "mlp.up_proj", (INTERMEDIATE, HIDDEN), DType::Bf16),
+            down: layer_weight_dtyped(cx, layer, "mlp.down_proj", (HIDDEN, INTERMEDIATE), DType::Bf16),
+            q_proj: layer_weight_dtyped(cx, layer, "self_attn.q_proj", (spec.q_dim, HIDDEN), DType::Bf16),
+            k_proj: layer_weight_dtyped(cx, layer, "self_attn.k_proj", (spec.kv_dim, HIDDEN), DType::Bf16),
             v_proj: spec.has_v_proj.then(|| {
-                layer_weight(cx, layer, "self_attn.v_proj", (spec.kv_dim, HIDDEN))
-                    .as_dtype(DType::Bf16)
+                layer_weight_dtyped(cx, layer, "self_attn.v_proj", (spec.kv_dim, HIDDEN), DType::Bf16)
             }),
-            o_proj: layer_weight(cx, layer, "self_attn.o_proj", (HIDDEN, spec.q_dim))
-                .as_dtype(DType::Bf16),
+            o_proj: layer_weight_dtyped(cx, layer, "self_attn.o_proj", (HIDDEN, spec.q_dim), DType::Bf16),
             q_norm: layer_weight(cx, layer, "self_attn.q_norm", spec.head_dim),
             k_norm: layer_weight(cx, layer, "self_attn.k_norm", spec.head_dim),
             layer_scalar: layer_tensor(cx, layer, "layer_scalar", HIDDEN),
@@ -250,20 +240,16 @@ impl Gemma4Layer {
                 router_scale: layer_tensor(cx, layer, "router.scale", HIDDEN),
                 router_proj: layer_weight(cx, layer, "router.proj", (NUM_EXPERTS, HIDDEN)),
                 per_expert_scale: layer_tensor(cx, layer, "router.per_expert_scale", NUM_EXPERTS),
-                gate_up_weights: layer_tensor(
+                gate_up_weights: layer_tensor_dtyped(
                     cx,
                     layer,
                     "experts.gate_up_proj",
-                    (NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN),
-                )
-                .as_dtype(DType::Bf16),
-                down_weights: layer_tensor(
+                    (NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN), DType::Bf16),
+                down_weights: layer_tensor_dtyped(
                     cx,
                     layer,
                     "experts.down_proj",
-                    (NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE),
-                )
-                .as_dtype(DType::Bf16),
+                    (NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE), DType::Bf16),
             },
         }
     }
@@ -368,6 +354,15 @@ fn persist(
     cx.named_tensor(name, shape).persist()
 }
 
+fn persist_dtyped(
+    cx: &mut Graph,
+    name: impl ToString,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
+) -> GraphTensor {
+    cx.named_tensor_dtyped(name, shape, dtype).persist()
+}
+
 fn layer_tensor(
     cx: &mut Graph,
     layer: usize,
@@ -377,11 +372,31 @@ fn layer_tensor(
     persist(cx, format!("model.layers.{layer}.{suffix}"), shape)
 }
 
+fn layer_tensor_dtyped(
+    cx: &mut Graph,
+    layer: usize,
+    suffix: &str,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
+) -> GraphTensor {
+    persist_dtyped(cx, format!("model.layers.{layer}.{suffix}"), shape, dtype)
+}
+
 fn layer_weight(
     cx: &mut Graph,
     layer: usize,
     suffix: &str,
     shape: impl luminal::prelude::ToShape,
+) -> GraphTensor {
+    layer_tensor(cx, layer, &format!("{suffix}.weight"), shape)
+}
+
+fn layer_weight_dtyped(
+    cx: &mut Graph,
+    layer: usize,
+    suffix: &str,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
 ) -> GraphTensor {
     layer_tensor(cx, layer, &format!("{suffix}.weight"), shape)
 }
@@ -635,7 +650,7 @@ impl Gemma4SparseMoE {
         let down_out = hidden_exp.matmul(down_gathered.transpose(2, 3)).squeeze(2);
 
         let mut weights_exp = top_k_weights.unsqueeze(top_k_weights.dims().len());
-        weights_exp.shape.expand(down_out.dims());
+        weights_exp.legacy_tracker_mut().expand(down_out.dims());
         (down_out * weights_exp).sum(n - 1)
     }
 }

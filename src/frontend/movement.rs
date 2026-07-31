@@ -9,20 +9,20 @@ impl GraphTensor {
     /// Swap dimensions of the tensor
     pub fn permute(mut self, axes: impl ToAxes) -> GraphTensor {
         let axes = axes.to_axes();
-        let current_dims = self.shape.dims.to_vec();
+        let current_dims = self.legacy_tracker.dims.to_vec();
         self.logical_view = self.graph().logical.apply_movement(
             self.id.index(),
             self.logical_view,
             &current_dims,
             crate::logical_recorder::Movement::Permute(axes.clone()),
         );
-        self.shape.permute(axes);
+        self.legacy_tracker.permute(axes);
         self
     }
 
     /// Swap 2 dimensions. This is a view-only operation and does not materialize a new tensor
     pub fn transpose(self, dim0: usize, dim1: usize) -> GraphTensor {
-        let num_dims = self.shape.len();
+        let num_dims = self.legacy_tracker.len();
         assert!(
             dim0 < num_dims && dim1 < num_dims,
             "transpose dimensions ({dim0}, {dim1}) out of bounds for tensor with {num_dims} dimensions"
@@ -34,14 +34,14 @@ impl GraphTensor {
 
     /// Transpose a 2D tensor
     pub fn t(self) -> GraphTensor {
-        assert_eq!(self.shape.len(), 2, ".t() supports only 2D tensors");
+        assert_eq!(self.legacy_tracker.len(), 2, ".t() supports only 2D tensors");
         self.transpose(0, 1)
     }
 
     /// Broadcast tensor along a new dimension
     pub fn expand_dim(mut self, axis: usize, size: impl Into<Expression>) -> GraphTensor {
         let size = size.into();
-        let current_dims = self.shape.dims.to_vec();
+        let current_dims = self.legacy_tracker.dims.to_vec();
         self.logical_view = self.graph().logical.apply_movement(
             self.id.index(),
             self.logical_view,
@@ -51,13 +51,13 @@ impl GraphTensor {
                 size: size.clone(),
             },
         );
-        self.shape.expand_dim(axis, size);
+        self.legacy_tracker.expand_dim(axis, size);
         self
     }
 
     /// Broadcast tensor along new dimensions on the right-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
     pub fn expand_rhs(mut self, shape: impl ToShape) -> GraphTensor {
-        let orig_dims = self.shape.len();
+        let orig_dims = self.legacy_tracker.len();
         for (i, s) in shape.to_shape().into_iter().enumerate() {
             self = self.expand_dim(orig_dims + i, s);
         }
@@ -67,18 +67,39 @@ impl GraphTensor {
     /// Tile a tensor along its existing dimensions without materializing a new buffer.
     pub fn repeat(mut self, repeats: impl ToShape) -> GraphTensor {
         let repeats = repeats.to_shape();
-        let current_dims = self.shape.dims.to_vec();
+        let current_dims = self.legacy_tracker.dims.to_vec();
         self.logical_view = self.graph().logical.apply_movement(
             self.id.index(),
             self.logical_view,
             &current_dims,
             crate::logical_recorder::Movement::Repeat(repeats.clone()),
         );
-        self.shape.repeat(repeats);
+        self.legacy_tracker.repeat(repeats);
         self
     }
 
     /// Broadcast tensor along new dimensions on the left-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
+    /// PyTorch-style expand: every size-1 axis whose target size differs
+    /// broadcasts to it (a squeeze + broadcast expand per axis — pure,
+    /// recorder-covered). Non-1 axes must already match.
+    pub fn expand(mut self, new_shape: impl ToShape) -> GraphTensor {
+        let target = new_shape.to_shape();
+        assert_eq!(target.len(), self.rank(), "expand rank mismatch");
+        for (axis, target_dim) in target.into_iter().enumerate() {
+            let current = self.dims()[axis];
+            if current == target_dim {
+                continue;
+            }
+            assert_eq!(
+                current,
+                Expression::from(1),
+                "expand: axis {axis} is {current}, only size-1 axes broadcast"
+            );
+            self = self.squeeze(axis).expand_dim(axis, target_dim);
+        }
+        self
+    }
+
     pub fn expand_lhs(mut self, shape: impl ToShape) -> GraphTensor {
         for (i, s) in shape.to_shape().into_iter().enumerate() {
             self = self.expand_dim(i, s);
@@ -96,7 +117,7 @@ impl GraphTensor {
             .poison(format!("expand_to_shape_on_axes at t{} (recorder Phase B)", self.id.index()));
         let shape = shape.to_shape();
         let axes = axes.to_axes();
-        assert_eq!(shape.len(), self.shape.len() + axes.len());
+        assert_eq!(shape.len(), self.legacy_tracker.len() + axes.len());
         for axis in axes.into_iter().sorted() {
             self = self.expand_dim(axis, shape[axis]);
         }
@@ -105,20 +126,20 @@ impl GraphTensor {
 
     /// Merge two dimensions together
     pub fn merge_dims(mut self, axis1: usize, axis2: usize) -> GraphTensor {
-        let current_dims = self.shape.dims.to_vec();
+        let current_dims = self.legacy_tracker.dims.to_vec();
         self.logical_view = self.graph().logical.apply_movement(
             self.id.index(),
             self.logical_view,
             &current_dims,
             crate::logical_recorder::Movement::MergeDims { axis1, axis2 },
         );
-        self.shape.merge_dims(axis1, axis2);
+        self.legacy_tracker.merge_dims(axis1, axis2);
         self
     }
 
     /// Flatten all dimensions into a single 1D tensor.
     pub fn flatten(mut self) -> GraphTensor {
-        while self.shape.len() > 1 {
+        while self.legacy_tracker.len() > 1 {
             self = self.merge_dims(0, 1);
         }
         self
@@ -127,7 +148,7 @@ impl GraphTensor {
     //// Split a dim into 2 dims, new dim is placed directly after original dim
     pub fn split_dims(mut self, axis: usize, new_dim_size: impl Into<Expression>) -> GraphTensor {
         let new_dim_size = new_dim_size.into();
-        let current_dims = self.shape.dims.to_vec();
+        let current_dims = self.legacy_tracker.dims.to_vec();
         self.logical_view = self.graph().logical.apply_movement(
             self.id.index(),
             self.logical_view,
@@ -137,13 +158,13 @@ impl GraphTensor {
                 inner: new_dim_size,
             },
         );
-        self.shape.split_dims(axis, new_dim_size);
+        self.legacy_tracker.split_dims(axis, new_dim_size);
         self
     }
 
     /// add a new dimension of size 1 at the specified place
     pub fn unsqueeze(self, dim: usize) -> GraphTensor {
-        assert!(self.shape.len() < 10, "Shape is maxed out at 10 dimensions");
+        assert!(self.legacy_tracker.len() < 10, "Shape is maxed out at 10 dimensions");
         self.expand_dim(dim, 1)
     }
 
@@ -154,14 +175,14 @@ impl GraphTensor {
             Expression::from(1),
             "Only dimensions of size 1 can be squeezed!"
         );
-        let current_dims = self.shape.dims.to_vec();
+        let current_dims = self.legacy_tracker.dims.to_vec();
         self.logical_view = self.graph().logical.apply_movement(
             self.id.index(),
             self.logical_view,
             &current_dims,
             crate::logical_recorder::Movement::RemoveDim { axis },
         );
-        self.shape.remove_dim(axis);
+        self.legacy_tracker.remove_dim(axis);
         self
     }
 
@@ -201,11 +222,11 @@ impl GraphTensor {
         let zero = idx_f32
             .graph()
             .constant_float(0.0)
-            .expand_rhs(idx_f32.shape);
+            .expand_rhs(idx_f32.legacy_tracker);
         let adj = idx_f32
             .graph()
             .constant_float(axis_dim as f32)
-            .expand_rhs(idx_f32.shape);
+            .expand_rhs(idx_f32.legacy_tracker);
         let is_neg = idx_f32.lt(zero).cast(DType::F32);
         let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
 
@@ -229,7 +250,7 @@ impl GraphTensor {
         let stride_tensor = self
             .graph()
             .constant(strides[axis])
-            .expand_rhs(idx_normalized.shape);
+            .expand_rhs(idx_normalized.legacy_tracker);
         let flat_idx = non_axis_flat + idx_normalized * stride_tensor;
 
         self.gather(flat_idx)
@@ -278,11 +299,11 @@ impl GraphTensor {
         let zero = idx_f32
             .graph()
             .constant_float(0.0)
-            .expand_rhs(idx_f32.shape);
+            .expand_rhs(idx_f32.legacy_tracker);
         let adj = idx_f32
             .graph()
             .constant_float(axis_dim as f32)
-            .expand_rhs(idx_f32.shape);
+            .expand_rhs(idx_f32.legacy_tracker);
         let is_neg = idx_f32.lt(zero).cast(DType::F32);
         let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
 
@@ -307,7 +328,7 @@ impl GraphTensor {
         let stride_tensor = self
             .graph()
             .constant(strides[axis])
-            .expand_rhs(idx_normalized.shape);
+            .expand_rhs(idx_normalized.legacy_tracker);
         let flat_dest = non_axis_flat + idx_normalized * stride_tensor;
 
         // Flatten to 1D using materialize + reshape
@@ -322,7 +343,7 @@ impl GraphTensor {
         let data_shape_usize: Vec<usize> =
             data_dims.iter().map(|d| d.to_usize().unwrap()).collect();
         let mut result = output_flat;
-        result.shape = ShapeTracker::new(data_shape_usize);
+        result.legacy_tracker = ShapeTracker::new(data_shape_usize);
 
         result
     }
@@ -375,7 +396,7 @@ impl GraphTensor {
         // Flatten batch dims of indices to [batch_numel, K] using materialize + reshape
         let mut indices_flat = indices;
         if idx_rank > 2 {
-            indices_flat.shape = ShapeTracker::new(vec![batch_numel, k]);
+            indices_flat.legacy_tracker = ShapeTracker::new(vec![batch_numel, k]);
         }
         // indices_flat: [batch_numel, K] or [K] if idx_rank == 1
 
@@ -385,7 +406,7 @@ impl GraphTensor {
             let idx_k = indices_flat.slice_along(k_dim..k_dim + 1, indices_flat.dims().len() - 1);
             let idx_k = idx_k.squeeze(idx_k.dims().len() - 1);
 
-            let stride_tensor = self.graph().constant(stride).expand_rhs(idx_k.shape);
+            let stride_tensor = self.graph().constant(stride).expand_rhs(idx_k.legacy_tracker);
             let contribution = idx_k * stride_tensor;
 
             flat_base = Some(match flat_base {
@@ -412,17 +433,17 @@ impl GraphTensor {
                 for _ in 0..ti {
                     ar_shaped = ar_shaped.expand_dim(0, 1);
                 }
-                ar_shaped.shape.expand(trailing_shape.clone());
+                ar_shaped.legacy_tracker.expand(trailing_shape.clone());
                 // Flatten trailing dims using materialize + reshape
                 let mut ar_flat = ar_shaped;
-                ar_flat.shape = ShapeTracker::new(vec![trailing_numel]);
+                ar_flat.legacy_tracker = ShapeTracker::new(vec![trailing_numel]);
                 // Expand to [batch_numel, trailing_numel]
                 ar_flat = ar_flat.expand_dim(0, batch_numel);
 
                 let stride_tensor = self
                     .graph()
                     .constant(data_strides[d])
-                    .expand_rhs(ar_flat.shape);
+                    .expand_rhs(ar_flat.legacy_tracker);
                 base_expanded += ar_flat * stride_tensor;
             }
             base_expanded
@@ -439,7 +460,7 @@ impl GraphTensor {
 
         // Reshape back to data_shape
         let mut result = output_flat;
-        result.shape = ShapeTracker::new(data_shape);
+        result.legacy_tracker = ShapeTracker::new(data_shape);
 
         result
     }
@@ -455,12 +476,12 @@ impl GraphTensor {
         );
         let id = self.graph().add_op(
             Gather {
-                input_shapes: vec![indexes.shape, self.shape],
+                input_shapes: vec![indexes.legacy_tracker, self.legacy_tracker],
                 ..Default::default()
             },
             &[indexes.id, self.id],
         );
-        GraphTensor::from_id(id, indexes.shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(id, indexes.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Scatter self (src) into dest at flat 1D positions given by indexes.
@@ -480,22 +501,22 @@ impl GraphTensor {
         // `x[idx] = scalar`. Without this, KernelScatter::compile calls
         // flatten_strides(index_shape, src_strides) with mismatched lengths
         // and panics with `assertion `left == right` failed, left: 1 right: 0`.
-        let mut src_strides = self.shape.strides.to_vec();
-        let target_rank = indexes.shape.dims.len();
+        let mut src_strides = self.legacy_tracker.strides.to_vec();
+        let target_rank = indexes.legacy_tracker.dims.len();
         while src_strides.len() < target_rank {
             src_strides.insert(0, Expression::from(0));
         }
         let id = self.graph().add_op(
             Scatter {
-                dest_shape: dest.shape.dims.to_vec(),
-                dest_strides: dest.shape.strides.to_vec(),
-                index_shape: indexes.shape.dims.to_vec(),
-                index_strides: indexes.shape.strides.to_vec(),
+                dest_shape: dest.legacy_tracker.dims.to_vec(),
+                dest_strides: dest.legacy_tracker.strides.to_vec(),
+                index_shape: indexes.legacy_tracker.dims.to_vec(),
+                index_strides: indexes.legacy_tracker.strides.to_vec(),
                 src_strides,
             },
             &[dest.id, indexes.id, self.id],
         );
-        GraphTensor::from_id(id, dest.shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(id, dest.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Extracts sliding local windows from an input tensor.
@@ -510,17 +531,17 @@ impl GraphTensor {
             (kernel.to_shape(), strides.to_shape(), dilation.to_shape());
 
         assert_eq!(
-            self.shape.len(),
+            self.legacy_tracker.len(),
             kernel.len(),
             "Kernel must be same number of dimensions as tensor!"
         );
         assert_eq!(
-            self.shape.len(),
+            self.legacy_tracker.len(),
             strides.len(),
             "Strides must be same number of dimensions as tensor!"
         );
         assert_eq!(
-            self.shape.len(),
+            self.legacy_tracker.len(),
             dilation.len(),
             "Dilation must be same number of dimensions as tensor!"
         );
@@ -556,7 +577,7 @@ impl GraphTensor {
                 strides: strides.to_vec(),
                 dilation: dilation.to_vec(),
                 window_counts: window_counts.clone(),
-                input_shape: self.shape,
+                input_shape: self.legacy_tracker,
             },
             &[self.id],
         );
@@ -632,7 +653,7 @@ impl GraphTensor {
                 crate::hlir::SliceView {
                     starts: starts.clone(),
                     out_dims: new_dims.clone(),
-                    input_shape: self.shape,
+                    input_shape: self.legacy_tracker,
                 },
                 &[self.id],
             );
@@ -666,11 +687,11 @@ impl GraphTensor {
             GraphTensor::from_id(id, ShapeTracker::new(new_dims), self.graph_ref, self.dtype)
         } else {
             // No start slices so no iota needed, just reduce the shape down
-            let mut new_dims = self.shape.dims.to_vec();
+            let mut new_dims = self.legacy_tracker.dims.to_vec();
             for (sh, (_, end)) in new_dims.iter_mut().zip(&ranges) {
                 *sh = sh.min(*end);
             }
-            let current_dims = self.shape.dims.to_vec();
+            let current_dims = self.legacy_tracker.dims.to_vec();
             self.logical_view = self.graph().logical.apply_movement(
                 self.id.index(),
                 self.logical_view,
@@ -679,7 +700,7 @@ impl GraphTensor {
                     new_dims: new_dims.clone(),
                 },
             );
-            for (sh, new_dim) in self.shape.dims.iter_mut().zip(new_dims) {
+            for (sh, new_dim) in self.legacy_tracker.dims.iter_mut().zip(new_dims) {
                 *sh = new_dim;
             }
             self
@@ -703,28 +724,28 @@ impl GraphTensor {
 
     // /// Cut out 'size' elements every 'spacing' elements on a dimension. 'size' must be smaller than the dimension
     // pub fn excise(mut self, spacing: usize, size: usize) -> GraphTensor {
-    //     let n_dims = self.shape.len();
+    //     let n_dims = self.legacy_tracker.len();
     //     // Pad out to a multiple of spacing + size
-    //     let total_size = (self.shape.dims[n_dims - 1] + ((spacing + size) - 1))
+    //     let total_size = (self.legacy_tracker.dims[n_dims - 1] + ((spacing + size) - 1))
     //         / (spacing + size)
     //         * (spacing + size);
-    //     let padding = total_size - self.shape.dims[self.shape.indexes[n_dims - 1]];
-    //     self.shape.padding[self.shape.indexes[n_dims - 1]].1 = padding;
+    //     let padding = total_size - self.legacy_tracker.dims[self.legacy_tracker.indexes[n_dims - 1]];
+    //     self.legacy_tracker.padding[self.legacy_tracker.indexes[n_dims - 1]].1 = padding;
 
     //     self = self.contiguous();
     //     // Expand a new dimension to do the slicing on
     //     let n_rows = total_size / (spacing + size);
-    //     self.shape.expand_dim(n_dims, spacing + size);
+    //     self.legacy_tracker.expand_dim(n_dims, spacing + size);
     //     // self = self.contiguous();
-    //     self.shape.dims[self.shape.indexes[n_dims - 1]] = n_rows;
-    //     self.shape.fake[self.shape.indexes[n_dims]] = false;
+    //     self.legacy_tracker.dims[self.legacy_tracker.indexes[n_dims - 1]] = n_rows;
+    //     self.legacy_tracker.fake[self.legacy_tracker.indexes[n_dims]] = false;
 
     //     // Slice
-    //     self.shape.mask[self.shape.indexes[n_dims]].1 = spacing.into();
+    //     self.legacy_tracker.mask[self.legacy_tracker.indexes[n_dims]].1 = spacing.into();
 
     //     self = self.contiguous();
 
-    //     self.shape.remove_dim(n_dims);
+    //     self.legacy_tracker.remove_dim(n_dims);
     //     self
     // }
 
@@ -734,7 +755,7 @@ impl GraphTensor {
             .logical
             .poison(format!("pad at t{} (recorder Phase B)", self.id.index()));
         let mut padding = padding.to_pad_vec();
-        padding.extend(vec![(0.into(), 0.into()); self.shape.len() - padding.len()]); // Make sure we have a padding per dim
+        padding.extend(vec![(0.into(), 0.into()); self.legacy_tracker.len() - padding.len()]); // Make sure we have a padding per dim
         if padding.iter().all(|(s, e)| *s == 0 && *e == 0) {
             return self;
         }
@@ -755,7 +776,7 @@ impl GraphTensor {
             crate::hlir::ClampView {
                 befores: befores.clone(),
                 afters: afters.clone(),
-                input_shape: self.shape,
+                input_shape: self.legacy_tracker,
             },
             &[self.id],
         );

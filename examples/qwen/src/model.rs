@@ -37,20 +37,16 @@ impl KVCache {
             // KV cache stored bf16 (2 bytes/elem); the scatter writes bf16
             // k_rope/v rows directly.
             k_caches.push(
-                persist(
+                persist_dtyped(
                     cx,
                     format!("kv_cache.{l}.k"),
-                    (N_KV_HEADS, max_seq, HEAD_DIM),
-                )
-                .as_dtype(DType::Bf16),
+                    (N_KV_HEADS, max_seq, HEAD_DIM), DType::Bf16),
             );
             v_caches.push(
-                persist(
+                persist_dtyped(
                     cx,
                     format!("kv_cache.{l}.v"),
-                    (N_KV_HEADS, max_seq, HEAD_DIM),
-                )
-                .as_dtype(DType::Bf16),
+                    (N_KV_HEADS, max_seq, HEAD_DIM), DType::Bf16),
             );
         }
         Self {
@@ -74,8 +70,7 @@ impl Qwen {
             "requested {layers} layers, but model has {LAYERS}"
         );
         Self {
-            embedding: persist(cx, "model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN))
-                .as_dtype(DType::Bf16),
+            embedding: persist_dtyped(cx, "model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN), DType::Bf16),
             layers: (0..layers).map(|l| QwenLayer::init(cx, l)).collect(),
             lm_norm: rms_norm(cx, "model.norm.weight"),
         }
@@ -130,15 +125,13 @@ struct QwenLayer {
 impl QwenLayer {
     fn init(cx: &mut Graph, l: usize) -> Self {
         Self {
-            up: layer_weight(cx, l, "mlp.up_proj", (INTERMEDIATE, HIDDEN)).as_dtype(DType::Bf16),
-            gate: layer_weight(cx, l, "mlp.gate_proj", (INTERMEDIATE, HIDDEN))
-                .as_dtype(DType::Bf16),
-            down: layer_weight(cx, l, "mlp.down_proj", (HIDDEN, INTERMEDIATE))
-                .as_dtype(DType::Bf16),
-            q_proj: layer_weight(cx, l, "self_attn.q_proj", (Q_DIM, HIDDEN)).as_dtype(DType::Bf16),
-            k_proj: layer_weight(cx, l, "self_attn.k_proj", (KV_DIM, HIDDEN)).as_dtype(DType::Bf16),
-            v_proj: layer_weight(cx, l, "self_attn.v_proj", (KV_DIM, HIDDEN)).as_dtype(DType::Bf16),
-            o_proj: layer_weight(cx, l, "self_attn.o_proj", (HIDDEN, Q_DIM)).as_dtype(DType::Bf16),
+            up: layer_weight_dtyped(cx, l, "mlp.up_proj", (INTERMEDIATE, HIDDEN), DType::Bf16),
+            gate: layer_weight_dtyped(cx, l, "mlp.gate_proj", (INTERMEDIATE, HIDDEN), DType::Bf16),
+            down: layer_weight_dtyped(cx, l, "mlp.down_proj", (HIDDEN, INTERMEDIATE), DType::Bf16),
+            q_proj: layer_weight_dtyped(cx, l, "self_attn.q_proj", (Q_DIM, HIDDEN), DType::Bf16),
+            k_proj: layer_weight_dtyped(cx, l, "self_attn.k_proj", (KV_DIM, HIDDEN), DType::Bf16),
+            v_proj: layer_weight_dtyped(cx, l, "self_attn.v_proj", (KV_DIM, HIDDEN), DType::Bf16),
+            o_proj: layer_weight_dtyped(cx, l, "self_attn.o_proj", (HIDDEN, Q_DIM), DType::Bf16),
             q_norm: layer_weight(cx, l, "self_attn.q_norm", HEAD_DIM),
             k_norm: layer_weight(cx, l, "self_attn.k_norm", HEAD_DIM),
             attn_rms: rms_norm(cx, format!("model.layers.{l}.input_layernorm.weight")),
@@ -191,6 +184,15 @@ fn persist(
     cx.named_tensor(name, shape).persist()
 }
 
+fn persist_dtyped(
+    cx: &mut Graph,
+    name: impl ToString,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
+) -> GraphTensor {
+    cx.named_tensor_dtyped(name, shape, dtype).persist()
+}
+
 fn layer_weight(
     cx: &mut Graph,
     layer: usize,
@@ -198,6 +200,16 @@ fn layer_weight(
     shape: impl luminal::prelude::ToShape,
 ) -> GraphTensor {
     persist(cx, format!("model.layers.{layer}.{suffix}.weight"), shape)
+}
+
+fn layer_weight_dtyped(
+    cx: &mut Graph,
+    layer: usize,
+    suffix: &str,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
+) -> GraphTensor {
+    persist_dtyped(cx, format!("model.layers.{layer}.{suffix}.weight"), shape, dtype)
 }
 
 fn rms_norm(cx: &mut Graph, weight_name: impl ToString) -> LayerNorm {
@@ -353,8 +365,8 @@ fn hlir_attention(
     // LUM-545: model invariant `prev + seq <= max_seq`, but the frontend
     // cannot yet propagate expression-bound assertions, so `slice` reports
     // `min(max_seq, p+s)`. Normalize the visible cache axis to `total_seq`.
-    k_full.shape.dims[1] = total_seq;
-    v_full.shape.dims[1] = total_seq;
+    k_full.legacy_tracker_mut().dims[1] = total_seq;
+    v_full.legacy_tracker_mut().dims[1] = total_seq;
 
     // GQA expand: [N_KV_HEADS, total_seq, HEAD_DIM] -> [N_HEADS, total_seq, HEAD_DIM].
     // The trailing `* 1.0` forces contiguous materialization — GQA's broadcast

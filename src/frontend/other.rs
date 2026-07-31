@@ -156,8 +156,8 @@ impl GraphTensor {
         // n_physical_elements, so size by span.
         let id = self
             .graph()
-            .add_op(Cast(self.shape.physical_span(), dtype), &[self.id]);
-        let mut shape = self.shape;
+            .add_op(Cast(self.legacy_tracker.physical_span(), dtype), &[self.id]);
+        let mut shape = self.legacy_tracker;
         shape.element_stride_bits = dtype.bits();
         if dtype == DType::Bool {
             // Their Cast-to-Bool is the != 0 projection — an explicit

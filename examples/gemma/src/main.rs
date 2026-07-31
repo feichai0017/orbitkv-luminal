@@ -65,12 +65,12 @@ fn main() {
 
     // Build graph
     let mut cx = Graph::default();
-    let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
-    let pos_ids = cx.named_tensor("pos_ids", 's').as_dtype(DType::Int);
-    let scatter_idx_t = cx.named_tensor("scatter_idx", 's').as_dtype(DType::Int);
-    let gather_idx_t = cx.named_tensor("gather_idx", 'c').as_dtype(DType::Int);
+    let input = cx.named_tensor_dtyped("input", 's', DType::Int);
+    let pos_ids = cx.named_tensor_dtyped("pos_ids", 's', DType::Int);
+    let scatter_idx_t = cx.named_tensor_dtyped("scatter_idx", 's', DType::Int);
+    let gather_idx_t = cx.named_tensor_dtyped("gather_idx", 'c', DType::Int);
     let seen_mask_t = cx.named_tensor("seen_mask", VOCAB_SIZE);
-    let new_token_t = cx.named_tensor("new_token", 1).as_dtype(DType::Int);
+    let new_token_t = cx.named_tensor_dtyped("new_token", 1, DType::Int);
     let repetition_penalty: f32 = 1.05;
     let kv_cache = KVCache::new(&mut cx, max_seq_len);
     let (token_ids, seen_out, cache_outputs) = Gemma::init(&mut cx).forward_with_sampling(
@@ -129,14 +129,25 @@ fn main() {
     let cache_bytes = cache_bytes(max_seq_len);
     // Persistent state is user-owned, aliased input<->output, registered
     // before compile so the search prices state updates as deployed.
-    let mut persistent_buffers = vec![runtime.alias_state(
-        seen_mask_t,
-        seen_out,
-        VOCAB_SIZE * std::mem::size_of::<f32>(),
-    )];
+    let mut persistent_buffers = vec![{
+        let state = runtime.alloc_state_buffer(VOCAB_SIZE * std::mem::size_of::<f32>());
+        runtime.bind_input_buffer(seen_mask_t, &state);
+        runtime.bind_output_buffer(seen_out, &state);
+        state
+    }];
     for (layer, (k_out, v_out)) in cache_outputs.iter().enumerate() {
-        persistent_buffers.push(runtime.alias_state(kv_cache.k_caches[layer], *k_out, cache_bytes));
-        persistent_buffers.push(runtime.alias_state(kv_cache.v_caches[layer], *v_out, cache_bytes));
+        persistent_buffers.push({
+        let state = runtime.alloc_state_buffer(cache_bytes);
+        runtime.bind_input_buffer(kv_cache.k_caches[layer], &state);
+        runtime.bind_output_buffer(*k_out, &state);
+        state
+    });
+        persistent_buffers.push({
+        let state = runtime.alloc_state_buffer(cache_bytes);
+        runtime.bind_input_buffer(kv_cache.v_caches[layer], &state);
+        runtime.bind_output_buffer(*v_out, &state);
+        state
+    });
     }
 
     println!("Compiling...");

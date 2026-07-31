@@ -22,26 +22,26 @@ use luminal::shape::ShapeTracker;
 /// Mirrors the gather-via-index_expression trick used by [`GraphTensor::output`]
 /// so downstream ops see a clean stride pattern.
 pub fn make_contiguous(t: GraphTensor) -> GraphTensor {
-    if t.shape.is_contiguous() {
+    if t.legacy_tracker_ref().is_contiguous() {
         return t;
     }
     let dims = t.dims();
     let total = dims.iter().copied().reduce(|a, b| a * b).unwrap();
-    let idx_expr = t.shape.index_expression();
+    let idx_expr = t.legacy_tracker_ref().index_expression();
     let idx = t.graph().iota(idx_expr, total);
     let mut gathered = t.gather(idx);
-    gathered.shape = ShapeTracker::new(dims);
+    *gathered.legacy_tracker_mut() = ShapeTracker::new(dims);
     gathered
 }
 
 fn canonicalize_static_shape(mut t: GraphTensor) -> GraphTensor {
-    for dim in &mut t.shape.dims {
+    for dim in &mut t.legacy_tracker_mut().dims {
         *dim = dim
             .to_usize()
             .map(Expression::from)
             .unwrap_or_else(|| dim.simplify());
     }
-    for stride in &mut t.shape.strides {
+    for stride in &mut t.legacy_tracker_mut().strides {
         *stride = stride.simplify();
     }
     t
@@ -868,7 +868,7 @@ impl Detect {
         // (1, reg_max, 4, A) * (1, reg_max, 4, A) -> sum over reg_max -> (1, 4, A)
         let w = self
             .dfl_weight
-            .expand_to_shape_on_axes(dfl_in.shape, &[0usize, 2, 3]);
+            .expand_to_shape_on_axes(dfl_in.dims(), &[0usize, 2, 3]);
         let dfl_out = (dfl_in * w).sum(&[1usize]); // (1, 4, A)
 
         // dist2bbox xywh: lt = dfl[:, :2, :], rb = dfl[:, 2:, :]

@@ -78,7 +78,7 @@ impl<'a> Translator<'a> {
 
         // `scale` kwarg, default 1/sqrt(head_dim).
         let head_dim = query
-            .shape
+            .legacy_tracker_ref()
             .dims
             .last()
             .and_then(|d| d.to_usize())
@@ -90,7 +90,7 @@ impl<'a> Translator<'a> {
 
         // Math form: scores = (Q @ K^T) * scale; + causal_mask; + attn_bias;
         // attn = softmax(scores, dim=-1); out = attn @ V.
-        let q_ndim = query.shape.len();
+        let q_ndim = query.legacy_tracker_ref().len();
         anyhow::ensure!(
             q_ndim >= 2,
             "SDPA: query must have at least 2 dims (got {q_ndim})"
@@ -105,18 +105,18 @@ impl<'a> Translator<'a> {
             .graph
             .constant_float(scale)
             .cast(scores.dtype)
-            .expand_rhs(scores.shape);
+            .expand_rhs(scores.dims());
         let mut scores = scores * scale_t;
 
         if is_causal {
             let s_q = scores
-                .shape
+                .legacy_tracker_ref()
                 .dims
                 .get(q_ndim - 2)
                 .and_then(|d| d.to_usize())
                 .context("SDPA is_causal: S_q must be concrete")?;
             let s_k = scores
-                .shape
+                .legacy_tracker_ref()
                 .dims
                 .get(q_ndim - 1)
                 .and_then(|d| d.to_usize())
@@ -145,7 +145,7 @@ impl<'a> Translator<'a> {
             // keep-mask to an additive offset (-1e9 where false) before adding.
             let mask_offset = if mask.dtype == DType::Bool {
                 let keep = mask.cast(DType::F32);
-                let one = keep.graph().constant_float(1.0).expand_rhs(keep.shape);
+                let one = keep.graph().constant_float(1.0).expand_rhs(keep.dims());
                 (one - keep) * -1e9_f32
             } else {
                 mask

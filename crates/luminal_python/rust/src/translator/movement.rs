@@ -19,15 +19,15 @@ fn normalize_concat_dims(
     skip_dim: Option<usize>,
     sym_ranges: &FxHashMap<char, ExprBounds>,
 ) {
-    for i in 0..lhs.shape.len() {
+    for i in 0..lhs.legacy_tracker_ref().len() {
         if Some(i) == skip_dim {
             continue;
         }
-        let lhs_dim = lhs.shape.dims[i];
-        let rhs_dim = rhs.shape.dims[i];
+        let lhs_dim = lhs.legacy_tracker_ref().dims[i];
+        let rhs_dim = rhs.legacy_tracker_ref().dims[i];
         if let Some(canonical) = canonical_equal_expr(lhs_dim, rhs_dim, sym_ranges) {
-            lhs.shape.dims[i] = canonical;
-            rhs.shape.dims[i] = canonical;
+            lhs.legacy_tracker_mut().dims[i] = canonical;
+            rhs.legacy_tracker_mut().dims[i] = canonical;
         }
     }
 }
@@ -37,32 +37,31 @@ impl<'a> Translator<'a> {
         let a = self.get_input_tensor(node, 0)?;
 
         let shape = if let Ok(target_shape) = self.get_ints_arg(node, 1) {
-            resolve_neg1_dim(&target_shape, &a.shape.dims)
+            resolve_neg1_dim(&target_shape, &a.legacy_tracker_ref().dims)
         } else {
             let exprs = self.get_exprs_arg(node, 1)?;
-            resolve_neg1_dim_exprs(&exprs, &a.shape.dims)
+            resolve_neg1_dim_exprs(&exprs, &a.legacy_tracker_ref().dims)
         };
 
         let has_broadcast = a
-            .shape
+            .legacy_tracker_ref()
             .dims
             .iter()
-            .zip(a.shape.strides.iter())
+            .zip(a.legacy_tracker_ref().strides.iter())
             .any(|(d, s)| s.to_usize() == Some(0) && d.to_usize() != Some(1));
 
-        let a = if has_broadcast || !a.shape.is_contiguous() {
+        let a = if has_broadcast || !a.legacy_tracker_ref().is_contiguous() {
             a + 0.0
         } else {
             a
         };
 
-        let new_shape = ShapeTracker::new(shape);
-        Ok(GraphTensor {
-            id: a.id,
-            graph_ref: a.graph_ref,
-            shape: new_shape,
-            dtype: a.dtype,
-        })
+        // LEGACY tracker replacement via the A2 escape hatch (this
+        // translator's own pipeline; recorder state not maintained here).
+        let mut out = a;
+        *out.legacy_tracker_mut() = ShapeTracker::new(shape);
+        out.logical_view = None;
+        Ok(out)
     }
 
     /// `aten.repeat`: tile the tensor `repeats[d]` times along each dim.
@@ -72,16 +71,16 @@ impl<'a> Translator<'a> {
         let mut t = self.get_input_tensor(node, 0)?;
         let repeats = self.get_ints_arg(node, 1)?;
         anyhow::ensure!(
-            repeats.len() >= t.shape.len(),
+            repeats.len() >= t.legacy_tracker_ref().len(),
             "repeat expects at least as many repeats ({}) as dims ({})",
             repeats.len(),
-            t.shape.len()
+            t.legacy_tracker_ref().len()
         );
         anyhow::ensure!(
             repeats.iter().all(|&r| r >= 1),
             "repeat counts must be >= 1, got {repeats:?}"
         );
-        for _ in 0..(repeats.len() - t.shape.len()) {
+        for _ in 0..(repeats.len() - t.legacy_tracker_ref().len()) {
             t = t.unsqueeze(0);
         }
         Ok(t.repeat(repeats.iter().map(|&r| r as usize).collect::<Vec<_>>()))
@@ -191,7 +190,7 @@ impl<'a> Translator<'a> {
         let dims = self.get_ints_arg(node, 1)?;
         let axes: Vec<usize> = dims
             .iter()
-            .map(|&d| normalize_dim(d, a.shape.len()))
+            .map(|&d| normalize_dim(d, a.legacy_tracker_ref().len()))
             .collect();
         Ok(a.permute(axes))
     }
@@ -205,7 +204,7 @@ impl<'a> Translator<'a> {
                 .enumerate()
                 .map(|(i, &s)| {
                     if s == -1 {
-                        a.shape.dims[i]
+                        a.legacy_tracker_ref().dims[i]
                     } else {
                         Expression::from(s as usize)
                     }
@@ -215,17 +214,17 @@ impl<'a> Translator<'a> {
             self.get_exprs_arg(node, 1)?
                 .into_iter()
                 .enumerate()
-                .map(|(i, e)| if e == neg1_expr { a.shape.dims[i] } else { e })
+                .map(|(i, e)| if e == neg1_expr { a.legacy_tracker_ref().dims[i] } else { e })
                 .collect()
         };
-        a.shape.expand(target_shape);
+        a.legacy_tracker_mut().expand(target_shape);
         Ok(a)
     }
 
     pub(crate) fn translate_slice(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let dim = self.get_int_arg(node, 1).unwrap_or(0);
-        let dim = normalize_dim(dim, a.shape.len());
+        let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
 
         let start: Expression = if node.inputs.len() > 2 {
             self.get_expr_arg(node, 2)
@@ -233,7 +232,7 @@ impl<'a> Translator<'a> {
         } else {
             Expression::from(0usize)
         };
-        let start = normalize_slice_bound(start, a.shape.dims[dim]);
+        let start = normalize_slice_bound(start, a.legacy_tracker_ref().dims[dim]);
 
         if node.inputs.len() <= 3 {
             return Ok(a);
@@ -253,7 +252,7 @@ impl<'a> Translator<'a> {
         }
 
         let end: Expression = self.get_expr_arg(node, 3)?;
-        let end = normalize_slice_bound(end, a.shape.dims[dim]);
+        let end = normalize_slice_bound(end, a.legacy_tracker_ref().dims[dim]);
 
         if let Some(s) = start.to_usize()
             && let Some(e) = end.to_usize()
@@ -276,13 +275,13 @@ impl<'a> Translator<'a> {
     pub(crate) fn translate_select(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let dim = self.get_int_arg(node, 1)?;
-        let dim = normalize_dim(dim, a.shape.len());
+        let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
         let index_raw = self.get_int_arg(node, 2)?;
 
         // Normalize a possibly-negative index. PyTorch accepts indices in
         // [-size, size); negative wraps from the end.
         let index = if index_raw < 0 {
-            let axis_size = a.shape.dims[dim].to_usize().ok_or_else(|| {
+            let axis_size = a.legacy_tracker_ref().dims[dim].to_usize().ok_or_else(|| {
                 anyhow::anyhow!(
                     "select.int: dim {} must be concrete to normalize a negative index",
                     dim
@@ -336,14 +335,14 @@ impl<'a> Translator<'a> {
 
         let tensors: Vec<GraphTensor> = tensors
             .into_iter()
-            .filter(|t| !t.shape.dims.iter().any(|d| d.to_usize() == Some(0)))
+            .filter(|t| !t.legacy_tracker_ref().dims.iter().any(|d| d.to_usize() == Some(0)))
             .collect();
 
         if tensors.is_empty() {
             bail!("cat: all tensor inputs are empty");
         }
 
-        let dim = normalize_dim(dim, tensors[0].shape.len());
+        let dim = normalize_dim(dim, tensors[0].legacy_tracker_ref().len());
         let mut result = tensors[0];
         let sym_ranges = sym_char_ranges(&self.sym_map);
         for t in &tensors[1..] {
@@ -364,8 +363,8 @@ impl<'a> Translator<'a> {
         let weight = self.get_input_tensor(node, 0)?;
         let indices = self.get_input_tensor(node, 1)?;
 
-        let hidden_dim = weight.shape.dims[1];
-        let seq_shape = indices.shape.dims;
+        let hidden_dim = weight.legacy_tracker_ref().dims[1];
+        let seq_shape = indices.legacy_tracker_ref().dims;
 
         let indices_int = indices.cast(DType::Int);
         let ids_expanded = (indices_int * hidden_dim).expand_dim(seq_shape.len(), hidden_dim);
@@ -418,17 +417,17 @@ impl<'a> Translator<'a> {
                     // gather_elements requires indices to have the same rank as data.
                     // PyTorch fancy indexing gives 1D indices that broadcast across other dims.
                     // Add unit leading dims to match rank, then broadcast to output shape.
-                    let src_dims = source.shape.dims;
+                    let src_dims = source.legacy_tracker_ref().dims;
                     let src_rank = src_dims.len();
                     let mut expanded = idx;
-                    for _ in 0..(src_rank - expanded.shape.len()) {
+                    for _ in 0..(src_rank - expanded.legacy_tracker_ref().len()) {
                         expanded = expanded.expand_dim(0, Expression::from(1usize));
                     }
                     // Build target shape: source dims everywhere except the indexed dim
-                    let idx_dim_size = expanded.shape.dims[first_non_none_dim];
+                    let idx_dim_size = expanded.legacy_tracker_ref().dims[first_non_none_dim];
                     let mut target: Vec<Expression> = src_dims.to_vec();
                     target[first_non_none_dim] = idx_dim_size;
-                    expanded.shape.expand(target);
+                    expanded.legacy_tracker_mut().expand(target);
                     return Ok(super::movement_dynamic::pt2_gather_elements(
                         source,
                         expanded,
@@ -445,7 +444,7 @@ impl<'a> Translator<'a> {
 
         let index_names = &index_names;
 
-        let src_shape = source.shape.dims;
+        let src_shape = source.legacy_tracker_ref().dims;
         let n_indexed = index_names.len();
 
         let mut strides: Vec<Expression> = vec![Expression::from(1usize); n_indexed];
@@ -463,7 +462,7 @@ impl<'a> Translator<'a> {
             // for the result, Bool→F32 for the negative mask) per indexed dim.
             let axis_size = src_shape[dim_idx];
             let idx_int = idx_tensor.cast(DType::Int);
-            let zero = self.graph.constant(0).expand_rhs(idx_int.shape);
+            let zero = self.graph.constant(0).expand_rhs(idx_int.dims());
             let is_negative = idx_int.lt(zero).cast(DType::Int);
             let idx_int = idx_int + is_negative * axis_size;
 
@@ -503,7 +502,7 @@ impl<'a> Translator<'a> {
                 remaining_size *= *d;
             }
 
-            let idx_shape = flat_idx.shape.dims;
+            let idx_shape = flat_idx.legacy_tracker_ref().dims;
             let mut expanded_idx = flat_idx * remaining_size;
 
             expanded_idx = expanded_idx.expand_dim(idx_shape.len(), remaining_size);
@@ -528,14 +527,14 @@ impl<'a> Translator<'a> {
     pub(crate) fn translate_gather(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let dim = self.get_int_arg(node, 1)?;
-        let dim = normalize_dim(dim, a.shape.len());
+        let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
         let indices = self.get_input_tensor(node, 2)?;
 
         // PyTorch eager allows torch.gather(rank-1, 0, rank-0) and returns
         // a rank-0 scalar — the only rank-mismatch case eager permits. Our
         // gather_elements requires the index rank to match the source rank,
         // so unsqueeze the rank-0 index to (1,), gather, then squeeze back.
-        let promoted_rank0 = indices.shape.is_empty() && a.shape.len() == 1;
+        let promoted_rank0 = indices.legacy_tracker_ref().is_empty() && a.legacy_tracker_ref().len() == 1;
         let indices = if promoted_rank0 {
             indices.unsqueeze(0)
         } else {
@@ -547,9 +546,9 @@ impl<'a> Translator<'a> {
         // Expression broadcasts the axis size and avoids three Cast nodes
         // (Int→F32 for indices, F32→Int for the result, plus a Bool→F32 for
         // the negative mask) that the previous F32-routed path emitted.
-        let axis_dim = a.shape.dims[dim];
+        let axis_dim = a.legacy_tracker_ref().dims[dim];
         let indices_int = indices.cast(DType::Int);
-        let zero = self.graph.constant(0).expand_rhs(indices_int.shape);
+        let zero = self.graph.constant(0).expand_rhs(indices_int.dims());
         let is_negative = indices_int.lt(zero).cast(DType::Int);
         let normalized = indices_int + is_negative * axis_dim;
 
@@ -564,7 +563,7 @@ impl<'a> Translator<'a> {
     pub(crate) fn translate_scatter_src(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let dim = self.get_int_arg(node, 1)?;
-        let dim = normalize_dim(dim, a.shape.len());
+        let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
         let indices = self.get_input_tensor(node, 2)?;
         let src = self.get_input_tensor(node, 3)?;
         Ok(super::movement_dynamic::pt2_scatter_elements(
@@ -578,7 +577,7 @@ impl<'a> Translator<'a> {
     pub(crate) fn translate_scatter_value(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, SCATTER_INPUT_ARG)?;
         let dim = self.get_int_arg(node, SCATTER_DIM_ARG)?;
-        let dim = normalize_dim(dim, a.shape.len());
+        let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
         let indices = self.get_input_tensor(node, SCATTER_INDEX_ARG)?;
         let value_arg = &node
             .inputs
@@ -594,7 +593,7 @@ impl<'a> Translator<'a> {
         } else {
             bail!("scatter.value: unsupported scalar argument {:?}", value_arg);
         }
-        .expand_rhs(indices.shape);
+        .expand_rhs(indices.dims());
         Ok(super::movement_dynamic::pt2_scatter_elements(
             a,
             indices.cast(DType::Int),
@@ -626,10 +625,10 @@ impl<'a> Translator<'a> {
             };
             let values = self.get_input_tensor(node, 2)?;
             let idx = self.get_tensor(&idx_name)?.cast(DType::Int);
-            if idx.shape.len() != 1 {
+            if idx.legacy_tracker_ref().len() != 1 {
                 bail!(
                     "index_put: only a 1-D tensor index is supported, got rank {}",
-                    idx.shape.len()
+                    idx.legacy_tracker_ref().len()
                 );
             }
             let val_dims = values.dims();
@@ -693,12 +692,12 @@ impl<'a> Translator<'a> {
             //   y = x.clone(); y[mask] = 99   # eager: y == x (no-op)
             // Pre-fix the compiled graph wrote 99 to row 0; this branch
             // ensures the bool-mask path lowers to a where-blend instead.
-            if idx_tensor.dtype == DType::Bool && idx_tensor.shape.dims == a.shape.dims {
+            if idx_tensor.dtype == DType::Bool && idx_tensor.legacy_tracker_ref().dims == a.legacy_tracker_ref().dims {
                 // Broadcast the (often scalar) value tensor to match data shape,
                 // then blend by mask. Cast mask to data's dtype for the
                 // arithmetic so this works for both integer and float data.
                 let mask_f = idx_tensor.cast(a.dtype);
-                let values_b = values.cast(a.dtype).expand_rhs(a.shape);
+                let values_b = values.cast(a.dtype).expand_rhs(a.dims());
                 // where(mask, value, a) as `a + mask*(value - a)`. Saves a mul
                 // and the `1.0` constant compared to the `a*(1 - m) + v*m`
                 // form; works for any numeric dtype without a dedicated cond.
@@ -712,7 +711,7 @@ impl<'a> Translator<'a> {
             // and K is always 1 (number of dims we're indexing into). Always pad
             // a trailing size-1 dim so the rank-1 and rank-N cases share a path.
             let indices = idx_tensor.cast(DType::Int);
-            let new_last = indices.shape.len();
+            let new_last = indices.legacy_tracker_ref().len();
             let indices = indices.expand_dim(new_last, Expression::from(1usize));
             Ok(super::movement_dynamic::pt2_scatter_nd(a, indices, values))
         } else {
@@ -728,7 +727,7 @@ impl<'a> Translator<'a> {
         } else {
             0
         };
-        let dim = normalize_dim(dim, a.shape.len());
+        let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
 
         let output_names: Vec<String> = node
             .outputs

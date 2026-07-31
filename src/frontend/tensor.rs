@@ -20,7 +20,13 @@ use rustc_hash::FxHashMap;
 pub struct GraphTensor {
     pub id: NodeIndex,
     pub graph_ref: *mut Graph,
-    pub shape: ShapeTracker,
+    /// A2 QUARANTINE (purity ruling 2026-07-30): the ShapeTracker is a
+    /// crate-internal TRANSITIONAL detail feeding the legacy HLIR
+    /// emission until M3 Step 4; the public shape surface is `dims()` /
+    /// `rank()`. Strides/contiguity/sizing are the compiler's business
+    /// (views are explicit logical structure; layout is binding
+    /// vocabulary) — no external code may read or write tracker state.
+    pub(crate) legacy_tracker: ShapeTracker,
     pub dtype: DType,
     /// M3 recorder view handle: `None` = "my logical value is the
     /// recorder's value for `id`"; `Some` = a tracker-level view emitted
@@ -46,7 +52,7 @@ impl GraphTensor {
             id,
             graph_ref,
             logical_view: None,
-            shape,
+            legacy_tracker: shape,
             dtype,
         }
     }
@@ -67,7 +73,7 @@ impl GraphTensor {
     /// If the tensor has non-contiguous strides (e.g. from transpose + merge_dims),
     /// inserts a gather to materialize contiguous data before the output node.
     pub fn output(&self) -> GraphTensor {
-        let source = if self.shape.is_contiguous() {
+        let source = if self.legacy_tracker.is_contiguous() {
             *self
         } else {
             // Insert gather to make physically contiguous
@@ -75,7 +81,7 @@ impl GraphTensor {
             let total = dims.iter().copied().reduce(|a, b| a * b).unwrap();
             let idx = self.graph().iota('z', total);
             let mut gathered = self.gather(idx);
-            gathered.shape = ShapeTracker::new(dims);
+            gathered.legacy_tracker = ShapeTracker::new(dims);
             gathered
         };
         self.output_raw(source, false)
@@ -97,7 +103,7 @@ impl GraphTensor {
                 source.id.index()
             ));
         } else {
-            let dims = source.shape.dims.to_vec();
+            let dims = source.legacy_tracker.dims.to_vec();
             self.graph().logical.output(
                 source.id.index(),
                 source.logical_view,
@@ -110,7 +116,7 @@ impl GraphTensor {
 
     /// Required bytes to store this tensor's physical elements. Rounds up to nearest byte.
     pub fn required_total_bytes(&self) -> Expression {
-        self.shape.required_total_bytes()
+        self.legacy_tracker.required_total_bytes()
     }
 
     /// Mark this tensor's storage to persist across executions. Creates a
@@ -124,54 +130,75 @@ impl GraphTensor {
     }
 
     pub fn dims(&self) -> Vec<Expression> {
-        self.shape.dims.to_vec()
+        self.legacy_tracker.dims.to_vec()
+    }
+
+    /// The tensor's rank — the public shape surface is dims()/rank()
+    /// (A2 quarantine; ruling 2026-07-30).
+    pub fn rank(&self) -> usize {
+        self.legacy_tracker.dims.len()
+    }
+
+    /// A2 escape hatch for TRANSITIONAL crates only (the torch-FX
+    /// translator, autograd, legacy examples): named to be greppable
+    /// debt. New code uses dims()/rank() and explicit views — this
+    /// accessor dies with the tracker at M3 Step 4.
+    #[doc(hidden)]
+    pub fn legacy_tracker_ref(&self) -> &ShapeTracker {
+        &self.legacy_tracker
+    }
+
+    /// See [`Self::legacy_tracker_ref`].
+    #[doc(hidden)]
+    pub fn legacy_tracker_mut(&mut self) -> &mut ShapeTracker {
+        &mut self.legacy_tracker
     }
 
     pub fn dims1(&self) -> Expression {
         assert_eq!(
-            self.shape.len(),
+            self.legacy_tracker.len(),
             1,
             "Shape has {} dimensions, tried to get 1",
-            self.shape.len()
+            self.legacy_tracker.len()
         );
         self.dims()[0]
     }
     pub fn dims2(&self) -> (Expression, Expression) {
         assert_eq!(
-            self.shape.len(),
+            self.legacy_tracker.len(),
             2,
             "Shape has {} dimensions, tried to get 2",
-            self.shape.len()
+            self.legacy_tracker.len()
         );
         let dims = self.dims();
         (dims[0], dims[1])
     }
     pub fn dims3(&self) -> (Expression, Expression, Expression) {
         assert_eq!(
-            self.shape.len(),
+            self.legacy_tracker.len(),
             3,
             "Shape has {} dimensions, tried to get 3",
-            self.shape.len()
+            self.legacy_tracker.len()
         );
         let dims = self.dims();
         (dims[0], dims[1], dims[2])
     }
     pub fn dims4(&self) -> (Expression, Expression, Expression, Expression) {
         assert_eq!(
-            self.shape.len(),
+            self.legacy_tracker.len(),
             4,
             "Shape has {} dimensions, tried to get 4",
-            self.shape.len()
+            self.legacy_tracker.len()
         );
         let dims = self.dims();
         (dims[0], dims[1], dims[2], dims[3])
     }
     pub fn dims5(&self) -> (Expression, Expression, Expression, Expression, Expression) {
         assert_eq!(
-            self.shape.len(),
+            self.legacy_tracker.len(),
             5,
             "Shape has {} dimensions, tried to get 5",
-            self.shape.len()
+            self.legacy_tracker.len()
         );
         let dims = self.dims();
         (dims[0], dims[1], dims[2], dims[3], dims[4])
@@ -181,7 +208,7 @@ impl GraphTensor {
 impl Debug for GraphTensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Print the shape
-        let mut shape = self.shape;
+        let mut shape = self.legacy_tracker;
         shape.resolve_dyn_dims(&self.graph().dyn_map);
         let shape = shape.shape_usize();
         writeln!(f, "Tensor with Shape: {shape:?}")

@@ -41,7 +41,7 @@ impl<'a> Translator<'a> {
         let dims_result = self.get_ints_arg(node, 1);
         let (axes, keepdim) = match dims_result {
             Ok(ref dims) if !dims.is_empty() => {
-                let ndim = a.shape.len();
+                let ndim = a.legacy_tracker_ref().len();
                 let axes: Vec<usize> = dims.iter().map(|&d| normalize_dim(d, ndim)).collect();
                 let keepdim = if node.inputs.len() > 2 {
                     self.get_bool_arg(node, 2).unwrap_or(false)
@@ -54,7 +54,7 @@ impl<'a> Translator<'a> {
                 // Full reduce: reduce over every axis, leaving a rank-0 (scalar) tensor.
                 // PyTorch eager returns shape () for `x.sum()` etc., and downstream ops
                 // (e.g. unsqueeze(0).expand(N)) rely on this rank.
-                let ndim = a.shape.len();
+                let ndim = a.legacy_tracker_ref().len();
                 if ndim == 0 {
                     // Already rank-0 — reducing over no axes is a no-op for sum/max/min/prod,
                     // and mean of a scalar is just the scalar.
@@ -142,7 +142,7 @@ impl<'a> Translator<'a> {
             false
         };
 
-        if a.shape.is_empty() {
+        if a.legacy_tracker_ref().is_empty() {
             match dim_opt {
                 None | Some(0) | Some(-1) => {
                     // PyTorch returns scalar index 0 for rank-0 argmax/argmin.
@@ -167,7 +167,7 @@ impl<'a> Translator<'a> {
                 (0usize, flat)
             }
             Some(dim_raw) => {
-                let dim = normalize_dim(dim_raw, a.shape.len());
+                let dim = normalize_dim(dim_raw, a.legacy_tracker_ref().len());
                 (dim, a)
             }
         };

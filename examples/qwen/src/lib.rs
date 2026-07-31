@@ -51,7 +51,7 @@ pub trait QwenRuntime: Runtime<ExecReturn = ()> {
     fn set_i32_data(&mut self, id: NodeIndex, data: Vec<i32>);
     fn set_zeros(&mut self, id: NodeIndex, num_bytes: usize);
     // TODO(aliasing): the CUDA backend now supports user-owned aliased
-    // state buffers (CudaRuntime::alias_state), which replaces the per-step
+    // state buffers (two bind_*_buffer calls sharing one state buffer), which replaces the per-step
     // remove_buffer/set_buffer promote below. This example keeps the legacy
     // promote because it also targets the Metal backend, which has no
     // aliasing API yet.
@@ -142,8 +142,8 @@ where
         .to_vec();
 
     let mut cx = Graph::default();
-    let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
-    let token_ids = cx.named_tensor("token_ids", 's').as_dtype(DType::Int);
+    let input = cx.named_tensor_dtyped("input", 's', DType::Int);
+    let token_ids = cx.named_tensor_dtyped("token_ids", 's', DType::Int);
     let kv_cache = KVCache::new(&mut cx, config.max_seq_len, config.layers);
     let (logits, cache_outputs) =
         Qwen::init(&mut cx, config.layers).forward(input, token_ids, &kv_cache);

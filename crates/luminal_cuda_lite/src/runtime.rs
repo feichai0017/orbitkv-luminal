@@ -771,10 +771,33 @@ impl CudaRuntime {
     }
 
     // alias_state is GONE (ruling 2026-07-30): the in-place
-    // persistent-state idiom is stated with BINDINGS — two bind calls
-    // registering one caller-owned buffer for both slots (the shared-
-    // BufferId boundary pattern; see boundary_scatter, the KV-cache
-    // exemplar). No special API required.
+    // persistent-state idiom is stated with BINDINGS — allocate a state
+    // buffer, then TWO bind calls register it for the input slot and the
+    // output slot (the shared-BufferId boundary pattern; see
+    // boundary_scatter, the KV-cache exemplar).
+
+    /// Allocate a zeroed, caller-held state buffer. Hold it as long as
+    /// the runtime uses tensors bound to it.
+    pub fn alloc_state_buffer(&mut self, bytes: usize) -> CudaSlice<u8> {
+        self.cuda_stream
+            .alloc_zeros::<u8>(bytes)
+            .expect("failed to allocate state buffer")
+    }
+
+    /// BINDING: register `buffer` as the storage for input `id`.
+    pub fn bind_input_buffer(&mut self, id: impl ToId, buffer: &CudaSlice<u8>) {
+        let ptr = buffer.device_ptr(&self.cuda_stream).0;
+        unsafe { self.set_device_ptr(id, ptr, buffer.len()) };
+    }
+
+    /// BINDING: register `buffer` as the storage for output `id`. Binding
+    /// one buffer as both an input and an output states the in-place
+    /// persistent-state intent: in-place candidates write through the
+    /// shared storage, materializing candidates pay a priced copy.
+    pub fn bind_output_buffer(&mut self, id: impl ToId, buffer: &CudaSlice<u8>) {
+        let ptr = buffer.device_ptr(&self.cuda_stream).0;
+        unsafe { self.set_output_device_ptr(id, ptr, buffer.len()) };
+    }
 
 
     pub fn output_is_zero_copy(&self, id: impl ToId) -> bool {

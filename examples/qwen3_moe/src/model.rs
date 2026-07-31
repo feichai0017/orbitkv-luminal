@@ -34,10 +34,10 @@ impl KVCache {
         let mut v_caches = Vec::with_capacity(LAYERS);
         for l in 0..LAYERS {
             k_caches.push(
-                persist(cx, format!("kv_cache.{l}.k"), (max_seq, KV_DIM)).as_dtype(DType::Bf16),
+                persist_dtyped(cx, format!("kv_cache.{l}.k"), (max_seq, KV_DIM), DType::Bf16),
             );
             v_caches.push(
-                persist(cx, format!("kv_cache.{l}.v"), (max_seq, KV_DIM)).as_dtype(DType::Bf16),
+                persist_dtyped(cx, format!("kv_cache.{l}.v"), (max_seq, KV_DIM), DType::Bf16),
             );
         }
         Self { k_caches, v_caches }
@@ -54,11 +54,10 @@ pub struct Qwen3MoE {
 impl Qwen3MoE {
     pub fn init(cx: &mut Graph) -> Self {
         Self {
-            embedding: persist(cx, "model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN))
-                .as_dtype(DType::Bf16),
+            embedding: persist_dtyped(cx, "model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN), DType::Bf16),
             layers: (0..LAYERS).map(|l| Qwen3MoELayer::init(cx, l)).collect(),
             lm_norm: rms_norm(cx, "model.norm.weight"),
-            lm_head: persist(cx, "lm_head.weight", (VOCAB_SIZE, HIDDEN)).as_dtype(DType::Bf16),
+            lm_head: persist_dtyped(cx, "lm_head.weight", (VOCAB_SIZE, HIDDEN), DType::Bf16),
         }
     }
 
@@ -152,10 +151,10 @@ struct QwenMoE {
 impl Qwen3MoELayer {
     fn init(cx: &mut Graph, l: usize) -> Self {
         Self {
-            q_proj: layer_weight(cx, l, "self_attn.q_proj", (Q_DIM, HIDDEN)).as_dtype(DType::Bf16),
-            k_proj: layer_weight(cx, l, "self_attn.k_proj", (KV_DIM, HIDDEN)).as_dtype(DType::Bf16),
-            v_proj: layer_weight(cx, l, "self_attn.v_proj", (KV_DIM, HIDDEN)).as_dtype(DType::Bf16),
-            o_proj: layer_weight(cx, l, "self_attn.o_proj", (HIDDEN, Q_DIM)).as_dtype(DType::Bf16),
+            q_proj: layer_weight_dtyped(cx, l, "self_attn.q_proj", (Q_DIM, HIDDEN), DType::Bf16),
+            k_proj: layer_weight_dtyped(cx, l, "self_attn.k_proj", (KV_DIM, HIDDEN), DType::Bf16),
+            v_proj: layer_weight_dtyped(cx, l, "self_attn.v_proj", (KV_DIM, HIDDEN), DType::Bf16),
+            o_proj: layer_weight_dtyped(cx, l, "self_attn.o_proj", (HIDDEN, Q_DIM), DType::Bf16),
             q_norm: layer_weight(cx, l, "self_attn.q_norm", HEAD_DIM),
             k_norm: layer_weight(cx, l, "self_attn.k_norm", HEAD_DIM),
             attn_rms: rms_norm(cx, format!("model.layers.{l}.input_layernorm.weight")),
@@ -165,20 +164,16 @@ impl Qwen3MoELayer {
             ),
             moe: QwenMoE {
                 router: layer_weight(cx, l, "mlp.gate", (NUM_EXPERTS, HIDDEN)),
-                gate_up_weights: layer_tensor(
+                gate_up_weights: layer_tensor_dtyped(
                     cx,
                     l,
                     "mlp.gate_up_weights",
-                    (NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN),
-                )
-                .as_dtype(DType::Bf16),
-                down_weights: layer_tensor(
+                    (NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN), DType::Bf16),
+                down_weights: layer_tensor_dtyped(
                     cx,
                     l,
                     "mlp.down_weights",
-                    (NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE),
-                )
-                .as_dtype(DType::Bf16),
+                    (NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE), DType::Bf16),
             },
         }
     }
@@ -238,6 +233,15 @@ fn persist(
     cx.named_tensor(name, shape).persist()
 }
 
+fn persist_dtyped(
+    cx: &mut Graph,
+    name: impl ToString,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
+) -> GraphTensor {
+    cx.named_tensor_dtyped(name, shape, dtype).persist()
+}
+
 fn layer_tensor(
     cx: &mut Graph,
     layer: usize,
@@ -247,11 +251,31 @@ fn layer_tensor(
     persist(cx, format!("model.layers.{layer}.{suffix}"), shape)
 }
 
+fn layer_tensor_dtyped(
+    cx: &mut Graph,
+    layer: usize,
+    suffix: &str,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
+) -> GraphTensor {
+    persist_dtyped(cx, format!("model.layers.{layer}.{suffix}"), shape, dtype)
+}
+
 fn layer_weight(
     cx: &mut Graph,
     layer: usize,
     suffix: &str,
     shape: impl luminal::prelude::ToShape,
+) -> GraphTensor {
+    layer_tensor(cx, layer, &format!("{suffix}.weight"), shape)
+}
+
+fn layer_weight_dtyped(
+    cx: &mut Graph,
+    layer: usize,
+    suffix: &str,
+    shape: impl luminal::prelude::ToShape,
+    dtype: DType,
 ) -> GraphTensor {
     layer_tensor(cx, layer, &format!("{suffix}.weight"), shape)
 }
@@ -317,7 +341,7 @@ impl QwenMoE {
 
         // 7. Weighted sum over k experts → [s, H]
         let mut weights_exp = top_k_values.unsqueeze(top_k_values.dims().len()); // [s, k, 1]
-        weights_exp.shape.expand(down_out.dims());
+        weights_exp.legacy_tracker_mut().expand(down_out.dims());
         (down_out * weights_exp).sum(n - 1)
     }
 }

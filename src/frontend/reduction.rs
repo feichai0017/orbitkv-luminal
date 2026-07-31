@@ -4,7 +4,7 @@ use crate::prelude::*;
 impl GraphTensor {
     /// Reduce a dimension of the tensor by summing all elements along that axis.
     pub fn sum(self, axes: impl ToAxes) -> GraphTensor {
-        let (mut shape, mut id) = (self.shape, self.id);
+        let (mut shape, mut id) = (self.legacy_tracker, self.id);
         // Sum reduce each dimension
         let mut axes = axes.to_axes();
         // Recorder operand for the FIRST reduce is self (view and all);
@@ -50,7 +50,7 @@ impl GraphTensor {
 
     /// Reduce a dimension of the tensor by taking the maximum of all elements along that axis.
     pub fn max(self, axes: impl ToAxes) -> GraphTensor {
-        let (mut shape, mut id) = (self.shape, self.id);
+        let (mut shape, mut id) = (self.legacy_tracker, self.id);
         // Max reduce each dimension
         let mut axes = axes.to_axes();
         // Recorder operand for the FIRST reduce is self (view and all);

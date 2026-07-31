@@ -19,7 +19,7 @@ impl Add for GraphTensor {
         );
         let new_id = self.graph().add_op(
             crate::hlir::Add {
-                input_shapes: vec![self.shape, rhs.shape],
+                input_shapes: vec![self.legacy_tracker, rhs.legacy_tracker],
                 ..Default::default()
             },
             &[self.id, rhs.id],
@@ -35,7 +35,7 @@ impl Add for GraphTensor {
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
     }
 }
 
@@ -97,7 +97,7 @@ impl Mul for GraphTensor {
         );
         let new_id = self.graph().add_op(
             crate::hlir::Mul {
-                input_shapes: vec![self.shape, rhs.shape],
+                input_shapes: vec![self.legacy_tracker, rhs.legacy_tracker],
                 ..Default::default()
             },
             &[self.id, rhs.id],
@@ -113,7 +113,7 @@ impl Mul for GraphTensor {
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
     }
 }
 
@@ -173,7 +173,7 @@ impl Rem<GraphTensor> for GraphTensor {
         );
         let new_id = self.graph().add_op(
             Mod {
-                input_shapes: vec![self.shape, rhs.shape],
+                input_shapes: vec![self.legacy_tracker, rhs.legacy_tracker],
                 ..Default::default()
             },
             &[self.id, rhs.id],
@@ -189,7 +189,7 @@ impl Rem<GraphTensor> for GraphTensor {
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
     }
 }
 
@@ -210,7 +210,7 @@ impl Add<f32> for GraphTensor {
             .graph()
             .constant_float(rhs)
             .cast(self.dtype)
-            .expand_rhs(self.shape)
+            .expand_rhs(self.legacy_tracker)
     }
 }
 
@@ -222,7 +222,7 @@ impl<S: Into<Expression>> Add<S> for GraphTensor {
             .graph()
             .constant(rhs)
             .cast(self.dtype)
-            .expand_rhs(self.shape)
+            .expand_rhs(self.legacy_tracker)
     }
 }
 
@@ -234,7 +234,7 @@ impl Sub<f32> for GraphTensor {
             .graph()
             .constant_float(rhs)
             .cast(self.dtype)
-            .expand_rhs(self.shape)
+            .expand_rhs(self.legacy_tracker)
     }
 }
 
@@ -246,7 +246,7 @@ impl<S: Into<Expression>> Sub<S> for GraphTensor {
             .graph()
             .constant(rhs)
             .cast(self.dtype)
-            .expand_rhs(self.shape)
+            .expand_rhs(self.legacy_tracker)
     }
 }
 
@@ -258,7 +258,7 @@ impl Mul<f32> for GraphTensor {
             .graph()
             .constant_float(rhs)
             .cast(self.dtype)
-            .expand_rhs(self.shape)
+            .expand_rhs(self.legacy_tracker)
     }
 }
 
@@ -270,7 +270,7 @@ impl<S: Into<Expression>> Mul<S> for GraphTensor {
             .graph()
             .constant(rhs)
             .cast(self.dtype)
-            .expand_rhs(self.shape)
+            .expand_rhs(self.legacy_tracker)
     }
 }
 
@@ -283,7 +283,7 @@ impl Div<f32> for GraphTensor {
             .graph()
             .constant_float(rhs.recip())
             .cast(self.dtype)
-            .expand_rhs(self.shape)
+            .expand_rhs(self.legacy_tracker)
     }
 }
 
@@ -295,7 +295,7 @@ impl<S: Into<Expression>> Div<S> for GraphTensor {
             .graph()
             .constant(rhs)
             .cast(self.dtype)
-            .expand_rhs(self.shape)
+            .expand_rhs(self.legacy_tracker)
     }
 }
 
@@ -307,7 +307,7 @@ impl Rem<f32> for GraphTensor {
             .graph()
             .constant_float(rhs)
             .cast(self.dtype)
-            .expand_rhs(self.shape)
+            .expand_rhs(self.legacy_tracker)
     }
 }
 
@@ -319,7 +319,7 @@ impl<S: Into<Expression>> Rem<S> for GraphTensor {
             .graph()
             .constant(rhs)
             .cast(self.dtype)
-            .expand_rhs(self.shape)
+            .expand_rhs(self.legacy_tracker)
     }
 }
 
@@ -335,7 +335,7 @@ impl GraphTensor {
         );
         let new_id = self.graph().add_op(
             LessThan {
-                input_shapes: vec![self.shape, rhs.shape],
+                input_shapes: vec![self.legacy_tracker, rhs.legacy_tracker],
                 ..Default::default()
             },
             &[self.id, rhs.id],
@@ -354,7 +354,7 @@ impl GraphTensor {
         // Comparison operations always output Bool
         GraphTensor::from_id(
             new_id,
-            self.shape
+            self.legacy_tracker
                 .contiguous()
                 .with_element_bits(DType::Bool.bits()),
             self.graph_ref,
@@ -414,7 +414,7 @@ impl GraphTensor {
             self.graph()
                 .constant_float(rhs)
                 .cast(self.dtype)
-                .expand_rhs(self.shape),
+                .expand_rhs(self.legacy_tracker),
         )
     }
 
@@ -654,7 +654,7 @@ pub(super) mod tests {
             test_binary_transforms(
                 size,
                 (),
-                |a, b| a % b.expand_rhs(a.shape),
+                |a, b| a % b.expand_rhs(a.legacy_tracker),
                 |a, b| {
                     let lhs = a.to_vec1::<f32>().unwrap();
                     let rhs_scalar = b.to_scalar::<f32>().unwrap();
@@ -688,7 +688,7 @@ pub(super) mod tests {
             test_binary(
                 size,
                 (),
-                |a, b| a.lt(b.expand_rhs(a.shape)).cast(crate::dtype::DType::F32),
+                |a, b| a.lt(b.expand_rhs(a.legacy_tracker)).cast(crate::dtype::DType::F32),
                 |a, b| {
                     let scalar = b.to_scalar::<f32>().unwrap();
                     let lhs = a.to_vec1::<f32>().unwrap();
@@ -823,7 +823,7 @@ pub(super) mod tests {
             |a, b| {
                 // gt() returns Bool, cast to F32 for cond which expects F32
                 let cond = a
-                    .gt(b.graph().constant_float(0.0).expand_rhs(a.shape))
+                    .gt(b.graph().constant_float(0.0).expand_rhs(a.legacy_tracker))
                     .cast(crate::dtype::DType::F32);
                 a.cond(cond, b)
             },

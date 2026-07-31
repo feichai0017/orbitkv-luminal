@@ -89,12 +89,12 @@ fn main() {
         .to_vec();
 
     let mut cx = Graph::default();
-    let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
-    let pos_ids = cx.named_tensor("pos_ids", 's').as_dtype(DType::Int);
+    let input = cx.named_tensor_dtyped("input", 's', DType::Int);
+    let pos_ids = cx.named_tensor_dtyped("pos_ids", 's', DType::Int);
     let seen_mask_t = cx.named_tensor("seen_mask", VOCAB_SIZE);
-    let new_token_t = cx.named_tensor("new_token", 1).as_dtype(DType::Int);
-    let scatter_idx_t = cx.named_tensor("scatter_idx", 's').as_dtype(DType::Int);
-    let gather_idx_t = cx.named_tensor("gather_idx", 'c').as_dtype(DType::Int);
+    let new_token_t = cx.named_tensor_dtyped("new_token", 1, DType::Int);
+    let scatter_idx_t = cx.named_tensor_dtyped("scatter_idx", 's', DType::Int);
+    let gather_idx_t = cx.named_tensor_dtyped("gather_idx", 'c', DType::Int);
     let repetition_penalty: f32 = 1.05;
     let kv_cache = KVCache::new(&mut cx, max_seq_len);
     let (token_ids, seen_out, cache_outputs) = Gemma4MoE::init(&mut cx).forward_with_sampling(

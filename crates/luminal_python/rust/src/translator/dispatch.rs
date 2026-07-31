@@ -93,20 +93,20 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.unsqueeze.default" => {
                 let a = self.get_input_tensor(node, 0)?;
                 let dim = self.get_int_arg(node, 1)?;
-                let dim = normalize_dim(dim, a.shape.len() + 1);
+                let dim = normalize_dim(dim, a.legacy_tracker_ref().len() + 1);
                 a.unsqueeze(dim)
             }
             "torch.ops.aten.squeeze.dims" => {
                 let a = self.get_input_tensor(node, 0)?;
                 let dims = self.get_ints_arg(node, 1)?;
-                let ndim = a.shape.len();
+                let ndim = a.legacy_tracker_ref().len();
                 let mut sorted_dims: Vec<usize> =
                     dims.iter().map(|&d| normalize_dim(d, ndim)).collect();
                 sorted_dims.sort();
                 let mut result = a;
                 let mut offset = 0;
                 for d in sorted_dims {
-                    if result.shape.dims[d - offset].to_usize() == Some(1) {
+                    if result.legacy_tracker_ref().dims[d - offset].to_usize() == Some(1) {
                         result = result.squeeze(d - offset);
                         offset += 1;
                     }
@@ -116,7 +116,7 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.expand.default" => self.translate_expand(node)?,
             "torch.ops.aten.clone.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                if !a.shape.is_contiguous() { a + 0.0 } else { a }
+                if !a.legacy_tracker_ref().is_contiguous() { a + 0.0 } else { a }
             }
             "torch.ops.aten.argsort.default" => self.translate_argsort(node)?,
 
@@ -161,7 +161,7 @@ impl<'a> Translator<'a> {
             "torch.ops.aten._softmax.default" => {
                 let a = self.get_input_tensor(node, 0)?;
                 let dim = self.get_int_arg(node, 1)?;
-                let dim = normalize_dim(dim, a.shape.len());
+                let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
                 a.softmax(dim)
             }
 
@@ -240,7 +240,7 @@ impl<'a> Translator<'a> {
                     .graph
                     .constant_float(val)
                     .cast(a.dtype)
-                    .expand_rhs(a.shape);
+                    .expand_rhs(a.dims());
                 a.eq(scalar)
             }
             "torch.ops.aten.ne.Scalar" => {
@@ -250,7 +250,7 @@ impl<'a> Translator<'a> {
                     .graph
                     .constant_float(val)
                     .cast(a.dtype)
-                    .expand_rhs(a.shape);
+                    .expand_rhs(a.dims());
                 a.ne(scalar)
             }
             "torch.ops.aten.eq.Tensor" => {
@@ -319,11 +319,11 @@ impl<'a> Translator<'a> {
                 // itself. PyTorch eager treats `dim=0` on a 0-d as an identity op,
                 // and the underlying `cumop` indexes `shape.dims[axis]` which would
                 // panic with empty dims.
-                if a.shape.is_empty() {
+                if a.legacy_tracker_ref().is_empty() {
                     a
                 } else {
                     let dim = self.get_int_arg(node, 1)?;
-                    let dim = normalize_dim(dim, a.shape.len());
+                    let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
                     a.cumsum(dim)
                 }
             }
@@ -362,9 +362,9 @@ impl<'a> Translator<'a> {
                         + (-0.284_496_72_f32))
                         + 0.254_829_6_f32);
                 let result_abs =
-                    self.graph.constant_float(1.0).expand_rhs(a.shape) - poly * (x2 * (-1.0)).exp();
+                    self.graph.constant_float(1.0).expand_rhs(a.dims()) - poly * (x2 * (-1.0)).exp();
                 // sign(x) = 2*(x >= 0) - 1
-                let zero = self.graph.constant_float(0.0).expand_rhs(a.shape);
+                let zero = self.graph.constant_float(0.0).expand_rhs(a.dims());
                 let sign = a.ge(zero).cast(DType::F32) * 2.0 - 1.0;
                 result_abs * sign
             }
@@ -374,7 +374,7 @@ impl<'a> Translator<'a> {
             }
             "torch.ops.aten.logical_not.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let one = self.graph.constant_float(1.0).expand_rhs(a.shape);
+                let one = self.graph.constant_float(1.0).expand_rhs(a.dims());
                 (one - a.cast(DType::F32)).cast(DType::Bool)
             }
 
@@ -514,7 +514,7 @@ impl<'a> Translator<'a> {
                     .graph
                     .constant_float(val)
                     .cast(a.dtype)
-                    .expand_rhs(a.shape);
+                    .expand_rhs(a.dims());
                 a % scalar
             }
             // Prod reduction
@@ -544,7 +544,7 @@ impl<'a> Translator<'a> {
             .graph
             .constant_float(val)
             .cast(a.dtype)
-            .expand_rhs(a.shape);
+            .expand_rhs(a.dims());
         Ok(cmp(a, scalar))
     }
 }

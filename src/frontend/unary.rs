@@ -76,7 +76,7 @@ impl GraphTensor {
     pub fn log2(self) -> GraphTensor {
         let new_id = self.graph().add_op(
             crate::hlir::Log2 {
-                input_shape: self.shape,
+                input_shape: self.legacy_tracker,
                 ..Default::default()
             },
             &[self.id],
@@ -89,14 +89,14 @@ impl GraphTensor {
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Base 2 exp
     pub fn exp2(self) -> GraphTensor {
         let new_id = self.graph().add_op(
             crate::hlir::Exp2 {
-                input_shape: self.shape,
+                input_shape: self.legacy_tracker,
                 ..Default::default()
             },
             &[self.id],
@@ -109,7 +109,7 @@ impl GraphTensor {
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Natural exp
@@ -126,7 +126,7 @@ impl GraphTensor {
     pub fn reciprocal(self) -> GraphTensor {
         let new_id = self.graph().add_op(
             crate::hlir::Recip {
-                input_shape: self.shape,
+                input_shape: self.legacy_tracker,
                 ..Default::default()
             },
             &[self.id],
@@ -139,14 +139,14 @@ impl GraphTensor {
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// The sin(x) function
     pub fn sin(self) -> GraphTensor {
         let new_id = self.graph().add_op(
             crate::hlir::Sin {
-                input_shape: self.shape,
+                input_shape: self.legacy_tracker,
                 ..Default::default()
             },
             &[self.id],
@@ -159,7 +159,7 @@ impl GraphTensor {
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// The cos(x) function
@@ -176,7 +176,7 @@ impl GraphTensor {
     pub fn sqrt(self) -> GraphTensor {
         let new_id = self.graph().add_op(
             crate::hlir::Sqrt {
-                input_shape: self.shape,
+                input_shape: self.legacy_tracker,
                 ..Default::default()
             },
             &[self.id],
@@ -189,7 +189,7 @@ impl GraphTensor {
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Scale so std is 1.0
@@ -202,7 +202,7 @@ impl GraphTensor {
             .add(epsilon)
             .sqrt()
             .reciprocal()
-            .expand_to_shape_on_axes(self.shape, axes)
+            .expand_to_shape_on_axes(self.legacy_tracker, axes)
             .mul(self)
     }
 
@@ -210,7 +210,7 @@ impl GraphTensor {
     pub fn mean_norm(self, axes: impl ToAxes) -> GraphTensor {
         self - self
             .mean(axes.to_axes())
-            .expand_to_shape_on_axes(self.shape, axes)
+            .expand_to_shape_on_axes(self.legacy_tracker, axes)
     }
 
     /// Applies a layer norm along an axis
@@ -226,7 +226,7 @@ impl GraphTensor {
         let norm = self.abs().pow(p).sum(axes.to_axes()).pow(1.0 / p);
         self / norm
             .maximum_f32(epsilon)
-            .expand_to_shape_on_axes(self.shape, axes)
+            .expand_to_shape_on_axes(self.legacy_tracker, axes)
     }
 
     /// Applies a softmax function along an axis
@@ -234,11 +234,11 @@ impl GraphTensor {
         let m = self
             - self
                 .max(axes.to_axes())
-                .expand_to_shape_on_axes(self.shape, axes.to_axes());
+                .expand_to_shape_on_axes(self.legacy_tracker, axes.to_axes());
         let exp = m.exp();
         exp / exp
             .sum(axes.to_axes())
-            .expand_to_shape_on_axes(self.shape, axes)
+            .expand_to_shape_on_axes(self.legacy_tracker, axes)
     }
 
     /// Applies a log softmax function along an axis
@@ -246,12 +246,12 @@ impl GraphTensor {
         let m = self
             - self
                 .max(axes.to_axes())
-                .expand_to_shape_on_axes(self.shape, axes.to_axes());
+                .expand_to_shape_on_axes(self.legacy_tracker, axes.to_axes());
         m - m
             .exp()
             .sum(axes.to_axes())
             .log()
-            .expand_to_shape_on_axes(m.shape, axes)
+            .expand_to_shape_on_axes(m.legacy_tracker, axes)
     }
 
     /// Get the indicies of the max elements along an axis
@@ -262,9 +262,9 @@ impl GraphTensor {
             .cast(DType::Int);
         // Create index arange for last dimension
         let r = self.graph().arange(self.dims()[axis]);
-        let axes = (0..self.shape.len()).filter(|i| *i != axis).collect_vec();
+        let axes = (0..self.legacy_tracker.len()).filter(|i| *i != axis).collect_vec();
         // Multiply one-hot by expanded index arange
-        (x_equal * r.expand_to_shape_on_axes(self.shape, axes)).max(axis)
+        (x_equal * r.expand_to_shape_on_axes(self.legacy_tracker, axes)).max(axis)
     }
 
     /// Get the indices of the min elements along an axis
@@ -287,7 +287,7 @@ impl GraphTensor {
             .product::<Expression>();
         let mean = self
             .mean(axes.to_axes())
-            .expand_to_shape_on_axes(self.shape, axes.to_axes());
+            .expand_to_shape_on_axes(self.legacy_tracker, axes.to_axes());
         let centered = self - mean;
         (centered * centered).sum(axes) / (n - correction)
     }
@@ -477,7 +477,7 @@ impl GraphTensor {
         op: impl Fn(GraphTensor, usize) -> GraphTensor,
         pad_elem: f32,
     ) -> Self {
-        let n_dims = self.shape.len();
+        let n_dims = self.legacy_tracker.len();
         for axis in axes.to_axes() {
             // Pad out length
             let mut kernel = vec![1.into(); n_dims];
