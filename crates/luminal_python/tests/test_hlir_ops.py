@@ -2165,6 +2165,24 @@ def test_sdpa_f32_unaffected_by_upcast(device: torch.device):
 # ---- mixed-dtype operand unification ---------------------------------------
 
 
+def test_layer_norm_fp16_outliers(device: torch.device):
+    """LN statistics must be computed in fp32 for low-precision inputs —
+    fp16 stats overflow on outlier activations (x^2 > fp16 max)."""
+    from test_models import LayerNormOutlierModel
+
+    torch.manual_seed(0)
+    model = LayerNormOutlierModel().to(device).half()
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = (torch.randn(1, 8, 64) * 40.0).half().to(device)
+    x[..., 0] = 350.0  # outlier channel: 350^2 overflows fp16
+    expected: torch.Tensor = model(x)
+    actual: torch.Tensor = compiled(x)
+    assert torch.isfinite(actual).all(), "LN produced non-finite output"
+    assert torch.allclose(actual.float(), expected.float(), atol=2e-2), (
+        f"max_diff={torch.max(torch.abs(actual.float() - expected.float())).item():.4f}"
+    )
+
+
 def test_expand_rank_extending(device: torch.device):
     """1-D -> 3-D expand with -1 must resolve source dims right-aligned
     (torch prepends new dims); left-aligned indexing walks off the end."""

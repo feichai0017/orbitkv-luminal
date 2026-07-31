@@ -2497,6 +2497,20 @@ class SdpaGqaModel(torch.nn.Module):
         )
 
 
+class LayerNormOutlierModel(torch.nn.Module):
+    """LayerNorm over fp16 activations with outlier magnitudes (~350, the
+    OPT-family residual-stream profile). torch computes LN statistics in
+    fp32 (opmath); fp16 statistics overflow at |x| > ~256 since x^2
+    exceeds fp16 max (65504)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ln = torch.nn.LayerNorm(64)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.ln(x)
+
+
 class ExpandRankExtendModel(torch.nn.Module):
     """Rank-extending `expand` with `-1`: a 1-D parameter grown to 3-D
     (`class_embedding.expand(B, 1, -1)` — the CLIP vision-tower pattern).
