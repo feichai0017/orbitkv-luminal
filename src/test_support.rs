@@ -2976,51 +2976,50 @@ mod zero_class_probe {
     }
 }
 
-/// Step-4b commissioned study: is the subst-of in-range guard
-/// meaningfully unstable, and what does a shrink-stable replacement
-/// cost? Three guard variants x five scenarios, each a standalone
-/// egglog program (preamble + hand-declared coordinates/maps), run to a
-/// verdict. `cargo test -- x_study_subst_guard --nocapture`.
+/// Deep-dive landing 1/6 regression: the subst-of in-range guard.
+/// LANDED form = smallest-possible-box interval arm + structural
+/// same-extent arm; LEGACY form (reconstructed by reverse surgery) =
+/// entry within the coordinate's CURRENT interval. Five standalone
+/// egglog scenarios, exact verdicts asserted for both forms.
+///
+/// On the two-phase scenarios: pins happen ONCE, pre-run (Austin's
+/// ruling — buckets are separate egglog programs; there is no
+/// operational mid-run pin). The late `(set (upper-bound-of ...))`
+/// models a DERIVED tightening arriving late in saturation, plus
+/// seed-order sensitivity generally: the legacy guard's verdict depends
+/// on WHEN a monotone fact lands; the landed guard's does not. The core
+/// defect is fixpoint-level regardless: legacy admits dyn-extent
+/// entries that are out-of-box under admissible valuations.
 #[cfg(test)]
 mod subst_guard_study {
-    const CURRENT_GUARD: &str = "    (= ?entry_lower (lower-bound-of ?entry))\n    (= ?entry_upper (upper-bound-of ?entry))\n    (= ?coord_lower (lower-bound-of ?expr))\n    (= ?coord_upper (upper-bound-of ?expr))\n    (>= ?entry_lower ?coord_lower)\n    (<= ?entry_upper ?coord_upper)";
+    const LANDED_GUARD: &str = "    (= ?entry_lower (lower-bound-of ?entry))\n    (= ?entry_upper (upper-bound-of ?entry))\n    (>= ?entry_lower (bigint 0))\n    (= ?extent_lower (lower-bound-of ?extent))\n    (<= ?entry_upper (- ?extent_lower (bigint 1)))";
 
-    /// Smallest-possible-box form: entry within [0, lower(extent)-1].
-    const MINBOX_GUARD: &str = "    (= ?entry_lower (lower-bound-of ?entry))\n    (= ?entry_upper (upper-bound-of ?entry))\n    (>= ?entry_lower (bigint 0))\n    (= ?extent_lower (lower-bound-of ?extent))\n    (<= ?entry_upper (- ?extent_lower (bigint 1)))";
+    const LEGACY_GUARD: &str = "    (= ?entry_lower (lower-bound-of ?entry))\n    (= ?entry_upper (upper-bound-of ?entry))\n    (= ?coord_lower (lower-bound-of ?expr))\n    (= ?coord_upper (upper-bound-of ?expr))\n    (>= ?entry_lower ?coord_lower)\n    (<= ?entry_upper ?coord_upper)";
 
-    /// The CoordVar arm's action line — the insertion anchor for the
-    /// structural same-extent arm.
-    const COORDVAR_ARM_ACTION: &str = "  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n)";
-
-    /// Structural arm: an entry that IS a coordinate over the SAME
-    /// extent class is in-box by construction (class-invariant: the
-    /// conclusion depends only on the entry class being equal to a
-    /// coordinate over e, which the spelling witnesses). Shrink-stable:
-    /// class equality never un-happens.
-    const SAME_EXTENT_ARM: &str = "\n(rule\n  (\n    (subst-demand ?expr ?map ?source_shape)\n    (= ?expr (CoordVar ?axis ?extent))\n    (= ?map (IndexMapLit ?entries))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?source_dim (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?extent ?source_dim)\n    (= ?entry (CoordVar ?entry_axis ?entry_extent))\n    (= ?entry_extent ?extent)\n  )\n  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n)\n";
+    /// The structural arm's rule text as landed (comment elided; the
+    /// unique premise pair suffices as the removal anchor).
+    const STRUCTURAL_ARM_ANCHOR: &str = "(rule\n  (\n    (subst-demand ?expr ?map ?source_shape)\n    (= ?expr (CoordVar ?axis ?extent))\n    (= ?map (IndexMapLit ?entries))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?source_dim (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?extent ?source_dim)\n    (= ?entry (CoordVar ?entry_axis ?entry_extent))\n    (= ?entry_extent ?extent)\n  )\n  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n)";
 
     fn variant(text: &str, name: &str) -> String {
         match name {
-            "current" => text.to_string(),
-            "minbox" => {
-                assert!(text.contains(CURRENT_GUARD), "guard text drifted");
-                text.replacen(CURRENT_GUARD, MINBOX_GUARD, 1)
+            "landed" => {
+                assert!(text.contains(LANDED_GUARD), "landed guard text drifted");
+                assert!(
+                    text.contains(STRUCTURAL_ARM_ANCHOR),
+                    "structural arm text drifted"
+                );
+                text.to_string()
             }
-            "structural" => {
-                assert!(text.contains(CURRENT_GUARD), "guard text drifted");
-                let t = text.replacen(CURRENT_GUARD, MINBOX_GUARD, 1);
-                assert!(t.contains(COORDVAR_ARM_ACTION), "arm anchor drifted");
-                t.replacen(
-                    COORDVAR_ARM_ACTION,
-                    &format!("  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n){SAME_EXTENT_ARM}"),
-                    1,
-                )
+            "legacy" => {
+                assert!(text.contains(LANDED_GUARD), "landed guard text drifted");
+                let t = text.replacen(LANDED_GUARD, LEGACY_GUARD, 1);
+                assert!(t.contains(STRUCTURAL_ARM_ANCHOR), "structural arm text drifted");
+                t.replacen(STRUCTURAL_ARM_ANCHOR, "; [study: structural arm removed]", 1)
             }
             other => panic!("unknown variant {other}"),
         }
     }
 
-    /// (name, program tail, what a PASS/FAIL/PANIC means)
     fn scenarios() -> Vec<(&'static str, String)> {
         let sg1_common = "\
 (let sgn (IntVar \"sgn\"))\n\
@@ -3044,11 +3043,8 @@ mod subst_guard_study {
 (subst-demand s4_coord s4_map s4_src)\n\
 (run-schedule (saturate (run)))\n";
         vec![
-            // Did the image fire at seed bounds? (dyn offset entry [5,7] into an [1,8]-extent box)
             ("sg1_admits", format!("{sg1_common}(check (= (subst-of sg_coord sg_map sg_src) sg_entry))\n")),
-            // ...and what happens when decode later pins n = 1?
-            ("sg1_pin", format!("{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (run)))\n")),
-            // Static extents: pad/slice-style entry [1,3] into a [0,3] box.
+            ("sg1_tighten", format!("{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (run)))\n")),
             ("sg2_static", "\
 (let s2_cout (CoordVar 0 (IntLit 3)))\n\
 (let s2_entry (IntAdd s2_cout (IntLit 1)))\n\
@@ -3058,7 +3054,6 @@ mod subst_guard_study {
 (subst-demand s2_coord s2_map s2_src)\n\
 (run-schedule (saturate (run)))\n\
 (check (= (subst-of s2_coord s2_map s2_src) s2_entry))\n".to_string()),
-            // Dyn IDENTITY-SHAPED composition: entry is a coordinate over the SAME dyn extent (a permute).
             ("sg3_identity", "\
 (let s3n (IntVar \"s3n\"))\n\
 (set (lower-bound-of s3n) (bigint 1))\n\
@@ -3070,41 +3065,66 @@ mod subst_guard_study {
 (subst-demand s3_coord s3_map s3_src)\n\
 (run-schedule (saturate (run)))\n\
 (check (= (subst-of s3_coord s3_map s3_src) s3_entry))\n".to_string()),
-            // Dyn constant entry the seeds do NOT justify (n may be 2, entry 5), then pin n = 1.
             ("sg4_admits", format!("{s4}(check (= (subst-of s4_coord s4_map s4_src) s4_entry))\n", s4 = sg4_common)),
-            ("sg4_pin", format!("{s4}(set (upper-bound-of s4n) (bigint 1))\n(run-schedule (saturate (run)))\n", s4 = sg4_common)),
+            ("sg4_tighten", format!("{s4}(set (upper-bound-of s4n) (bigint 1))\n(run-schedule (saturate (run)))\n", s4 = sg4_common)),
         ]
     }
 
-    #[test]
-    fn x_study_subst_guard() {
-        if std::env::var("SGX").is_err() {
-            eprintln!("SGX not set — study inert");
-            return;
+    fn run_verdict(text: &str) -> &'static str {
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        match egraph.parse_and_run_program(None, text) {
+            Ok(_) => "ok",
+            Err(err) => {
+                let e = err.to_string();
+                if e.contains("crossed IntExpr bounds") {
+                    "panic-crossed-bounds"
+                } else if e.contains("distinct integer literals") {
+                    "panic-distinct-literals"
+                } else if e.contains("Check failed") || e.contains("check failed") {
+                    "refused"
+                } else {
+                    "other-error"
+                }
+            }
         }
+    }
+
+    #[test]
+    fn subst_guard_landed_vs_legacy() {
+        // (variant, scenario) -> expected verdict. "refused" = the image
+        // correctly did not fire (fail-closed); the legacy admissions and
+        // detonations are the documented unsoundness.
+        let expected = [
+            ("landed", "sg1_admits", "refused"),
+            ("landed", "sg1_tighten", "ok"),
+            ("landed", "sg2_static", "ok"),
+            ("landed", "sg3_identity", "ok"),
+            ("landed", "sg4_admits", "refused"),
+            ("landed", "sg4_tighten", "ok"),
+            ("legacy", "sg1_admits", "ok"),
+            ("legacy", "sg1_tighten", "panic-crossed-bounds"),
+            ("legacy", "sg2_static", "ok"),
+            ("legacy", "sg3_identity", "ok"),
+            ("legacy", "sg4_admits", "ok"),
+            ("legacy", "sg4_tighten", "panic-crossed-bounds"),
+        ];
         let base = crate::egglog_snippet::assembled_program();
-        for var_name in ["current", "minbox", "structural"] {
+        for var_name in ["landed", "legacy"] {
             let varied = variant(&base, var_name);
             for (scen_name, tail) in scenarios() {
-                let text = format!("{varied}\n{tail}");
-                let mut egraph = crate::egglog_snippet::new_egraph();
-                let verdict = match egraph.parse_and_run_program(None, &text) {
-                    Ok(_) => "OK".to_string(),
-                    Err(err) => {
-                        let e = err.to_string();
-                        if e.contains("crossed IntExpr bounds") {
-                            "PANIC crossed-bounds".into()
-                        } else if e.contains("distinct integer literals") {
-                            "PANIC distinct-literals".into()
-                        } else if e.contains("Check failed") || e.contains("check failed") {
-                            "CHECK-FAILED (image did not fire)".into()
-                        } else {
-                            format!("ERR {}", &e[..e.len().min(90)])
-                        }
-                    }
-                };
-                eprintln!("STUDY {var_name:>10} | {scen_name:<12} | {verdict}");
+                let verdict = run_verdict(&format!("{varied}\n{tail}"));
+                let want = expected
+                    .iter()
+                    .find(|(v, s, _)| *v == var_name && *s == scen_name)
+                    .map(|(_, _, w)| *w)
+                    .unwrap();
+                eprintln!("STUDY {var_name:>7} | {scen_name:<12} | {verdict}");
+                assert_eq!(
+                    verdict, want,
+                    "guard regression: {var_name}/{scen_name} expected {want}, got {verdict}"
+                );
             }
         }
     }
 }
+

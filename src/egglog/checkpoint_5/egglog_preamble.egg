@@ -3638,17 +3638,46 @@
     (= ?source_dim (expr-list-nth-from-end ?source_dims ?axis))
     (= ?extent ?source_dim)
     ; IN-RANGE INSTANTIATION GUARD (the well-definedness condition — see
-    ; the contract above): the entry's proven range must fit inside the
-    ; coordinate's own range, else the substitution is not an
-    ; instantiation of this class's box-true equations and the image
-    ; union would be unsound. Unknown bounds stall the arm: fail-closed,
-    ; house style — strengthen bounds derivation, never weaken this.
+    ; the contract above), SMALLEST-POSSIBLE-BOX form (deep-dive item 1,
+    ; ratified 2026-07-31): the entry must fit the box under EVERY
+    ; admissible valuation, so it is checked against [0, lower(extent)-1]
+    ; — the box's minimum — never against the coordinate's own derived
+    ; interval. The old form (entry within the coordinate's CURRENT
+    ; interval) compared against the box's MAXIMUM: it admitted dyn-extent
+    ; instantiations invalid under admissible valuations, and — being
+    ; gated on an upper bound, which only falls — was not shrink-stable:
+    ; a later legal pin retroactively invalidated already-fired images
+    ; (crossed-bounds detonation; see subst_guard_study). Lower bounds
+    ; only rise, so this premise can never un-happen. Unknown bounds
+    ; stall the arm: fail-closed, house style — strengthen bounds
+    ; derivation, never weaken this.
     (= ?entry_lower (lower-bound-of ?entry))
     (= ?entry_upper (upper-bound-of ?entry))
-    (= ?coord_lower (lower-bound-of ?expr))
-    (= ?coord_upper (upper-bound-of ?expr))
-    (>= ?entry_lower ?coord_lower)
-    (<= ?entry_upper ?coord_upper)
+    (>= ?entry_lower (bigint 0))
+    (= ?extent_lower (lower-bound-of ?extent))
+    (<= ?entry_upper (- ?extent_lower (bigint 1)))
+  )
+  ((set (subst-of ?expr ?map ?source_shape) ?entry))
+)
+; STRUCTURAL IN-RANGE ARM (deep-dive item 1): an entry that IS a
+; coordinate over the SAME extent class is in-box by construction —
+; its values range over [0, extent-1] exactly. This is the legal shape
+; of spelling-matching: the CoordVar spelling is a WITNESS for a
+; class-invariant fact ("this class equals a coordinate over e"), never
+; a per-spelling value source. It carries dyn-dim identity/permute
+; composition, which the interval arm above must conservatively refuse
+; (interval arithmetic cannot see the entry-extent correlation).
+(rule
+  (
+    (subst-demand ?expr ?map ?source_shape)
+    (= ?expr (CoordVar ?axis ?extent))
+    (= ?map (IndexMapLit ?entries))
+    (= ?entry (expr-list-nth-from-end ?entries ?axis))
+    (= ?source_shape (ShapeLit ?source_dims))
+    (= ?source_dim (expr-list-nth-from-end ?source_dims ?axis))
+    (= ?extent ?source_dim)
+    (= ?entry (CoordVar ?entry_axis ?entry_extent))
+    (= ?entry_extent ?extent)
   )
   ((set (subst-of ?expr ?map ?source_shape) ?entry))
 )
