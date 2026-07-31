@@ -2692,8 +2692,8 @@ mod stage4b_probes {
     ///    extent unions with IntLit 0) breaks `coeff-of`'s :no-merge
     ///    argument on degenerate axes (on domain {0}, c->c and c->0 are
     ///    equal functions with coefficients 1 vs 0 — both valid strides).
-    ///    A lower-bound>=2 gate on the coeff-1 rule is applied in the
-    ///    preamble (flagged AWAITING RATIFICATION).
+    ///    (An extent>=2 gate was trialed and REVERTED — Austin's ruling
+    ///    2026-07-31: fix the root cause, not the symptom.)
     /// 2. With that gate, the same repro still panics `const-part-of`
     ///    with 0 vs 32 (the f32 bit width) — a REAL unsound union: the
     ///    collapse feeds CoordVar into the global zero class, and
@@ -2972,6 +2972,139 @@ mod zero_class_probe {
                 dump_zero_class(&egraph);
             }
             Err(err) => eprintln!("RUN ERR: {err}"),
+        }
+    }
+}
+
+/// Step-4b commissioned study: is the subst-of in-range guard
+/// meaningfully unstable, and what does a shrink-stable replacement
+/// cost? Three guard variants x five scenarios, each a standalone
+/// egglog program (preamble + hand-declared coordinates/maps), run to a
+/// verdict. `cargo test -- x_study_subst_guard --nocapture`.
+#[cfg(test)]
+mod subst_guard_study {
+    const CURRENT_GUARD: &str = "    (= ?entry_lower (lower-bound-of ?entry))\n    (= ?entry_upper (upper-bound-of ?entry))\n    (= ?coord_lower (lower-bound-of ?expr))\n    (= ?coord_upper (upper-bound-of ?expr))\n    (>= ?entry_lower ?coord_lower)\n    (<= ?entry_upper ?coord_upper)";
+
+    /// Smallest-possible-box form: entry within [0, lower(extent)-1].
+    const MINBOX_GUARD: &str = "    (= ?entry_lower (lower-bound-of ?entry))\n    (= ?entry_upper (upper-bound-of ?entry))\n    (>= ?entry_lower (bigint 0))\n    (= ?extent_lower (lower-bound-of ?extent))\n    (<= ?entry_upper (- ?extent_lower (bigint 1)))";
+
+    /// The CoordVar arm's action line — the insertion anchor for the
+    /// structural same-extent arm.
+    const COORDVAR_ARM_ACTION: &str = "  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n)";
+
+    /// Structural arm: an entry that IS a coordinate over the SAME
+    /// extent class is in-box by construction (class-invariant: the
+    /// conclusion depends only on the entry class being equal to a
+    /// coordinate over e, which the spelling witnesses). Shrink-stable:
+    /// class equality never un-happens.
+    const SAME_EXTENT_ARM: &str = "\n(rule\n  (\n    (subst-demand ?expr ?map ?source_shape)\n    (= ?expr (CoordVar ?axis ?extent))\n    (= ?map (IndexMapLit ?entries))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?source_dim (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?extent ?source_dim)\n    (= ?entry (CoordVar ?entry_axis ?entry_extent))\n    (= ?entry_extent ?extent)\n  )\n  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n)\n";
+
+    fn variant(text: &str, name: &str) -> String {
+        match name {
+            "current" => text.to_string(),
+            "minbox" => {
+                assert!(text.contains(CURRENT_GUARD), "guard text drifted");
+                text.replacen(CURRENT_GUARD, MINBOX_GUARD, 1)
+            }
+            "structural" => {
+                assert!(text.contains(CURRENT_GUARD), "guard text drifted");
+                let t = text.replacen(CURRENT_GUARD, MINBOX_GUARD, 1);
+                assert!(t.contains(COORDVAR_ARM_ACTION), "arm anchor drifted");
+                t.replacen(
+                    COORDVAR_ARM_ACTION,
+                    &format!("  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n){SAME_EXTENT_ARM}"),
+                    1,
+                )
+            }
+            other => panic!("unknown variant {other}"),
+        }
+    }
+
+    /// (name, program tail, what a PASS/FAIL/PANIC means)
+    fn scenarios() -> Vec<(&'static str, String)> {
+        let sg1_common = "\
+(let sgn (IntVar \"sgn\"))\n\
+(set (lower-bound-of sgn) (bigint 1))\n\
+(set (upper-bound-of sgn) (bigint 8))\n\
+(let sg_cout (CoordVar 0 (IntLit 3)))\n\
+(let sg_entry (IntAdd sg_cout (IntLit 5)))\n\
+(let sg_src (ShapeLit (IntExprCons sgn (IntExprNil))))\n\
+(let sg_map (IndexMapLit (IntExprCons sg_entry (IntExprNil))))\n\
+(let sg_coord (CoordVar 0 sgn))\n\
+(subst-demand sg_coord sg_map sg_src)\n\
+(run-schedule (saturate (run)))\n";
+        let sg4_common = "\
+(let s4n (IntVar \"s4n\"))\n\
+(set (lower-bound-of s4n) (bigint 1))\n\
+(set (upper-bound-of s4n) (bigint 8))\n\
+(let s4_entry (IntLit 5))\n\
+(let s4_src (ShapeLit (IntExprCons s4n (IntExprNil))))\n\
+(let s4_map (IndexMapLit (IntExprCons s4_entry (IntExprNil))))\n\
+(let s4_coord (CoordVar 0 s4n))\n\
+(subst-demand s4_coord s4_map s4_src)\n\
+(run-schedule (saturate (run)))\n";
+        vec![
+            // Did the image fire at seed bounds? (dyn offset entry [5,7] into an [1,8]-extent box)
+            ("sg1_admits", format!("{sg1_common}(check (= (subst-of sg_coord sg_map sg_src) sg_entry))\n")),
+            // ...and what happens when decode later pins n = 1?
+            ("sg1_pin", format!("{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (run)))\n")),
+            // Static extents: pad/slice-style entry [1,3] into a [0,3] box.
+            ("sg2_static", "\
+(let s2_cout (CoordVar 0 (IntLit 3)))\n\
+(let s2_entry (IntAdd s2_cout (IntLit 1)))\n\
+(let s2_src (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))\n\
+(let s2_map (IndexMapLit (IntExprCons s2_entry (IntExprNil))))\n\
+(let s2_coord (CoordVar 0 (IntLit 4)))\n\
+(subst-demand s2_coord s2_map s2_src)\n\
+(run-schedule (saturate (run)))\n\
+(check (= (subst-of s2_coord s2_map s2_src) s2_entry))\n".to_string()),
+            // Dyn IDENTITY-SHAPED composition: entry is a coordinate over the SAME dyn extent (a permute).
+            ("sg3_identity", "\
+(let s3n (IntVar \"s3n\"))\n\
+(set (lower-bound-of s3n) (bigint 1))\n\
+(set (upper-bound-of s3n) (bigint 8))\n\
+(let s3_entry (CoordVar 1 s3n))\n\
+(let s3_src (ShapeLit (IntExprCons s3n (IntExprNil))))\n\
+(let s3_map (IndexMapLit (IntExprCons s3_entry (IntExprNil))))\n\
+(let s3_coord (CoordVar 0 s3n))\n\
+(subst-demand s3_coord s3_map s3_src)\n\
+(run-schedule (saturate (run)))\n\
+(check (= (subst-of s3_coord s3_map s3_src) s3_entry))\n".to_string()),
+            // Dyn constant entry the seeds do NOT justify (n may be 2, entry 5), then pin n = 1.
+            ("sg4_admits", format!("{s4}(check (= (subst-of s4_coord s4_map s4_src) s4_entry))\n", s4 = sg4_common)),
+            ("sg4_pin", format!("{s4}(set (upper-bound-of s4n) (bigint 1))\n(run-schedule (saturate (run)))\n", s4 = sg4_common)),
+        ]
+    }
+
+    #[test]
+    fn x_study_subst_guard() {
+        if std::env::var("SGX").is_err() {
+            eprintln!("SGX not set — study inert");
+            return;
+        }
+        let base = crate::egglog_snippet::assembled_program();
+        for var_name in ["current", "minbox", "structural"] {
+            let varied = variant(&base, var_name);
+            for (scen_name, tail) in scenarios() {
+                let text = format!("{varied}\n{tail}");
+                let mut egraph = crate::egglog_snippet::new_egraph();
+                let verdict = match egraph.parse_and_run_program(None, &text) {
+                    Ok(_) => "OK".to_string(),
+                    Err(err) => {
+                        let e = err.to_string();
+                        if e.contains("crossed IntExpr bounds") {
+                            "PANIC crossed-bounds".into()
+                        } else if e.contains("distinct integer literals") {
+                            "PANIC distinct-literals".into()
+                        } else if e.contains("Check failed") || e.contains("check failed") {
+                            "CHECK-FAILED (image did not fire)".into()
+                        } else {
+                            format!("ERR {}", &e[..e.len().min(90)])
+                        }
+                    }
+                };
+                eprintln!("STUDY {var_name:>10} | {scen_name:<12} | {verdict}");
+            }
         }
     }
 }
