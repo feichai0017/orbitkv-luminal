@@ -20,7 +20,6 @@ pub mod bufferize;
 pub mod dps;
 pub mod egglog_snippet;
 pub mod extractor;
-pub mod hlir_to_logical;
 pub mod layout_ir;
 pub mod logical_op;
 pub mod implementation_search;

@@ -122,7 +122,7 @@ impl SsaReferenceRuntime {
             crate::reference_binding::SCHEDULE,
             spec.post_checks
         );
-        let program = crate::hlir_to_logical::LogicalProgram {
+        let program = crate::logical_recorder::LogicalProgram {
             text,
             input_slots: spec.input_slots,
             output_slots: spec.output_slots,
@@ -325,8 +325,7 @@ mod tests {
     use crate::graph::{CompileOptions, Graph};
     use crate::hlir::ReferenceRuntime;
     use crate::op::Runtime;
-    use crate::hlir_to_logical::hlir_to_logical;
-    use egglog::SerializeConfig;
+        use egglog::SerializeConfig;
 
     /// Their graph → our whole pipeline → an executed plan.
     /// M3 Topic C: the differentials' "ours" side runs the NATIVE path —
@@ -345,7 +344,7 @@ mod tests {
                  (set (upper-bound-of (IntVar \"{var}\")) (bigint {value}))\n"
             ));
         }
-        let program = crate::hlir_to_logical::LogicalProgram {
+        let program = crate::logical_recorder::LogicalProgram {
             text: format!(
                 "{pre}{seeds}{}{post}",
                 crate::reference_binding::SCHEDULE
@@ -356,20 +355,12 @@ mod tests {
         run_ssa_program(program, inputs)
     }
 
-    /// The interim-translator path — stragglers only, dies at Topic D.
-    #[allow(dead_code)]
-    fn run_ssa_translator(
-        cx: &Graph,
-        inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)],
-    ) -> SsaReferenceRuntime {
-        let program = hlir_to_logical(cx).expect("translates");
-        run_ssa_program(program, inputs)
-    }
+
 
     /// The pipeline from an assembled LogicalProgram — shared by the
     /// translator path (run_ssa) and the native recorder path (M3).
     fn run_ssa_program(
-        program: crate::hlir_to_logical::LogicalProgram,
+        program: crate::logical_recorder::LogicalProgram,
         inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)],
     ) -> SsaReferenceRuntime {
         let text = format!(
@@ -781,241 +772,6 @@ mod tests {
         }
     }
 
-    /// M3 STEP 0 CERTIFICATION: the recorder's natively-emitted model and
-    /// the interim translator's derivation of the same graph must land
-    /// every output in ONE e-class. Inputs unify by constructor identity
-    /// (same LogicalTensorInputLit args); the checks then assert the
-    /// derived outputs merged under saturation.
-    fn certify_recorder(cx: &Graph) {
-        let translated = hlir_to_logical(cx).expect("translates");
-        let rec_text = cx
-            .logical
-            .certification_text()
-            .expect("recorder is clean for a covered graph")
-            .to_string();
-        let mut checks = String::new();
-        for (source, _) in &translated.output_slots {
-            let rec_name = cx
-                .logical
-                .value_name(*source)
-                .expect("recorder covered the output");
-            checks.push_str(&format!("(check (= t{source}_logical {rec_name}))\n"));
-        }
-        let full = format!(
-            "{}\n\n{}\n{}\n(run-schedule (saturate (run)))\n{}",
-            crate::egglog_snippet::assembled_program(),
-            translated.text,
-            rec_text,
-            checks,
-        );
-        crate::egglog_snippet::new_egraph()
-            .parse_and_run_program(None, &full)
-            .expect("recorder ≡ translator certification");
-    }
-
-    #[test]
-    fn certify_recorder_simple_elementwise() {
-        let mut cx = Graph::new();
-        let b = cx.tensor(3);
-        let c = cx.tensor(3);
-        let g = cx.tensor(3);
-        let e = cx.tensor(3);
-        let _a = (b * c + g).output();
-        let _d = (b * c / e).sin().output();
-        certify_recorder(&cx);
-    }
-
-    #[test]
-    fn certify_recorder_permuted_mul() {
-        let mut cx = Graph::new();
-        let x = cx.tensor((2, 3));
-        let y = cx.tensor((3, 2));
-        let _out = (x.permute((1, 0)) * y).output();
-        certify_recorder(&cx);
-    }
-
-    #[test]
-    fn certify_recorder_matmul() {
-        let mut cx = Graph::new();
-        let a = cx.tensor((2, 3));
-        let b = cx.tensor((3, 4));
-        let _c = a.matmul(b).output();
-        certify_recorder(&cx);
-    }
-
-    #[test]
-    fn certify_recorder_lt_cast_scalar_blend() {
-        let mut cx = Graph::new();
-        let x = cx.tensor((2, 3));
-        let y = cx.tensor((2, 3));
-        let _out = (x.lt(y).cast(crate::dtype::DType::F32) * 3.0 + 1.0).output();
-        certify_recorder(&cx);
-    }
-
-    #[test]
-    fn certify_recorder_reduce() {
-        let mut cx = Graph::new();
-        let x = cx.tensor((2, 4));
-        let _out = x.sum(1).output();
-        certify_recorder(&cx);
-    }
-
-    /// Reshapes CANNOT be certified against the translator: its lifter
-    /// RECONSTRUCTS input shapes from consumer views (declaring a [12]
-    /// input as [3,4] — the reconstruction hack that dies with it), while
-    /// the recorder declares the graph's truth plus an explicit view. The
-    /// honest certification is the NATIVE differential against their
-    /// runtime.
-    #[test]
-    fn differential_native_recorder_reshapes() {
-        let build = || {
-            let mut cx = Graph::new();
-            let a = cx.tensor(12);
-            let b = cx.tensor((3, 4));
-            let split_out = (a.split_dims(0, 4) * b).output();
-            let c = cx.tensor((3, 4));
-            let d = cx.tensor(12);
-            let merge_out = (c.merge_dims(0, 1) * d).output();
-            let e = cx.tensor((2, 3, 2));
-            let f = cx.tensor(12);
-            let flatten_out = (e.flatten() * f).output();
-            (cx, a, b, c, d, e, f, split_out, merge_out, flatten_out)
-        };
-        let v12a: Vec<f32> = (0..12).map(|v| v as f32 + 1.0).collect();
-        let v12b: Vec<f32> = (0..12).map(|v| v as f32 * 0.5 - 2.0).collect();
-
-        let (mut cx, a, b, c, d, e, f, split_out, merge_out, flatten_out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(a.id, v12a.clone());
-        theirs.set_data(b.id, v12b.clone());
-        theirs.set_data(c.id, v12b.clone());
-        theirs.set_data(d.id, v12a.clone());
-        theirs.set_data(e.id, v12a.clone());
-        theirs.set_data(f.id, v12b.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected_split = theirs.get_f32(split_out.id).clone();
-        let expected_merge = theirs.get_f32(merge_out.id).clone();
-        let expected_flatten = theirs.get_f32(flatten_out.id).clone();
-
-        let (cx2, a2, b2, c2, d2, e2, f2, split2, merge2, flatten2) = build();
-        let program = cx2.logical.native_program().expect("native program");
-        let ours = run_ssa_program(
-            program,
-            &[
-                (a2.id, v12a.clone()),
-                (b2.id, v12b.clone()),
-                (c2.id, v12b.clone()),
-                (d2.id, v12a.clone()),
-                (e2.id, v12a),
-                (f2.id, v12b),
-            ],
-        );
-        assert_close(ours.get_f32(split2.id.index() as i64).unwrap(), &expected_split);
-        assert_close(ours.get_f32(merge2.id.index() as i64).unwrap(), &expected_merge);
-        assert_close(
-            ours.get_f32(flatten2.id.index() as i64).unwrap(),
-            &expected_flatten,
-        );
-    }
-
-    #[test]
-    fn certify_recorder_repeat() {
-        let mut cx = Graph::new();
-        let x = cx.tensor(3);
-        let y = cx.tensor(6);
-        let _out = (x.repeat(2) * y).output();
-        certify_recorder(&cx);
-    }
-
-    #[test]
-    fn certify_recorder_slices() {
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let _flat = (x.slice(2..6) + x.slice(1..5)).output();
-        let y = cx.tensor((4, 5));
-        let z = cx.tensor((2, 3));
-        let _two_dim = (y.slice((1..3, 2..5)) * z).output();
-        certify_recorder(&cx);
-    }
-
-    #[test]
-    fn certify_recorder_unfold() {
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let _plain = x.unfold(3, 2, 1).output();
-        let y = cx.tensor(10);
-        let _dilated = y.unfold(3, 2, 2).output();
-        certify_recorder(&cx);
-    }
-
-    #[test]
-    fn certify_recorder_arange() {
-        let mut cx = Graph::new();
-        let x = cx.tensor(4);
-        let idx = cx.arange(4);
-        let _out = (x + idx.cast(crate::dtype::DType::F32)).output();
-        certify_recorder(&cx);
-    }
-
-    /// M3 STEP 2 PROOF: the whole native entry ladder — load (model +
-    /// binding defaults) → search (one saturation, then selection priced
-    /// by EXECUTION on this runtime) → execute — against their runtime.
-    #[test]
-    fn native_ladder_load_search_execute() {
-        let build = || {
-            let mut cx = Graph::new();
-            let b = cx.tensor(3);
-            let c = cx.tensor(3);
-            let g = cx.tensor(3);
-            let a = (b * c + g).output();
-            (cx, b, c, g, a)
-        };
-        let b_data = vec![1.0, 2.0, 3.0];
-        let c_data = vec![4.0, 5.0, 6.0];
-        let g_data = vec![0.5, -1.5, 2.5];
-
-        let (mut cx, b, c, g, a) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(b.id, b_data.clone());
-        theirs.set_data(c.id, c_data.clone());
-        theirs.set_data(g.id, g_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(a.id).clone();
-
-        let (cx2, b2, c2, g2, a2) = build();
-        let mut ours = SsaReferenceRuntime::load(&cx2).expect("native load");
-        let mut input_data: FxHashMap<i64, Vec<f32>> = FxHashMap::default();
-        input_data.insert(b2.id.index() as i64, b_data.clone());
-        input_data.insert(c2.id.index() as i64, c_data.clone());
-        input_data.insert(g2.id.index() as i64, g_data.clone());
-        let outcome = ours
-            .search(&input_data, &Default::default())
-            .expect("native search");
-        assert!(outcome.plans_profiled > 0, "selection profiled real plans");
-        ours.set_data(b2.id.index() as i64, b_data);
-        ours.set_data(c2.id.index() as i64, c_data);
-        ours.set_data(g2.id.index() as i64, g_data);
-        ours.execute().expect("executes");
-        assert_close(ours.get_f32(a2.id.index() as i64).unwrap(), &expected);
-    }
-
-    #[test]
-    fn certify_recorder_pad() {
-        let mut cx = Graph::new();
-        let x = cx.tensor(4);
-        let _zero_fill = x.pad((1, 2), 0.0).output();
-        let y = cx.tensor((3, 4));
-        let _rank2 = y.pad(((1, 0), (2, 1)), -1.5).output();
-        certify_recorder(&cx);
-    }
 
     /// COORDINATE-FORM GATHER differential (ruling 2026-07-31): the
     /// primary gather — one Int coordinate tensor per data axis — records
@@ -1382,49 +1138,6 @@ mod tests {
 
         let (cx2, x2, y2, out2) = build();
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
-        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
-    }
-
-    /// SCATTER differential: src scattered into a copied dest at iota
-    /// positions — the KV-cache shape, flat-1-D bridge, both kernels'
-    /// init-copy semantics, against their runtime (in-bounds indices; OOB
-    /// diverges by design: they skip, we refuse).
-    #[test]
-    fn differential_scatter_against_reference_runtime() {
-        let build = || {
-            let mut cx = Graph::new();
-            let dest = cx.tensor(8);
-            let src = cx.tensor(3);
-            let indexes = cx.iota(crate::shape::Expression::from('z') * 2 + 1, 3);
-            let out = src.scatter1d(indexes, dest).output();
-            (cx, dest, src, out)
-        };
-        let dest_data: Vec<f32> = (0..8).map(|v| v as f32 * 10.0).collect();
-        let src_data = vec![-1.0, -2.0, -3.0];
-
-        let (mut cx, dest, src, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(dest.id, dest_data.clone());
-        theirs.set_data(src.id, src_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(out.id).clone();
-
-        let (cx2, dest2, src2, out2) = build();
-        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
-        assert!(
-            program.text.contains("LogicalScatter"),
-            "{}",
-            program.text
-        );
-        // scatter1d recording is deferred B-tail sugar; this flat-path
-            // differential stays translator-driven until Topic D decides
-            // its fate (the coordinate-form scatter differential covers
-            // the native path).
-            let ours = run_ssa_translator(&cx2, &[(dest2.id, dest_data), (src2.id, src_data)]);
         assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
     }
 

@@ -24,7 +24,7 @@ use rustc_hash::FxHashMap;
 
 use crate::bufferize::BufferIrGraph;
 use crate::extractor::{self, Genome};
-use crate::hlir_to_logical::LogicalProgram;
+use crate::logical_recorder::LogicalProgram;
 use crate::ssa_reference::SsaReferenceRuntime;
 
 #[derive(Debug, Clone)]
@@ -249,7 +249,7 @@ pub fn bucketed_search_implementations(
         }
         text
     };
-    let assemble = |seeds: &BTreeMap<char, (u64, u64)>| crate::hlir_to_logical::LogicalProgram {
+    let assemble = |seeds: &BTreeMap<char, (u64, u64)>| crate::logical_recorder::LogicalProgram {
         text: format!(
             "{pre}{}{}{post}",
             seeds_text(seeds),
@@ -345,8 +345,7 @@ mod tests {
     use super::*;
     use crate::graph::{CompileOptions, Graph};
     use crate::hlir::ReferenceRuntime;
-    use crate::hlir_to_logical::hlir_to_logical;
-    use crate::op::Runtime;
+        use crate::op::Runtime;
     use egglog::SerializeConfig;
 
     /// A REAL selection space (x+y and x*y from shared inputs offers the
@@ -381,7 +380,7 @@ mod tests {
 
         // Our search.
         let (cx2, x2, y2, a2, m2) = build();
-        let program = hlir_to_logical(&cx2).expect("translates");
+        let program = cx2.logical.native_program().expect("native program");
         let text = format!(
             "{}\n\n{}",
             crate::egglog_snippet::assembled_program(),

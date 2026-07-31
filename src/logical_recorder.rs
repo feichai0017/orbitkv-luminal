@@ -24,6 +24,7 @@
 
 use crate::dtype::DType;
 use crate::shape::{Expression, Term};
+use anyhow::{anyhow, bail, Result as AnyResult};
 use rustc_hash::FxHashMap;
 
 /// Handle to a tracker-level view value. Lives on `GraphTensor` (`Copy`);
@@ -896,12 +897,12 @@ impl LogicalRecorder {
 
     /// M3 Step 1 assembly: the natively-recorded MODEL plus the reference
     /// BINDING (defaults matching the interim translator's boundary text),
-    /// as a runnable [`crate::hlir_to_logical::LogicalProgram`]. The
+    /// as a runnable [`crate::logical_recorder::LogicalProgram`]. The
     /// binding vocabulary is the reference runtime's — a different runtime
     /// binds differently against the same model.
-    pub fn native_program(&self) -> Result<crate::hlir_to_logical::LogicalProgram, String> {
+    pub fn native_program(&self) -> Result<crate::logical_recorder::LogicalProgram, String> {
         let (pre, input_slots, output_slots, post_checks) = self.native_parts()?;
-        Ok(crate::hlir_to_logical::LogicalProgram {
+        Ok(crate::logical_recorder::LogicalProgram {
             text: format!("{pre}{}{post_checks}", crate::reference_binding::SCHEDULE),
             input_slots,
             output_slots,
@@ -963,5 +964,84 @@ impl LogicalRecorder {
             "nat_output_boundary",
         ));
         Ok((text, input_slots, output_slots, self.post_checks.clone()))
+    }
+}
+
+
+// ─── Survivors of the interim translator (M3 Topic D) ───
+
+/// The assembled program plus the I/O binding tables the runtime needs
+/// (moved here when the interim translator was deleted, M3 Topic D).
+/// Buffer ids equal HLIR node indices, matching `ReferenceRuntime`'s
+/// `set_data`/`get_f32` keying so differential tests bind identically.
+#[derive(Debug, Clone)]
+pub struct LogicalProgram {
+    /// Model + binding + schedule + authoring-contract checks. Run as
+    /// `format!("{}\n\n{}", egglog_snippet::assembled_program(), text)`.
+    pub text: String,
+    /// `(HLIR input node, BufferLit id)` in signature order.
+    pub input_slots: Vec<(petgraph::graph::NodeIndex, u64)>,
+    /// `(Output.node key, BufferLit id)` in output-slot order — the key
+    /// their `get_f32` matches on (the SOURCE tensor's node index).
+    pub output_slots: Vec<(usize, u64)>,
+}
+
+/// Their RPN index expression rendered as OUR IntExpr term, with `z`
+/// replaced by the given coordinate term and dyn vars resolved via the
+/// pins. Add/Mul only for now (their slice path is affine); anything else
+/// bails loudly.
+pub(crate) fn int_expr_term(
+    expr: &Expression,
+    coord_term: &str,
+    dyn_map: &FxHashMap<char, usize>,
+    at: &str,
+) -> AnyResult<String> {
+    let mut stack: Vec<String> = Vec::new();
+    for term in expr.terms.read().iter() {
+        match term {
+            Term::Num(n) => stack.push(format!("(IntLit {n})")),
+            Term::Var('z') => stack.push(coord_term.to_string()),
+            Term::Var(c) => {
+                let value = dyn_map.get(c).ok_or_else(|| {
+                    anyhow!("hlir_to_logical: unpinned var '{c}' in index expression at {at}")
+                })?;
+                stack.push(format!("(IntLit {value})"));
+            }
+            Term::Add | Term::Mul | Term::Sub | Term::Div | Term::Mod | Term::Min
+            | Term::Max | Term::Gte | Term::Lt => {
+                // Their builders emit RHS terms first, so the stack TOP is
+                // the LEFT operand (verified against as_op + the Sub impl).
+                let (Some(left), Some(right)) = (stack.pop(), stack.pop()) else {
+                    bail!("hlir_to_logical: malformed index expression at {at}");
+                };
+                let rendered = match term {
+                    Term::Add => format!("(IntAdd {left} {right})"),
+                    Term::Mul => format!("(IntMul {left} {right})"),
+                    Term::Sub => format!("(IntAdd {left} (IntMul (IntLit -1) {right}))"),
+                    Term::Div => format!("(IntTruncDiv {left} {right})"),
+                    Term::Mod => format!("(IntTruncRem {left} {right})"),
+                    Term::Min => format!("(IntMin {left} {right})"),
+                    Term::Max => format!("(IntMax {left} {right})"),
+                    // Comparisons arrive as 0/1 VALUES in their expressions;
+                    // ours are the bool bridge's indicators. Over the discrete
+                    // integers, a >= b is spelled b < a+1 — one constructor.
+                    Term::Lt => {
+                        format!("(IntCastFromBool (BoolLessThanInt {left} {right}))")
+                    }
+                    Term::Gte => format!(
+                        "(IntCastFromBool (BoolLessThanInt {right} (IntAdd {left} (IntLit 1))))"
+                    ),
+                    _ => unreachable!(),
+                };
+                stack.push(rendered);
+            }
+            other => bail!(
+                "hlir_to_logical: index-expression term {other:?} at {at} — later slice"
+            ),
+        }
+    }
+    match (stack.pop(), stack.is_empty()) {
+        (Some(result), true) => Ok(result),
+        _ => bail!("hlir_to_logical: malformed index expression at {at}"),
     }
 }
