@@ -329,7 +329,39 @@ mod tests {
     use egglog::SerializeConfig;
 
     /// Their graph → our whole pipeline → an executed plan.
+    /// M3 Topic C: the differentials' "ours" side runs the NATIVE path —
+    /// recorder model + reference binding, with the graph's dyn pins
+    /// injected as tight bounds seeds (the binding interface; the [n,n]
+    /// collapse delivers literals by congruence).
     fn run_ssa(cx: &Graph, inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)]) -> SsaReferenceRuntime {
+        let (pre, input_slots, output_slots, post) =
+            cx.logical.native_parts().expect("recorder clean for a covered graph");
+        let mut vars: Vec<_> = cx.dyn_map.iter().collect();
+        vars.sort();
+        let mut seeds = String::new();
+        for (var, value) in vars {
+            seeds.push_str(&format!(
+                "(set (lower-bound-of (IntVar \"{var}\")) (bigint {value}))\n\
+                 (set (upper-bound-of (IntVar \"{var}\")) (bigint {value}))\n"
+            ));
+        }
+        let program = crate::hlir_to_logical::LogicalProgram {
+            text: format!(
+                "{pre}{seeds}{}{post}",
+                crate::reference_binding::SCHEDULE
+            ),
+            input_slots,
+            output_slots,
+        };
+        run_ssa_program(program, inputs)
+    }
+
+    /// The interim-translator path — stragglers only, dies at Topic D.
+    #[allow(dead_code)]
+    fn run_ssa_translator(
+        cx: &Graph,
+        inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)],
+    ) -> SsaReferenceRuntime {
         let program = hlir_to_logical(cx).expect("translates");
         run_ssa_program(program, inputs)
     }
@@ -545,17 +577,15 @@ mod tests {
             let expected = theirs.get_f32(out.id).clone();
 
             let (cx2, x2, y2, out2) = build(pin);
-            let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+            let program = cx2.logical.native_program().expect("native program");
             assert!(
                 program.text.contains("(IntVar \"a\")"),
                 "the model must stay symbolic:\n{}",
                 program.text
             );
-            assert!(
-                program.text.contains(&format!("(bigint {pin})")),
-                "the binding must pin via tight bounds:\n{}",
-                program.text
-            );
+            // The pin arrives as BINDING seeds, not model content: run_ssa
+            // injects (bigint {pin}) bounds from the graph's dyn_map — the
+            // execution below at both pins is the proof.
             let ours = run_ssa(&cx2, &[(x2.id, data_x), (y2.id, data_y)]);
             assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
         }
@@ -586,7 +616,7 @@ mod tests {
         let expected = theirs.get_f32(out.id).clone();
 
         let (cx2, x2, out2) = build();
-        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+        let program = cx2.logical.native_program().expect("native program");
         assert!(
             program.text.contains("LogicalIndexMapApply"),
             "the slice must arrive as a view:\n{}",
@@ -621,7 +651,7 @@ mod tests {
         let expected = theirs.get_f32(out.id).clone();
 
         let (cx2, x2, out2) = build();
-        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+        let program = cx2.logical.native_program().expect("native program");
         assert!(
             program.text.contains("LogicalIndexMapApply"),
             "the slice must arrive as a view:\n{}",
@@ -661,7 +691,7 @@ mod tests {
         let expected_dilated = theirs.get_f32(dilated.id).clone();
 
         let (cx2, x2, y2, plain2, dilated2) = build();
-        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+        let program = cx2.logical.native_program().expect("native program");
         assert!(
             program.text.contains("LogicalIndexMapApply"),
             "unfold must arrive as a view:\n{}",
@@ -703,7 +733,7 @@ mod tests {
             let expected = theirs.get_f32(out.id).clone();
 
             let (cx2, x2, out2) = build(fill);
-            let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+            let program = cx2.logical.native_program().expect("native program");
             assert!(
                 program.text.contains("IntCastFromBool"),
                 "the mask must ride the bool bridge:\n{}",
@@ -740,7 +770,7 @@ mod tests {
             let expected = theirs.get_f32(out.id).clone();
 
             let (cx2, x2, out2) = build(fill);
-            let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+            let program = cx2.logical.native_program().expect("native program");
             assert!(
                 program.text.contains("IntMax") && program.text.contains("IntCastFromBool"),
                 "clamp view + indicator mask expected:\n{}",
@@ -1183,7 +1213,7 @@ mod tests {
         let expected = theirs.get_f32(out.id).clone();
 
         let (cx2, x2, y2, out2) = build();
-        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+        let program = cx2.logical.native_program().expect("native program");
         assert!(
             program.text.contains("LogicalLessThan") && program.text.contains("LogicalCast"),
             "comparison + cast expected in the model:\n{}",
@@ -1239,9 +1269,9 @@ mod tests {
         };
 
         let (cx2, x2, y2, out2) = build();
-        let program = crate::hlir_to_logical::hlir_to_logical(&cx2).expect("translates");
+        let program = cx2.logical.native_program().expect("native program");
         assert!(
-            program.text.contains("(LogicalCast t") && program.text.contains("(Bool8)"),
+            program.text.contains("(LogicalCast rec_t") && program.text.contains("(Bool8)"),
             "boundary Bool8 cast expected in the binding:\n{}",
             program.text
         );
@@ -1390,7 +1420,11 @@ mod tests {
             "{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(dest2.id, dest_data), (src2.id, src_data)]);
+        // scatter1d recording is deferred B-tail sugar; this flat-path
+            // differential stays translator-driven until Topic D decides
+            // its fate (the coordinate-form scatter differential covers
+            // the native path).
+            let ours = run_ssa_translator(&cx2, &[(dest2.id, dest_data), (src2.id, src_data)]);
         assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
     }
 

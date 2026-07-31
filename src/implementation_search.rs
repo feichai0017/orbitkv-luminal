@@ -229,8 +229,35 @@ pub fn bucketed_search_implementations(
     input_data: impl Fn(&FxHashMap<char, usize>) -> FxHashMap<i64, Vec<f32>>,
     options: &ImplementationSearchOptions,
 ) -> Result<Vec<BucketPlan>> {
-    use crate::hlir_to_logical::hlir_to_logical_with_dims;
     ensure!(!dim_buckets.is_empty(), "no dim buckets supplied");
+
+    // M3 Topic C: buckets assemble NATIVELY — one recorder model, per-
+    // bucket binding seeds (ranges for the bucket-wide validation render,
+    // tight [n,n] pins for the representative render). The model text
+    // never changes across buckets; only the binding does.
+    let (pre, input_slots, output_slots, post) = graph
+        .logical
+        .native_parts()
+        .map_err(|reason| anyhow!("native load refused: {reason}"))?;
+    let seeds_text = |seeds: &BTreeMap<char, (u64, u64)>| {
+        let mut text = String::new();
+        for (var, (lower, upper)) in seeds {
+            text.push_str(&format!(
+                "(set (lower-bound-of (IntVar \"{var}\")) (bigint {lower}))\n\
+                 (set (upper-bound-of (IntVar \"{var}\")) (bigint {upper}))\n"
+            ));
+        }
+        text
+    };
+    let assemble = |seeds: &BTreeMap<char, (u64, u64)>| crate::hlir_to_logical::LogicalProgram {
+        text: format!(
+            "{pre}{}{}{post}",
+            seeds_text(seeds),
+            crate::reference_binding::SCHEDULE
+        ),
+        input_slots: input_slots.clone(),
+        output_slots: output_slots.clone(),
+    };
 
     // Cartesian combinations, dims in sorted order (their bucket_combinations).
     let dims: Vec<&char> = dim_buckets.keys().collect();
@@ -261,8 +288,14 @@ pub fn bucketed_search_implementations(
 
         // Bucket-wide soundness: the range-seeded render must run its whole
         // fixpoint (authoring-contract checks included) over the interval.
-        let validation =
-            hlir_to_logical_with_dims(graph, &representative, Some(&ranges))?;
+        let mut validation_seeds: BTreeMap<char, (u64, u64)> = BTreeMap::new();
+        for (dim, value) in &representative {
+            validation_seeds.insert(*dim, (*value as u64, *value as u64));
+        }
+        for (dim, (min, max)) in &ranges {
+            validation_seeds.insert(*dim, (*min as u64, *max as u64));
+        }
+        let validation = assemble(&validation_seeds);
         let text = format!(
             "{}\n\n{}",
             crate::egglog_snippet::assembled_program(),
@@ -272,8 +305,12 @@ pub fn bucketed_search_implementations(
             .parse_and_run_program(None, &text)
             .map_err(|err| anyhow!("bucket {ranges:?} fails bucket-wide validation: {err}"))?;
 
-        // Representative render: searched and profiled.
-        let program = hlir_to_logical_with_dims(graph, &representative, None)?;
+        // Representative render: pinned via tight bounds, searched, profiled.
+        let mut pin_seeds: BTreeMap<char, (u64, u64)> = BTreeMap::new();
+        for (dim, value) in &representative {
+            pin_seeds.insert(*dim, (*value as u64, *value as u64));
+        }
+        let program = assemble(&pin_seeds);
         let text = format!(
             "{}\n\n{}",
             crate::egglog_snippet::assembled_program(),
