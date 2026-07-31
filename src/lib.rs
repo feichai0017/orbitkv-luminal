@@ -20,6 +20,7 @@ pub mod logical_op;
 pub mod implementation_search;
 pub mod ssa_reference;
 pub mod test_support;
+pub mod visualization;
 
 #[cfg(test)]
 pub mod tests;
@@ -30,6 +31,7 @@ pub mod prelude {
     pub use crate::frontend::*;
     pub use crate::graph::*;
     pub use crate::shape::*;
+    pub use crate::visualization::{ToDot, ToHtml};
     pub use anyhow;
     pub use egglog;
     pub use egglog::ast as egglog_ast;

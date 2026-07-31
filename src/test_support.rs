@@ -2730,3 +2730,248 @@ mod stage4b_probes {
         assert!((got[0] - 1.0).abs() < 1e-6, "{got:?}");
     }
 }
+
+/// Step-4b zero-class diagnostics: env-driven egglog experiments on the
+/// minimal degenerate-broadcast repro (`tensor(1) * 2.0`). Run one as
+/// X4B=<name> cargo test -- x_probe_zero_class --nocapture
+/// Experiments do STRING SURGERY on the assembled program only — the
+/// preamble file is never touched.
+#[cfg(test)]
+mod zero_class_probe {
+    use crate::graph::Graph;
+
+    fn assembled_repro() -> String {
+        let mut cx = Graph::new();
+        let a = cx.tensor(1);
+        let _b = (a * 2.0).output();
+        let (pre, _input_slots, _output_slots, post) =
+            cx.logical.native_parts().expect("recorder clean");
+        format!(
+            "{}\n\n{pre}{}{post}",
+            crate::egglog_snippet::assembled_program(),
+            crate::reference_binding::SCHEDULE
+        )
+    }
+
+    fn cut(text: &str, needle: &str, label: &str) -> String {
+        assert!(
+            text.contains(needle),
+            "surgery target not found: {label}"
+        );
+        text.replacen(needle, &format!("; [probe-cut: {label}]\n"), 1)
+    }
+
+    const COLLAPSE_RULE: &str = "(rule\n  (\n    (= ?coord (CoordVar ?axis ?extent))\n    (= ?extent_lower (lower-bound-of ?extent))\n    (>= ?extent_lower (bigint 1))\n    (= ?extent_upper (upper-bound-of ?extent))\n    (<= ?extent_upper (bigint 1))\n  )\n  ((union ?coord (IntLit 0)))\n)";
+
+    const BOUNDS_ZERO_RULE: &str = "(rule\n  (\n    (= ?lower (lower-bound-of ?expr))\n    (>= ?lower (bigint 0))\n    (= ?upper (upper-bound-of ?expr))\n    (<= ?upper (bigint 0))\n  )\n  ((union ?expr (IntLit 0)))\n)";
+
+    const CROSSED_RULE: &str = "(rule\n  (\n    (= ?lower (lower-bound-of ?expr))\n    (= ?upper (upper-bound-of ?expr))\n    (> ?lower ?upper)\n  )\n  ((panic \"crossed IntExpr bounds: unsound union or inconsistent seed\"))\n)";
+
+    const DISTINCT_LIT_RULE: &str = "(rule\n  ((= ?expr (IntLit ?a)) (= ?expr (IntLit ?b)) (!= ?a ?b))\n  ((panic \"distinct integer literals unioned: unsound IntExpr equality\"))\n)";
+
+    const COORD_STRIDE_RULE: &str = "(rule\n  ((symbolic-stride-demand ?expr ?axis) (= ?expr (CoordVar ?axis ?extent)))\n  ((set (symbolic-stride-of ?expr ?axis) (IntLit 1)))\n)";
+
+    const MUL_STRIDE_RULE: &str = "(rule\n  (\n    (symbolic-stride-demand ?expr ?axis)\n    (= ?expr (IntMul (CoordVar ?axis ?extent) ?stride))\n    (axis-free ?stride ?axis)\n  )\n  ((set (symbolic-stride-of ?expr ?axis) ?stride))\n)";
+
+    const FREE_STRIDE_RULE: &str = "(rule\n  ((symbolic-stride-demand ?expr ?axis) (axis-free ?expr ?axis))\n  ((set (symbolic-stride-of ?expr ?axis) (IntLit 0)))\n)";
+
+    const SUPPORT_RULE: &str = "(rule\n  ((axis-in-support ?expr ?axis) (axis-free ?expr ?axis))\n  ((panic \"axis support contradiction: unsound union or broken support rule\"))\n)";
+
+    const NONZERO_CERT_RULE: &str = "(rule\n  ((provably-cannot-union-with-zero ?expr) (= ?expr (IntLit 0)))\n  ((panic \"provably-cannot-union-with-zero certified the zero class: certificate or union unsound\"))\n)";
+
+    const BOTH_CERTS_RULE: &str = "(rule\n  (\n    (= ?expr (IntLit 0))\n    (provably-cannot-union-with-zero ?expr)\n  )\n  ((panic \"zero and nonzero certificates on one class: route or union unsound\"))\n)";
+
+    fn witness_mode(mut text: String) -> String {
+        // Every :no-merge fold becomes first-wins so saturation runs to
+        // completion; fold VALUES are then unreliable — only witness
+        // relations and class contents are read.
+        text = text.replace(" :no-merge)", " :merge old)");
+        assert!(text.contains(CROSSED_RULE), "crossed rule text drifted");
+        text = text.replacen(
+            CROSSED_RULE,
+            "(relation crossed-witness (IntExpr BigInt BigInt))\n(rule\n  (\n    (= ?lower (lower-bound-of ?expr))\n    (= ?upper (upper-bound-of ?expr))\n    (> ?lower ?upper)\n  )\n  ((crossed-witness ?expr ?lower ?upper))\n)",
+            1,
+        );
+        assert!(text.contains(DISTINCT_LIT_RULE), "distinct-lit rule text drifted");
+        text = text.replacen(
+            DISTINCT_LIT_RULE,
+            "(relation distinct-lit-witness (i64 i64))\n(rule\n  ((= ?expr (IntLit ?a)) (= ?expr (IntLit ?b)) (!= ?a ?b))\n  ((distinct-lit-witness ?a ?b))\n)",
+            1,
+        );
+        assert!(text.contains(SUPPORT_RULE), "support rule text drifted");
+        text = text.replacen(
+            SUPPORT_RULE,
+            "(relation support-contra-witness (IntExpr i64))\n(rule\n  ((axis-in-support ?expr ?axis) (axis-free ?expr ?axis))\n  ((support-contra-witness ?expr ?axis))\n)",
+            1,
+        );
+        assert!(text.contains(NONZERO_CERT_RULE), "nonzero-cert rule text drifted");
+        text = text.replacen(
+            NONZERO_CERT_RULE,
+            "(relation nonzero-on-zero-witness (IntExpr))\n(rule\n  ((provably-cannot-union-with-zero ?expr) (= ?expr (IntLit 0)))\n  ((nonzero-on-zero-witness ?expr))\n)",
+            1,
+        );
+        assert!(text.contains(BOTH_CERTS_RULE), "both-certs rule text drifted");
+        text = text.replacen(
+            BOTH_CERTS_RULE,
+            "; [probe: both-certs tripwire subsumed by nonzero-on-zero-witness]\n",
+            1,
+        );
+        // Post-checks may legitimately fail once classes are corrupted;
+        // drop everything after the schedule and print witnesses instead.
+        let schedule = crate::reference_binding::SCHEDULE;
+        if let Some(idx) = text.find(schedule) {
+            text.truncate(idx + schedule.len());
+        }
+        text.push_str(
+            "\n(print-function crossed-witness 1000)\n(print-function distinct-lit-witness 1000)\n(print-function support-contra-witness 1000)\n(print-function nonzero-on-zero-witness 1000)\n",
+        );
+        text
+    }
+
+
+    /// Dump every e-node in the class of (IntLit 0), rendered one level
+    /// deep (op of each child class's first node), so the corrupted
+    /// class's population is visible.
+    fn dump_zero_class(egraph: &egglog::EGraph) {
+        let s = egraph.serialize(egglog::SerializeConfig::default()).egraph;
+        let mut zero_class = None;
+        for (_, node) in s.nodes.iter() {
+            if node.op == "IntLit" {
+                let child = &node.children[0];
+                if s.nodes[child].op == "0" {
+                    zero_class = Some(node.eclass.clone());
+                    break;
+                }
+            }
+        }
+        let Some(zc) = zero_class else {
+            eprintln!("no IntLit 0 node found");
+            return;
+        };
+        let mut members: Vec<String> = Vec::new();
+        for (_, node) in s.nodes.iter() {
+            if node.eclass == zc {
+                let kids: Vec<String> = node
+                    .children
+                    .iter()
+                    .map(|c| {
+                        let cn = &s.nodes[c];
+                        if cn.children.is_empty() {
+                            cn.op.clone()
+                        } else {
+                            let inner: Vec<String> = cn
+                                .children
+                                .iter()
+                                .map(|cc| s.nodes[cc].op.clone())
+                                .collect();
+                            format!("{}({})", cn.op, inner.join(","))
+                        }
+                    })
+                    .collect();
+                members.push(format!("{}({})", node.op, kids.join(", ")));
+            }
+        }
+        members.sort();
+        eprintln!("ZERO CLASS: {} enodes", members.len());
+        for m in members.iter().take(120) {
+            eprintln!("  Z: {m}");
+        }
+    }
+
+    #[test]
+    fn x_probe_zero_class() {
+        let Ok(experiment) = std::env::var("X4B") else {
+            eprintln!("X4B not set — probe inert");
+            return;
+        };
+        let mut text = assembled_repro();
+        match experiment.as_str() {
+            "dump" => {
+                let path = std::env::var("X4B_OUT")
+                    .unwrap_or_else(|_| "/tmp/repro_full.egg".into());
+                std::fs::write(&path, &text).unwrap();
+                eprintln!("dumped {} bytes to {path}", text.len());
+                return;
+            }
+            "baseline" => {}
+            "nocollapse" => {
+                text = cut(&text, COLLAPSE_RULE, "extent-1 collapse");
+            }
+            "nozeroroads" => {
+                text = cut(&text, COLLAPSE_RULE, "extent-1 collapse");
+                text = cut(&text, BOUNDS_ZERO_RULE, "bounds-zero union");
+            }
+            "witness" => {
+                text = witness_mode(text);
+            }
+            "w_cut_coordstride" => {
+                text = cut(&text, COORD_STRIDE_RULE, "symbolic CoordVar stride-1");
+                text = witness_mode(text);
+            }
+            "w_cut_pointing" => {
+                text = cut(&text, COORD_STRIDE_RULE, "symbolic CoordVar stride-1");
+                text = cut(&text, MUL_STRIDE_RULE, "symbolic IntMul stride");
+                text = cut(&text, FREE_STRIDE_RULE, "symbolic broadcast stride-0");
+                text = witness_mode(text);
+            }
+            "fix_pointing" => {
+                // The candidate-fix probe: pointing rules cut, every real
+                // tripwire LIVE, and the full pipeline run to numerics.
+                text = cut(&text, COORD_STRIDE_RULE, "symbolic CoordVar stride-1");
+                text = cut(&text, MUL_STRIDE_RULE, "symbolic IntMul stride");
+                text = cut(&text, FREE_STRIDE_RULE, "symbolic broadcast stride-0");
+                let mut egraph = crate::egglog_snippet::new_egraph();
+                match egraph.parse_and_run_program(None, &text) {
+                    Err(err) => {
+                        eprintln!("FIX RUN ERR: {err}");
+                        return;
+                    }
+                    Ok(_) => eprintln!("FIX SATURATION OK"),
+                }
+                let serialized = egraph
+                    .serialize(egglog::SerializeConfig::default())
+                    .egraph;
+                let allow = crate::ssa_reference::reference_allow_list();
+                let extracted = crate::extractor::extract_layout_ir_with_ops(
+                    &serialized,
+                    Some(&allow),
+                )
+                .expect("extracts")
+                .expect("plan");
+                let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))
+                    .expect("bufferizes");
+                let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
+                rt.load_plan(plan);
+                rt.set_data(0i64, vec![0.5]);
+                rt.execute().expect("executes");
+                let got = rt.get_f32(3i64).or_else(|_| rt.get_f32(2i64)).expect("output");
+                eprintln!("FIX NUMERICS: {got:?} (want [1.0])");
+                return;
+            }
+            "w_noroads" => {
+                text = cut(&text, COLLAPSE_RULE, "extent-1 collapse");
+                text = cut(&text, BOUNDS_ZERO_RULE, "bounds-zero union");
+                text = witness_mode(text);
+            }
+            other => {
+                // witness mode + named extra cuts, comma-separated in
+                // X4B_CUTS as label ranges (start-marker..end-marker not
+                // supported; exact-needle cuts registered here).
+                panic!("unknown experiment {other}");
+            }
+        }
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        match egraph.parse_and_run_program(None, &text) {
+            Ok(msgs) => {
+                eprintln!("RUN OK; {} messages", msgs.len());
+                for m in msgs.iter() {
+                    let full = format!("{m:?}").replace('\n', " | ");
+                    let cap = full.len().min(2000);
+                    eprintln!("MSG: {}", &full[..cap]);
+                }
+                dump_zero_class(&egraph);
+            }
+            Err(err) => eprintln!("RUN ERR: {err}"),
+        }
+    }
+}

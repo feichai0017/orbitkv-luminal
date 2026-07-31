@@ -323,6 +323,28 @@ impl LogicalGraph {
         self.poisoned.as_deref()
     }
 
+    /// Read-only rows for visualization, one per value in ValueId order:
+    /// (constructor, operand ids, dims, dtype, input label).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn viz_rows(
+        &self,
+    ) -> impl Iterator<Item = (&str, &[ValueId], &[Expression], DType, Option<&str>)> {
+        self.values.iter().map(|value| {
+            (
+                value.constructor.as_str(),
+                value.operands.as_slice(),
+                value.dims.as_slice(),
+                value.dtype,
+                value.input_label.as_deref(),
+            )
+        })
+    }
+
+    /// The recorded output designations, in .output() order.
+    pub(crate) fn viz_outputs(&self) -> &[(ValueId, usize)] {
+        &self.outputs
+    }
+
     fn dim_term(expr: &Expression) -> Result<String, String> {
         let terms = expr.terms.read();
         match &terms[..] {
@@ -978,7 +1000,7 @@ impl LogicalGraph {
 
     /// The live set: every value transitively reachable from the outputs,
     /// plus every input declaration (bindings enumerate all inputs).
-    fn live_set(&self) -> Vec<bool> {
+    pub(crate) fn live_set(&self) -> Vec<bool> {
         let mut live = vec![false; self.values.len()];
         let mut stack: Vec<ValueId> = self.outputs.iter().map(|(id, _)| *id).collect();
         for (index, value) in self.values.iter().enumerate() {
