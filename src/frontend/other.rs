@@ -65,7 +65,7 @@ impl Graph {
         } else {
             format!("(CoordVar 0 (IntLit {range}))")
         };
-        let value_expr = match crate::logical_recorder::int_expr_term(
+        let value_expr = match crate::logical_graph::int_expr_term(
             expr,
             &coord,
             &Default::default(),

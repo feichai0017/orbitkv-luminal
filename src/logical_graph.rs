@@ -1,4 +1,7 @@
-//! M3 Step 0: the logical-model recorder.
+//! The LOGICAL GRAPH — the model the frontend actually builds (renamed
+//! from logical_recorder, ruling 2026-07-31: this IS the durable thing;
+//! the HLIR StableGraph beside it is the transitional representation that
+//! dies at M3 Step 4, at which point this absorbs into Graph outright).
 //!
 //! GraphTensor methods emit their LOGICAL ops here as the graph is built,
 //! beside their HLIR emission — the two worlds coexist until the interim
@@ -125,7 +128,7 @@ struct NodeValue {
 }
 
 #[derive(Debug, Default)]
-pub struct LogicalRecorder {
+pub struct LogicalGraph {
     /// HLIR node index -> the emitted logical value for that op's result.
     node_values: FxHashMap<usize, NodeValue>,
     views: Vec<ViewValue>,
@@ -141,7 +144,7 @@ pub struct LogicalRecorder {
     poisoned: Option<String>,
 }
 
-impl LogicalRecorder {
+impl LogicalGraph {
     /// First poison reason wins; everything after is a no-op.
     pub fn poison(&mut self, reason: impl Into<String>) {
         if self.poisoned.is_none() {
@@ -897,12 +900,12 @@ impl LogicalRecorder {
 
     /// M3 Step 1 assembly: the natively-recorded MODEL plus the reference
     /// BINDING (defaults matching the interim translator's boundary text),
-    /// as a runnable [`crate::logical_recorder::LogicalProgram`]. The
+    /// as a runnable [`crate::logical_graph::LogicalProgram`]. The
     /// binding vocabulary is the reference runtime's — a different runtime
     /// binds differently against the same model.
-    pub fn native_program(&self) -> Result<crate::logical_recorder::LogicalProgram, String> {
+    pub fn native_program(&self) -> Result<crate::logical_graph::LogicalProgram, String> {
         let (pre, input_slots, output_slots, post_checks) = self.native_parts()?;
-        Ok(crate::logical_recorder::LogicalProgram {
+        Ok(crate::logical_graph::LogicalProgram {
             text: format!("{pre}{}{post_checks}", crate::reference_binding::SCHEDULE),
             input_slots,
             output_slots,

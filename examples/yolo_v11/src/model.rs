@@ -16,35 +16,14 @@
 //!   final detect output -> (1, 84, 8400)
 
 use luminal::prelude::*;
-use luminal::shape::ShapeTracker;
 
-/// Materialize a (potentially non-contiguous) tensor into a contiguous buffer.
-/// Mirrors the gather-via-index_expression trick used by [`GraphTensor::output`]
-/// so downstream ops see a clean stride pattern.
+/// Materialize into a canonical contiguous value — the PURE spelling
+/// (an identity add, their python translator's own idiom): the model
+/// states only the value; whether a copy actually happens is the
+/// compiler's pricing decision. (Topic E: the old version read tracker
+/// state and rebuilt trackers by hand.)
 pub fn make_contiguous(t: GraphTensor) -> GraphTensor {
-    if t.legacy_tracker_ref().is_contiguous() {
-        return t;
-    }
-    let dims = t.dims();
-    let total = dims.iter().copied().reduce(|a, b| a * b).unwrap();
-    let idx_expr = t.legacy_tracker_ref().index_expression();
-    let idx = t.graph().iota(idx_expr, total);
-    let mut gathered = t.gather1d(idx);
-    *gathered.legacy_tracker_mut() = ShapeTracker::new(dims);
-    gathered
-}
-
-fn canonicalize_static_shape(mut t: GraphTensor) -> GraphTensor {
-    for dim in &mut t.legacy_tracker_mut().dims {
-        *dim = dim
-            .to_usize()
-            .map(Expression::from)
-            .unwrap_or_else(|| dim.simplify());
-    }
-    for stride in &mut t.legacy_tracker_mut().strides {
-        *stride = stride.simplify();
-    }
-    t
+    t + 0.0
 }
 
 pub const NC: usize = 80;
@@ -102,8 +81,7 @@ impl Conv {
     /// paths in the luminal e-graph. Special-cases 1x1 convs to an HLIR matmul
     /// (no unfold) since they don't need spatial windowing.
     pub fn forward_no_act(&self, x: GraphTensor) -> GraphTensor {
-        let x = canonicalize_static_shape(x);
-        if self.k == 1 && self.s == 1 && self.p == 0 {
+                if self.k == 1 && self.s == 1 && self.p == 0 {
             return self.forward_1x1(x);
         }
         // x: (1, c_in, H, W) — keep the batch dim throughout.
@@ -227,8 +205,7 @@ impl DwConv {
     }
 
     pub fn forward_no_act(&self, x: GraphTensor) -> GraphTensor {
-        let x = canonicalize_static_shape(x);
-        let dims = x.dims();
+                let dims = x.dims();
         let h = dims[2];
         let w = dims[3];
         let h_out = (h + 2 * self.p - self.k) / self.s + 1;
@@ -476,8 +453,7 @@ impl Sppf {
 
 /// MaxPool2d via pad (with -inf-equivalent) + unfold + max reduction.
 pub fn max_pool_2d(x: GraphTensor, k: usize, s: usize, p: usize) -> GraphTensor {
-    let x = canonicalize_static_shape(x);
-    let dims = x.dims();
+        let dims = x.dims();
     let h = dims[2];
     let w = dims[3];
     let h_out = (h + 2 * p - k) / s + 1;

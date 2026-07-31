@@ -30,8 +30,8 @@ pub struct GraphTensor {
     pub dtype: DType,
     /// M3 recorder view handle: `None` = "my logical value is the
     /// recorder's value for `id`"; `Some` = a tracker-level view emitted
-    /// by the movement API (see [`crate::logical_recorder`]).
-    pub logical_view: Option<crate::logical_recorder::ViewId>,
+    /// by the movement API (see [`crate::logical_graph`]).
+    pub logical_view: Option<crate::logical_graph::ViewId>,
 }
 
 impl From<&GraphTensor> for GraphTensor {

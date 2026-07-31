@@ -142,7 +142,7 @@ fn rmsnorm(x: GraphTensor, weight: GraphTensor, eps: f32) -> GraphTensor {
 /// LayerNorm with no affine parameters (mean-norm + std-norm only).
 /// Matches `nn.LayerNorm(dim, elementwise_affine=False)` in PyTorch.
 fn layernorm_noaffine(x: GraphTensor, eps: f32) -> GraphTensor {
-    let last = x.legacy_tracker_ref().last_axis();
+    let last = x.rank() - 1;
     x.layer_norm(last, eps)
 }
 

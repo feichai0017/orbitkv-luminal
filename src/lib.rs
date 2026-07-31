@@ -4,7 +4,7 @@ pub mod egglog_utils;
 pub mod frontend;
 pub mod graph;
 pub mod hlir;
-pub mod logical_recorder;
+pub mod logical_graph;
 pub mod reference_binding;
 pub mod mask_events;
 pub mod op;

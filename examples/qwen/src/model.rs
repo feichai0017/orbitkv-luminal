@@ -365,6 +365,12 @@ fn hlir_attention(
     // LUM-545: model invariant `prev + seq <= max_seq`, but the frontend
     // cannot yet propagate expression-bound assertions, so `slice` reports
     // `min(max_seq, p+s)`. Normalize the visible cache axis to `total_seq`.
+    // STEP-4-GATED HATCH (Topic E, 2026-07-31): their frontend cannot
+    // propagate the bound prev + seq <= max_seq, so slice reports
+    // min(max_seq, total_seq) and this normalizes it by hand. On the native
+    // pipeline the model keeps the min and the e-graph's bounds-decided
+    // IntMin collapse proves it equals total_seq from the binding's seeded
+    // ranges — this hack DELETES when the example re-seats at Step 4.
     k_full.legacy_tracker_mut().dims[1] = total_seq;
     v_full.legacy_tracker_mut().dims[1] = total_seq;
 

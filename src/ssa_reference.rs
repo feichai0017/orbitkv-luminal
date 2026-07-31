@@ -122,7 +122,7 @@ impl SsaReferenceRuntime {
             crate::reference_binding::SCHEDULE,
             spec.post_checks
         );
-        let program = crate::logical_recorder::LogicalProgram {
+        let program = crate::logical_graph::LogicalProgram {
             text,
             input_slots: spec.input_slots,
             output_slots: spec.output_slots,
@@ -344,7 +344,7 @@ mod tests {
                  (set (upper-bound-of (IntVar \"{var}\")) (bigint {value}))\n"
             ));
         }
-        let program = crate::logical_recorder::LogicalProgram {
+        let program = crate::logical_graph::LogicalProgram {
             text: format!(
                 "{pre}{seeds}{}{post}",
                 crate::reference_binding::SCHEDULE
@@ -360,7 +360,7 @@ mod tests {
     /// The pipeline from an assembled LogicalProgram — shared by the
     /// translator path (run_ssa) and the native recorder path (M3).
     fn run_ssa_program(
-        program: crate::logical_recorder::LogicalProgram,
+        program: crate::logical_graph::LogicalProgram,
         inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)],
     ) -> SsaReferenceRuntime {
         let text = format!(

@@ -514,7 +514,7 @@ pub struct Graph {
     pub dyn_map: FxHashMap<char, usize>,
     /// M3 Step 0: the logical-model recorder — GraphTensor methods emit
     /// their logical ops here beside the HLIR emission.
-    pub logical: crate::logical_recorder::LogicalRecorder,
+    pub logical: crate::logical_graph::LogicalGraph,
     /// Edge weights: (Input index, Output index, Input shape)
     pub graph: HLIRGraph,
     /// E-Graph search spaces. Bucketed compilation stores one egraph per
