@@ -343,9 +343,7 @@ pub fn select_bucket<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{CompileOptions, Graph};
-    use crate::hlir::ReferenceRuntime;
-        use crate::op::Runtime;
+    use crate::graph::Graph;
     use egglog::SerializeConfig;
 
     /// A REAL selection space (x+y and x*y from shared inputs offers the
@@ -365,18 +363,9 @@ mod tests {
         let x_data = vec![1.0, 2.0, 3.0, 4.0];
         let y_data = vec![10.0, 20.0, 30.0, 40.0];
 
-        // Their numbers.
-        let (mut cx, x, y, a, m) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.set_data(y.id, y_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let their_a = theirs.get_f32(a.id).clone();
-        let their_m = theirs.get_f32(m.id).clone();
+        // GOLDEN (pinned: x + y and x * y on the fixed data).
+        let their_a = vec![11.0, 22.0, 33.0, 44.0];
+        let their_m = vec![10.0, 40.0, 90.0, 160.0];
 
         // Our search.
         let (cx2, x2, y2, a2, m2) = build();
@@ -481,17 +470,11 @@ mod tests {
         // Numeric agreement at each bucket's representative.
         for plan in &plans {
             let rep = plan.representative[&'a'];
-            let (mut cx_ref, xr, yr, out_ref) = build(rep);
+            // GOLDEN (computed: out = x * y with x[i] = i+1, y[i] = i*0.5
+            // — the data_for closure's values at this representative).
+            let n = rep * 2;
+            let expected: Vec<f32> = (0..n).map(|v| (v as f32 + 1.0) * (v as f32 * 0.5)).collect();
             let data = data_for(&plan.representative);
-            cx_ref.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-            let mut theirs = cx_ref.search(
-                ReferenceRuntime::default(),
-                CompileOptions::default().search_graph_limit(1),
-            );
-            theirs.set_data(xr.id, data[&(x.id.index() as i64)].clone());
-            theirs.set_data(yr.id, data[&(y.id.index() as i64)].clone());
-            theirs.execute(&cx_ref.dyn_map);
-            let expected = theirs.get_f32(out_ref.id).clone();
 
             let mut runtime = SsaReferenceRuntime::default();
             runtime.load_plan(plan.outcome.best_plan.clone());

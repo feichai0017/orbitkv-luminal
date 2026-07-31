@@ -322,9 +322,7 @@ impl SsaReferenceRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{CompileOptions, Graph};
-    use crate::hlir::ReferenceRuntime;
-    use crate::op::Runtime;
+    use crate::graph::Graph;
         use egglog::SerializeConfig;
 
     /// Their graph → our whole pipeline → an executed plan.
@@ -417,22 +415,9 @@ mod tests {
         let g_data = vec![0.5, -1.5, 2.5];
         let e_data = vec![2.0, 4.0, 8.0];
 
-        // Theirs: first viable graph, no real search.
-        let (mut cx, b, c, g, e, a, d) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(b.id, b_data.clone());
-        theirs.set_data(c.id, c_data.clone());
-        theirs.set_data(g.id, g_data.clone());
-        theirs.set_data(e.id, e_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let their_a = theirs.get_f32(a.id).clone();
-        let their_d = theirs.get_f32(d.id).clone();
-
-        // Ours, same graph shape, same data.
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion).
+        let expected_a = vec![4.5, 8.5, 20.5];
+        let expected_d = vec![0.9092974, 0.5984721, 0.7780732];
         let (cx2, b2, c2, g2, e2, a2, d2) = build();
         let ours = run_ssa(
             &cx2,
@@ -443,8 +428,8 @@ mod tests {
                 (e2.id, e_data),
             ],
         );
-        assert_close(ours.get_f32(a2.id.index() as i64).unwrap(), &their_a);
-        assert_close(ours.get_f32(d2.id.index() as i64).unwrap(), &their_d);
+        assert_close(ours.get_f32(a2.id.index() as i64).unwrap(), &expected_a);
+        assert_close(ours.get_f32(d2.id.index() as i64).unwrap(), &expected_d);
     }
 
     /// Slice-2 differential: a permuted operand (transpose view) through
@@ -461,17 +446,8 @@ mod tests {
         let x_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let y_data = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
 
-        let (mut cx, x, y, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.set_data(y.id, y_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(out.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected = vec![10.0, 80.0, 60.0, 200.0, 150.0, 360.0];
         let (cx2, x2, y2, out2) = build();
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
         assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
@@ -491,17 +467,8 @@ mod tests {
         let x_data = vec![10.0, 20.0, 30.0, 40.0];
         let y_data = vec![1.0, 2.0, 3.0, 4.0];
 
-        let (mut cx, x, y, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.set_data(y.id, y_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(out.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected = vec![9.0, 18.0, 27.0, 36.0];
         let (cx2, x2, y2, out2) = build();
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
         assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
@@ -522,17 +489,8 @@ mod tests {
         let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let b_data: Vec<f32> = (1..=12).map(|v| v as f32).collect();
 
-        let (mut cx, a, b, c) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(a.id, a_data.clone());
-        theirs.set_data(b.id, b_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(c.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected = vec![38.0, 44.0, 50.0, 56.0, 83.0, 98.0, 113.0, 128.0];
         let (cx2, a2, b2, c2) = build();
         let ours = run_ssa(&cx2, &[(a2.id, a_data), (b2.id, b_data)]);
         assert_close(ours.get_f32(c2.id.index() as i64).unwrap(), &expected);
@@ -556,17 +514,8 @@ mod tests {
             let data_x: Vec<f32> = (0..pin * 2).map(|v| v as f32 + 1.0).collect();
             let data_y: Vec<f32> = (0..pin * 2).map(|v| (v as f32) * 0.5 - 1.0).collect();
 
-            let (mut cx, x, y, out) = build(pin);
-            cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-            let mut theirs = cx.search(
-                ReferenceRuntime::default(),
-                CompileOptions::default().search_graph_limit(1),
-            );
-            theirs.set_data(x.id, data_x.clone());
-            theirs.set_data(y.id, data_y.clone());
-            theirs.execute(&cx.dyn_map);
-            let expected = theirs.get_f32(out.id).clone();
-
+            // GOLDEN per pin (pinned from their ReferenceRuntime — Step 4b).
+            let expected = match pin { 3 => vec![-1.0, -1.0, 0.0, 2.0, 5.0, 9.0], 5 => vec![-1.0, -1.0, 0.0, 2.0, 5.0, 9.0, 14.0, 20.0, 27.0, 35.0], _ => unreachable!() };
             let (cx2, x2, y2, out2) = build(pin);
             let program = cx2.logical.native_program().expect("native program");
             assert!(
@@ -596,16 +545,8 @@ mod tests {
         };
         let x_data: Vec<f32> = (0..8).map(|v| (v * v) as f32).collect();
 
-        let (mut cx, x, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(out.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected = vec![5.0, 13.0, 25.0, 41.0];
         let (cx2, x2, out2) = build();
         let program = cx2.logical.native_program().expect("native program");
         assert!(
@@ -631,16 +572,8 @@ mod tests {
         };
         let x_data: Vec<f32> = (0..20).map(|v| v as f32 * 1.5).collect();
 
-        let (mut cx, x, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(out.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected = vec![10.5, 12.0, 13.5, 18.0, 19.5, 21.0];
         let (cx2, x2, out2) = build();
         let program = cx2.logical.native_program().expect("native program");
         assert!(
@@ -669,18 +602,9 @@ mod tests {
         let x_data: Vec<f32> = (0..8).map(|v| (v * v) as f32).collect();
         let y_data: Vec<f32> = (0..10).map(|v| v as f32 * 3.0 - 5.0).collect();
 
-        let (mut cx, x, y, plain, dilated) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.set_data(y.id, y_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected_plain = theirs.get_f32(plain.id).clone();
-        let expected_dilated = theirs.get_f32(dilated.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected_plain = vec![0.0, 1.0, 4.0, 4.0, 9.0, 16.0, 16.0, 25.0, 36.0];
+        let expected_dilated = vec![-5.0, 1.0, 7.0, 1.0, 7.0, 13.0, 7.0, 13.0, 19.0];
         let (cx2, x2, y2, plain2, dilated2) = build();
         let program = cx2.logical.native_program().expect("native program");
         assert!(
@@ -713,16 +637,8 @@ mod tests {
             };
             let x_data = vec![10.0, 20.0, 30.0, 40.0];
 
-            let (mut cx, x, out) = build(fill);
-            cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-            let mut theirs = cx.search(
-                ReferenceRuntime::default(),
-                CompileOptions::default().search_graph_limit(1),
-            );
-            theirs.set_data(x.id, x_data.clone());
-            theirs.execute(&cx.dyn_map);
-            let expected = theirs.get_f32(out.id).clone();
-
+            // GOLDEN per fill (pinned from their ReferenceRuntime — Step 4b).
+            let expected = if fill == 0.0 { vec![0.0, 10.0, 20.0, 30.0, 40.0, 0.0, 0.0] } else { vec![2.5, 10.0, 20.0, 30.0, 40.0, 2.5, 2.5] };
             let (cx2, x2, out2) = build(fill);
             let program = cx2.logical.native_program().expect("native program");
             assert!(
@@ -750,16 +666,8 @@ mod tests {
             };
             let x_data: Vec<f32> = (0..12).map(|v| v as f32 + 1.0).collect();
 
-            let (mut cx, x, out) = build(fill);
-            cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-            let mut theirs = cx.search(
-                ReferenceRuntime::default(),
-                CompileOptions::default().search_graph_limit(1),
-            );
-            theirs.set_data(x.id, x_data.clone());
-            theirs.execute(&cx.dyn_map);
-            let expected = theirs.get_f32(out.id).clone();
-
+            // GOLDEN per fill (pinned from their ReferenceRuntime — Step 4b).
+            let expected = if fill == 0.0 { vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 5.0, 6.0, 7.0, 8.0, 0.0, 0.0, 0.0, 9.0, 10.0, 11.0, 12.0, 0.0] } else { vec![-1.5, -1.5, -1.5, -1.5, -1.5, -1.5, -1.5, -1.5, -1.5, 1.0, 2.0, 3.0, 4.0, -1.5, -1.5, -1.5, 5.0, 6.0, 7.0, 8.0, -1.5, -1.5, -1.5, 9.0, 10.0, 11.0, 12.0, -1.5] };
             let (cx2, x2, out2) = build(fill);
             let program = cx2.logical.native_program().expect("native program");
             assert!(
@@ -794,18 +702,8 @@ mod tests {
         let row_vals: Vec<f32> = row_ints.iter().map(|v| *v as f32).collect();
         let col_vals: Vec<f32> = col_ints.iter().map(|v| *v as f32).collect();
 
-        let (mut cx, data, row, col, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(data.id, data_vals.clone());
-        theirs.set_data(row.id, row_ints);
-        theirs.set_data(col.id, col_ints);
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(out.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected = vec![5.5, 13.0, 10.0, 17.5, 2.5, 7.0];
         let (cx2, data2, row2, col2, out2) = build();
         let program = cx2.logical.native_program().expect("native program");
         assert!(
@@ -845,19 +743,8 @@ mod tests {
         let col_vals: Vec<f32> = col_ints.iter().map(|v| *v as f32).collect();
         let src_vals = vec![100.0, 200.0, 300.0, 400.0];
 
-        let (mut cx, dest, row, col, src, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(dest.id, dest_vals.clone());
-        theirs.set_data(row.id, row_ints);
-        theirs.set_data(col.id, col_ints);
-        theirs.set_data(src.id, src_vals.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(out.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected = vec![0.0, 100.0, 2.0, 3.0, 400.0, 5.0, 6.0, 200.0, 300.0, 9.0, 10.0, 11.0];
         let (cx2, dest2, row2, col2, src2, out2) = build();
         let program = cx2.logical.native_program().expect("native program");
         assert!(
@@ -910,20 +797,10 @@ mod tests {
         let g_data = vec![0.5, -1.5, 2.5];
         let e_data = vec![2.0, 4.0, 8.0];
 
-        let (mut cx, b, c, g, e, a, d) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(b.id, b_data.clone());
-        theirs.set_data(c.id, c_data.clone());
-        theirs.set_data(g.id, g_data.clone());
-        theirs.set_data(e.id, e_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected_a = theirs.get_f32(a.id).clone();
-        let expected_d = theirs.get_f32(d.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected_a = vec![4.5, 8.5, 20.5];
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected_d = vec![0.9092974, 0.5984721, 0.7780732];
         let (cx2, b2, c2, g2, e2, a2, d2) = build();
         let program = cx2.logical.native_program().expect("native program");
         let ours = run_ssa_program(
@@ -957,17 +834,8 @@ mod tests {
         let x_data = vec![1.0, 5.0, 2.0, 8.0, -1.0, 0.0];
         let y_data = vec![2.0, 4.0, 2.0, 9.0, -2.0, 0.5];
 
-        let (mut cx, x, y, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.set_data(y.id, y_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(out.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected = vec![4.0, 1.0, 1.0, 4.0, 1.0, 4.0];
         let (cx2, x2, y2, out2) = build();
         let program = cx2.logical.native_program().expect("native program");
         assert!(
@@ -996,34 +864,8 @@ mod tests {
         let x_data = vec![1.0, 5.0, 2.0, 8.0, -1.0, 0.0];
         let y_data = vec![2.0, 4.0, 2.0, 9.0, -2.0, 0.5];
 
-        let (mut cx, x, y, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.set_data(y.id, y_data.clone());
-        theirs.execute(&cx.dyn_map);
-        // Their get_f32 panics on Bool outputs; read the typed buffer the
-        // way get_f32 locates it and take the native bool vector.
-        let expected: Vec<bool> = {
-            let output_id = theirs
-                .graph
-                .node_indices()
-                .find(|n| {
-                    if let Some(crate::hlir::Output { node, .. }) =
-                        (**theirs.graph[*n]).as_any().downcast_ref::<crate::hlir::Output>()
-                    {
-                        *node == out.id.index()
-                    } else {
-                        false
-                    }
-                })
-                .expect("their output node");
-            theirs.buffers.get(&output_id).expect("their bool buffer").to_bool_vec()
-        };
-
+        // GOLDEN (pinned; x.lt(y) elementwise on the fixed data).
+        let expected: Vec<bool> = vec![true, false, false, true, false, true];
         let (cx2, x2, y2, out2) = build();
         let program = cx2.logical.native_program().expect("native program");
         assert!(
@@ -1074,23 +916,12 @@ mod tests {
         let v12e: Vec<f32> = (0..12).map(|v| v as f32 * 1.5).collect();
         let v12f: Vec<f32> = (0..12).map(|v| 12.0 - v as f32).collect();
 
-        let (mut cx, a, b, c, d, e, f, split_out, merge_out, flatten_out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(a.id, v12a.clone());
-        theirs.set_data(b.id, v12b.clone());
-        theirs.set_data(c.id, v12c.clone());
-        theirs.set_data(d.id, v12d.clone());
-        theirs.set_data(e.id, v12e.clone());
-        theirs.set_data(f.id, v12f.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected_split = theirs.get_f32(split_out.id).clone();
-        let expected_merge = theirs.get_f32(merge_out.id).clone();
-        let expected_flatten = theirs.get_f32(flatten_out.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected_flatten = vec![0.0, 16.5, 30.0, 40.5, 48.0, 52.5, 54.0, 52.5, 48.0, 40.5, 30.0, 16.5];
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected_merge = vec![-0.0, -5.0, -16.0, -27.0, -32.0, -25.0, 0.0, 49.0, 128.0, 243.0, 400.0, 605.0];
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected_split = vec![-2.0, -3.0, -3.0, -2.0, 0.0, 3.0, 7.0, 12.0, 18.0, 25.0, 33.0, 42.0];
         let (cx2, a2, b2, c2, d2, e2, f2, split2, merge2, flatten2) = build();
         let ours = run_ssa(
             &cx2,
@@ -1125,17 +956,8 @@ mod tests {
         let x_data = vec![1.0, 2.0, 3.0];
         let y_data: Vec<f32> = (0..12).map(|v| v as f32 + 0.5).collect();
 
-        let (mut cx, x, y, out) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.set_data(y.id, y_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(out.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected = vec![0.5, 3.0, 7.5, 3.5, 9.0, 16.5, 6.5, 15.0, 25.5, 9.5, 21.0, 34.5];
         let (cx2, x2, y2, out2) = build();
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
         assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
@@ -1153,16 +975,8 @@ mod tests {
         };
         let x_data = vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0];
 
-        let (mut cx, x, s) = build();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut theirs = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        theirs.set_data(x.id, x_data.clone());
-        theirs.execute(&cx.dyn_map);
-        let expected = theirs.get_f32(s.id).clone();
-
+        // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
+        let expected = vec![11.0, 22.0, 33.0];
         let (cx2, x2, s2) = build();
         let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
         assert_close(ours.get_f32(s2.id.index() as i64).unwrap(), &expected);
