@@ -16,7 +16,7 @@ impl GraphTensor {
         self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
             &(self.logical_value, current_dims),
-            crate::logical_graph::Movement::Permute(axes.clone()),
+            crate::graph::Movement::Permute(axes.clone()),
         );
         self.dims = axes.iter().map(|i| self.dims[*i]).collect();
         self
@@ -47,7 +47,7 @@ impl GraphTensor {
         self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
             &(self.logical_value, current_dims),
-            crate::logical_graph::Movement::ExpandDim {
+            crate::graph::Movement::ExpandDim {
                 axis,
                 size: size.clone(),
             },
@@ -79,7 +79,7 @@ impl GraphTensor {
         self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
             &(self.logical_value, current_dims),
-            crate::logical_graph::Movement::Repeat(repeats.clone()),
+            crate::graph::Movement::Repeat(repeats.clone()),
         );
         for (dim, repeat) in self.dims.iter_mut().zip(repeats) {
             if repeat == Expression::from(1) {
@@ -140,7 +140,7 @@ impl GraphTensor {
         self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
             &(self.logical_value, current_dims),
-            crate::logical_graph::Movement::MergeDims { axis1, axis2 },
+            crate::graph::Movement::MergeDims { axis1, axis2 },
         );
         // Move axis2 next to axis1 if not adjacent, then fold it in.
         if axis2 != axis1 + 1 {
@@ -179,7 +179,7 @@ impl GraphTensor {
         self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
             &(self.logical_value, current_dims),
-            crate::logical_graph::Movement::SplitDims {
+            crate::graph::Movement::SplitDims {
                 axis,
                 inner: new_dim_size,
             },
@@ -206,7 +206,7 @@ impl GraphTensor {
         self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
             &(self.logical_value, current_dims),
-            crate::logical_graph::Movement::RemoveDim { axis },
+            crate::graph::Movement::RemoveDim { axis },
         );
         self.dims.remove(axis);
         self
@@ -650,18 +650,18 @@ impl GraphTensor {
         // win_p·stride_p + k_p·dilation_p — window arithmetic straight
         // from the unfold's own parameters.
         let out_rank = 2 * n;
-        let entries: Vec<crate::logical_graph::MapEntry> = (0..n)
+        let entries: Vec<crate::graph::MapEntry> = (0..n)
             .map(|p| {
-                crate::logical_graph::MapEntry::Add(
-                    Box::new(crate::logical_graph::MapEntry::Mul(
-                        Box::new(crate::logical_graph::MapEntry::Coord {
+                crate::graph::MapEntry::Add(
+                    Box::new(crate::graph::MapEntry::Mul(
+                        Box::new(crate::graph::MapEntry::Coord {
                             from_end: out_rank - 1 - p,
                             extent: window_counts[p],
                         }),
                         strides[p].into(),
                     )),
-                    Box::new(crate::logical_graph::MapEntry::Mul(
-                        Box::new(crate::logical_graph::MapEntry::Coord {
+                    Box::new(crate::graph::MapEntry::Mul(
+                        Box::new(crate::graph::MapEntry::Coord {
                             from_end: out_rank - 1 - (n + p),
                             extent: kernel[p],
                         }),
@@ -713,18 +713,18 @@ impl GraphTensor {
             // The seam node's own parameters ARE the view: parent axis p
             // reads out coordinate p plus its start.
             let rank = new_dims.len();
-            let entries: Vec<crate::logical_graph::MapEntry> = (0..rank)
+            let entries: Vec<crate::graph::MapEntry> = (0..rank)
                 .map(|p| {
-                    let coord = crate::logical_graph::MapEntry::Coord {
+                    let coord = crate::graph::MapEntry::Coord {
                         from_end: rank - 1 - p,
                         extent: new_dims[p],
                     };
                     if starts[p] == Expression::from(0) {
                         coord
                     } else {
-                        crate::logical_graph::MapEntry::Add(
+                        crate::graph::MapEntry::Add(
                             Box::new(coord),
-                            Box::new(crate::logical_graph::MapEntry::Lit(starts[p])),
+                            Box::new(crate::graph::MapEntry::Lit(starts[p])),
                         )
                     }
                 })
@@ -748,7 +748,7 @@ impl GraphTensor {
             self.logical_value = self.graph().logical.apply_movement(
                 self.id.index(),
                 &(self.logical_value, current_dims),
-                crate::logical_graph::Movement::Shrink {
+                crate::graph::Movement::Shrink {
                     new_dims: new_dims.clone(),
                 },
             );
@@ -801,28 +801,28 @@ impl GraphTensor {
         let clamp_logical;
         {
             let rank = dims.len();
-            let entries: Vec<crate::logical_graph::MapEntry> = (0..rank)
+            let entries: Vec<crate::graph::MapEntry> = (0..rank)
                 .map(|k| {
-                    let coord = crate::logical_graph::MapEntry::Coord {
+                    let coord = crate::graph::MapEntry::Coord {
                         from_end: rank - 1 - k,
                         extent: out_dims[k],
                     };
                     let mut entry = coord;
                     if befores[k] != Expression::from(0) {
-                        entry = crate::logical_graph::MapEntry::Max(
-                            Box::new(crate::logical_graph::MapEntry::Add(
+                        entry = crate::graph::MapEntry::Max(
+                            Box::new(crate::graph::MapEntry::Add(
                                 Box::new(entry),
-                                Box::new(crate::logical_graph::MapEntry::Lit(
+                                Box::new(crate::graph::MapEntry::Lit(
                                     (Expression::from(0) - befores[k]).simplify(),
                                 )),
                             )),
-                            Box::new(crate::logical_graph::MapEntry::Lit(0.into())),
+                            Box::new(crate::graph::MapEntry::Lit(0.into())),
                         );
                     }
                     if afters[k] != Expression::from(0) {
-                        entry = crate::logical_graph::MapEntry::Min(
+                        entry = crate::graph::MapEntry::Min(
                             Box::new(entry),
-                            Box::new(crate::logical_graph::MapEntry::Lit(
+                            Box::new(crate::graph::MapEntry::Lit(
                                 (dims[k] - 1).simplify(),
                             )),
                         );

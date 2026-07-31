@@ -46,13 +46,13 @@ impl Graph {
         expr: &Expression,
         dims: &[Expression],
         range: usize,
-    ) -> Option<crate::logical_graph::ValueId> {
+    ) -> Option<crate::graph::ValueId> {
         let coord = if range <= 1 {
             "(IntLit 0)".to_string()
         } else {
             format!("(CoordVar 0 (IntLit {range}))")
         };
-        let value_expr = match crate::logical_graph::int_expr_term(
+        let value_expr = match crate::graph::int_expr_term(
             expr,
             &coord,
             &Default::default(),

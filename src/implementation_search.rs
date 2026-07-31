@@ -24,7 +24,7 @@ use rustc_hash::FxHashMap;
 
 use crate::bufferize::BufferIrGraph;
 use crate::extractor::{self, Genome};
-use crate::logical_graph::LogicalProgram;
+use crate::graph::LogicalProgram;
 use crate::ssa_reference::SsaReferenceRuntime;
 
 #[derive(Debug, Clone)]
@@ -249,7 +249,7 @@ pub fn bucketed_search_implementations(
         }
         text
     };
-    let assemble = |seeds: &BTreeMap<char, (u64, u64)>| crate::logical_graph::LogicalProgram {
+    let assemble = |seeds: &BTreeMap<char, (u64, u64)>| crate::graph::LogicalProgram {
         text: format!(
             "{pre}{}{}{post}",
             seeds_text(seeds),

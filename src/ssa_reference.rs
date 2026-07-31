@@ -122,7 +122,7 @@ impl SsaReferenceRuntime {
             crate::reference_binding::SCHEDULE,
             spec.post_checks
         );
-        let program = crate::logical_graph::LogicalProgram {
+        let program = crate::graph::LogicalProgram {
             text,
             input_slots: spec.input_slots,
             output_slots: spec.output_slots,

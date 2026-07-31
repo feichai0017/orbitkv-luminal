@@ -29,7 +29,7 @@ pub struct GraphTensor {
     pub dtype: DType,
     /// The SSA value this handle names in the logical graph (M3 Step 4a).
     /// `None` = unrecorded (a poisoned/uncovered path).
-    pub logical_value: Option<crate::logical_graph::ValueId>,
+    pub logical_value: Option<crate::graph::ValueId>,
 }
 
 impl From<&GraphTensor> for GraphTensor {
@@ -58,7 +58,7 @@ impl GraphTensor {
     /// Attach the recorded logical value to this handle.
     pub(crate) fn with_logical(
         mut self,
-        value: Option<crate::logical_graph::ValueId>,
+        value: Option<crate::graph::ValueId>,
     ) -> Self {
         self.logical_value = value;
         self

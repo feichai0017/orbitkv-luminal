@@ -2639,7 +2639,7 @@ pub fn run_ssa(cx: &crate::graph::Graph, inputs: &[(petgraph::graph::NodeIndex, 
              (set (upper-bound-of (IntVar \"{var}\")) (bigint {value}))\n"
         ));
     }
-    let program = crate::logical_graph::LogicalProgram {
+    let program = crate::graph::LogicalProgram {
         text: format!(
             "{pre}{seeds}{}{post}",
             crate::reference_binding::SCHEDULE
@@ -2655,7 +2655,7 @@ pub fn run_ssa(cx: &crate::graph::Graph, inputs: &[(petgraph::graph::NodeIndex, 
 /// The pipeline from an assembled LogicalProgram — shared by the
 /// translator path (run_ssa) and the native recorder path (M3).
 pub fn run_ssa_program(
-    program: crate::logical_graph::LogicalProgram,
+    program: crate::graph::LogicalProgram,
     inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)],
 ) -> crate::ssa_reference::SsaReferenceRuntime {
     let text = format!(
