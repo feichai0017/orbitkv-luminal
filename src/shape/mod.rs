@@ -1,8 +1,6 @@
 mod expression;
-mod tracker;
 
 pub use expression::*;
-pub use tracker::*;
 
 use std::ops::{Bound, Range, RangeBounds, RangeFrom, RangeFull, RangeTo, RangeToInclusive};
 
@@ -523,11 +521,5 @@ impl<A: Into<Expression>> ToShape for Vec<A> {
 impl<A: Into<Expression>> ToShape for A {
     fn to_shape(self) -> Vec<Expression> {
         vec![self.into()]
-    }
-}
-
-impl ToShape for ShapeTracker {
-    fn to_shape(self) -> Vec<Expression> {
-        self.dims.to_shape()
     }
 }

@@ -19,8 +19,8 @@ impl LayerNorm {
         cx: &mut Graph,
     ) -> Self {
         Self {
-            weight: weight.map(|w| cx.named_tensor(w, dim).persist()),
-            bias: bias.map(|b| cx.named_tensor(b, dim).persist()),
+            weight: weight.map(|w| cx.named_tensor(w, dim)),
+            bias: bias.map(|b| cx.named_tensor(b, dim)),
             mean_norm,
             epsilon,
         }

@@ -2616,3 +2616,117 @@ mod intcoordvar_probe {
         );
     }
 }
+
+/// M3 Step 4b: the NATIVE test harness — recorder model + reference
+/// binding + dyn pins as tight bounds seeds, saturated, extracted,
+/// bufferized, executed on `SsaReferenceRuntime`. The frontend candle
+/// differentials and the ssa_reference differentials both run through
+/// here.
+/// Their graph → our whole pipeline → an executed plan.
+/// M3 Topic C: the differentials' "ours" side runs the NATIVE path —
+/// recorder model + reference binding, with the graph's dyn pins
+/// injected as tight bounds seeds (the binding interface; the [n,n]
+/// collapse delivers literals by congruence).
+pub fn run_ssa(cx: &crate::graph::Graph, inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)]) -> crate::ssa_reference::SsaReferenceRuntime {
+    let (pre, input_slots, output_slots, post) =
+        cx.logical.native_parts().expect("recorder clean for a covered graph");
+    let mut vars: Vec<_> = cx.dyn_map.iter().collect();
+    vars.sort();
+    let mut seeds = String::new();
+    for (var, value) in vars {
+        seeds.push_str(&format!(
+            "(set (lower-bound-of (IntVar \"{var}\")) (bigint {value}))\n\
+             (set (upper-bound-of (IntVar \"{var}\")) (bigint {value}))\n"
+        ));
+    }
+    let program = crate::logical_graph::LogicalProgram {
+        text: format!(
+            "{pre}{seeds}{}{post}",
+            crate::reference_binding::SCHEDULE
+        ),
+        input_slots,
+        output_slots,
+    };
+    run_ssa_program(program, inputs)
+}
+
+
+
+/// The pipeline from an assembled LogicalProgram — shared by the
+/// translator path (run_ssa) and the native recorder path (M3).
+pub fn run_ssa_program(
+    program: crate::logical_graph::LogicalProgram,
+    inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)],
+) -> crate::ssa_reference::SsaReferenceRuntime {
+    let text = format!(
+        "{}\n\n{}",
+        crate::egglog_snippet::assembled_program(),
+        program.text
+    );
+    let mut egraph = crate::egglog_snippet::new_egraph();
+    egraph.parse_and_run_program(None, &text).expect("program runs");
+    let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
+    let allow = crate::ssa_reference::reference_allow_list();
+    let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))
+        .expect("extracts")
+        .expect("plan");
+    let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))
+        .expect("bufferizes");
+    let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
+    rt.load_plan(plan);
+    for (node, data) in inputs {
+        rt.set_data(node.index() as i64, data.clone());
+    }
+    rt.execute().expect("executes");
+    rt
+}
+
+
+#[cfg(test)]
+mod stage4b_probes {
+    /// PINNED KNOWN UNSOUNDNESS (Step 4b, awaiting Austin's egglog design
+    /// ruling — full dossier in the session memory). Minimal repro: any
+    /// rank-0 -> [1] scalar-broadcast view. Two layers:
+    ///
+    /// 1. The user-ratified EXTENT-1 COLLAPSE (CoordVar over a provably-1
+    ///    extent unions with IntLit 0) breaks `coeff-of`'s :no-merge
+    ///    argument on degenerate axes (on domain {0}, c->c and c->0 are
+    ///    equal functions with coefficients 1 vs 0 — both valid strides).
+    ///    A lower-bound>=2 gate on the coeff-1 rule is applied in the
+    ///    preamble (flagged AWAITING RATIFICATION).
+    /// 2. With that gate, the same repro still panics `const-part-of`
+    ///    with 0 vs 32 (the f32 bit width) — a REAL unsound union: the
+    ///    collapse feeds CoordVar into the global zero class, and
+    ///    inversion-style rules (bit->element discovery et al.) matching
+    ///    (IntMul ?expr (IntLit ?bits)) inside that class bind ?expr to
+    ///    the wrong zero-product lhs, cross-wiring layouts until exprs
+    ///    disagreeing at the origin merge. Merge-tolerant folds let the
+    ///    crossed-bounds tripwire confirm independently.
+    /// PINNED KNOWN GAP (Step 4b): a PURE-IDENTITY graph — an input
+    /// directly output(), no ops — panics the axis-extent-lock tripwire
+    /// natively (input and output bindings share one BufferLit and one
+    /// logical value). The model zoo's identity-add idiom (Topic E, yolo)
+    /// exists for exactly this; the real fix is binding-level (4d/M4
+    /// aliasing/donation design).
+    #[test]
+    #[ignore = "pure-identity output unsupported natively — binding-level fix at 4d/M4"]
+    fn pinned_pure_identity_output() {
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor(2);
+        let b = a.output();
+        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![1.0, 2.0])]);
+        let got = rt.get_f32(b.id.index() as i64).unwrap();
+        assert_eq!(got, &vec![1.0, 2.0]);
+    }
+
+    #[test]
+    #[ignore = "degenerate-broadcast unsound union — awaiting egglog-level ruling (Step 4b)"]
+    fn pinned_degenerate_broadcast_unsound_union() {
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor(1);
+        let b = (a * 2.0).output();
+        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![0.5])]);
+        let got = rt.get_f32(b.id.index() as i64).unwrap();
+        assert!((got[0] - 1.0).abs() < 1e-6, "{got:?}");
+    }
+}

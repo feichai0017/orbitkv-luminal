@@ -321,68 +321,8 @@ impl SsaReferenceRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::graph::Graph;
-        use egglog::SerializeConfig;
-
-    /// Their graph → our whole pipeline → an executed plan.
-    /// M3 Topic C: the differentials' "ours" side runs the NATIVE path —
-    /// recorder model + reference binding, with the graph's dyn pins
-    /// injected as tight bounds seeds (the binding interface; the [n,n]
-    /// collapse delivers literals by congruence).
-    fn run_ssa(cx: &Graph, inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)]) -> SsaReferenceRuntime {
-        let (pre, input_slots, output_slots, post) =
-            cx.logical.native_parts().expect("recorder clean for a covered graph");
-        let mut vars: Vec<_> = cx.dyn_map.iter().collect();
-        vars.sort();
-        let mut seeds = String::new();
-        for (var, value) in vars {
-            seeds.push_str(&format!(
-                "(set (lower-bound-of (IntVar \"{var}\")) (bigint {value}))\n\
-                 (set (upper-bound-of (IntVar \"{var}\")) (bigint {value}))\n"
-            ));
-        }
-        let program = crate::logical_graph::LogicalProgram {
-            text: format!(
-                "{pre}{seeds}{}{post}",
-                crate::reference_binding::SCHEDULE
-            ),
-            input_slots,
-            output_slots,
-        };
-        run_ssa_program(program, inputs)
-    }
-
-
-
-    /// The pipeline from an assembled LogicalProgram — shared by the
-    /// translator path (run_ssa) and the native recorder path (M3).
-    fn run_ssa_program(
-        program: crate::logical_graph::LogicalProgram,
-        inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)],
-    ) -> SsaReferenceRuntime {
-        let text = format!(
-            "{}\n\n{}",
-            crate::egglog_snippet::assembled_program(),
-            program.text
-        );
-        let mut egraph = crate::egglog_snippet::new_egraph();
-        egraph.parse_and_run_program(None, &text).expect("program runs");
-        let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-        let allow = reference_allow_list();
-        let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))
-            .expect("extracts")
-            .expect("plan");
-        let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))
-            .expect("bufferizes");
-        let mut rt = SsaReferenceRuntime::default();
-        rt.load_plan(plan);
-        for (node, data) in inputs {
-            rt.set_data(node.index() as i64, data.clone());
-        }
-        rt.execute().expect("executes");
-        rt
-    }
+    use crate::test_support::{run_ssa, run_ssa_program};
 
     fn assert_close(ours: &[f32], theirs: &[f32]) {
         assert_eq!(ours.len(), theirs.len(), "length mismatch");

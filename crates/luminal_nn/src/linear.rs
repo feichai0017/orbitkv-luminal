@@ -10,9 +10,9 @@ pub struct Linear {
 impl Linear {
     pub fn new(inp: usize, out: usize, bias: bool, cx: &mut Graph) -> Self {
         Self {
-            weight: cx.named_tensor("Weight", (inp, out)).persist(),
+            weight: cx.named_tensor("Weight", (inp, out)),
             bias: if bias {
-                Some(cx.named_tensor("Bias", out).persist())
+                Some(cx.named_tensor("Bias", out))
             } else {
                 None
             },
@@ -22,9 +22,9 @@ impl Linear {
 
     pub fn new_permuted(inp: usize, out: usize, bias: bool, cx: &mut Graph) -> Self {
         Self {
-            weight: cx.named_tensor("Weight", (out, inp)).persist(),
+            weight: cx.named_tensor("Weight", (out, inp)),
             bias: if bias {
-                Some(cx.named_tensor("Bias", out).persist())
+                Some(cx.named_tensor("Bias", out))
             } else {
                 None
             },

@@ -5,6 +5,10 @@ use luminal::prelude::*;
 /// The layer expects inputs shaped like `[batch..., channels, spatial...]` where the number of
 /// spatial dimensions is greater than zero. The kernel configuration controls how many spatial
 /// axes are convolved (N) and must be shorter than the input rank (K): `K > N` is asserted.
+// NOTE (Step 4b): modules no longer call .persist() at authoring time —
+// persistence is a RUNTIME-BINDING choice (purity ruling 2026-07-30);
+// the recorder poisons persist_only outputs until the binding-side API
+// lands at 4d/M4.
 pub struct ConvND {
     pub weight: GraphTensor, // (ch_out, ch_in * kernel_product)
     pub bias: Option<GraphTensor>,
@@ -61,9 +65,9 @@ impl ConvND {
         Self {
             weight: cx
                 .named_tensor("ConvWeight", (ch_out, ch_in * kernel_product))
-                .persist(),
+                ,
             bias: if bias {
-                Some(cx.named_tensor("ConvBias", ch_out).persist())
+                Some(cx.named_tensor("ConvBias", ch_out))
             } else {
                 None
             },
@@ -441,15 +445,11 @@ mod forward_tests {
             &mut cx,
         );
         let out = conv.forward(x).output();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut rt = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
+        let rt = luminal::test_support::run_ssa(
+            &cx,
+            &[(x.id, x_data.clone()), (conv.weight.id, w_data.clone())],
         );
-        rt.set_data(x.id, x_data.clone());
-        rt.set_data(conv.weight.id, w_data.clone());
-        rt.execute(&cx.dyn_map);
-        let got = rt.get_f32(out.id).clone();
+        let got = rt.get_f32(out.id.index() as i64).unwrap().clone();
 
         // Naive conv; weight layout is (co, ci * k * k), ci-major.
         let mut want = vec![0.0f32; b * co * oh * ow];

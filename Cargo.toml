@@ -45,15 +45,13 @@ ordered-float = "5.1.0"
 proptest = "1.9.0"
 
 [workspace]
+# M3 Step 4b: their HLIR pipeline is deleted. Crates and examples that
+# consumed it (cuda_lite/metal/python/training/bench + the model-zoo
+# examples) are PARKED — out of the workspace until their M4/4d re-seat
+# on the native ladder. They are not deleted; their sources stay put.
 members = [
-    "examples/*",
     "crates/luminal_nn",
-    "crates/luminal_cuda_lite",
-    "crates/luminal_metal",
     "crates/luminal_tracing",
-    "crates/luminal_bench",
-    "crates/luminal_python/rust",
-    "crates/luminal_training",
 ]
 
 [patch.crates-io]
