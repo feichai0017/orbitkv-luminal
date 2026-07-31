@@ -24,18 +24,18 @@ impl Add for GraphTensor {
             },
             &[self.id, rhs.id],
         );
-        self.graph().logical.op(
+        let logical = self.graph().logical.op(
             new_id.index(),
             "LogicalAdd",
             &[
-                (self.id.index(), self.logical_view, self.dims()),
-                (rhs.id.index(), rhs.logical_view, rhs.dims()),
+                (self.logical_value, self.dims()),
+                (rhs.logical_value, rhs.dims()),
             ],
             "",
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype).with_logical(logical)
     }
 }
 
@@ -102,18 +102,18 @@ impl Mul for GraphTensor {
             },
             &[self.id, rhs.id],
         );
-        self.graph().logical.op(
+        let logical = self.graph().logical.op(
             new_id.index(),
             "LogicalMul",
             &[
-                (self.id.index(), self.logical_view, self.dims()),
-                (rhs.id.index(), rhs.logical_view, rhs.dims()),
+                (self.logical_value, self.dims()),
+                (rhs.logical_value, rhs.dims()),
             ],
             "",
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype).with_logical(logical)
     }
 }
 
@@ -178,18 +178,18 @@ impl Rem<GraphTensor> for GraphTensor {
             },
             &[self.id, rhs.id],
         );
-        self.graph().logical.op(
+        let logical = self.graph().logical.op(
             new_id.index(),
             "LogicalMod",
             &[
-                (self.id.index(), self.logical_view, self.dims()),
-                (rhs.id.index(), rhs.logical_view, rhs.dims()),
+                (self.logical_value, self.dims()),
+                (rhs.logical_value, rhs.dims()),
             ],
             "",
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype).with_logical(logical)
     }
 }
 
@@ -340,12 +340,12 @@ impl GraphTensor {
             },
             &[self.id, rhs.id],
         );
-        self.graph().logical.op(
+        let logical = self.graph().logical.op(
             new_id.index(),
             "LogicalLessThan",
             &[
-                (self.id.index(), self.logical_view, self.dims()),
-                (rhs.id.index(), rhs.logical_view, rhs.dims()),
+                (self.logical_value, self.dims()),
+                (rhs.logical_value, rhs.dims()),
             ],
             "",
             self.dims(),
@@ -359,7 +359,7 @@ impl GraphTensor {
                 .with_element_bits(DType::Bool.bits()),
             self.graph_ref,
             DType::Bool,
-        )
+        ).with_logical(logical)
     }
 
     /// Greater than comparison

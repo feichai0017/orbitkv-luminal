@@ -81,15 +81,15 @@ impl GraphTensor {
             },
             &[self.id],
         );
-        self.graph().logical.op(
+        let logical = self.graph().logical.op(
             new_id.index(),
             "LogicalLog2",
-            &[(self.id.index(), self.logical_view, self.dims())],
+            &[(self.logical_value, self.dims())],
             "",
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype).with_logical(logical)
     }
 
     /// Base 2 exp
@@ -101,15 +101,15 @@ impl GraphTensor {
             },
             &[self.id],
         );
-        self.graph().logical.op(
+        let logical = self.graph().logical.op(
             new_id.index(),
             "LogicalExp2",
-            &[(self.id.index(), self.logical_view, self.dims())],
+            &[(self.logical_value, self.dims())],
             "",
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype).with_logical(logical)
     }
 
     /// Natural exp
@@ -131,15 +131,15 @@ impl GraphTensor {
             },
             &[self.id],
         );
-        self.graph().logical.op(
+        let logical = self.graph().logical.op(
             new_id.index(),
             "LogicalRecip",
-            &[(self.id.index(), self.logical_view, self.dims())],
+            &[(self.logical_value, self.dims())],
             "",
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype).with_logical(logical)
     }
 
     /// The sin(x) function
@@ -151,15 +151,15 @@ impl GraphTensor {
             },
             &[self.id],
         );
-        self.graph().logical.op(
+        let logical = self.graph().logical.op(
             new_id.index(),
             "LogicalSin",
-            &[(self.id.index(), self.logical_view, self.dims())],
+            &[(self.logical_value, self.dims())],
             "",
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype).with_logical(logical)
     }
 
     /// The cos(x) function
@@ -181,15 +181,15 @@ impl GraphTensor {
             },
             &[self.id],
         );
-        self.graph().logical.op(
+        let logical = self.graph().logical.op(
             new_id.index(),
             "LogicalSqrt",
-            &[(self.id.index(), self.logical_view, self.dims())],
+            &[(self.logical_value, self.dims())],
             "",
             self.dims(),
             self.dtype,
         );
-        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(new_id, self.legacy_tracker.contiguous(), self.graph_ref, self.dtype).with_logical(logical)
     }
 
     /// Scale so std is 1.0

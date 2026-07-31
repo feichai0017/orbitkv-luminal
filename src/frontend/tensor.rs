@@ -28,10 +28,9 @@ pub struct GraphTensor {
     /// vocabulary) — no external code may read or write tracker state.
     pub(crate) legacy_tracker: ShapeTracker,
     pub dtype: DType,
-    /// M3 recorder view handle: `None` = "my logical value is the
-    /// recorder's value for `id`"; `Some` = a tracker-level view emitted
-    /// by the movement API (see [`crate::logical_graph`]).
-    pub logical_view: Option<crate::logical_graph::ViewId>,
+    /// The SSA value this handle names in the logical graph (M3 Step 4a).
+    /// `None` = unrecorded (a poisoned/uncovered path).
+    pub logical_value: Option<crate::logical_graph::ValueId>,
 }
 
 impl From<&GraphTensor> for GraphTensor {
@@ -51,10 +50,19 @@ impl GraphTensor {
         Self {
             id,
             graph_ref,
-            logical_view: None,
+            logical_value: None,
             legacy_tracker: shape,
             dtype,
         }
+    }
+
+    /// Attach the recorded logical value to this handle.
+    pub(crate) fn with_logical(
+        mut self,
+        value: Option<crate::logical_graph::ValueId>,
+    ) -> Self {
+        self.logical_value = value;
+        self
     }
 
     /// Get a mutable reference to the graph this tensor belongs to
@@ -106,8 +114,7 @@ impl GraphTensor {
             let dims = source.legacy_tracker.dims.to_vec();
             self.graph().logical.output(
                 source.id.index(),
-                source.logical_view,
-                &dims,
+                &(source.logical_value, dims),
                 source.id.index(),
             );
         }

@@ -1522,11 +1522,12 @@ impl Graph {
             graph_ref: self,
             legacy_tracker: ShapeTracker::new(shape).with_element_bits(dtype.bits()),
             dtype,
-            logical_view: None,
+            logical_value: None,
         };
-        self.logical
+        let logical = self
+            .logical
             .input(id.index(), &name, &tensor.legacy_tracker.dims.to_vec(), tensor.dtype);
-        tensor
+        tensor.with_logical(logical)
     }
 
     /// Get the sources of a node given it's id

@@ -10,10 +10,9 @@ impl GraphTensor {
     pub fn permute(mut self, axes: impl ToAxes) -> GraphTensor {
         let axes = axes.to_axes();
         let current_dims = self.legacy_tracker.dims.to_vec();
-        self.logical_view = self.graph().logical.apply_movement(
+        self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
-            self.logical_view,
-            &current_dims,
+            &(self.logical_value, current_dims),
             crate::logical_graph::Movement::Permute(axes.clone()),
         );
         self.legacy_tracker.permute(axes);
@@ -42,10 +41,9 @@ impl GraphTensor {
     pub fn expand_dim(mut self, axis: usize, size: impl Into<Expression>) -> GraphTensor {
         let size = size.into();
         let current_dims = self.legacy_tracker.dims.to_vec();
-        self.logical_view = self.graph().logical.apply_movement(
+        self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
-            self.logical_view,
-            &current_dims,
+            &(self.logical_value, current_dims),
             crate::logical_graph::Movement::ExpandDim {
                 axis,
                 size: size.clone(),
@@ -68,10 +66,9 @@ impl GraphTensor {
     pub fn repeat(mut self, repeats: impl ToShape) -> GraphTensor {
         let repeats = repeats.to_shape();
         let current_dims = self.legacy_tracker.dims.to_vec();
-        self.logical_view = self.graph().logical.apply_movement(
+        self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
-            self.logical_view,
-            &current_dims,
+            &(self.logical_value, current_dims),
             crate::logical_graph::Movement::Repeat(repeats.clone()),
         );
         self.legacy_tracker.repeat(repeats);
@@ -124,10 +121,9 @@ impl GraphTensor {
     /// Merge two dimensions together
     pub fn merge_dims(mut self, axis1: usize, axis2: usize) -> GraphTensor {
         let current_dims = self.legacy_tracker.dims.to_vec();
-        self.logical_view = self.graph().logical.apply_movement(
+        self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
-            self.logical_view,
-            &current_dims,
+            &(self.logical_value, current_dims),
             crate::logical_graph::Movement::MergeDims { axis1, axis2 },
         );
         self.legacy_tracker.merge_dims(axis1, axis2);
@@ -146,10 +142,9 @@ impl GraphTensor {
     pub fn split_dims(mut self, axis: usize, new_dim_size: impl Into<Expression>) -> GraphTensor {
         let new_dim_size = new_dim_size.into();
         let current_dims = self.legacy_tracker.dims.to_vec();
-        self.logical_view = self.graph().logical.apply_movement(
+        self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
-            self.logical_view,
-            &current_dims,
+            &(self.logical_value, current_dims),
             crate::logical_graph::Movement::SplitDims {
                 axis,
                 inner: new_dim_size,
@@ -173,10 +168,9 @@ impl GraphTensor {
             "Only dimensions of size 1 can be squeezed!"
         );
         let current_dims = self.legacy_tracker.dims.to_vec();
-        self.logical_view = self.graph().logical.apply_movement(
+        self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
-            self.logical_view,
-            &current_dims,
+            &(self.logical_value, current_dims),
             crate::logical_graph::Movement::RemoveDim { axis },
         );
         self.legacy_tracker.remove_dim(axis);
@@ -514,15 +508,15 @@ impl GraphTensor {
             },
             &[flat_index.id, self.id],
         );
-        let data_operand = (self.id.index(), self.logical_view, dims);
+        let data_operand = (self.logical_value, dims);
         let coord_operands: Vec<_> = coords
             .iter()
-            .map(|coord| (coord.id.index(), coord.logical_view, coord.dims()))
+            .map(|coord| (coord.logical_value, coord.dims()))
             .collect();
-        self.graph().logical.record_gather(
+        let logical = self.graph().logical.record_gather(
             id.index(),
-            data_operand,
-            coord_operands,
+            &data_operand,
+            &coord_operands,
             out_dims.clone(),
             self.dtype,
         );
@@ -532,6 +526,7 @@ impl GraphTensor {
             self.graph_ref,
             self.dtype,
         )
+        .with_logical(logical)
     }
 
     /// COORDINATE-FORM scatter — THE primary (ruling 2026-07-31): self is
@@ -588,17 +583,17 @@ impl GraphTensor {
             },
             &[self.id, flat_index.id, src.id],
         );
-        let init_operand = (self.id.index(), self.logical_view, dims.clone());
-        let src_operand = (src.id.index(), src.logical_view, index_dims);
+        let init_operand = (self.logical_value, dims.clone());
+        let src_operand = (src.logical_value, index_dims);
         let coord_operands: Vec<_> = coords
             .iter()
-            .map(|coord| (coord.id.index(), coord.logical_view, coord.dims()))
+            .map(|coord| (coord.logical_value, coord.dims()))
             .collect();
-        self.graph().logical.record_scatter(
+        let logical = self.graph().logical.record_scatter(
             id.index(),
-            init_operand,
-            coord_operands,
-            src_operand,
+            &init_operand,
+            &coord_operands,
+            &src_operand,
             dims.clone(),
             self.dtype,
         );
@@ -608,6 +603,7 @@ impl GraphTensor {
             self.graph_ref,
             self.dtype,
         )
+        .with_logical(logical)
     }
 
     /// FLAT gather (the rank-1 primitive): out[i] = data[indexes[i]].
@@ -753,10 +749,10 @@ impl GraphTensor {
                 )
             })
             .collect();
-        let operand = (self.id.index(), self.logical_view, self.dims());
-        self.graph().logical.view_op(
+        let operand = (self.logical_value, self.dims());
+        let logical = self.graph().logical.view_op(
             id.index(),
-            operand,
+            &operand,
             &entries,
             final_shape.clone(),
             self.dtype,
@@ -767,6 +763,7 @@ impl GraphTensor {
             self.graph_ref,
             self.dtype,
         )
+        .with_logical(logical)
     }
 
     /// Take a slice of a tensor along multiple dimensions.
@@ -824,15 +821,16 @@ impl GraphTensor {
                     }
                 })
                 .collect();
-            let operand = (self.id.index(), self.logical_view, self.dims());
-            self.graph().logical.view_op(
+            let operand = (self.logical_value, self.dims());
+            let logical = self.graph().logical.view_op(
                 id.index(),
-                operand,
+                &operand,
                 &entries,
                 new_dims.clone(),
                 self.dtype,
             );
             GraphTensor::from_id(id, ShapeTracker::new(new_dims), self.graph_ref, self.dtype)
+                .with_logical(logical)
         } else {
             // No start slices so no iota needed, just reduce the shape down
             let mut new_dims = self.legacy_tracker.dims.to_vec();
@@ -840,14 +838,13 @@ impl GraphTensor {
                 *sh = sh.min(*end);
             }
             let current_dims = self.legacy_tracker.dims.to_vec();
-            self.logical_view = self.graph().logical.apply_movement(
-                self.id.index(),
-                self.logical_view,
-                &current_dims,
-                crate::logical_graph::Movement::Shrink {
+            self.logical_value = self.graph().logical.apply_movement(
+            self.id.index(),
+            &(self.logical_value, current_dims),
+            crate::logical_graph::Movement::Shrink {
                     new_dims: new_dims.clone(),
                 },
-            );
+        );
             for (sh, new_dim) in self.legacy_tracker.dims.iter_mut().zip(new_dims) {
                 *sh = new_dim;
             }
@@ -927,7 +924,8 @@ impl GraphTensor {
         );
         // Pad's read half recorded as the TOTAL clamped view — per parent
         // axis min(max(c - before, 0), dim - 1), clamp sides only where
-        // padding exists (the translator's conditional forms).
+        // padding exists.
+        let clamp_logical;
         {
             let rank = dims.len();
             let entries: Vec<crate::logical_graph::MapEntry> = (0..rank)
@@ -959,10 +957,10 @@ impl GraphTensor {
                     entry
                 })
                 .collect();
-            let operand = (self.id.index(), self.logical_view, dims.clone());
-            self.graph().logical.view_op(
+            let operand = (self.logical_value, dims.clone());
+            clamp_logical = self.graph().logical.view_op(
                 clamped_id.index(),
-                operand,
+                &operand,
                 &entries,
                 out_dims.clone(),
                 self.dtype,
@@ -973,7 +971,8 @@ impl GraphTensor {
             ShapeTracker::new(out_dims.clone()),
             self.graph_ref,
             self.dtype,
-        );
+        )
+        .with_logical(clamp_logical);
 
         let mask_id = self.graph().add_op(
             crate::hlir::MaskIota {
@@ -983,7 +982,8 @@ impl GraphTensor {
             },
             &[],
         );
-        self.graph()
+        let mask_logical = self
+            .graph()
             .logical
             .record_mask_iota(mask_id.index(), &befores, &afters, &dims);
         let mask = GraphTensor::from_id(
@@ -992,6 +992,7 @@ impl GraphTensor {
             self.graph_ref,
             DType::Int,
         )
+        .with_logical(mask_logical)
         .cast(self.dtype);
 
         let masked = clamped * mask;

@@ -809,7 +809,7 @@ mod tests {
         let (cx2, data2, row2, col2, out2) = build();
         let program = cx2.logical.native_program().expect("native program");
         assert!(
-            program.text.contains("(LogicalGather rec_t"),
+            program.text.contains("(LogicalGather v"),
             "coordinate-form gather expected in the model:\n{}",
             program.text
         );
@@ -861,7 +861,7 @@ mod tests {
         let (cx2, dest2, row2, col2, src2, out2) = build();
         let program = cx2.logical.native_program().expect("native program");
         assert!(
-            program.text.contains("(LogicalScatter rec_t"),
+            program.text.contains("(LogicalScatter v"),
             "coordinate-form scatter expected in the model:\n{}",
             program.text
         );
@@ -1027,7 +1027,7 @@ mod tests {
         let (cx2, x2, y2, out2) = build();
         let program = cx2.logical.native_program().expect("native program");
         assert!(
-            program.text.contains("(LogicalCast rec_t") && program.text.contains("(Bool8)"),
+            program.text.contains("(LogicalCast v") && program.text.contains("(Bool8)"),
             "boundary Bool8 cast expected in the binding:\n{}",
             program.text
         );

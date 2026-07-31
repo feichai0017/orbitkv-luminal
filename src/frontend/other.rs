@@ -11,8 +11,8 @@ impl Graph {
             self,
             DType::Int,
         );
-        self.record_iota(tensor.id.index(), &expr, &[], 1);
-        tensor
+        let logical = self.record_iota(tensor.id.index(), &expr, &[], 1);
+        tensor.with_logical(logical)
     }
 
     /// A scalar float constant
@@ -23,14 +23,14 @@ impl Graph {
             self,
             DType::F32,
         );
-        self.logical.source_op(
+        let logical = self.logical.source_op(
             tensor.id.index(),
             "LogicalConstant",
             &format!("{:?}", i as f64),
             Vec::new(),
             DType::F32,
         );
-        tensor
+        tensor.with_logical(logical)
     }
 
     /// Iota expression
@@ -45,8 +45,8 @@ impl Graph {
             DType::Int,
         );
         let range_value = range.to_usize().unwrap_or(0);
-        self.record_iota(tensor.id.index(), &expr, &sh, range_value);
-        tensor
+        let logical = self.record_iota(tensor.id.index(), &expr, &sh, range_value);
+        tensor.with_logical(logical)
     }
 
     /// Record a LogicalIota for the recorder: the iota's value expression
@@ -59,7 +59,7 @@ impl Graph {
         expr: &Expression,
         dims: &[Expression],
         range: usize,
-    ) {
+    ) -> Option<crate::logical_graph::ValueId> {
         let coord = if range <= 1 {
             "(IntLit 0)".to_string()
         } else {
@@ -74,7 +74,7 @@ impl Graph {
             Ok(text) => text,
             Err(err) => {
                 self.logical.poison(format!("iota at t{node}: {err}"));
-                return;
+                return None;
             }
         };
         let shape = if dims.is_empty() {
@@ -85,9 +85,9 @@ impl Graph {
             self.logical.poison(format!(
                 "iota at t{node} over multi-dim shape {dims:?} (flat consumption only)"
             ));
-            return;
+            return None;
         };
-        self.logical.source_op(
+        let logical = self.logical.source_op(
             node,
             "LogicalIota",
             &format!("{value_expr} {shape}"),
@@ -98,6 +98,7 @@ impl Graph {
             "(check (= ?reclo{node} (lower-bound-of {value_expr})))\n\
              (check (= ?rechi{node} (upper-bound-of {value_expr})))\n"
         ));
+        logical
     }
 
     /// ARange from 0 to N
@@ -166,9 +167,9 @@ impl GraphTensor {
                 .logical
                 .poison(format!("Cast-to-Bool at t{} (the != 0 projection)", id.index()));
         } else {
-            let operand = (self.id.index(), self.logical_view, self.dims());
+            let operand = (self.logical_value, self.dims());
             let out_dims = self.dims();
-            self.graph().logical.op(
+            let logical = self.graph().logical.op(
                 id.index(),
                 "LogicalCast",
                 &[operand],
@@ -176,6 +177,8 @@ impl GraphTensor {
                 out_dims,
                 dtype,
             );
+            return GraphTensor::from_id(id, shape, self.graph_ref, dtype)
+                .with_logical(logical);
         }
         GraphTensor::from_id(id, shape, self.graph_ref, dtype)
     }
