@@ -404,6 +404,11 @@ def compile(
     Returns:
         A CompiledModel callable.
     """
+    from .generation import _materialize_skeleton
+
+    # Stock disk-mapped models (from_pretrained(device_map={"": "disk"}))
+    # arrive on meta; make them traceable. No-op otherwise.
+    _materialize_skeleton(model)
     if factory is None:
         factory = _detect_factory_capsule(
             example_input

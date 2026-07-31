@@ -262,3 +262,31 @@ def test_disk_mapped_skeleton_materializes():
     # Idempotent / no-op for materialized and normal models alike.
     _materialize_skeleton(model)
     _materialize_skeleton(reference)
+
+
+def test_aot_compile_accepts_disk_mapped_model(device):
+    """luminal.pt2.compile materializes disk-mapped skeletons too — the AOT
+    entry traces and runs (weight *sourcing* for such models remains the
+    backend's business; this pins traceability)."""
+    from transformers import AutoModelForCausalLM
+
+    from luminal.pt2 import compile as luminal_compile
+
+    hub_model = "hf-internal-testing/tiny-random-LlamaForCausalLM"
+    try:
+        # use_cache=False: the AOT path does not support DynamicCache outputs
+        # (pre-existing and load-mode independent); this test pins skeleton
+        # traceability, not cache handling.
+        model = AutoModelForCausalLM.from_pretrained(
+            hub_model, device_map={"": "disk"}, use_cache=False
+        ).eval()
+    except (OSError, ImportError) as exc:
+        pytest.skip(f"disk-mapped load unavailable: {exc}")
+
+    input_ids = torch.tensor([[1, 2, 3, 4]])
+    compiled = luminal_compile(model, input_ids, search_iterations=1)
+    outputs = compiled(input_ids)
+    vocab = model.config.vocab_size
+    assert any(torch.is_tensor(t) and t.shape[-1] == vocab for t in outputs), (
+        "no vocab-shaped output from the compiled skeleton"
+    )
