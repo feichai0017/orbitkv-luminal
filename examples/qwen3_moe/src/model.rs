@@ -114,7 +114,7 @@ impl Qwen3MoE {
 
         // seen[new_token] = 1.0 (in place; no-op for -1).
         let one = cx.constant_float(1.0).expand_dim(0, 1);
-        let seen_out = one.scatter(new_token, seen_mask);
+        let seen_out = one.scatter1d(new_token, seen_mask);
 
         // CPU-equivalent penalty: seen & logit > 0 → /p, seen & logit <= 0 → *p.
         let p = repetition_penalty;
@@ -293,7 +293,7 @@ fn rms_norm(cx: &mut Graph, weight_name: impl ToString) -> LayerNorm {
 
 fn token_embedding(embedding: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
     let seq = token_ids.dims1();
-    embedding.gather(
+    embedding.gather1d(
         (token_ids * HIDDEN).expand_dim(1, HIDDEN)
             + token_ids.graph().arange(HIDDEN).expand_dim(0, seq),
     )
@@ -316,7 +316,7 @@ impl QwenMoE {
             .graph()
             .iota(Expression::from('z') / k_expr * e_dim, top_k_indices.dims());
         let routing_flat_idx = row_offsets + top_k_indices;
-        let top_k_values = routing_weights.gather(routing_flat_idx);
+        let top_k_values = routing_weights.gather1d(routing_flat_idx);
         let top_k_values = top_k_values / top_k_values.sum(n - 1).expand_dim(n - 1, TOP_K);
 
         // 4. Gather gate_up expert weights → [s, k, intermediate*2, H]
@@ -341,7 +341,7 @@ impl QwenMoE {
 
         // 7. Weighted sum over k experts → [s, H]
         let mut weights_exp = top_k_values.unsqueeze(top_k_values.dims().len()); // [s, k, 1]
-        weights_exp.legacy_tracker_mut().expand(down_out.dims());
+        let weights_exp = weights_exp.expand(down_out.dims());
         (down_out * weights_exp).sum(n - 1)
     }
 }
@@ -367,7 +367,7 @@ fn gather_experts(
         exp_within = exp_within.expand_dim(i, *dim);
     }
     let expert_flat_idx = exp_base + exp_within;
-    weights.gather(expert_flat_idx)
+    weights.gather1d(expert_flat_idx)
 }
 
 /// RMS norm computed in F32 with explicit casts when the input is 16-bit.
@@ -474,7 +474,7 @@ fn attention(
     let causal_square = scores.graph().triu(ctx, 1).cast(scores.dtype) * -1e10;
     let row_offsets = (q_pos * ctx).expand_dim(1, ctx);
     let col_offsets = scores.graph().arange(ctx).expand_dim(0, seq);
-    let attn_mask = causal_square.gather(row_offsets + col_offsets);
+    let attn_mask = causal_square.gather1d(row_offsets + col_offsets);
     let masked_scores = scores + attn_mask.expand_dim(0, N_HEADS);
     let weights = masked_scores.softmax(2);
     let out = weights.matmul(v_ctx);

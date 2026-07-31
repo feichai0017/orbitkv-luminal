@@ -97,7 +97,7 @@ proptest! {
         prop_assume!(values.len() >= rows * cols);
         let mut cx = Graph::new();
         let a = cx.tensor((rows, cols));
-        let kth_largest = a.gather(a.topk_indexes(k, 1).slice((.., (k - 1)..k)).squeeze(1));
+        let kth_largest = a.gather1d(a.topk_indexes(k, 1).slice((.., (k - 1)..k)).squeeze(1));
         let mask = a.ge(kth_largest.expand_dim(1, cols)).cast(crate::dtype::DType::F32);
         let filtered = (a * mask).output();
         cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());

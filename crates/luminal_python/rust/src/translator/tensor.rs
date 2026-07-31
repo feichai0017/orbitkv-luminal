@@ -282,7 +282,7 @@ impl<'a> Translator<'a> {
         // by the time matmul expands into elementwise Mul. Using the PT2 output
         // metadata keeps the matmul dtype aligned with the exported contract
         // without upcasting the full expert weight bank.
-        let weight_gathered = weight.gather(flat_idx).cast(out_dtype);
+        let weight_gathered = weight.gather1d(flat_idx).cast(out_dtype);
         let input = input.cast(out_dtype);
 
         // Per-token matmul: [S, 1, K] @ [S, K, N] → [S, 1, N] → [S, N].

@@ -93,7 +93,7 @@ pub(crate) fn materialize(g: GraphTensor) -> GraphTensor {
     let dims = g.dims();
     let total = dims.iter().copied().product::<Expression>();
     let idx = g.graph().iota('z', total);
-    let mut m = g.gather(idx);
+    let mut m = g.gather1d(idx);
     *m.legacy_tracker_mut() = ShapeTracker::new(&dims[..]).with_element_bits(g.dtype.bits());
     m
 }
@@ -199,7 +199,7 @@ pub(crate) fn static_scatter_add(
             )
         };
         let dest = zeros_flat(cx, l.into(), g_flat.dtype);
-        let scattered = g_k.scatter(idx_k, dest); // (l,)
+        let scattered = g_k.scatter1d(idx_k, dest); // (l,)
         acc = Some(match acc {
             Some(a) => a + scattered,
             None => scattered,

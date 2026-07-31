@@ -92,7 +92,7 @@ pub fn pt2_gather_elements(data: GraphTensor, indexes: GraphTensor, axis: usize)
         .expand_rhs(idx_normalized.dims());
     let flat_idx = non_axis_flat + idx_normalized * stride_tensor;
 
-    data.gather(flat_idx)
+    data.gather1d(flat_idx)
 }
 
 /// Translator-local `scatter_elements` that accepts symbolic shape dims.
@@ -120,7 +120,7 @@ pub fn pt2_scatter_elements(
     let flat_updates = updates.flatten();
     let flat_data = data.flatten();
 
-    let output_flat = flat_updates.scatter(flat_dest_1d, flat_data);
+    let output_flat = flat_updates.scatter1d(flat_dest_1d, flat_data);
 
     // View-only reshape back to data shape; the buffer is already laid
     // out row-major from the scatter, so swapping the tracker is safe.
@@ -223,7 +223,7 @@ pub fn pt2_scatter_nd(
     let flat_updates = updates.flatten();
     let flat_data = data.flatten();
 
-    let output_flat = flat_updates.scatter(full_flat_dest, flat_data);
+    let output_flat = flat_updates.scatter1d(full_flat_dest, flat_data);
 
     let mut result = output_flat;
     *result.legacy_tracker_mut() = ShapeTracker::new(data_dims);

@@ -249,7 +249,7 @@ fn swiglu_in_f32(gate: GraphTensor, up: GraphTensor) -> GraphTensor {
 
 fn token_embedding(embedding: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
     let seq = token_ids.dims1();
-    embedding.gather(
+    embedding.gather1d(
         (token_ids * HIDDEN).expand_dim(1, HIDDEN)
             + token_ids.graph().arange(HIDDEN).expand_dim(0, seq),
     )
@@ -356,8 +356,8 @@ fn hlir_attention(
         + d_offset.expand_dim(0, N_KV_HEADS).expand_dim(1, seq);
 
     // Scatter new K/V into cache
-    let k_cache_out = k_new.scatter(scatter_idx, k_cache_in);
-    let v_cache_out = v_new.scatter(scatter_idx, v_cache_in);
+    let k_cache_out = k_new.scatter1d(scatter_idx, k_cache_in);
+    let v_cache_out = v_new.scatter1d(scatter_idx, v_cache_in);
 
     // Slice to valid range: [N_KV_HEADS, total_seq, HEAD_DIM]
     let mut k_full = k_cache_out.slice((.., ..total_seq, ..));

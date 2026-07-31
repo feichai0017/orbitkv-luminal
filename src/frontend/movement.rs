@@ -250,7 +250,7 @@ impl GraphTensor {
             .expand_rhs(idx_normalized.legacy_tracker);
         let flat_idx = non_axis_flat + idx_normalized * stride_tensor;
 
-        self.gather(flat_idx)
+        self.gather1d(flat_idx)
     }
 
     /// Scatter updates into a copy of self at positions specified by per-element indices along an axis.
@@ -334,7 +334,7 @@ impl GraphTensor {
         let flat_data = self.flatten();
 
         // Use HLIR Scatter: dest[indexes[i]] = src[i]
-        let output_flat = flat_updates.scatter(flat_dest_1d, flat_data);
+        let output_flat = flat_updates.scatter1d(flat_dest_1d, flat_data);
 
         // Reshape back to data_shape
         let data_shape_usize: Vec<usize> =
@@ -453,7 +453,7 @@ impl GraphTensor {
         let flat_data = self.flatten();
 
         // Use HLIR Scatter: dest[indexes[i]] = src[i]
-        let output_flat = flat_updates.scatter(full_flat_dest, flat_data);
+        let output_flat = flat_updates.scatter1d(full_flat_dest, flat_data);
 
         // Reshape back to data_shape
         let mut result = output_flat;
@@ -462,7 +462,156 @@ impl GraphTensor {
         result
     }
 
-    pub fn gather(self, indexes: GraphTensor) -> GraphTensor {
+    /// COORDINATE-FORM gather — THE primary (ruling 2026-07-31): one Int
+    /// coordinate tensor per data axis, each over the OUTPUT shape:
+    /// `out[c] = data[coords[0][c], ..., coords[r-1][c]]` — numpy fancy
+    /// indexing / unpacked GatherND, mapping 1:1 onto LogicalGather. The
+    /// HLIR side lowers transitionally to flat-index arithmetic + the flat
+    /// Gather (dies with the HLIR pipeline at M3 Step 4); the recorder
+    /// emits the coordinate form DIRECTLY.
+    pub fn gather(self, coords: &[GraphTensor]) -> GraphTensor {
+        assert_eq!(
+            coords.len(),
+            self.rank(),
+            "gather: one coordinate tensor per data axis"
+        );
+        assert!(!coords.is_empty(), "gather: rank-0 data has no axes");
+        let out_dims = coords[0].dims();
+        for coord in coords {
+            assert_eq!(coord.dtype, DType::Int, "gather coordinates must be Int");
+            assert_eq!(coord.dims(), out_dims, "gather coordinates share the out shape");
+        }
+        let dims = self.dims();
+        // Row-major strides of the data box, as expressions.
+        let mut strides = vec![Expression::from(1); dims.len()];
+        for k in (0..dims.len().saturating_sub(1)).rev() {
+            strides[k] = (strides[k + 1] * dims[k + 1]).simplify();
+        }
+        // Transitional flat index: sum of coord_k * stride_k (Int arithmetic
+        // through covered ops — dead lets in the logical model, inert).
+        let mut flat: Option<GraphTensor> = None;
+        for (k, coord) in coords.iter().enumerate() {
+            let term = if strides[k] == Expression::from(1) {
+                *coord
+            } else {
+                let stride_scalar = self.graph().constant(strides[k]);
+                let mut stride_full = stride_scalar;
+                for (axis, dim) in out_dims.iter().enumerate() {
+                    stride_full = stride_full.expand_dim(axis, *dim);
+                }
+                *coord * stride_full
+            };
+            flat = Some(match flat {
+                None => term,
+                Some(acc) => acc + term,
+            });
+        }
+        let flat_index = flat.expect("at least one axis");
+        let id = self.graph().add_op(
+            Gather {
+                input_shapes: vec![flat_index.legacy_tracker, self.legacy_tracker],
+                ..Default::default()
+            },
+            &[flat_index.id, self.id],
+        );
+        let data_operand = (self.id.index(), self.logical_view, dims);
+        let coord_operands: Vec<_> = coords
+            .iter()
+            .map(|coord| (coord.id.index(), coord.logical_view, coord.dims()))
+            .collect();
+        self.graph().logical.record_gather(
+            id.index(),
+            data_operand,
+            coord_operands,
+            out_dims.clone(),
+            self.dtype,
+        );
+        GraphTensor::from_id(
+            id,
+            ShapeTracker::new(out_dims),
+            self.graph_ref,
+            self.dtype,
+        )
+    }
+
+    /// COORDINATE-FORM scatter — THE primary (ruling 2026-07-31): self is
+    /// the init/dest; `src` lands at the positions the coordinate tensors
+    /// name (one per dest axis, each over src's shape). Copy-then-write
+    /// value semantics; in-place is a binding + search decision.
+    pub fn scatter(self, coords: &[GraphTensor], src: GraphTensor) -> GraphTensor {
+        assert_eq!(
+            coords.len(),
+            self.rank(),
+            "scatter: one coordinate tensor per dest axis"
+        );
+        assert!(!coords.is_empty(), "scatter: rank-0 dest has no axes");
+        let index_dims = src.dims();
+        for coord in coords {
+            assert_eq!(coord.dtype, DType::Int, "scatter coordinates must be Int");
+            assert_eq!(coord.dims(), index_dims, "scatter coordinates share src's shape");
+        }
+        let dims = self.dims();
+        let mut strides = vec![Expression::from(1); dims.len()];
+        for k in (0..dims.len().saturating_sub(1)).rev() {
+            strides[k] = (strides[k + 1] * dims[k + 1]).simplify();
+        }
+        let mut flat: Option<GraphTensor> = None;
+        for (k, coord) in coords.iter().enumerate() {
+            let term = if strides[k] == Expression::from(1) {
+                *coord
+            } else {
+                let stride_scalar = self.graph().constant(strides[k]);
+                let mut stride_full = stride_scalar;
+                for (axis, dim) in index_dims.iter().enumerate() {
+                    stride_full = stride_full.expand_dim(axis, *dim);
+                }
+                *coord * stride_full
+            };
+            flat = Some(match flat {
+                None => term,
+                Some(acc) => acc + term,
+            });
+        }
+        let flat_index = flat.expect("at least one axis");
+        let mut src_strides = src.legacy_tracker.strides.to_vec();
+        let target_rank = flat_index.legacy_tracker.dims.len();
+        while src_strides.len() < target_rank {
+            src_strides.insert(0, Expression::from(0));
+        }
+        let id = self.graph().add_op(
+            Scatter {
+                dest_shape: self.legacy_tracker.dims.to_vec(),
+                dest_strides: self.legacy_tracker.strides.to_vec(),
+                index_shape: flat_index.legacy_tracker.dims.to_vec(),
+                index_strides: flat_index.legacy_tracker.strides.to_vec(),
+                src_strides,
+            },
+            &[self.id, flat_index.id, src.id],
+        );
+        let init_operand = (self.id.index(), self.logical_view, dims.clone());
+        let src_operand = (src.id.index(), src.logical_view, index_dims);
+        let coord_operands: Vec<_> = coords
+            .iter()
+            .map(|coord| (coord.id.index(), coord.logical_view, coord.dims()))
+            .collect();
+        self.graph().logical.record_scatter(
+            id.index(),
+            init_operand,
+            coord_operands,
+            src_operand,
+            dims.clone(),
+            self.dtype,
+        );
+        GraphTensor::from_id(
+            id,
+            ShapeTracker::new(dims),
+            self.graph_ref,
+            self.dtype,
+        )
+    }
+
+    /// FLAT gather (the rank-1 primitive): out[i] = data[indexes[i]].
+    pub fn gather1d(self, indexes: GraphTensor) -> GraphTensor {
         self.graph()
             .logical
             .poison(format!("gather at t{} (recorder Phase B)", self.id.index()));
@@ -483,7 +632,9 @@ impl GraphTensor {
 
     /// Scatter self (src) into dest at flat 1D positions given by indexes.
     /// output = copy(dest); output[indexes[i]] = src[i]
-    pub fn scatter(self, indexes: GraphTensor, dest: GraphTensor) -> GraphTensor {
+    /// FLAT scatter (the rank-1 primitive): dest with src written at
+    /// flat positions indexes (copy-then-write).
+    pub fn scatter1d(self, indexes: GraphTensor, dest: GraphTensor) -> GraphTensor {
         self.graph()
             .logical
             .poison(format!("scatter at t{} (recorder Phase B)", self.id.index()));
@@ -1180,12 +1331,12 @@ mod tests {
         let mut cx = Graph::new();
         let data = cx.tensor((2, 3));
         let indexes = cx.tensor_dtyped(4, DType::Int);
-        let gathered = data.gather(indexes).output();
+        let gathered = data.gather1d(indexes).output();
         // Inverse permutation via scatter: scatter arange at perm positions into zeros
         let perm = cx.tensor_dtyped(6, DType::Int);
         let values = cx.arange(6);
         let zeros = cx.iota(Expression::from(0usize), 6);
-        let inv = values.scatter(perm, zeros).cast(DType::F32).output();
+        let inv = values.scatter1d(perm, zeros).cast(DType::F32).output();
         cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
         let mut rt = cx.search(
             ReferenceRuntime::default(),
@@ -1205,7 +1356,7 @@ mod tests {
         let src = cx.tensor(3);
         let indexes = cx.tensor_dtyped(3, DType::Int);
         let dest = cx.tensor(5);
-        let result = src.scatter(indexes, dest).output();
+        let result = src.scatter1d(indexes, dest).output();
         cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
         let mut rt = cx.search(
             ReferenceRuntime::default(),
@@ -1224,7 +1375,7 @@ mod tests {
         let src = cx.tensor(1);
         let indexes = cx.tensor_dtyped(1, DType::Int);
         let dest = cx.tensor(5);
-        let result = src.scatter(indexes, dest).output();
+        let result = src.scatter1d(indexes, dest).output();
         cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
         let mut rt = cx.search(
             ReferenceRuntime::default(),
@@ -1243,7 +1394,7 @@ mod tests {
         let src = cx.tensor(4);
         let indexes = cx.tensor_dtyped(4, DType::Int);
         let dest = cx.tensor(4);
-        let result = src.scatter(indexes, dest).output();
+        let result = src.scatter1d(indexes, dest).output();
         cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
         let mut rt = cx.search(
             ReferenceRuntime::default(),

@@ -142,7 +142,7 @@ impl Gemma {
 
         // seen[new_token] = 1.0 (in place; no-op for -1).
         let one = cx.constant_float(1.0).expand_dim(0, 1);
-        let seen_out = one.scatter(new_token, seen_mask);
+        let seen_out = one.scatter1d(new_token, seen_mask);
 
         // CPU-equivalent penalty: seen & logit > 0 → /p, seen & logit <= 0 → *p.
         let p = repetition_penalty;
@@ -297,7 +297,7 @@ fn layer_norm(cx: &mut Graph, layer: usize, name: &str) -> LayerNorm {
 
 fn token_embedding(embedding: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
     let seq = token_ids.dims1();
-    embedding.gather(
+    embedding.gather1d(
         (token_ids * HIDDEN).expand_dim(1, HIDDEN)
             + token_ids.graph().arange(HIDDEN).expand_dim(0, seq),
     )
@@ -437,7 +437,7 @@ fn paged_attention(
     let causal_square = scores.graph().triu(ctx, 1).cast(scores.dtype) * -1e10;
     let row_offsets = (q_pos * ctx).expand_dim(1, ctx);
     let col_offsets = scores.graph().arange(ctx).expand_dim(0, seq);
-    let attn_mask = causal_square.gather(row_offsets + col_offsets);
+    let attn_mask = causal_square.gather1d(row_offsets + col_offsets);
 
     let attn_mask = if is_local {
         // Sliding window: block kv positions older than q_pos - (W-1).

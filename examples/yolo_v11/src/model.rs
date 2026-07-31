@@ -29,7 +29,7 @@ pub fn make_contiguous(t: GraphTensor) -> GraphTensor {
     let total = dims.iter().copied().reduce(|a, b| a * b).unwrap();
     let idx_expr = t.legacy_tracker_ref().index_expression();
     let idx = t.graph().iota(idx_expr, total);
-    let mut gathered = t.gather(idx);
+    let mut gathered = t.gather1d(idx);
     *gathered.legacy_tracker_mut() = ShapeTracker::new(dims);
     gathered
 }

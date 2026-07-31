@@ -514,7 +514,7 @@ fn vjp(
             // grad_src[i] = g[idx[i]] for the write that won each location,
             // 0 for overwritten writes. Write i wins iff no later write i' > i
             // hits the same location, so mask by the count of later duplicates.
-            let gathered = g_flat.gather(idx_flat); // (M,)
+            let gathered = g_flat.gather1d(idx_flat); // (M,)
             let ri = cx.iota('z', m_flat).expand_dim(1, m_flat); // [i, i'] = i
             let ci = cx.iota('z', m_flat).expand_dim(0, m_flat); // [i, i'] = i'
             let later = ri.lt(ci).cast(g.dtype); // (M, M): i' after i

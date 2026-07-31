@@ -80,7 +80,7 @@ impl GraphTensor {
             let dims = self.dims();
             let total = dims.iter().copied().reduce(|a, b| a * b).unwrap();
             let idx = self.graph().iota('z', total);
-            let mut gathered = self.gather(idx);
+            let mut gathered = self.gather1d(idx);
             gathered.legacy_tracker = ShapeTracker::new(dims);
             gathered
         };

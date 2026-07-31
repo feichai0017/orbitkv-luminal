@@ -168,7 +168,7 @@ impl Gemma4MoE {
         let s = logits.dims()[0];
 
         let one = cx.constant_float(1.0).expand_dim(0, 1);
-        let seen_out = one.scatter(new_token, seen_mask);
+        let seen_out = one.scatter1d(new_token, seen_mask);
 
         let p = repetition_penalty;
         let seen_b = seen_out.expand_dim(0, s);
@@ -407,7 +407,7 @@ fn layer_norm(cx: &mut Graph, layer: usize, name: &str) -> LayerNorm {
 
 fn token_embedding(embedding: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
     let seq = token_ids.dims1();
-    embedding.gather(
+    embedding.gather1d(
         (token_ids * HIDDEN).expand_dim(1, HIDDEN)
             + token_ids.graph().arange(HIDDEN).expand_dim(0, seq),
     )
@@ -540,7 +540,7 @@ fn gather_experts(
         exp_within = exp_within.expand_dim(axis, *dim);
     }
     let expert_flat_idx = exp_base + exp_within;
-    weights.gather(expert_flat_idx)
+    weights.gather1d(expert_flat_idx)
 }
 
 /// Paged attention in the llama/qwen HLIR spelling (scatter_rows into 2D
@@ -587,7 +587,7 @@ fn paged_attention(
     let causal_square = scores.graph().triu(ctx, 1).cast(scores.dtype) * -1e10;
     let row_offsets = (q_pos * ctx).expand_dim(1, ctx);
     let col_offsets = scores.graph().arange(ctx).expand_dim(0, seq);
-    let attn_mask = causal_square.gather(row_offsets + col_offsets);
+    let attn_mask = causal_square.gather1d(row_offsets + col_offsets);
 
     let attn_mask = if spec.is_sliding {
         // Window: block kv positions older than q_pos - (W-1).
@@ -630,10 +630,10 @@ impl Gemma4SparseMoE {
             .graph()
             .iota(Expression::from('z') / k_expr * e_dim, top_k_indices.dims());
         let routing_flat_idx = row_offsets + top_k_indices;
-        let top_k_values = routing_weights.gather(routing_flat_idx);
+        let top_k_values = routing_weights.gather1d(routing_flat_idx);
         let top_k_norm = top_k_values.sum(n - 1).expand_dim(n - 1, TOP_K);
         let top_k_weights =
-            (top_k_values / top_k_norm) * self.per_expert_scale.gather(top_k_indices);
+            (top_k_values / top_k_norm) * self.per_expert_scale.gather1d(top_k_indices);
 
         let gate_up_gathered =
             gather_experts(expert_input, top_k_indices, self.gate_up_weights).cast(DType::F32);

@@ -251,7 +251,7 @@ impl Llama {
 
         // seen[new_token] = 1.0 (in place; no-op for -1).
         let one = cx.constant_float(1.0).expand_dim(0, 1);
-        let seen_out = one.scatter(new_token, seen_mask);
+        let seen_out = one.scatter1d(new_token, seen_mask);
 
         // CPU-equivalent penalty: seen & logit > 0 → /p, seen & logit <= 0 → *p.
         let p = repetition_penalty;
@@ -669,7 +669,7 @@ fn rms_norm(cx: &mut Graph, dim: usize, weight_name: impl ToString) -> LayerNorm
 
 fn token_embedding(embedding: GraphTensor, token_ids: GraphTensor, hidden: usize) -> GraphTensor {
     let seq = token_ids.dims1();
-    embedding.gather(
+    embedding.gather1d(
         (token_ids * hidden).expand_dim(1, hidden)
             + token_ids.graph().arange(hidden).expand_dim(0, seq),
     )
@@ -818,7 +818,7 @@ fn attention(
         .graph()
         .arange(ctx)
         .expand_dim(0, Expression::from('s'));
-    let attn_mask = causal_square.gather(row_offsets + col_offsets);
+    let attn_mask = causal_square.gather1d(row_offsets + col_offsets);
     let masked_scores = scores + attn_mask.expand_dim(0, config.n_heads());
     let weights = masked_scores.softmax(2);
     let out = weights.matmul(v_ctx);

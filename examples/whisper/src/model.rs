@@ -121,7 +121,7 @@ fn merge_heads(x: GraphTensor) -> GraphTensor {
 
 fn embedding_lookup(embedding: GraphTensor, ids: GraphTensor) -> GraphTensor {
     let seq = ids.dims1();
-    embedding.gather(
+    embedding.gather1d(
         (ids * N_TEXT_STATE).expand_dim(1, N_TEXT_STATE)
             + ids.graph().arange(N_TEXT_STATE).expand_dim(0, seq),
     )
@@ -173,8 +173,8 @@ fn decoder_self_attention(
         + p_offset.expand_dim(0, N_TEXT_HEAD).expand_dim(2, HEAD_DIM)
         + d_offset.expand_dim(0, N_TEXT_HEAD).expand_dim(1, seq);
 
-    let k_cache_out = k_new.scatter(scatter_idx, k_cache_in);
-    let v_cache_out = v_new.scatter(scatter_idx, v_cache_in);
+    let k_cache_out = k_new.scatter1d(scatter_idx, k_cache_in);
+    let v_cache_out = v_new.scatter1d(scatter_idx, v_cache_in);
 
     let mut k_full = k_cache_out.slice((.., ..total, ..));
     let mut v_full = v_cache_out.slice((.., ..total, ..));

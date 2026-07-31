@@ -711,6 +711,99 @@ impl LogicalRecorder {
         self.source_op(node, "LogicalIota", &format!("{expr} {shape}"), out_dims, DType::Int);
     }
 
+    /// Record a coordinate-form gather: one coordinate tensor per data
+    /// axis, each over the output shape — LogicalGather's exact shape.
+    #[allow(clippy::type_complexity)]
+    pub fn record_gather(
+        &mut self,
+        node: usize,
+        data: (usize, Option<ViewId>, Vec<Expression>),
+        coords: Vec<(usize, Option<ViewId>, Vec<Expression>)>,
+        out_dims: Vec<Expression>,
+        out_dtype: DType,
+    ) {
+        if self.poisoned.is_some() {
+            return;
+        }
+        let (data_node, data_view, data_dims) = data;
+        let data_name = match self.resolve(data_node, data_view, &data_dims) {
+            Ok(name) => name,
+            Err(reason) => return self.poison(format!("gather at t{node}: {reason}")),
+        };
+        let mut list = "(LogicalTensorNil)".to_string();
+        let mut names = Vec::with_capacity(coords.len());
+        for (coord_node, view, dims) in &coords {
+            match self.resolve(*coord_node, *view, dims) {
+                Ok(name) => names.push(name),
+                Err(reason) => return self.poison(format!("gather at t{node}: {reason}")),
+            }
+        }
+        for name in names.iter().rev() {
+            list = format!("(LogicalTensorCons {name} {list})");
+        }
+        let name = format!("rec_t{node}");
+        self.ops_text
+            .push_str(&format!("(let {name} (LogicalGather {data_name} {list}))\n"));
+        self.node_values.insert(
+            node,
+            NodeValue {
+                name,
+                dims: out_dims,
+                dtype: out_dtype,
+            },
+        );
+    }
+
+    /// Record a coordinate-form scatter: init updated at the coordinate
+    /// tensors' positions with src — LogicalScatter's exact shape.
+    #[allow(clippy::type_complexity)]
+    pub fn record_scatter(
+        &mut self,
+        node: usize,
+        init: (usize, Option<ViewId>, Vec<Expression>),
+        coords: Vec<(usize, Option<ViewId>, Vec<Expression>)>,
+        src: (usize, Option<ViewId>, Vec<Expression>),
+        out_dims: Vec<Expression>,
+        out_dtype: DType,
+    ) {
+        if self.poisoned.is_some() {
+            return;
+        }
+        let (init_node, init_view, init_dims) = init;
+        let init_name = match self.resolve(init_node, init_view, &init_dims) {
+            Ok(name) => name,
+            Err(reason) => return self.poison(format!("scatter at t{node}: {reason}")),
+        };
+        let (src_node, src_view, src_dims) = src;
+        let src_name = match self.resolve(src_node, src_view, &src_dims) {
+            Ok(name) => name,
+            Err(reason) => return self.poison(format!("scatter at t{node}: {reason}")),
+        };
+        let mut names = Vec::with_capacity(coords.len());
+        for (coord_node, view, dims) in &coords {
+            match self.resolve(*coord_node, *view, dims) {
+                Ok(name) => names.push(name),
+                Err(reason) => return self.poison(format!("scatter at t{node}: {reason}")),
+            }
+        }
+        let mut list = "(LogicalTensorNil)".to_string();
+        for name in names.iter().rev() {
+            list = format!("(LogicalTensorCons {name} {list})");
+        }
+        let name = format!("rec_t{node}");
+        self.ops_text.push_str(&format!(
+            "(let {name} (LogicalScatter {init_name} {list} {src_name}))\n"
+        ));
+        self.node_values.insert(
+            node,
+            NodeValue {
+                name,
+                dims: out_dims,
+                dtype: out_dtype,
+            },
+        );
+    }
+
     /// Append post-schedule authoring checks (iota bounds pairs).
     pub fn post_check(&mut self, text: &str) {
         self.post_checks.push_str(text);

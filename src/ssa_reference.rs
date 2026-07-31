@@ -987,14 +987,118 @@ mod tests {
         certify_recorder(&cx);
     }
 
-    /// Uncovered constructs POISON the recorder with an attributable    /// Uncovered constructs POISON the recorder with an attributable
+    /// COORDINATE-FORM GATHER differential (ruling 2026-07-31): the
+    /// primary gather — one Int coordinate tensor per data axis — records
+    /// LogicalGather directly (rank-N native, no flatten trick); their
+    /// runtime executes the transitional flat-index HLIR lowering as the
+    /// oracle.
+    #[test]
+    fn differential_native_coordinate_gather() {
+        let build = || {
+            let mut cx = Graph::new();
+            let data = cx.tensor((3, 4));
+            let row = cx.tensor_dtyped((2, 3), crate::dtype::DType::Int);
+            let col = cx.tensor_dtyped((2, 3), crate::dtype::DType::Int);
+            let out = data.gather(&[row, col]).output();
+            (cx, data, row, col, out)
+        };
+        let data_vals: Vec<f32> = (0..12).map(|v| v as f32 * 1.5 + 1.0).collect();
+        let row_ints = vec![0i32, 2, 1, 2, 0, 1];
+        let col_ints = vec![3i32, 0, 2, 3, 1, 0];
+        let row_vals: Vec<f32> = row_ints.iter().map(|v| *v as f32).collect();
+        let col_vals: Vec<f32> = col_ints.iter().map(|v| *v as f32).collect();
+
+        let (mut cx, data, row, col, out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(data.id, data_vals.clone());
+        theirs.set_data(row.id, row_ints);
+        theirs.set_data(col.id, col_ints);
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(out.id).clone();
+
+        let (cx2, data2, row2, col2, out2) = build();
+        let program = cx2.logical.native_program().expect("native program");
+        assert!(
+            program.text.contains("(LogicalGather rec_t"),
+            "coordinate-form gather expected in the model:\n{}",
+            program.text
+        );
+        let ours = run_ssa_program(
+            program,
+            &[
+                (data2.id, data_vals),
+                (row2.id, row_vals),
+                (col2.id, col_vals),
+            ],
+        );
+        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+    }
+
+    /// COORDINATE-FORM SCATTER differential: dest updated at (row, col)
+    /// coordinate positions with src — value semantics, against their
+    /// flat-Scatter lowering.
+    #[test]
+    fn differential_native_coordinate_scatter() {
+        let build = || {
+            let mut cx = Graph::new();
+            let dest = cx.tensor((3, 4));
+            let row = cx.tensor_dtyped(4, crate::dtype::DType::Int);
+            let col = cx.tensor_dtyped(4, crate::dtype::DType::Int);
+            let src = cx.tensor(4);
+            let out = dest.scatter(&[row, col], src).output();
+            (cx, dest, row, col, src, out)
+        };
+        let dest_vals: Vec<f32> = (0..12).map(|v| v as f32).collect();
+        let row_ints = vec![0i32, 1, 2, 1];
+        let col_ints = vec![1i32, 3, 0, 0];
+        let row_vals: Vec<f32> = row_ints.iter().map(|v| *v as f32).collect();
+        let col_vals: Vec<f32> = col_ints.iter().map(|v| *v as f32).collect();
+        let src_vals = vec![100.0, 200.0, 300.0, 400.0];
+
+        let (mut cx, dest, row, col, src, out) = build();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+        let mut theirs = cx.search(
+            ReferenceRuntime::default(),
+            CompileOptions::default().search_graph_limit(1),
+        );
+        theirs.set_data(dest.id, dest_vals.clone());
+        theirs.set_data(row.id, row_ints);
+        theirs.set_data(col.id, col_ints);
+        theirs.set_data(src.id, src_vals.clone());
+        theirs.execute(&cx.dyn_map);
+        let expected = theirs.get_f32(out.id).clone();
+
+        let (cx2, dest2, row2, col2, src2, out2) = build();
+        let program = cx2.logical.native_program().expect("native program");
+        assert!(
+            program.text.contains("(LogicalScatter rec_t"),
+            "coordinate-form scatter expected in the model:\n{}",
+            program.text
+        );
+        let ours = run_ssa_program(
+            program,
+            &[
+                (dest2.id, dest_vals),
+                (row2.id, row_vals),
+                (col2.id, col_vals),
+                (src2.id, src_vals),
+            ],
+        );
+        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+    }
+
+    /// Uncovered constructs POISON the recorder with an attributable
     /// reason — the native path refuses loudly, never mistranslates.
     #[test]
     fn recorder_poisons_on_uncovered_family() {
         let mut cx = Graph::new();
         let x = cx.tensor((2, 3));
         let y = cx.tensor_dtyped(6, crate::dtype::DType::Int);
-        let _out = x.flatten().gather(y).output();
+        let _out = x.flatten().gather1d(y).output();
         let reason = cx.logical.poisoned().expect("gather poisons the recorder");
         assert!(reason.contains("gather"), "attributable reason: {reason}");
         assert!(cx.logical.native_program().is_err());
@@ -1262,7 +1366,7 @@ mod tests {
             let dest = cx.tensor(8);
             let src = cx.tensor(3);
             let indexes = cx.iota(crate::shape::Expression::from('z') * 2 + 1, 3);
-            let out = src.scatter(indexes, dest).output();
+            let out = src.scatter1d(indexes, dest).output();
             (cx, dest, src, out)
         };
         let dest_data: Vec<f32> = (0..8).map(|v| v as f32 * 10.0).collect();

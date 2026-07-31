@@ -249,7 +249,7 @@ mod tests {
                 |cx| {
                     cx.arange(base_len as i32)
                         .cast(DType::F32)
-                        .gather(cx.iota(Expression::from('z') * 2, count as i32))
+                        .gather1d(cx.iota(Expression::from('z') * 2, count as i32))
                 },
                 |dev| {
                     let values = (0..count).map(|i| (2 * i) as f32).collect::<Vec<f32>>();

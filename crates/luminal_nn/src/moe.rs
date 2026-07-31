@@ -29,7 +29,7 @@ impl MoE {
             .iota(Expression::from('z') / k_expr * e_dim, top_k_indices.dims());
         let routing_flat_idx =
             (row_offsets.cast(DType::F32) + top_k_indices.cast(DType::F32)).cast(DType::Int);
-        let top_k_values = routing_weights.gather(routing_flat_idx); // [batch.., k]
+        let top_k_values = routing_weights.gather1d(routing_flat_idx); // [batch.., k]
 
         // 4. Gather expert weight matrices: [batch.., k, in, out]
         //    flat_idx[.., ki, i, o] = expert_idx[.., ki] * in*out + i * out + o
@@ -52,7 +52,7 @@ impl MoE {
         }
 
         let expert_flat_idx = (exp_base + exp_within).cast(DType::Int);
-        let gathered = self.expert_weights.gather(expert_flat_idx); // [batch.., k, in, out]
+        let gathered = self.expert_weights.gather1d(expert_flat_idx); // [batch.., k, in, out]
 
         // 5. Batched matmul: [batch.., k, 1, in] @ [batch.., k, in, out] → [batch.., k, out]
         let expanded_act = activations

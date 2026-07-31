@@ -375,7 +375,7 @@ impl<'a> Translator<'a> {
             arange_expanded = arange_expanded.expand_dim(0, *d);
         }
 
-        Ok(weight.gather(ids_expanded + arange_expanded))
+        Ok(weight.gather1d(ids_expanded + arange_expanded))
     }
 
     pub(crate) fn translate_index_tensor(&mut self, node: &Node) -> Result<GraphTensor> {
@@ -495,7 +495,7 @@ impl<'a> Translator<'a> {
         let flat_idx = flat_idx.context("index.Tensor: no indices")?;
 
         if remaining_dims.is_empty() {
-            Ok(flat_source.gather(flat_idx))
+            Ok(flat_source.gather1d(flat_idx))
         } else {
             let mut remaining_size = Expression::from(1usize);
             for d in &remaining_dims {
@@ -516,7 +516,7 @@ impl<'a> Translator<'a> {
             let final_idx = expanded_idx + arange_expanded;
             let total_elements = indexed_size * remaining_size;
             let fully_flat = reshape_tensor(flat_source, vec![total_elements]);
-            let gathered = fully_flat.gather(final_idx);
+            let gathered = fully_flat.gather1d(final_idx);
 
             let mut result_shape: Vec<Expression> = idx_shape.to_vec();
             result_shape.extend_from_slice(&remaining_dims);

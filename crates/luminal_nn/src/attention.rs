@@ -21,7 +21,7 @@ pub fn gather_rows(data: GraphTensor, indices: GraphTensor, d: usize) -> GraphTe
     // flat_idx[i,j] = indices[i] * D + j
     let flat_idx = base + col;
 
-    data.gather(flat_idx)
+    data.gather1d(flat_idx)
 }
 
 /// Scatter entire rows into a 2D tensor using row indices.
@@ -46,7 +46,7 @@ pub fn scatter_rows(
     let col = src.graph().arange(d as i32).expand_dim(0, n);
     let flat_idx = base + col;
 
-    src.scatter(flat_idx, dest)
+    src.scatter1d(flat_idx, dest)
 }
 
 /// Pure HLIR paged attention for one layer with causal masking.

@@ -298,7 +298,7 @@ impl Mistral3TextEncoder {
         // is BF16 so the gathered slice is BF16 too — cast to F32 immediately
         // so the rest of the network runs in F32 with BF16 weights upcast at
         // each matmul (see `linear_no_bias`).
-        let mut x = self.embed_tokens.gather(
+        let mut x = self.embed_tokens.gather1d(
             (input_ids * HIDDEN).expand_dim(1, HIDDEN)
                 + input_ids.graph().arange(HIDDEN).expand_dim(0, seq),
         );

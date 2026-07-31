@@ -25,7 +25,7 @@ fn scatter_ranks_to_sort_indices(
     }
 
     if ndim == 1 {
-        return values.scatter(ranks, zeros);
+        return values.scatter1d(ranks, zeros);
     }
 
     // Multi-dim: ranks are per-axis (0..ax_size) but scatter uses flat indices.
@@ -60,7 +60,7 @@ fn scatter_ranks_to_sort_indices(
         Some(base) => base + ranks_scaled,
     };
 
-    values.scatter(adjusted, zeros)
+    values.scatter1d(adjusted, zeros)
 }
 
 impl Neg for GraphTensor {
@@ -449,7 +449,7 @@ impl GraphTensor {
 
     /// Sort the tensor along a certian axis
     pub fn sort(self, axis: usize, descending: bool) -> GraphTensor {
-        self.gather(self.argsort(axis, descending))
+        self.gather1d(self.argsort(axis, descending))
     }
 
     /// Sort and retrieve top-k **indexes**

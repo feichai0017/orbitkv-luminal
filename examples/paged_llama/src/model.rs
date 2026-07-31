@@ -231,7 +231,7 @@ fn norm_in_f32(norm: &LayerNorm, x: GraphTensor) -> GraphTensor {
 
 fn token_embedding(embedding: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
     let seq = token_ids.dims1();
-    embedding.gather(
+    embedding.gather1d(
         (token_ids * HIDDEN).expand_dim(1, HIDDEN)
             + token_ids.graph().arange(HIDDEN).expand_dim(0, seq),
     )
