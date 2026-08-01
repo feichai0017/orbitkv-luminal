@@ -6,7 +6,7 @@
 ; (min(max(c - before, 0), dim-1)) and the mask indicator product.
 
 ; A coordinate over [0, 4) — the undecided fuel.
-(let position (CoordVar 0 (IntLit 4)))
+(let position (CoordVar (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))) 0))
 
 ; --- decided comparisons collapse to their literals ---
 (let decided_true (IntCastFromBool (BoolLessThanInt (IntLit 2) (IntLit 5))))

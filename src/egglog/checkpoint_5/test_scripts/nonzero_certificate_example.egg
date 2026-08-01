@@ -12,15 +12,20 @@
 ; support facts) must stay silent through the whole run: the fixture
 ; passing IS the tripwire check.
 
-; Coordinates for the suite. extent-1 deliberately included: under the
-; possible-valuations contract its box is {0} in every use (the extent
-; rides in the term), so it is IDENTICALLY ZERO — the extent-1 collapse
-; unions it with (IntLit 0), and no certificate is ever granted (Stage C1,
-; user ruling: coordinates earn certification from their extent's STABLE
-; lower bound, never by default).
-(let coord_inner (CoordVar 0 (IntLit 4)))
-(let coord_outer (CoordVar 1 (IntLit 12)))
-(let coord_extent_one (CoordVar 2 (IntLit 1)))
+; Coordinates for the suite, each OWNED by its box (ownership is the
+; term-carried content: a coordinate's extent IS its owner shape's dim).
+; coord_inner/coord_outer share the [12, 4] stall box below — the b1
+; stall pin needs stall_offset spelled over the very coordinates the
+; fold would mint. extent-1 deliberately included: under the
+; possible-valuations contract its box is {0} in every use, so it is
+; IDENTICALLY ZERO — the extent-1 collapse unions it with (IntLit 0),
+; and no certificate is ever granted (Stage C1, user ruling: coordinates
+; earn certification from their extent's STABLE lower bound, never by
+; default).
+(let stall_shape (ShapeLit (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil)))))
+(let coord_inner (CoordVar stall_shape 0))
+(let coord_outer (CoordVar stall_shape 1))
+(let coord_extent_one (CoordVar (ShapeLit (IntExprCons (IntLit 1) (IntExprNil))) 0))
 
 ; A bounded symbolic dim (lower >= 1: value-route-certifiable) and a maybe-zero
 ; symbolic dim (lower = 0: correctly UNcertifiable — an empty-instance
@@ -46,8 +51,9 @@
 (let bucketed_two_plus_dim (IntVar "bucketed_two_plus_dim"))
 (set (lower-bound-of bucketed_two_plus_dim) (bigint 2))
 (set (upper-bound-of bucketed_two_plus_dim) (bigint 4000))
-(let bucketed_coordinate (CoordVar 3 bucketed_two_plus_dim))
-(let gap_coordinate (CoordVar 4 seq_len))
+(let bucketed_coordinate
+  (CoordVar (ShapeLit (IntExprCons bucketed_two_plus_dim (IntExprNil))) 0))
+(let gap_coordinate (CoordVar (ShapeLit (IntExprCons seq_len (IntExprNil))) 0))
 
 ; R1 material: literals of every sign.
 (let positive_literal (IntLit 7))
@@ -91,8 +97,9 @@
 ; the skip rule requires the zero class — this stride is neither, so the
 ; fold stalls and the layout NEVER derives an offset-expression form.
 ; (The offset it would fold to is semantically fine; underivable is the
-; deliberate conservative choice — design b1.)
-(let stall_shape (ShapeLit (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil)))))
+; deliberate conservative choice — design b1. stall_shape is let-bound up
+; top: it owns coord_inner/coord_outer, so stall_offset below IS the fold's
+; would-be output, keeping the fail pin sharp.)
 (let stall_layout
   (StridedElementLayoutLit
     stall_shape

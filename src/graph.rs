@@ -368,39 +368,43 @@ impl LogicalGraph {
         format!("({dtype:?})")
     }
 
-    fn entry_term(entry: &MapEntry) -> Result<String, String> {
+    /// `owner_shape` is the consuming view's OUT shape term — the box the
+    /// map's coordinates are formals of (scoped CoordVar: ownership rides
+    /// in the term; the extent field is gone, extents are the owner's own
+    /// dims).
+    fn entry_term(entry: &MapEntry, owner_shape: &str) -> Result<String, String> {
         Ok(match entry {
-            MapEntry::Coord { from_end, extent } => {
-                format!("(CoordVar {from_end} {})", Self::dim_term(extent)?)
+            MapEntry::Coord { from_end, extent: _ } => {
+                format!("(CoordVar {owner_shape} {from_end})")
             }
             MapEntry::Lit(value) => Self::dim_term(value)?,
             MapEntry::Add(a, b) => format!(
                 "(IntAdd {} {})",
-                Self::entry_term(a)?,
-                Self::entry_term(b)?
+                Self::entry_term(a, owner_shape)?,
+                Self::entry_term(b, owner_shape)?
             ),
             MapEntry::Mul(a, e) => {
-                format!("(IntMul {} {})", Self::entry_term(a)?, Self::dim_term(e)?)
+                format!("(IntMul {} {})", Self::entry_term(a, owner_shape)?, Self::dim_term(e)?)
             }
             MapEntry::Div(a, e) => format!(
                 "(IntTruncDiv {} {})",
-                Self::entry_term(a)?,
+                Self::entry_term(a, owner_shape)?,
                 Self::dim_term(e)?
             ),
             MapEntry::Rem(a, e) => format!(
                 "(IntTruncRem {} {})",
-                Self::entry_term(a)?,
+                Self::entry_term(a, owner_shape)?,
                 Self::dim_term(e)?
             ),
             MapEntry::Min(a, b) => format!(
                 "(IntMin {} {})",
-                Self::entry_term(a)?,
-                Self::entry_term(b)?
+                Self::entry_term(a, owner_shape)?,
+                Self::entry_term(b, owner_shape)?
             ),
             MapEntry::Max(a, b) => format!(
                 "(IntMax {} {})",
-                Self::entry_term(a)?,
-                Self::entry_term(b)?
+                Self::entry_term(a, owner_shape)?,
+                Self::entry_term(b, owner_shape)?
             ),
         })
     }
@@ -538,16 +542,6 @@ impl LogicalGraph {
         out_dims: Vec<Expression>,
         out_dtype: DType,
     ) -> Option<ValueId> {
-        let mut entries_term = "(IntExprNil)".to_string();
-        for entry in entries.iter().rev() {
-            match Self::entry_term(entry) {
-                Ok(term) => entries_term = format!("(IntExprCons {term} {entries_term})"),
-                Err(reason) => {
-                    self.poison(format!("view at t{at}: {reason}"));
-                    return None;
-                }
-            }
-        }
         let shape = match Self::shape_term(&out_dims) {
             Ok(shape) => shape,
             Err(reason) => {
@@ -555,6 +549,16 @@ impl LogicalGraph {
                 return None;
             }
         };
+        let mut entries_term = "(IntExprNil)".to_string();
+        for entry in entries.iter().rev() {
+            match Self::entry_term(entry, &shape) {
+                Ok(term) => entries_term = format!("(IntExprCons {term} {entries_term})"),
+                Err(reason) => {
+                    self.poison(format!("view at t{at}: {reason}"));
+                    return None;
+                }
+            }
+        }
         Some(self.push(Value {
             constructor: "LogicalIndexMapApply".to_string(),
             operands: vec![base],
@@ -619,9 +623,16 @@ impl LogicalGraph {
             }
             out_dims.push(out_dim);
         }
+        let out_shape_term = match Self::shape_term(&out_dims) {
+            Ok(term) => term,
+            Err(reason) => {
+                self.poison(format!("mask iota at t{at}: {reason}"));
+                return None;
+            }
+        };
         let mut factors: Vec<String> = Vec::new();
         for k in 0..rank {
-            let coord = format!("(CoordVar {} {})", rank - 1 - k, out_terms[k]);
+            let coord = format!("(CoordVar {out_shape_term} {})", rank - 1 - k);
             let before = befores[k];
             let after = afters[k];
             let (Ok(before_term), Ok(bound_term)) = (

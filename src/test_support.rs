@@ -1248,14 +1248,14 @@ mod harness_tests {
     #[test]
     fn div_mod_iota_gather_with_layout_saturates_cleanly() {
         let body = r#"
-(let flat (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 3)) (CoordVar 0 (IntLit 3))))
+(let out_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
+(let flat (IntAdd (IntMul (CoordVar out_shape 1) (IntLit 3)) (CoordVar out_shape 0)))
 (let value
   (IntAdd
     (IntMul (IntAdd (IntTruncRem (IntTruncDiv flat (IntLit 3)) (IntLit 2)) (IntLit 1)) (IntLit 5))
     (IntAdd (IntTruncRem flat (IntLit 3)) (IntLit 2))))
 (let row_coord (IntTruncDiv value (IntLit 5)))
 (let col_coord (IntTruncRem value (IntLit 5)))
-(let out_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
 (let row_iota (LogicalIota row_coord out_shape))
 (let col_iota (LogicalIota col_coord out_shape))
 (let data_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprCons (IntLit 5) (IntExprNil)))))
@@ -2553,7 +2553,7 @@ mod intcoordvar_probe {
 
     /// Today's behavior on the user's own discriminating example: a
     /// 3-vector with slices v[0..2] and v[1..3]. Both slices' coordinate
-    /// is the identical term (CoordVar 0 (IntLit 2)); the VIEW terms stay
+    /// is the identical term (CoordVar out_shape 0); the VIEW terms stay
     /// distinct; an identically-written view hash-conses (free CSE).
     #[test]
     fn x_probe_slice_views_today() {
@@ -2563,13 +2563,13 @@ mod intcoordvar_probe {
 (let vec_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
 (let out_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprNil))))
 (let v_in (LogicalTensorInputLit (LogicalIdLit "v") vec_shape (F32)))
-(let coord (CoordVar 0 (IntLit 2)))
+(let coord (CoordVar out_shape 0))
 (let slice_a (LogicalIndexMapApply v_in
   (IndexMapLit (IntExprCons coord (IntExprNil))) out_shape))
 (let slice_b (LogicalIndexMapApply v_in
   (IndexMapLit (IntExprCons (IntAdd coord (IntLit 1)) (IntExprNil))) out_shape))
 (let slice_a2 (LogicalIndexMapApply v_in
-  (IndexMapLit (IntExprCons (CoordVar 0 (IntLit 2)) (IntExprNil))) out_shape))
+  (IndexMapLit (IntExprCons (CoordVar out_shape 0) (IntExprNil))) out_shape))
 (let v_layout (RightMajorContiguousElementLayoutLit vec_shape (bits-of (F32))))
 (let v_lt (LayoutTensorLit v_in v_layout))
 (run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
@@ -2590,7 +2590,7 @@ mod intcoordvar_probe {
                 ("distinct-views", "(fail (check (= slice_a slice_b)))"),
                 (
                     "shared-coord-term",
-                    "(check (= coord (CoordVar 0 (IntLit 2))))",
+                    "(check (= coord (CoordVar out_shape 0)))",
                 ),
                 (
                     "corruption-pairs",
@@ -2761,7 +2761,7 @@ mod zero_class_probe {
         text.replacen(needle, &format!("; [probe-cut: {label}]\n"), 1)
     }
 
-    const COLLAPSE_RULE: &str = "(rule\n  (\n    (= ?coord (CoordVar ?axis ?extent))\n    (= ?extent_lower (lower-bound-of ?extent))\n    (>= ?extent_lower (bigint 1))\n    (= ?extent_upper (upper-bound-of ?extent))\n    (<= ?extent_upper (bigint 1))\n  )\n  ((union ?coord (IntLit 0)))\n)";
+    const COLLAPSE_RULE: &str = "(rule\n  (\n    (= ?coord (CoordVar ?shape ?axis))\n    (= ?shape (ShapeLit ?dims))\n    (= ?extent (expr-list-nth-from-end ?dims ?axis))\n    (= ?extent_lower (lower-bound-of ?extent))\n    (>= ?extent_lower (bigint 1))\n    (= ?extent_upper (upper-bound-of ?extent))\n    (<= ?extent_upper (bigint 1))\n  )\n  ((union ?coord (IntLit 0)))\n)";
 
     const BOUNDS_ZERO_RULE: &str = "(rule\n  (\n    (= ?lower (lower-bound-of ?expr))\n    (>= ?lower (bigint 0))\n    (= ?upper (upper-bound-of ?expr))\n    (<= ?upper (bigint 0))\n  )\n  ((union ?expr (IntLit 0)))\n)";
 
@@ -2769,9 +2769,9 @@ mod zero_class_probe {
 
     const DISTINCT_LIT_RULE: &str = "(rule\n  ((= ?expr (IntLit ?a)) (= ?expr (IntLit ?b)) (!= ?a ?b))\n  ((panic \"distinct integer literals unioned: unsound IntExpr equality\"))\n)";
 
-    const COORD_STRIDE_RULE: &str = "(rule\n  ((symbolic-stride-demand ?expr ?axis) (= ?expr (CoordVar ?axis ?extent)))\n  ((set (symbolic-stride-of ?expr ?axis) (IntLit 1)))\n)";
+    const COORD_STRIDE_RULE: &str = "(rule\n  ((symbolic-stride-demand ?expr ?axis) (= ?expr (CoordVar ?shape ?axis)))\n  ((set (symbolic-stride-of ?expr ?axis) (IntLit 1)))\n)";
 
-    const MUL_STRIDE_RULE: &str = "(rule\n  (\n    (symbolic-stride-demand ?expr ?axis)\n    (= ?expr (IntMul (CoordVar ?axis ?extent) ?stride))\n    (axis-free ?stride ?axis)\n  )\n  ((set (symbolic-stride-of ?expr ?axis) ?stride))\n)";
+    const MUL_STRIDE_RULE: &str = "(rule\n  (\n    (symbolic-stride-demand ?expr ?axis)\n    (= ?expr (IntMul (CoordVar ?shape ?axis) ?stride))\n    (axis-free ?stride ?axis)\n  )\n  ((set (symbolic-stride-of ?expr ?axis) ?stride))\n)";
 
     const FREE_STRIDE_RULE: &str = "(rule\n  ((symbolic-stride-demand ?expr ?axis) (axis-free ?expr ?axis))\n  ((set (symbolic-stride-of ?expr ?axis) (IntLit 0)))\n)";
 
@@ -2998,7 +2998,7 @@ mod subst_guard_study {
 
     /// The structural arm's rule text as landed (comment elided; the
     /// unique premise pair suffices as the removal anchor).
-    const STRUCTURAL_ARM_ANCHOR: &str = "(rule\n  (\n    (subst-demand ?expr ?map ?source_shape)\n    (= ?expr (CoordVar ?axis ?extent))\n    (= ?map (IndexMapLit ?entries))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?source_dim (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?extent ?source_dim)\n    (= ?entry (CoordVar ?entry_axis ?entry_extent))\n    (= ?entry_extent ?extent)\n  )\n  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n)";
+    const STRUCTURAL_ARM_ANCHOR: &str = "(rule\n  (\n    (subst-demand ?expr ?map ?source_shape)\n    (= ?expr (CoordVar ?source_shape ?axis))\n    (= ?map (IndexMapLit ?entries))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?extent (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?entry (CoordVar ?entry_shape ?entry_axis))\n    (= ?entry_shape (ShapeLit ?entry_dims))\n    (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))\n    (= ?entry_extent ?extent)\n  )\n  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n)";
 
     fn variant(text: &str, name: &str) -> String {
         match name {
@@ -3025,11 +3025,12 @@ mod subst_guard_study {
 (let sgn (IntVar \"sgn\"))\n\
 (set (lower-bound-of sgn) (bigint 1))\n\
 (set (upper-bound-of sgn) (bigint 8))\n\
-(let sg_cout (CoordVar 0 (IntLit 3)))\n\
+(let sg_cout_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))\n\
+(let sg_cout (CoordVar sg_cout_shape 0))\n\
 (let sg_entry (IntAdd sg_cout (IntLit 5)))\n\
 (let sg_src (ShapeLit (IntExprCons sgn (IntExprNil))))\n\
 (let sg_map (IndexMapLit (IntExprCons sg_entry (IntExprNil))))\n\
-(let sg_coord (CoordVar 0 sgn))\n\
+(let sg_coord (CoordVar sg_src 0))\n\
 (subst-demand sg_coord sg_map sg_src)\n\
 (run-schedule (saturate (run)))\n";
         let sg4_common = "\
@@ -3039,18 +3040,19 @@ mod subst_guard_study {
 (let s4_entry (IntLit 5))\n\
 (let s4_src (ShapeLit (IntExprCons s4n (IntExprNil))))\n\
 (let s4_map (IndexMapLit (IntExprCons s4_entry (IntExprNil))))\n\
-(let s4_coord (CoordVar 0 s4n))\n\
+(let s4_coord (CoordVar s4_src 0))\n\
 (subst-demand s4_coord s4_map s4_src)\n\
 (run-schedule (saturate (run)))\n";
         vec![
             ("sg1_admits", format!("{sg1_common}(check (= (subst-of sg_coord sg_map sg_src) sg_entry))\n")),
             ("sg1_tighten", format!("{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (run)))\n")),
             ("sg2_static", "\
-(let s2_cout (CoordVar 0 (IntLit 3)))\n\
+(let s2_cout_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))\n\
+(let s2_cout (CoordVar s2_cout_shape 0))\n\
 (let s2_entry (IntAdd s2_cout (IntLit 1)))\n\
 (let s2_src (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))\n\
 (let s2_map (IndexMapLit (IntExprCons s2_entry (IntExprNil))))\n\
-(let s2_coord (CoordVar 0 (IntLit 4)))\n\
+(let s2_coord (CoordVar s2_src 0))\n\
 (subst-demand s2_coord s2_map s2_src)\n\
 (run-schedule (saturate (run)))\n\
 (check (= (subst-of s2_coord s2_map s2_src) s2_entry))\n".to_string()),
@@ -3058,10 +3060,11 @@ mod subst_guard_study {
 (let s3n (IntVar \"s3n\"))\n\
 (set (lower-bound-of s3n) (bigint 1))\n\
 (set (upper-bound-of s3n) (bigint 8))\n\
-(let s3_entry (CoordVar 1 s3n))\n\
+(let s3_entry_shape (ShapeLit (IntExprCons s3n (IntExprCons s3n (IntExprNil)))))\n\
+(let s3_entry (CoordVar s3_entry_shape 1))\n\
 (let s3_src (ShapeLit (IntExprCons s3n (IntExprNil))))\n\
 (let s3_map (IndexMapLit (IntExprCons s3_entry (IntExprNil))))\n\
-(let s3_coord (CoordVar 0 s3n))\n\
+(let s3_coord (CoordVar s3_src 0))\n\
 (subst-demand s3_coord s3_map s3_src)\n\
 (run-schedule (saturate (run)))\n\
 (check (= (subst-of s3_coord s3_map s3_src) s3_entry))\n".to_string()),
@@ -3083,6 +3086,7 @@ mod subst_guard_study {
                 } else if e.contains("Check failed") || e.contains("check failed") {
                     "refused"
                 } else {
+                    eprintln!("STUDY-ERR detail: {}", &e[..e.len().min(400)]);
                     "other-error"
                 }
             }

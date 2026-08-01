@@ -1,9 +1,9 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Bounds-lattice pins (Stage I0): every expected value is hand-computed.
 ; Conventions under test:
-;   - IntLit is exact; CoordVar(axis, extent) ranges [0, extent-1] via the
-;     extent's OWN bounds (so the rule is already uniform for symbolic
-;     extents)
+;   - IntLit is exact; a CoordVar ranges [0, extent-1] where the extent is
+;     its owner shape's axis-th-from-end dim, read via the extent's OWN
+;     bounds (so the rule is already uniform for symbolic extents)
 ;   - IntAdd adds endpoints; IntMul takes the four-corner min/max (mixed signs)
 ;   - lower-bound-of only rises (:merge max), upper-bound-of only falls
 ;     (:merge min): every representative of a class contributes, and the
@@ -19,8 +19,10 @@
 ; the same lattice rules with the ring rules absent — forensics record.)
 
 ; The transformer-style geometry: inner axis spans 4, outer axis spans 12.
-(let inner_coord (CoordVar 0 (IntLit 4)))
-(let outer_coord (CoordVar 1 (IntLit 12)))
+(let inner_coord
+  (CoordVar (ShapeLit (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil)))) 0))
+(let outer_coord
+  (CoordVar (ShapeLit (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil)))) 1))
 
 ; A fixture-realistic strided offset: 64*outer + 32*inner.
 (let strided_offset (IntAdd (IntMul outer_coord (IntLit 64)) (IntMul inner_coord (IntLit 32))))

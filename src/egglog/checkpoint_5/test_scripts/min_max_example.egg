@@ -49,11 +49,11 @@
 (let bounded_maximum (IntMax sequence_length (IntLit 7)))
 
 ; substitution descent: a min over a coordinate through the identity map
-(let tile_coordinate (CoordVar 0 (IntLit 128)))
+(let minmax_source_shape (ShapeLit (IntExprCons (IntLit 128) (IntExprNil))))
+(let tile_coordinate (CoordVar minmax_source_shape 0))
 (let coordinate_minimum (IntMin tile_coordinate (IntLit 64)))
 (let identity_rank1_map
-  (IndexMapLit (IntExprCons (CoordVar 0 (IntLit 128)) (IntExprNil))))
-(let minmax_source_shape (ShapeLit (IntExprCons (IntLit 128) (IntExprNil))))
+  (IndexMapLit (IntExprCons tile_coordinate (IntExprNil))))
 (subst-demand coordinate_minimum identity_rank1_map minmax_source_shape)
 
 (run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))

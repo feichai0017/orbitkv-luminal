@@ -35,7 +35,7 @@
 (let row0_map
   (IndexMapLit
     (IntExprCons (IntLit 0)
-      (IntExprCons (CoordVar 0 (IntLit 2))
+      (IntExprCons (CoordVar row_shape 0)
         (IntExprNil)))))
 (let row0_view_logical (LogicalIndexMapApply x_logical row0_map row_shape))
 
@@ -81,7 +81,7 @@
 ; The composed row-0 layout is DISCOVERED contiguous (zero entry annihilates,
 ; strides fold, contiguity classified)...
 (let x_element_offset
-  (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 2)) (CoordVar 0 (IntLit 2))))
+  (IntAdd (IntMul (CoordVar x_shape 1) (IntLit 2)) (CoordVar x_shape 0)))
 (check
   (= expected_view_layout
      (BitOffsetExpressionLayoutLit

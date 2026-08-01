@@ -17,22 +17,22 @@
 ; x_in = (0 * x_out) + (1 * y_out)
 ; y_in = (1 * x_out) + (0 * y_out)
 ; A map's entries range over the OUTPUT's coordinates and coordinate
-; variables carry their axis extents, so one logical transpose needs one
-; map term per output shape (the map's domain IS the output index box).
+; variables are OWNED by the output shape, so one logical transpose needs
+; one map term per output shape (the map's domain IS the output index box).
 
 ; Transpose onto z = [2x4]: output var 0 spans 4, var 1 spans 2.
 (let x_to_z_transpose_map
   (IndexMapLit
-    (IntExprCons (CoordVar 0 (IntLit 4))
-      (IntExprCons (CoordVar 1 (IntLit 2))
+    (IntExprCons (CoordVar z_shape 0)
+      (IntExprCons (CoordVar z_shape 1)
         (IntExprNil))))
 )
 
 ; Transpose onto the [4x2] view of left_input: var 0 spans 2, var 1 spans 4.
 (let left_to_view_transpose_map
   (IndexMapLit
-    (IntExprCons (CoordVar 0 (IntLit 2))
-      (IntExprCons (CoordVar 1 (IntLit 4))
+    (IntExprCons (CoordVar x_shape 0)
+      (IntExprCons (CoordVar x_shape 1)
         (IntExprNil))))
 )
 
@@ -52,7 +52,7 @@
 ; The input buffer is intentionally non-contiguous:
 ;   shape   = [4, 2]
 ;   strides = [8, 2]
-;   element offset = CoordVar(1,4) * 8 + CoordVar(0,2) * 2
+;   element offset = (CoordVar x_shape 1) * 8 + (CoordVar x_shape 0) * 2
 (let x_input_strides
   (IntExprCons (IntLit 8)
     (IntExprCons (IntLit 2)
@@ -60,8 +60,8 @@
 
 (let x_input_element_offset
   (IntAdd
-    (IntMul (CoordVar 1 (IntLit 4)) (IntLit 8))
-    (IntMul (CoordVar 0 (IntLit 2)) (IntLit 2))))
+    (IntMul (CoordVar x_shape 1) (IntLit 8))
+    (IntMul (CoordVar x_shape 0) (IntLit 2))))
 
 (let x_input_layout (StridedElementLayoutLit x_shape x_input_strides (bits-of x_dtype)))
 (let x_input_layout_tensor (LayoutTensorLit x_logical x_input_layout))
@@ -73,11 +73,11 @@
 
 ; This input is left-major contiguous:
 ;   shape = [2, 4]
-;   element offset = CoordVar(1,2) + CoordVar(0,4) * 2
+;   element offset = (CoordVar z_shape 1) + (CoordVar z_shape 0) * 2
 (let left_input_element_offset
   (IntAdd
-    (CoordVar 1 (IntLit 2))
-    (IntMul (CoordVar 0 (IntLit 4)) (IntLit 2))))
+    (CoordVar z_shape 1)
+    (IntMul (CoordVar z_shape 0) (IntLit 2))))
 
 (let left_input_layout (LeftMajorContiguousElementLayoutLit z_shape (bits-of x_dtype)))
 (let left_input_layout_tensor (LayoutTensorLit left_input_logical left_input_layout))
@@ -146,8 +146,8 @@
 (check
   (= (subst-of x_input_element_offset x_to_z_transpose_map x_shape)
      (IntAdd
-       (IntMul (CoordVar 0 (IntLit 4)) (IntLit 8))
-       (IntMul (CoordVar 1 (IntLit 2)) (IntLit 2)))))
+       (IntMul (CoordVar z_shape 0) (IntLit 8))
+       (IntMul (CoordVar z_shape 1) (IntLit 2)))))
 
 ; The strided input layout lowers to element-offset and bit-offset forms.
 (check

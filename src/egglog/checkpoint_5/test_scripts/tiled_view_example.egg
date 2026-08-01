@@ -30,11 +30,12 @@
 (let flat_layout (RightMajorContiguousElementLayoutLit flat_shape (bits-of storage_dtype)))
 (let flat_layout_tensor (LayoutTensorLit flat_logical flat_layout))
 ; recomposition entry: the parent's inner coordinate as 64*w1 + w0
+; (map entries are the OUT box's formals — owned by tiled_shape)
 (let tile_recomposition
-  (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 64)) (CoordVar 0 (IntLit 64))))
+  (IntAdd (IntMul (CoordVar tiled_shape 1) (IntLit 64)) (CoordVar tiled_shape 0)))
 (let tiling_map
   (IndexMapLit
-    (IntExprCons (CoordVar 2 (IntLit 4))
+    (IntExprCons (CoordVar tiled_shape 2)
       (IntExprCons tile_recomposition (IntExprNil)))))
 (let tiled_view_logical (LogicalIndexMapApply flat_logical tiling_map tiled_shape))
 
@@ -42,12 +43,12 @@
 (let tiled_logical (LogicalTensorInputLit (LogicalIdLit "tiled_storage") tiled_shape storage_dtype))
 (let tiled_layout (RightMajorContiguousElementLayoutLit tiled_shape (bits-of storage_dtype)))
 (let tiled_layout_tensor (LayoutTensorLit tiled_logical tiled_layout))
-(let flat_inner_coordinate (CoordVar 0 (IntLit 128)))
+(let flat_inner_coordinate (CoordVar flat_shape 0))
 (let tile_index_entry (IntTruncDiv flat_inner_coordinate (IntLit 64)))
 (let tile_offset_entry (IntTruncRem flat_inner_coordinate (IntLit 64)))
 (let untiling_map
   (IndexMapLit
-    (IntExprCons (CoordVar 1 (IntLit 4))
+    (IntExprCons (CoordVar flat_shape 1)
       (IntExprCons tile_index_entry
         (IntExprCons tile_offset_entry (IntExprNil))))))
 (let flat_view_logical (LogicalIndexMapApply tiled_logical untiling_map flat_shape))
@@ -55,25 +56,31 @@
 ; hand-written fold offsets (the ladder derives these in the layout
 ; classes; subst-of is keyed by class)
 (let flat_element_offset
-  (IntAdd (IntMul (CoordVar 1 (IntLit 4)) (IntLit 128)) (CoordVar 0 (IntLit 128))))
+  (IntAdd (IntMul (CoordVar flat_shape 1) (IntLit 128)) (CoordVar flat_shape 0)))
 (let tiled_element_offset
-  (IntAdd (IntMul (CoordVar 2 (IntLit 4)) (IntLit 128))
-    (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 64)) (CoordVar 0 (IntLit 64)))))
+  (IntAdd (IntMul (CoordVar tiled_shape 2) (IntLit 128))
+    (IntAdd (IntMul (CoordVar tiled_shape 1) (IntLit 64)) (CoordVar tiled_shape 0))))
 
 ; --- standalone identity material ---
+; Coordinates are OWNED now, so the standalone identities live over their
+; own rank-1 [128] box: the descent-completion demand below substitutes
+; over THAT box (subst replaces exactly the coordinates its source shape
+; owns), keeping the untiling view's flat_shape coordinates out of the
+; standalone material.
+(let identity_rank1_source_shape (ShapeLit (IntExprCons (IntLit 128) (IntExprNil))))
+(let standalone_inner_coordinate (CoordVar identity_rank1_source_shape 0))
 (let tile_recovery (IntTruncDiv tile_recomposition (IntLit 64)))
 (let offset_recovery (IntTruncRem tile_recomposition (IntLit 64)))
-(let ceiling_term (IntCeilDiv flat_inner_coordinate (IntLit 64)))
-(let fused_pair (IntTruncDiv (IntTruncDiv flat_inner_coordinate (IntLit 4)) (IntLit 16)))
-(let direct_quotient (IntTruncDiv flat_inner_coordinate (IntLit 64)))
-(let negated_dividend (IntTruncDiv (IntMul (IntLit -1) flat_inner_coordinate) (IntLit 64)))
-(let negative_divisor_quotient (IntTruncDiv flat_inner_coordinate (IntLit -64)))
-(let negative_divisor_remainder (IntTruncRem flat_inner_coordinate (IntLit -64)))
-(let negative_divisor_ceiling (IntCeilDiv flat_inner_coordinate (IntLit -64)))
+(let ceiling_term (IntCeilDiv standalone_inner_coordinate (IntLit 64)))
+(let fused_pair (IntTruncDiv (IntTruncDiv standalone_inner_coordinate (IntLit 4)) (IntLit 16)))
+(let direct_quotient (IntTruncDiv standalone_inner_coordinate (IntLit 64)))
+(let negated_dividend (IntTruncDiv (IntMul (IntLit -1) standalone_inner_coordinate) (IntLit 64)))
+(let negative_divisor_quotient (IntTruncDiv standalone_inner_coordinate (IntLit -64)))
+(let negative_divisor_remainder (IntTruncRem standalone_inner_coordinate (IntLit -64)))
+(let negative_divisor_ceiling (IntCeilDiv standalone_inner_coordinate (IntLit -64)))
 ; descent completion: the identity map carries a division term through
 (let identity_rank1_map
-  (IndexMapLit (IntExprCons (CoordVar 0 (IntLit 128)) (IntExprNil))))
-(let identity_rank1_source_shape (ShapeLit (IntExprCons (IntLit 128) (IntExprNil))))
+  (IndexMapLit (IntExprCons standalone_inner_coordinate (IntExprNil))))
 (subst-demand direct_quotient identity_rank1_map identity_rank1_source_shape)
 
 (run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
@@ -108,14 +115,14 @@
 
 ; --- the tiled recovery, standalone: translation shifts the multiple
 ; out, the small dividend vanishes, the zero summand collapses ---
-(check (= tile_recovery (CoordVar 1 (IntLit 2))))
-(check (= offset_recovery (CoordVar 0 (IntLit 64))))
+(check (= tile_recovery (CoordVar tiled_shape 1)))
+(check (= offset_recovery (CoordVar tiled_shape 0)))
 
 ; --- the ceil bridge: every ceiling over a nonneg dividend earns the
 ; device-honest shifted-trunc representative ---
 (check
   (= ceiling_term
-     (IntTruncDiv (IntAdd flat_inner_coordinate (IntAdd (IntLit 64) (IntLit -1))) (IntLit 64))))
+     (IntTruncDiv (IntAdd standalone_inner_coordinate (IntAdd (IntLit 64) (IntLit -1))) (IntLit 64))))
 
 ; --- fusion: two divisions are one ---
 (check (= fused_pair direct_quotient))
@@ -125,8 +132,8 @@
 ; keeps, ceiling negates the dividend) ---
 (check (= negated_dividend (IntMul (IntLit -1) direct_quotient)))
 (check (= negative_divisor_quotient (IntMul (IntLit -1) direct_quotient)))
-(check (= negative_divisor_remainder (IntTruncRem flat_inner_coordinate (IntLit 64))))
-(check (= negative_divisor_ceiling (IntCeilDiv (IntMul (IntLit -1) flat_inner_coordinate) (IntLit 64))))
+(check (= negative_divisor_remainder (IntTruncRem standalone_inner_coordinate (IntLit 64))))
+(check (= negative_divisor_ceiling (IntCeilDiv (IntMul (IntLit -1) standalone_inner_coordinate) (IntLit 64))))
 
 ; --- substitution descends through division constructors ---
 (check (= (subst-of direct_quotient identity_rank1_map identity_rank1_source_shape) direct_quotient))

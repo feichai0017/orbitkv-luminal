@@ -23,7 +23,7 @@
 
 ; Axis-1 coordinate (table columns): the passthrough — an iota of the
 ; inner output coordinate (axis 0 = innermost, extent 4).
-(let column_iota_logical (LogicalIota (CoordVar 0 (IntLit 4)) lookup_shape))
+(let column_iota_logical (LogicalIota (CoordVar lookup_shape 0) lookup_shape))
 
 (let coordinate_list
   (LogicalTensorCons token_ids_logical
@@ -49,8 +49,8 @@
 ; two-routes-one-class pin, and the doorway to zero-copy extraction of
 ; all-static gathers.
 (let transpose_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprCons (IntLit 6) (IntExprNil)))))
-(let row_coordinate_iota (LogicalIota (CoordVar 0 (IntLit 6)) transpose_shape))
-(let column_coordinate_iota (LogicalIota (CoordVar 1 (IntLit 4)) transpose_shape))
+(let row_coordinate_iota (LogicalIota (CoordVar transpose_shape 0) transpose_shape))
+(let column_coordinate_iota (LogicalIota (CoordVar transpose_shape 1) transpose_shape))
 (let transposed_gather
   (LogicalGather table_logical
     (LogicalTensorCons row_coordinate_iota
@@ -58,16 +58,16 @@
 (let transposed_view
   (LogicalIndexMapApply table_logical
     (IndexMapLit
-      (IntExprCons (CoordVar 0 (IntLit 6))
-        (IntExprCons (CoordVar 1 (IntLit 4)) (IntExprNil))))
+      (IntExprCons (CoordVar transpose_shape 0)
+        (IntExprCons (CoordVar transpose_shape 1) (IntExprNil))))
     transpose_shape))
 
 (run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
 
 ; Iota authoring contract: every constructed iota demands its expression's
 ; bounds — an absent entry fails the check loudly at the fixpoint.
-(check (= ?demanded_lower (lower-bound-of (CoordVar 0 (IntLit 4)))))
-(check (= ?demanded_upper (upper-bound-of (CoordVar 0 (IntLit 4)))))
+(check (= ?demanded_lower (lower-bound-of (CoordVar lookup_shape 0))))
+(check (= ?demanded_upper (upper-bound-of (CoordVar lookup_shape 0))))
 
 ; --- dtype: the result carries the DATA's dtype ---
 (check (= (dtype-of lookup_logical) (F32)))
@@ -97,10 +97,10 @@
        (LayoutTensorCons (LayoutTensorLit lookup_logical lookup_layout) (LayoutTensorNil)))))
 
 ; Iota authoring contract for the transpose coordinates.
-(check (= ?demanded_lower (lower-bound-of (CoordVar 0 (IntLit 6)))))
-(check (= ?demanded_upper (upper-bound-of (CoordVar 0 (IntLit 6)))))
-(check (= ?demanded_lower2 (lower-bound-of (CoordVar 1 (IntLit 4)))))
-(check (= ?demanded_upper2 (upper-bound-of (CoordVar 1 (IntLit 4)))))
+(check (= ?demanded_lower (lower-bound-of (CoordVar transpose_shape 0))))
+(check (= ?demanded_upper (upper-bound-of (CoordVar transpose_shape 0))))
+(check (= ?demanded_lower2 (lower-bound-of (CoordVar transpose_shape 1))))
+(check (= ?demanded_upper2 (upper-bound-of (CoordVar transpose_shape 1))))
 
 ; --- the unification: two routes, one class ---
 (check (= transposed_gather transposed_view))

@@ -1,7 +1,10 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-; Substitution range guard (2026-07-29, Austin-approved): the subst
-; CoordVar arm only fires when the map entry's proven range fits inside
-; the coordinate's own range — the well-definedness condition of
+; Substitution range guard (2026-07-29, Austin-approved; smallest-
+; possible-box form 2026-07-31): the subst CoordVar arm only fires when
+; the map entry's proven range fits inside the coordinate's smallest
+; possible box [0, lower(extent)-1] — the extent being the owner
+; shape's axis dim — or when the entry is structurally a coordinate
+; over the same extent class. This is the well-definedness condition of
 ; subst-of on classes (see the preamble subst contract). This proof
 ; pins both faces:
 ;   (1) an IN-RANGE view composes: coordinate image, composed offset,
@@ -13,7 +16,7 @@
 (let d (LogicalTensorInputLit (LogicalIdLit "d") d_shape (F32)))
 (let d_layout (RightMajorContiguousElementLayoutLit d_shape (bits-of (F32))))
 (let d_lt (LayoutTensorLit d d_layout))
-(let c0 (CoordVar 0 (IntLit 3)))
+(let c0 (CoordVar d_shape 0))
 
 ; Reversal view, entry 2 - c0: range [0, 2] — inside the parent box [0, 3).
 (let rev_map

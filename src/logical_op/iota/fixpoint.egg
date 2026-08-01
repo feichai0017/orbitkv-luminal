@@ -1,9 +1,0 @@
-(rule
-  (
-    (= ?out_logical (LogicalIota ?index_expression ?shape))
-  )
-  (
-    (extent-lock-demand ?index_expression ?shape)
-  )
-  :ruleset fixpoint-invariants
-)

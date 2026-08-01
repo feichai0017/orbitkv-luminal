@@ -37,7 +37,7 @@ impl Graph {
     }
 
     /// Record a LogicalIota for the recorder: the iota's value expression
-    /// over its FLAT coordinate (z -> CoordVar(0, range)), plus the
+    /// over its FLAT coordinate (z -> CoordVar([range], 0)), plus the
     /// authoring-contract bounds check pair. Rank-0 (range 1) iotas emit
     /// over the empty shape — a scalar.
     fn record_iota(
@@ -50,7 +50,9 @@ impl Graph {
         let coord = if range <= 1 {
             "(IntLit 0)".to_string()
         } else {
-            format!("(CoordVar 0 (IntLit {range}))")
+            format!(
+                "(CoordVar (ShapeLit (IntExprCons (IntLit {range}) (IntExprNil))) 0)"
+            )
         };
         let value_expr = match crate::graph::int_expr_term(
             expr,

@@ -43,10 +43,6 @@ impl LogicalOp for LogicalIota {
                 category: SpliceCategory::Forward,
                 text: include_str!("iota/forward_layout.egg"),
             },
-            EgglogSnippet {
-                category: SpliceCategory::Fixpoint,
-                text: include_str!("iota/fixpoint.egg"),
-            },
         ]
     }
 }

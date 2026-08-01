@@ -20,7 +20,7 @@
       (IntExprNil))))
 
 (let ids_a (LogicalTensorInputLit (LogicalIdLit "ids_a") flat_shape (Int)))
-(let iota_b (LogicalIota (CoordVar 0 (IntLit 10)) folded_shape))
+(let iota_b (LogicalIota (CoordVar folded_shape 0) folded_shape))
 
 (let data_shape (ShapeLit (IntExprCons (IntLit 5) (IntExprCons (IntLit 7) (IntExprNil)))))
 (let data (LogicalTensorInputLit (LogicalIdLit "data") data_shape (F32)))
@@ -34,8 +34,8 @@
 
 ; Iota authoring contract: every constructed iota demands its expression's
 ; bounds — an absent entry fails the check loudly at the fixpoint.
-(check (= ?demanded_lower (lower-bound-of (CoordVar 0 (IntLit 10)))))
-(check (= ?demanded_upper (upper-bound-of (CoordVar 0 (IntLit 10)))))
+(check (= ?demanded_lower (lower-bound-of (CoordVar folded_shape 0))))
+(check (= ?demanded_upper (upper-bound-of (CoordVar folded_shape 0))))
 
 ; If we get here, the shapes unioned before (or in the same rebuild as) the
 ; duplicative sets — no false panic on this ordering.
