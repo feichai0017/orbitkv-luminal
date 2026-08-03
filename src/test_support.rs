@@ -3132,3 +3132,180 @@ mod subst_guard_study {
     }
 }
 
+/// COMMISSIONED ADVERSARIAL STUDY (Austin, deep dive): can any program
+/// induce INFINITE minting of "valid strided terms" — discover stride n
+/// valid, then n+1, then n+2, unboundedly? Method: adversarial seeds run
+/// in BOUNDED schedule blocks with the e-graph serialized and counted
+/// between blocks. Divergence = monotone unbounded growth across blocks;
+/// convergence = plateau (fixpoint). Welding seeds run with first-wins
+/// folds + disarmed tripwires (the zero_class_probe surgery) so growth
+/// is measurable INSTEAD of aborting at the first panic — fold values
+/// are then meaningless; only counts are read.
+/// Run: MDX=1 cargo test -- x_study_mint_divergence --nocapture
+#[cfg(test)]
+mod mint_divergence_study {
+    fn disarm(mut text: String) -> String {
+        text = text.replace(" :no-merge)", " :merge old)");
+        for panic_rule in [
+            "((panic \"crossed IntExpr bounds: unsound union or inconsistent seed\"))",
+            "((panic \"distinct integer literals unioned: unsound IntExpr equality\"))",
+            "((panic \"axis support contradiction: unsound union or broken support rule\"))",
+            "((panic \"provably-cannot-union-with-zero certified the zero class: certificate or union unsound\"))",
+            "((panic \"zero and nonzero certificates on one class: route or union unsound\"))",
+        ] {
+            assert!(text.contains(panic_rule), "tripwire text drifted: {panic_rule}");
+            text = text.replace(panic_rule, "()");
+        }
+        text
+    }
+
+    /// Run `blocks` bounded schedule blocks over `base + seed`, counting
+    /// (nodes, classes) after each; returns the count sequence.
+    fn measure(base: &str, seed: &str, blocks: usize) -> Vec<(usize, usize)> {
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph
+            .parse_and_run_program(None, &format!("{base}\n{seed}"))
+            .expect("seed loads");
+        let mut counts = Vec::new();
+        for _ in 0..blocks {
+            egraph
+                .parse_and_run_program(None, "(run-schedule (repeat 4 (run)))")
+                .expect("block runs");
+            let s = egraph.serialize(egglog::SerializeConfig::default()).egraph;
+            let nodes = s.nodes.len();
+            let classes = s
+                .nodes
+                .values()
+                .map(|n| n.eclass.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            counts.push((nodes, classes));
+        }
+        counts
+    }
+
+    fn verdict(name: &str, counts: &[(usize, usize)]) {
+        let tail_growth = counts[counts.len() - 1].0 as i64 - counts[counts.len() - 2].0 as i64;
+        let plateaued = tail_growth == 0;
+        eprintln!(
+            "MINT {name:<22} | nodes/classes per block: {counts:?} | last-block growth {tail_growth} | {}",
+            if plateaued { "PLATEAU" } else { "STILL GROWING" }
+        );
+    }
+
+    #[test]
+    fn x_study_mint_divergence() {
+        if std::env::var("MDX").is_err() {
+            eprintln!("MDX not set — study inert");
+            return;
+        }
+        let armed = crate::egglog_snippet::assembled_program().to_string();
+        let disarmed = disarm(armed.clone());
+
+        // M1 — LITERAL LADDER: a degenerate coordinate with three literal
+        // strides in play (c·2, c·3, c·5 all provably-nonzero strides of a
+        // [1]-box layout family). The weld (2≡3≡5≡0≡1) fires under
+        // disarmed folds; the question is whether anything then MINTS new
+        // literals/terms unboundedly.
+        let m1 = r#"
+(let one_shape (ShapeLit (IntExprCons (IntLit 1) (IntExprNil))))
+(let c (CoordVar one_shape 0))
+(let p2 (IntMul c (IntLit 2)))
+(let p3 (IntMul c (IntLit 3)))
+(let p5 (IntMul c (IntLit 5)))
+(let l2 (ElementOffsetExpressionLayoutLit p2 one_shape (BitWidthLit 32)))
+(let l3 (ElementOffsetExpressionLayoutLit p3 one_shape (BitWidthLit 32)))
+(let l5 (ElementOffsetExpressionLayoutLit p5 one_shape (BitWidthLit 32)))
+(let t_in (LogicalTensorInputLit (LogicalIdLit "m1") one_shape (F32)))
+(let lt2 (LayoutTensorLit t_in l2))
+(let lt3 (LayoutTensorLit t_in l3))
+(let lt5 (LayoutTensorLit t_in l5))
+(element-to-strided-demand lt2)
+(element-to-strided-demand lt3)
+(element-to-strided-demand lt5)
+"#;
+        verdict("M1 literal ladder", &measure(&disarmed, m1, 6));
+
+        // M2 — SYMBOLIC SUCCESSOR: strides n and n+1 over a degenerate
+        // coordinate. The pointing arms weld n ≡ n+1; if any rule then
+        // manufactures n+2 from that equality, counts diverge.
+        let m2 = r#"
+(let none_shape (ShapeLit (IntExprCons (IntLit 1) (IntExprNil))))
+(let cs (CoordVar none_shape 0))
+(let nvar (IntVar "mdx_n"))
+(set (lower-bound-of nvar) (bigint 2))
+(set (upper-bound-of nvar) (bigint 8))
+(let nplus (IntAdd nvar (IntLit 1)))
+(let pn (IntMul cs nvar))
+(let pn1 (IntMul cs nplus))
+(let ln (ElementOffsetExpressionLayoutLit pn none_shape (BitWidthLit 32)))
+(let ln1 (ElementOffsetExpressionLayoutLit pn1 none_shape (BitWidthLit 32)))
+(let t2_in (LogicalTensorInputLit (LogicalIdLit "m2") none_shape (F32)))
+(let ltn (LayoutTensorLit t2_in ln))
+(let ltn1 (LayoutTensorLit t2_in ln1))
+(element-to-strided-demand ltn)
+(element-to-strided-demand ltn1)
+"#;
+        verdict("M2 symbolic successor", &measure(&disarmed, m2, 6));
+
+        // M3 — DEEP DEGENERATE NEST: four stacked [1]-views composed by
+        // subst; the ARMED preamble (no disarm needed if no weld fires
+        // before the walks) — run disarmed anyway for uniformity.
+        let m3 = r#"
+(let s1 (ShapeLit (IntExprCons (IntLit 1) (IntExprNil))))
+(let v0 (LogicalTensorInputLit (LogicalIdLit "m3") s1 (F32)))
+(let id_map (IndexMapLit (IntExprCons (CoordVar s1 0) (IntExprNil))))
+(let v1 (LogicalIndexMapApply v0 id_map s1))
+(let v2 (LogicalIndexMapApply v1 id_map s1))
+(let v3 (LogicalIndexMapApply v2 id_map s1))
+(let v4 (LogicalIndexMapApply v3 id_map s1))
+(let l0 (RightMajorContiguousElementLayoutLit s1 (BitWidthLit 32)))
+(let lt0 (LayoutTensorLit v0 l0))
+"#;
+        verdict("M3 deep degenerate nest", &measure(&disarmed, m3, 6));
+
+        // M4 — CYCLIC SELF-VIEW (the remove/insert-dim cycle preview): a
+        // tensor unioned with a view-of-a-view of itself. Terminates iff
+        // demand machinery tolerates cyclic classes.
+        let m4 = r#"
+(let s4 (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
+(let w0 (LogicalTensorInputLit (LogicalIdLit "m4") s4 (F32)))
+(let id4 (IndexMapLit (IntExprCons (CoordVar s4 0) (IntExprNil))))
+(let w1 (LogicalIndexMapApply w0 id4 s4))
+(let w2 (LogicalIndexMapApply w1 id4 s4))
+(union w2 w0)
+(let l4 (RightMajorContiguousElementLayoutLit s4 (BitWidthLit 32)))
+(let lt4 (LayoutTensorLit w0 l4))
+"#;
+        verdict("M4 cyclic self-view", &measure(&armed, m4, 6));
+
+        // M5 — MAYBE-EMPTY EXTENTS: dims seeded [0,8] and [0,1]. Reports
+        // what fires: coordinate bounds, the collapse, discovery.
+        let m5_seed = r#"
+(let e8 (IntVar "mdx_e8"))
+(set (lower-bound-of e8) (bigint 0))
+(set (upper-bound-of e8) (bigint 8))
+(let se8 (ShapeLit (IntExprCons e8 (IntExprNil))))
+(let ce8 (CoordVar se8 0))
+(let e1 (IntVar "mdx_e1"))
+(set (lower-bound-of e1) (bigint 0))
+(set (upper-bound-of e1) (bigint 1))
+(let se1 (ShapeLit (IntExprCons e1 (IntExprNil))))
+(let ce1 (CoordVar se1 0))
+(run-schedule (saturate (run)))
+"#;
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph
+            .parse_and_run_program(None, &format!("{armed}\n{m5_seed}"))
+            .expect("m5 runs");
+        for (label, check) in [
+            ("[0,8] coord bounds set", "(check (= ?u (upper-bound-of ce8)))"),
+            ("[0,8] coord collapsed", "(check (= ce8 (IntLit 0)))"),
+            ("[0,1] coord bounds set", "(check (= ?u (upper-bound-of ce1)))"),
+            ("[0,1] coord collapsed", "(check (= ce1 (IntLit 0)))"),
+        ] {
+            let ok = egraph.parse_and_run_program(None, check).is_ok();
+            eprintln!("MINT M5 {label:<24} => {}", if ok { "YES" } else { "no" });
+        }
+    }
+}
