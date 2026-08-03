@@ -175,11 +175,6 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    // KNOWN ISSUE (Step 4b, pinned by stage4b_probes::
-    // pinned_degenerate_broadcast_unsound_union): any extent-1 axis under
-    // a broadcast view trips an egglog-level unsound union (zero-class
-    // inversion; awaiting Austin's ruling), so proptest shape ranges
-    // start at 2 until it lands.
     use crate::{prelude::*, tests::assert_close};
     use candle_core::{Device, Tensor};
     use proptest::prelude::*;
@@ -204,7 +199,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_arange(end in 2i32..64) {
+        fn test_arange(end in 1i32..64) {
             test_init(
                 |cx| cx.arange(end).cast(DType::F32) * 1.0,
                 |dev| Tensor::arange(0_f32, end as f32, dev).unwrap(),
@@ -215,7 +210,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_arange_options(start in -16i32..16, step in 2i32..6, count in 2i32..20) {
+        fn test_arange_options(start in -16i32..16, step in 1i32..6, count in 1i32..20) {
             let end = start + step * count;
             test_init(
                 |cx| cx.arange_options(start, end, step).cast(DType::F32) * 1.0,
@@ -236,7 +231,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_triangle_mask(size in 2usize..64) {
+        fn test_triangle_mask(size in 1usize..64) {
             test_init(
                 |cx| cx.tril(size as i32, 0).cast(DType::F32),
                 |dev| Tensor::tril2(size, candle_core::DType::F32, dev).unwrap(),
@@ -249,7 +244,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "stack unsqueezes (extent-1) — gated on the pinned degenerate-broadcast issue (Step 4b)"]
     fn test_stack() {
         use crate::tests::random_vec;
 

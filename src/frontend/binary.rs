@@ -425,11 +425,6 @@ impl F32Pow for f32 {
 // #[cfg(test)]
 #[cfg(test)]
 pub(super) mod tests {
-    // KNOWN ISSUE (Step 4b, pinned by stage4b_probes::
-    // pinned_degenerate_broadcast_unsound_union): any extent-1 axis under
-    // a broadcast view trips an egglog-level unsound union (zero-class
-    // inversion; awaiting Austin's ruling), so proptest shape ranges
-    // start at 2 until it lands.
     use crate::{
         prelude::*,
         tests::{assert_close, random_vec},
@@ -535,7 +530,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_add(x in 2..100, y in 2..5) {
+        fn test_add(x in 1..100, y in 1..5) {
             test_binary(x, x, |a, b| a + b, |a, b| (&a + &b).unwrap());
             test_binary((y, x), (y, x), |a, b| a + b, |a, b| (&a + &b).unwrap());
         }
@@ -544,7 +539,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_sub(x in 2..100, y in 2..5) {
+        fn test_sub(x in 1..100, y in 1..5) {
             test_binary(x, x, |a, b| a - b, |a, b| (&a - &b).unwrap());
             test_binary((y, x), (y, x), |a, b| a - b, |a, b| (&a - &b).unwrap());
         }
@@ -553,7 +548,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_mul(x in 2..100, y in 2..5) {
+        fn test_mul(x in 1..100, y in 1..5) {
             test_binary(x, x, |a, b| a * b, |a, b| (&a * &b).unwrap());
             test_binary(
                 (2, y, x),
@@ -567,7 +562,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_div(x in 2..100) {
+        fn test_div(x in 1..100) {
             test_binary_transforms(
                 x,
                 x,
@@ -582,7 +577,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_maximum(x in 2..100) {
+        fn test_maximum(x in 1..100) {
             test_binary(x, x, |a, b| a.maximum(b), |a, b| a.maximum(&b).unwrap());
         }
     }
@@ -590,7 +585,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_minimum(x in 2..100) {
+        fn test_minimum(x in 1..100) {
             test_binary(x, x, |a, b| a.minimum(b), |a, b| a.minimum(&b).unwrap());
         }
     }
@@ -598,7 +593,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_mod(size in 2usize..64) {
+        fn test_mod(size in 1usize..64) {
             test_binary_transforms(
                 size,
                 size,
@@ -618,7 +613,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_mod_scalar_broadcast(size in 2usize..64) {
+        fn test_mod_scalar_broadcast(size in 1usize..64) {
             // rank-0 RHS expanded against rank-N LHS, mirroring `x % torch.tensor(c)`.
             test_binary_transforms(
                 size,
@@ -639,7 +634,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_lt(size in 2usize..64) {
+        fn test_lt(size in 1usize..64) {
             test_binary(
                 size,
                 size,
@@ -652,7 +647,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_lt_scalar_broadcast(size in 2usize..64) {
+        fn test_lt_scalar_broadcast(size in 1usize..64) {
             // rank-0 RHS expanded against rank-N LHS for `lt`.
             test_binary(
                 size,
@@ -674,7 +669,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_gt(size in 2usize..64) {
+        fn test_gt(size in 1usize..64) {
             test_binary(
                 size,
                 size,
@@ -687,7 +682,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_le(size in 2usize..64) {
+        fn test_le(size in 1usize..64) {
             test_binary(
                 size,
                 size,
@@ -700,7 +695,7 @@ pub(super) mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_ge(size in 2usize..64) {
+        fn test_ge(size in 1usize..64) {
             test_binary(
                 size,
                 size,

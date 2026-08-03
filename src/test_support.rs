@@ -2684,24 +2684,11 @@ pub fn run_ssa_program(
 
 #[cfg(test)]
 mod stage4b_probes {
-    /// PINNED KNOWN UNSOUNDNESS (Step 4b, awaiting Austin's egglog design
-    /// ruling — full dossier in the session memory). Minimal repro: any
-    /// rank-0 -> [1] scalar-broadcast view. Two layers:
+    /// (History: this module held the Step-4b degenerate-broadcast
+    /// unsoundness pin — the stride recovery walks welding the zero
+    /// class. Fixed by the testimony landing; the repro is now the LIVE
+    /// regression `degenerate_broadcast_runs_clean` below.)
     ///
-    /// 1. The user-ratified EXTENT-1 COLLAPSE (CoordVar over a provably-1
-    ///    extent unions with IntLit 0) breaks `coeff-of`'s :no-merge
-    ///    argument on degenerate axes (on domain {0}, c->c and c->0 are
-    ///    equal functions with coefficients 1 vs 0 — both valid strides).
-    ///    (An extent>=2 gate was trialed and REVERTED — Austin's ruling
-    ///    2026-07-31: fix the root cause, not the symptom.)
-    /// 2. With that gate, the same repro still panics `const-part-of`
-    ///    with 0 vs 32 (the f32 bit width) — a REAL unsound union: the
-    ///    collapse feeds CoordVar into the global zero class, and
-    ///    inversion-style rules (bit->element discovery et al.) matching
-    ///    (IntMul ?expr (IntLit ?bits)) inside that class bind ?expr to
-    ///    the wrong zero-product lhs, cross-wiring layouts until exprs
-    ///    disagreeing at the origin merge. Merge-tolerant folds let the
-    ///    crossed-bounds tripwire confirm independently.
     /// PINNED KNOWN GAP (Step 4b): a PURE-IDENTITY graph — an input
     /// directly output(), no ops — panics the axis-extent-lock tripwire
     /// natively (input and output bindings share one BufferLit and one
@@ -2719,9 +2706,14 @@ mod stage4b_probes {
         assert_eq!(got, &vec![1.0, 2.0]);
     }
 
+    /// LIVE REGRESSION (was the pinned Step-4b unsoundness): the
+    /// rank-0 -> [1] broadcast that used to weld the zero class (the
+    /// recovery walks turned "presentations [1] and [0] are both valid"
+    /// into IntExpr equalities 0 ≡ 1 ≡ 32). With recovery deleted and
+    /// strided-presentation testimony in its place, it runs end-to-end
+    /// with every tripwire live.
     #[test]
-    #[ignore = "degenerate-broadcast unsound union — awaiting egglog-level ruling (Step 4b)"]
-    fn pinned_degenerate_broadcast_unsound_union() {
+    fn degenerate_broadcast_runs_clean() {
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor(1);
         let b = (a * 2.0).output();
@@ -2768,12 +2760,6 @@ mod zero_class_probe {
     const CROSSED_RULE: &str = "(rule\n  (\n    (= ?lower (lower-bound-of ?expr))\n    (= ?upper (upper-bound-of ?expr))\n    (> ?lower ?upper)\n  )\n  ((panic \"crossed IntExpr bounds: unsound union or inconsistent seed\"))\n)";
 
     const DISTINCT_LIT_RULE: &str = "(rule\n  ((= ?expr (IntLit ?a)) (= ?expr (IntLit ?b)) (!= ?a ?b))\n  ((panic \"distinct integer literals unioned: unsound IntExpr equality\"))\n)";
-
-    const COORD_STRIDE_RULE: &str = "(rule\n  ((symbolic-stride-demand ?expr ?axis) (= ?expr (CoordVar ?shape ?axis)))\n  ((set (symbolic-stride-of ?expr ?axis) (IntLit 1)))\n)";
-
-    const MUL_STRIDE_RULE: &str = "(rule\n  (\n    (symbolic-stride-demand ?expr ?axis)\n    (= ?expr (IntMul (CoordVar ?shape ?axis) ?stride))\n    (axis-free ?stride ?axis)\n  )\n  ((set (symbolic-stride-of ?expr ?axis) ?stride))\n)";
-
-    const FREE_STRIDE_RULE: &str = "(rule\n  ((symbolic-stride-demand ?expr ?axis) (axis-free ?expr ?axis))\n  ((set (symbolic-stride-of ?expr ?axis) (IntLit 0)))\n)";
 
     const SUPPORT_RULE: &str = "(rule\n  ((axis-in-support ?expr ?axis) (axis-free ?expr ?axis))\n  ((panic \"axis support contradiction: unsound union or broken support rule\"))\n)";
 
@@ -2903,50 +2889,6 @@ mod zero_class_probe {
             }
             "witness" => {
                 text = witness_mode(text);
-            }
-            "w_cut_coordstride" => {
-                text = cut(&text, COORD_STRIDE_RULE, "symbolic CoordVar stride-1");
-                text = witness_mode(text);
-            }
-            "w_cut_pointing" => {
-                text = cut(&text, COORD_STRIDE_RULE, "symbolic CoordVar stride-1");
-                text = cut(&text, MUL_STRIDE_RULE, "symbolic IntMul stride");
-                text = cut(&text, FREE_STRIDE_RULE, "symbolic broadcast stride-0");
-                text = witness_mode(text);
-            }
-            "fix_pointing" => {
-                // The candidate-fix probe: pointing rules cut, every real
-                // tripwire LIVE, and the full pipeline run to numerics.
-                text = cut(&text, COORD_STRIDE_RULE, "symbolic CoordVar stride-1");
-                text = cut(&text, MUL_STRIDE_RULE, "symbolic IntMul stride");
-                text = cut(&text, FREE_STRIDE_RULE, "symbolic broadcast stride-0");
-                let mut egraph = crate::egglog_snippet::new_egraph();
-                match egraph.parse_and_run_program(None, &text) {
-                    Err(err) => {
-                        eprintln!("FIX RUN ERR: {err}");
-                        return;
-                    }
-                    Ok(_) => eprintln!("FIX SATURATION OK"),
-                }
-                let serialized = egraph
-                    .serialize(egglog::SerializeConfig::default())
-                    .egraph;
-                let allow = crate::ssa_reference::reference_allow_list();
-                let extracted = crate::extractor::extract_layout_ir_with_ops(
-                    &serialized,
-                    Some(&allow),
-                )
-                .expect("extracts")
-                .expect("plan");
-                let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))
-                    .expect("bufferizes");
-                let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
-                rt.load_plan(plan);
-                rt.set_data(0i64, vec![0.5]);
-                rt.execute().expect("executes");
-                let got = rt.get_f32(3i64).or_else(|_| rt.get_f32(2i64)).expect("output");
-                eprintln!("FIX NUMERICS: {got:?} (want [1.0])");
-                return;
             }
             "w_noroads" => {
                 text = cut(&text, COLLAPSE_RULE, "extent-1 collapse");
@@ -3220,11 +3162,8 @@ mod mint_divergence_study {
 (let lt2 (LayoutTensorLit t_in l2))
 (let lt3 (LayoutTensorLit t_in l3))
 (let lt5 (LayoutTensorLit t_in l5))
-(element-to-strided-demand lt2)
-(element-to-strided-demand lt3)
-(element-to-strided-demand lt5)
 "#;
-        verdict("M1 literal ladder", &measure(&disarmed, m1, 6));
+        verdict("M1 literal ladder", &measure(&armed, m1, 6));
 
         // M2 — SYMBOLIC SUCCESSOR: strides n and n+1 over a degenerate
         // coordinate. The pointing arms weld n ≡ n+1; if any rule then
@@ -3243,10 +3182,8 @@ mod mint_divergence_study {
 (let t2_in (LogicalTensorInputLit (LogicalIdLit "m2") none_shape (F32)))
 (let ltn (LayoutTensorLit t2_in ln))
 (let ltn1 (LayoutTensorLit t2_in ln1))
-(element-to-strided-demand ltn)
-(element-to-strided-demand ltn1)
 "#;
-        verdict("M2 symbolic successor", &measure(&disarmed, m2, 6));
+        verdict("M2 symbolic successor", &measure(&armed, m2, 6));
 
         // M3 — DEEP DEGENERATE NEST: four stacked [1]-views composed by
         // subst; the ARMED preamble (no disarm needed if no weld fires

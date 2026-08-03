@@ -125,11 +125,6 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    // KNOWN ISSUE (Step 4b, pinned by stage4b_probes::
-    // pinned_degenerate_broadcast_unsound_union): any extent-1 axis under
-    // a broadcast view trips an egglog-level unsound union (zero-class
-    // inversion; awaiting Austin's ruling), so proptest shape ranges
-    // start at 2 until it lands.
     use crate::frontend::binary::tests::test_binary;
     use crate::prelude::{DType, Graph};
     use proptest::prelude::*;
@@ -154,7 +149,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_matrix_vector(m in 2usize..6, k in 2usize..6, n in 2usize..6) {
+        fn test_matrix_vector(m in 1usize..6, k in 1usize..6, n in 1usize..6) {
             test_binary(
                 (m, k),
                 (k, n),
@@ -167,7 +162,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_matmul(m in 2usize..6, k in 2usize..6, n in 2usize..6) {
+        fn test_matmul(m in 1usize..6, k in 1usize..6, n in 1usize..6) {
             test_binary(
                 (m, k),
                 (k, n),
@@ -180,7 +175,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_batch_matmul(batch in 2usize..4, m in 2usize..6, k in 2usize..6, n in 2usize..6) {
+        fn test_batch_matmul(batch in 1usize..4, m in 1usize..6, k in 1usize..6, n in 1usize..6) {
             test_binary(
                 (batch, m, k),
                 (k, n),
@@ -200,7 +195,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_batch_batch_matmul(batch in 2usize..4, m in 2usize..6, k in 2usize..6, n in 2usize..6) {
+        fn test_batch_batch_matmul(batch in 1usize..4, m in 1usize..6, k in 1usize..6, n in 1usize..6) {
             test_binary(
                 (batch, m, k),
                 (batch, m, k),
