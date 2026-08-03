@@ -2165,6 +2165,32 @@ def test_sdpa_f32_unaffected_by_upcast(device: torch.device):
 # ---- mixed-dtype operand unification ---------------------------------------
 
 
+@pytest.mark.parametrize(
+    "op", ["sum", "mean", "softmax", "cumsum", "amax"]
+)
+def test_reduction_fp16_opmath_parity(op: str, device: torch.device):
+    """Reduction-class ops at fp16 outlier scale must match eager (which
+    accumulates in fp32 opmath). Guards against input-dtype statistic
+    chains — the layer_norm/sdpa overflow class."""
+    from test_models import ReductionParityModel
+
+    torch.manual_seed(0)
+    model = ReductionParityModel(op).to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    if op in ("sum", "mean", "cumsum"):
+        x = (torch.rand(2, 8, 2048) * 30 + 1).half().to(device)  # big positive sums
+    else:
+        x = (torch.randn(2, 8, 2048) * 40).half().to(device)  # ~300-magnitude tails
+    expected = model(x)
+    actual = compiled(x)
+    assert torch.isfinite(actual).all(), f"{op}: non-finite output"
+    rel = (
+        (actual.double() - expected.double()).abs().max()
+        / expected.double().abs().max().clamp(min=1e-9)
+    ).item()
+    assert rel < 0.01, f"{op}: rel_err={rel:.4f} vs eager"
+
+
 def test_layer_norm_fp16_outliers(device: torch.device):
     """LN statistics must be computed in fp32 for low-precision inputs —
     fp16 stats overflow on outlier activations (x^2 > fp16 max)."""

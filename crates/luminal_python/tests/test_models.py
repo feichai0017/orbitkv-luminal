@@ -2497,6 +2497,27 @@ class SdpaGqaModel(torch.nn.Module):
         )
 
 
+class ReductionParityModel(torch.nn.Module):
+    """One reduction-class op, for the fp16 opmath parity battery: torch
+    accumulates reductions in fp32 for half inputs; these pin luminal to the
+    same contract at outlier magnitudes."""
+
+    OPS = {
+        "sum": lambda x: x.sum(-1),
+        "mean": lambda x: x.mean(-1),
+        "softmax": lambda x: torch.softmax(x, -1),
+        "cumsum": lambda x: x.cumsum(-1),
+        "amax": lambda x: x.amax(-1),
+    }
+
+    def __init__(self, op: str) -> None:
+        super().__init__()
+        self.op = op
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.OPS[self.op](x)
+
+
 class LayerNormOutlierModel(torch.nn.Module):
     """LayerNorm over fp16 activations with outlier magnitudes (~350, the
     OPT-family residual-stream profile). torch computes LN statistics in
