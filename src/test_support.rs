@@ -1265,7 +1265,7 @@ mod harness_tests {
     (LogicalTensorCons row_iota (LogicalTensorCons col_iota (LogicalTensorNil)))))
 (let data_layout (RightMajorContiguousElementLayoutLit data_shape (bits-of (F32))))
 (let data_layout_tensor (LayoutTensorLit data_logical data_layout))
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let full = format!("{}\n\n{}", crate::egglog_snippet::assembled_program(), body);
         crate::egglog_snippet::new_egraph()
@@ -1734,7 +1734,7 @@ mod harness_tests {
 (set (buffer-freed-by out_buffer) (CallerFrees))
 (let output
   (BufferOutputLit (BufferTensorCons (BufferTensorLit out_lt out_buffer) (BufferTensorNil))))
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let program = format!("{preamble}\n\n{script}");
         let mut egraph = crate::egglog_snippet::new_egraph();
@@ -2572,7 +2572,7 @@ mod intcoordvar_probe {
   (IndexMapLit (IntExprCons (CoordVar out_shape 0) (IntExprNil))) out_shape))
 (let v_layout (RightMajorContiguousElementLayoutLit vec_shape (bits-of (F32))))
 (let v_lt (LayoutTensorLit v_in v_layout))
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#,
         );
         let mut egraph = crate::egglog_snippet::new_egraph();

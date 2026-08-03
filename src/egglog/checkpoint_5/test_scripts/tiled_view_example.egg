@@ -83,7 +83,7 @@
   (IndexMapLit (IntExprCons standalone_inner_coordinate (IntExprNil))))
 (subst-demand direct_quotient identity_rank1_map identity_rank1_source_shape)
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; --- TILING: the composed layout is linear in the tile coordinates and
 ; discovery classifies it completely ---

@@ -407,6 +407,18 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Helper Functions For IntExpr Lists
 (ruleset layout-tensor-op-metadata)
+; Copy candidates mint AGAINST SETTLED CLASSES (Austin's ruling
+; 2026-08-03): the copy matcher's (!=) is a per-iteration snapshot on
+; canonical ids, so inside the main fixpoint it could admit a pair that
+; later unions — the mint is never retracted and persists as a
+; self-copy (unselectable junk: the extractor's cycle guard kills it,
+; but it pollutes the producer space and burns genome evaluations).
+; Copy mints are pure fixpoint LEAVES (no rule matches LayoutTensorOp
+; constructors in the main phase), so deferring them changes no
+; equality; one non-saturating pass suffices (the rule cannot feed
+; itself). Runs BEFORE layout-tensor-op-metadata so fresh Lits get
+; their list rows.
+(ruleset materializing-copy-mint)
 
 (function expr-list-length-of (IntExprList) i64 :no-merge) ; I think these can be no merge
 (function expr-list-nth-from-end (IntExprList i64) IntExpr :no-merge) ; I think these can be no merge

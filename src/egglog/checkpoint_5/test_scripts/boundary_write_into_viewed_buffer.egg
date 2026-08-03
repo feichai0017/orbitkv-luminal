@@ -76,7 +76,7 @@
       (BufferTensorCons r_output_buffer_tensor
         (BufferTensorNil)))))
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; The composed row-0 layout is DISCOVERED contiguous (zero entry annihilates,
 ; strides fold, contiguity classified)...

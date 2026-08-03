@@ -154,7 +154,7 @@
 (let gap_probe_offset
   (IntAdd (IntMul (CoordVar gap_probe_shape 1) gap_probe_dim) (CoordVar gap_probe_shape 0)))
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; The right-major fold over [4, seq_len] produces SYMBOLIC strides
 ; [seq_len, 1]...

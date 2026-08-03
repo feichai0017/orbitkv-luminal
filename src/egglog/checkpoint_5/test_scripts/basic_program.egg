@@ -138,7 +138,7 @@
 ; transpose): compose the strided input offset with the transpose map.
 (subst-demand x_input_element_offset x_to_z_transpose_map x_shape)
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; The transpose substitution swaps both variables SIMULTANEOUSLY:
 ; x offset v1*8 + v0*2 over x's coords becomes 8*z_v0 + 2*z_v1 over z's
