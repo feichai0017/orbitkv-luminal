@@ -2506,6 +2506,9 @@ class ReductionParityModel(torch.nn.Module):
         "sum": lambda x: x.sum(-1),
         "mean": lambda x: x.mean(-1),
         "softmax": lambda x: torch.softmax(x, -1),
+        "log_softmax": lambda x: torch.log_softmax(x, -1),
+        "var": lambda x: x.var(-1),
+        "std": lambda x: x.std(-1),
         "cumsum": lambda x: x.cumsum(-1),
         "amax": lambda x: x.amax(-1),
     }

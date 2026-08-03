@@ -2166,7 +2166,7 @@ def test_sdpa_f32_unaffected_by_upcast(device: torch.device):
 
 
 @pytest.mark.parametrize(
-    "op", ["sum", "mean", "softmax", "cumsum", "amax"]
+    "op", ["sum", "mean", "softmax", "log_softmax", "var", "std", "cumsum", "amax"]
 )
 def test_reduction_fp16_opmath_parity(op: str, device: torch.device):
     """Reduction-class ops at fp16 outlier scale must match eager (which

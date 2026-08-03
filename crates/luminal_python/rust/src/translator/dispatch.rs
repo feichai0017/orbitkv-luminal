@@ -165,6 +165,49 @@ impl<'a> Translator<'a> {
                 let dim = normalize_dim(dim, a.shape.len());
                 a.softmax(dim)
             }
+            "torch.ops.aten._log_softmax.default" => {
+                // (self, dim, half_to_float). torch computes in fp32 (opmath)
+                // for half inputs; half_to_float=true additionally keeps the
+                // fp32 output.
+                let a = self.get_input_tensor(node, 0)?;
+                let dim = self.get_int_arg(node, 1)?;
+                let dim = normalize_dim(dim, a.shape.len());
+                let half_to_float = self.get_bool_arg(node, 2).unwrap_or(false);
+                let out_dtype = if half_to_float { DType::F32 } else { a.dtype };
+                a.cast(DType::F32).log_softmax(dim).cast(out_dtype)
+            }
+            "torch.ops.aten.var.correction" => {
+                // (self, dims?, *, correction?, keepdim). Statistics in fp32
+                // (opmath): the squares overflow fp16 on outlier activations
+                // — same class as the layer_norm fix. `std` decomposes to
+                // var.correction + sqrt upstream, so this arm covers both.
+                let a = self.get_input_tensor(node, 0)?;
+                let ndim = a.shape.len();
+                let axes: Vec<usize> = match self.get_ints_arg(node, 1) {
+                    Ok(dims) if !dims.is_empty() => {
+                        dims.iter().map(|&d| normalize_dim(d, ndim)).collect()
+                    }
+                    _ => (0..ndim).collect(),
+                };
+                let correction = self
+                    .get_int_arg(node, 2)
+                    .or_else(|_| self.get_float_arg(node, 2).map(|f| f as i64))
+                    .unwrap_or(1) as usize;
+                let keepdim = self.get_bool_arg(node, 3).unwrap_or(false);
+                let out_dtype = a.dtype;
+                let mut result = a
+                    .cast(DType::F32)
+                    .var_options(axes.clone(), correction)
+                    .cast(out_dtype);
+                if keepdim {
+                    let mut sorted = axes;
+                    sorted.sort_unstable();
+                    for ax in sorted {
+                        result = result.unsqueeze(ax);
+                    }
+                }
+                result
+            }
 
             // LayerNorm
             "torch.ops.aten.native_layer_norm.default" => self.translate_layer_norm(node)?,
