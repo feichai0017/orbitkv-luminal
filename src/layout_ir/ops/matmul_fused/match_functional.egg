@@ -5,6 +5,9 @@
 ; over the expanded shape [M, N, K] (K innermost = reduction axis 0; CoordVar
 ; axes are zero-based from the innermost, so k = axis 0, j = axis 1, i = axis
 ; 2; each view's entries are listed from its parent's outermost axis inward).
+; Scoped coordinates: the entries are matched as THE EXPANDED SHAPE'S own
+; coordinates — a foreign shape's axis-2 coordinate can no longer satisfy
+; the pattern.
 ;
 ; The minted op's INPUT list holds the ORIGINAL lhs/rhs layout tensors and its
 ; OUTPUT list only the contraction result: the broadcast views and the
@@ -27,10 +30,10 @@
          (IntExprCons ?m_dim (IntExprCons ?n_dim (IntExprCons ?k_dim (IntExprNil))))))
     (= ?lhs_map
        (IndexMapLit
-         (IntExprCons (CoordVar 2 ?m_dim) (IntExprCons (CoordVar 0 ?k_dim) (IntExprNil)))))
+         (IntExprCons (CoordVar ?expanded_shape 2) (IntExprCons (CoordVar ?expanded_shape 0) (IntExprNil)))))
     (= ?rhs_map
        (IndexMapLit
-         (IntExprCons (CoordVar 0 ?k_dim) (IntExprCons (CoordVar 1 ?n_dim) (IntExprNil)))))
+         (IntExprCons (CoordVar ?expanded_shape 0) (IntExprCons (CoordVar ?expanded_shape 1) (IntExprNil)))))
     (= (injectivity-of ?out_layout_tensor) (Injective))
   )
   (

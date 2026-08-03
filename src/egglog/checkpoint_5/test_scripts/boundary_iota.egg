@@ -10,8 +10,8 @@
 ; The row-major linear index: axis 1 outer (extent 3), axis 0 inner (extent 5).
 (let window_expr
   (IntAdd
-    (IntMul (CoordVar 1 (IntLit 3)) (IntLit 5))
-    (CoordVar 0 (IntLit 5))))
+    (IntMul (CoordVar window_shape 1) (IntLit 5))
+    (CoordVar window_shape 0)))
 (let iota_logical (LogicalIota window_expr window_shape))
 
 (let iota_layout (RightMajorContiguousElementLayoutLit window_shape (bits-of (Int))))
@@ -38,7 +38,7 @@
     (BufferTensorCons iota_output_buffer_tensor
       (BufferTensorNil))))
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; Iota authoring contract: every constructed iota demands its expression's
 ; bounds — an absent entry fails the check loudly at the fixpoint.

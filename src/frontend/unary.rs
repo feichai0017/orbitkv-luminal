@@ -488,11 +488,6 @@ impl GraphTensor {
 
 #[cfg(test)]
 pub(super) mod tests {
-    // KNOWN ISSUE (Step 4b, pinned by stage4b_probes::
-    // pinned_degenerate_broadcast_unsound_union): any extent-1 axis under
-    // a broadcast view trips an egglog-level unsound union (zero-class
-    // inversion; awaiting Austin's ruling), so proptest shape ranges
-    // start at 2 until it lands.
     use crate::{
         prelude::*,
         tests::{assert_close, random_vec},
@@ -558,39 +553,39 @@ pub(super) mod tests {
         #![proptest_config(ProptestConfig::with_cases(10))]
 
         #[test]
-        fn test_exp(size in 2usize..128) {
+        fn test_exp(size in 1usize..128) {
             test_unary(size, |a| a.exp(), |a| a.exp().unwrap());
         }
 
         #[test]
-        fn test_log(size in 2usize..128) {
+        fn test_log(size in 1usize..128) {
             test_unary(size, |a| a.log(), |a| a.log().unwrap());
         }
 
         #[test]
-        fn test_sin(size in 2usize..128) {
+        fn test_sin(size in 1usize..128) {
             test_unary(size, |a| a.sin(), |a| a.sin().unwrap());
         }
 
         #[test]
-        fn test_cos(size in 2usize..128) {
+        fn test_cos(size in 1usize..128) {
             test_unary(size, |a| a.cos(), |a| a.cos().unwrap());
         }
 
         #[test]
-        fn test_relu(size in 2usize..128) {
+        fn test_relu(size in 1usize..128) {
             test_unary(size, |a| a.relu(), |a| a.relu().unwrap());
         }
 
         #[test]
         #[ignore = "SCALE-GATED (Step 4b): the exact-gelu model (~100 values: A&S degree-5 Horner + sign/abs + the to-Bool desugar) sends the unbounded (saturate (run)) schedule into a >1h AC/distributivity closure — needs bounded saturation scheduling before it can run as a test"]
-        fn test_gelu_exact(size in 2usize..128) {
+        fn test_gelu_exact(size in 1usize..128) {
             // Exact GELU vs candle's exact erf GELU.
             test_unary(size, |a| a.gelu(), |a| a.gelu_erf().unwrap());
         }
 
         #[test]
-        fn test_gelu_tanh_approximation(size in 2usize..128) {
+        fn test_gelu_tanh_approximation(size in 1usize..128) {
             test_unary(
                 size,
                 |a| a.gelu_fast_tanh_approximation(),
@@ -599,38 +594,38 @@ pub(super) mod tests {
         }
 
         #[test]
-        fn test_swish(size in 2usize..128) {
+        fn test_swish(size in 1usize..128) {
             test_unary(size, |a| a.swish(), |a| a.silu().unwrap());
         }
 
         #[test]
-        fn test_tanh(size in 2usize..128) {
+        fn test_tanh(size in 1usize..128) {
             test_unary(size, |a| a.tanh(), |a| a.tanh().unwrap());
         }
 
         #[test]
-        fn test_recip(size in 2usize..128) {
+        fn test_recip(size in 1usize..128) {
             test_unary(size, |a| a.reciprocal(), |a| a.recip().unwrap());
         }
 
         #[test]
-        fn test_sqrt(size in 2usize..128) {
+        fn test_sqrt(size in 1usize..128) {
             test_unary(size, |a| a.sqrt(), |a| a.sqrt().unwrap());
         }
 
         #[test]
-        fn test_square(size in 2usize..128) {
+        fn test_square(size in 1usize..128) {
             test_unary(size, |a| a.square(), |a| a.powf(2.0).unwrap());
         }
 
         #[test]
-        fn test_softmax(size in 2usize..128, rows in 2usize..16, cols in 2usize..16) {
+        fn test_softmax(size in 1usize..128, rows in 1usize..16, cols in 1usize..16) {
             test_unary(size, |a| a.softmax(0), |a| softmax(&a, 0).unwrap());
             test_unary((rows, cols), |a| a.softmax(1), |a| softmax(&a, 1).unwrap());
         }
 
         #[test]
-        fn test_layer_norm(size in 2usize..128) {
+        fn test_layer_norm(size in 1usize..128) {
             test_unary(
                 size,
                 |a| a.layer_norm(0, 1e-5),
@@ -656,7 +651,7 @@ pub(super) mod tests {
         }
 
         #[test]
-        fn test_cumulative(rows in 2usize..16, cols in 2usize..16) {
+        fn test_cumulative(rows in 1usize..16, cols in 1usize..16) {
             test_unary(rows, |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
             test_unary((rows, cols), |a| a.cumsum(1), |a| a.cumsum(1).unwrap());
             test_unary((rows, cols), |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
@@ -675,25 +670,25 @@ pub(super) mod tests {
         }
 
         #[test]
-        fn test_argmax(rows in 2usize..16, cols in 2usize..16) {
+        fn test_argmax(rows in 1usize..16, cols in 1usize..16) {
             test_unary((rows, cols), |a| a.argmax(0).cast(DType::F32), |a| a.argmax(0).unwrap().to_dtype(candle_core::DType::F32).unwrap());
             test_unary((rows, cols), |a| a.argmax(1).cast(DType::F32), |a| a.argmax(1).unwrap().to_dtype(candle_core::DType::F32).unwrap());
         }
 
         #[test]
-        fn test_argmin(rows in 2usize..16, cols in 2usize..16) {
+        fn test_argmin(rows in 1usize..16, cols in 1usize..16) {
             test_unary((rows, cols), |a| a.argmin(0).cast(DType::F32), |a| a.argmin(0).unwrap().to_dtype(candle_core::DType::F32).unwrap());
             test_unary((rows, cols), |a| a.argmin(1).cast(DType::F32), |a| a.argmin(1).unwrap().to_dtype(candle_core::DType::F32).unwrap());
         }
 
         #[test]
-        fn test_var(rows in 2usize..16, cols in 2usize..16) {
+        fn test_var(rows in 1usize..16, cols in 1usize..16) {
             test_unary((rows, cols), |a| a.var(1), |a| a.var(1).unwrap());
             test_unary((rows, cols), |a| a.var(0), |a| a.var(0).unwrap());
         }
 
         #[test]
-        fn test_std(rows in 2usize..16, cols in 2usize..16) {
+        fn test_std(rows in 1usize..16, cols in 1usize..16) {
             test_unary((rows, cols), |a| a.std(1), |a| a.var(1).unwrap().sqrt().unwrap());
         }
 

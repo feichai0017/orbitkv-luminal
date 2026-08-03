@@ -56,10 +56,6 @@ impl LogicalOp for LogicalIndexMapApply {
                 category: SpliceCategory::Fixpoint,
                 text: include_str!("index_map_apply/fixpoint_2.egg"),
             },
-            EgglogSnippet {
-                category: SpliceCategory::Fixpoint,
-                text: include_str!("index_map_apply/fixpoint_3.egg"),
-            },
         ]
     }
 }

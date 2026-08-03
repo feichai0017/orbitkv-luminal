@@ -17,7 +17,7 @@
 (let ids_layout_tensor (LayoutTensorLit token_ids_logical ids_layout))
 
 ; The passthrough column coordinate: interior iota, never a boundary tensor.
-(let column_iota_logical (LogicalIota (CoordVar 0 (IntLit 4)) lookup_shape))
+(let column_iota_logical (LogicalIota (CoordVar lookup_shape 0) lookup_shape))
 
 (let lookup_logical
   (LogicalGather table_logical
@@ -53,12 +53,12 @@
     (BufferTensorCons lookup_output_buffer_tensor
       (BufferTensorNil))))
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; Iota authoring contract: every constructed iota demands its expression's
 ; bounds — an absent entry fails the check loudly at the fixpoint.
-(check (= ?demanded_lower (lower-bound-of (CoordVar 0 (IntLit 4)))))
-(check (= ?demanded_upper (upper-bound-of (CoordVar 0 (IntLit 4)))))
+(check (= ?demanded_lower (lower-bound-of (CoordVar lookup_shape 0))))
+(check (= ?demanded_upper (upper-bound-of (CoordVar lookup_shape 0))))
 
 ; The variable-arity op match fired: the gather is implementable.
 (check

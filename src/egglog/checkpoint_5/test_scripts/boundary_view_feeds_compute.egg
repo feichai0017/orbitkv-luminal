@@ -25,8 +25,8 @@
 ; parent inner (size 3) <- output outer v1 (extent 3) — the transpose.
 (let transpose_map
   (IndexMapLit
-    (IntExprCons (CoordVar 0 (IntLit 2))
-      (IntExprCons (CoordVar 1 (IntLit 3))
+    (IntExprCons (CoordVar transposed_shape 0)
+      (IntExprCons (CoordVar transposed_shape 1)
         (IntExprNil)))))
 (let view_logical (LogicalIndexMapApply x_logical transpose_map transposed_shape))
 (let y_logical (LogicalSqrt view_logical))
@@ -57,12 +57,12 @@
 (let output
   (BufferOutputLit (BufferTensorCons y_output_buffer_tensor (BufferTensorNil))))
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; The composed view layout — the parent's fold-derived bit offset pushed
 ; through the transpose map — lands in the hand-written left-major class.
 (let x_element_offset
-  (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 3)) (CoordVar 0 (IntLit 3))))
+  (IntAdd (IntMul (CoordVar x_shape 1) (IntLit 3)) (CoordVar x_shape 0)))
 (check
   (= expected_view_layout
      (BitOffsetExpressionLayoutLit

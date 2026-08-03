@@ -14,8 +14,10 @@
 ;   - REFUSE the same-factor constant-sum pump (Engine C) and anything
 ;     zero-adjacent — the refusal pins are the termination story.
 
-(let coord_inner (CoordVar 0 (IntLit 4)))
-(let coord_outer (CoordVar 1 (IntLit 12)))
+(let coord_inner
+  (CoordVar (ShapeLit (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil)))) 0))
+(let coord_outer
+  (CoordVar (ShapeLit (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil)))) 1))
 (let seq_len (IntVar "seq_len"))
 (set (lower-bound-of seq_len) (bigint 1))
 (set (upper-bound-of seq_len) (bigint 4096))

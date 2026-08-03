@@ -12,8 +12,10 @@
 ;     pair + AC + fold = the classic assoc+annihilation divergence) —
 ;     now saturate. This fixture TERMINATING is itself the pin.
 
-(let coord_inner (CoordVar 0 (IntLit 2)))
-(let coord_outer (CoordVar 1 (IntLit 2)))
+(let coord_inner
+  (CoordVar (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 2) (IntExprNil)))) 0))
+(let coord_outer
+  (CoordVar (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 2) (IntExprNil)))) 1))
 
 ; --- the historical killer seeds (cancellation pairs + rich soup) ---
 ; Two folding pairs, a strided-offset soup around them, and the exact

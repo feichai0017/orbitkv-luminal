@@ -887,11 +887,6 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    // KNOWN ISSUE (Step 4b, pinned by stage4b_probes::
-    // pinned_degenerate_broadcast_unsound_union): any extent-1 axis under
-    // a broadcast view trips an egglog-level unsound union (zero-class
-    // inversion; awaiting Austin's ruling), so proptest shape ranges
-    // start at 2 until it lands.
     use crate::{
         frontend::{binary::tests::test_binary, unary::tests::test_unary},
         prelude::*,
@@ -903,7 +898,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_pad_1d(len in 2usize..64, left in 0usize..6, right in 0usize..6) {
+        fn test_pad_1d(len in 1usize..64, left in 0usize..6, right in 0usize..6) {
             // Zero padding early-returns self => a PURE-IDENTITY graph,
             // natively unsupported (pinned by stage4b_probes::
             // pinned_pure_identity_output; binding-level fix at 4d/M4).
@@ -919,7 +914,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_pad_2d(rows in 2usize..32, cols in 2usize..32, top in 0usize..6, bottom in 0usize..6, left in 0usize..6, right in 0usize..6) {
+        fn test_pad_2d(rows in 1usize..32, cols in 1usize..32, top in 0usize..6, bottom in 0usize..6, left in 0usize..6, right in 0usize..6) {
             test_unary(
                 (rows, cols),
                 |a| a.pad(((top, bottom), (left, right)), 0.),
@@ -940,19 +935,16 @@ mod tests {
             rows in 3usize..32,
             cols in 3usize..32,
             start_row in 0usize..32,
-            end_row in 2usize..32,
+            end_row in 1usize..32,
             start_col in 0usize..32,
-            end_col in 2usize..32,
+            end_col in 1usize..32,
             pad_top in 0usize..6,
             pad_bottom in 0usize..6,
             pad_left in 0usize..6,
             pad_right in 0usize..6,
         ) {
-            // Width-1 slices make extent-1 output axes — the pinned
-            // degenerate-broadcast unsound union (awaiting the egglog
-            // ruling); require width >= 2 until it lands.
-            prop_assume!(start_row + 2 <= end_row && end_row <= rows);
-            prop_assume!(start_col + 2 <= end_col && end_col <= cols);
+            prop_assume!(start_row < end_row && end_row <= rows);
+            prop_assume!(start_col < end_col && end_col <= cols);
             test_unary(
                 (rows, cols),
                 |a| a.slice((start_row..end_row, start_col..end_col)).pad(((pad_top, pad_bottom), (pad_left, pad_right)), 0.),
@@ -971,7 +963,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
-        fn test_transpose(rows in 2usize..32, cols in 2usize..32) {
+        fn test_transpose(rows in 1usize..32, cols in 1usize..32) {
             test_unary(
                 (rows, cols),
                 |a| a.transpose(0, 1) * 1.0,
@@ -1158,7 +1150,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "unsqueeze is inherently extent-1 — gated on the pinned degenerate-broadcast issue (Step 4b)"]
     fn test_unsqueeze() {
         let mut cx = Graph::new();
         let inp = cx.tensor((2, 2, 3));
@@ -1171,7 +1162,10 @@ mod tests {
             |a| a.squeeze(0).expand_dim(0, 2) * 1.,
             |a| a.broadcast_as((2, 3)).unwrap(),
         );
-        test_unary((2, 1, 3), |a| a.squeeze(1), |a| a.reshape((2, 3)).unwrap());
+        // `* 1.0` materializes: a bare squeeze is a pure-VIEW output, and
+        // view-only outputs share the input's buffer id — the 4d binding
+        // gap (see stage4b_probes::pinned_pure_identity_output).
+        test_unary((2, 1, 3), |a| a.squeeze(1) * 1.0, |a| a.reshape((2, 3)).unwrap());
     }
 
     #[test]

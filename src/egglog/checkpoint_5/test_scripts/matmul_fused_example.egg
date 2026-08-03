@@ -27,9 +27,13 @@
 ; j = axis 1, i = axis 2; view entries listed from the parent's outermost
 ; axis inward): A[i,k] and B[k,j].
 (let lhs_map
-  (IndexMapLit (IntExprCons (CoordVar 2 m_dim) (IntExprCons (CoordVar 0 k_dim) (IntExprNil)))))
+  (IndexMapLit
+    (IntExprCons (CoordVar expanded_shape 2)
+      (IntExprCons (CoordVar expanded_shape 0) (IntExprNil)))))
 (let rhs_map
-  (IndexMapLit (IntExprCons (CoordVar 0 k_dim) (IntExprCons (CoordVar 1 n_dim) (IntExprNil)))))
+  (IndexMapLit
+    (IntExprCons (CoordVar expanded_shape 0)
+      (IntExprCons (CoordVar expanded_shape 1) (IntExprNil)))))
 (let lhs_expanded (LogicalIndexMapApply lhs_logical lhs_map expanded_shape))
 (let rhs_expanded (LogicalIndexMapApply rhs_logical rhs_map expanded_shape))
 (let product_logical (LogicalMul lhs_expanded rhs_expanded))
@@ -72,7 +76,7 @@
 (let output
   (BufferOutputLit (BufferTensorCons matmul_buffer_tensor (BufferTensorNil))))
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; Shape pins: the decomposition derives exactly the declared geometry.
 (check (= (shape-of product_logical) expanded_shape))

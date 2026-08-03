@@ -1344,12 +1344,12 @@ impl<'a> ClassRenderer<'a> {
                 })
             })
             .or_else(|| {
-                // Compact per user: v<axis> — the extent rides in tooltips,
-                // not labels (a coordinate variable's identity is (axis,
-                // extent), but graphs balloon if every leaf spells both).
+                // Compact per user: v<axis> — the owner shape rides in
+                // tooltips, not labels (a coordinate variable's identity is
+                // (shape, axis); child 0 is the owner, child 1 the axis).
                 self.node_with_op(class, "CoordVar").and_then(|node_id| {
                     let node = self.egraph.nodes.get(node_id)?;
-                    let axis_class = child_class(self.egraph, node, 0)?;
+                    let axis_class = child_class(self.egraph, node, 1)?;
                     Some(format!(
                         "v{}",
                         self.render_class_prefer(&axis_class, 2, None)

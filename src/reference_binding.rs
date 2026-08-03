@@ -88,4 +88,4 @@ pub fn boundary_lists(
 
 /// The standard schedule tail shared by every assembled reference program.
 pub const SCHEDULE: &str =
-    "(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))\n\n";
+    "(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))\n\n";

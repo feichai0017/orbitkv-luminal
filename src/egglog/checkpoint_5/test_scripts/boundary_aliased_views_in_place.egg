@@ -16,13 +16,13 @@
 (let row0_index_map
   (IndexMapLit
     (IntExprCons (IntLit 0)
-      (IntExprCons (CoordVar 0 (IntLit 2))
+      (IntExprCons (CoordVar view_shape 0)
         (IntExprNil)))))
 
 (let row1_index_map
   (IndexMapLit
     (IntExprCons (IntLit 1)
-      (IntExprCons (CoordVar 0 (IntLit 2))
+      (IntExprCons (CoordVar view_shape 0)
         (IntExprNil)))))
 
 (let row0_view_logical
@@ -35,10 +35,10 @@
   (LogicalSqrt row0_view_logical))
 
 (let row0_element_offset
-  (CoordVar 0 (IntLit 2)))
+  (CoordVar view_shape 0))
 
 (let row1_element_offset
-  (IntAdd (IntLit 2) (CoordVar 0 (IntLit 2))))
+  (IntAdd (IntLit 2) (CoordVar view_shape 0)))
 
 (let row0_view_layout
   (ElementOffsetExpressionLayoutLit row0_element_offset view_shape (bits-of view_dtype)))
@@ -84,7 +84,7 @@
       (BufferTensorCons row1_output_buffer_tensor
         (BufferTensorNil)))))
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; The inputs alias each other, and the output writes into that same storage.
 (check (= (buffer-id-of row0_input_buffer_tensor)

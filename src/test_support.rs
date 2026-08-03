@@ -1248,14 +1248,14 @@ mod harness_tests {
     #[test]
     fn div_mod_iota_gather_with_layout_saturates_cleanly() {
         let body = r#"
-(let flat (IntAdd (IntMul (CoordVar 1 (IntLit 2)) (IntLit 3)) (CoordVar 0 (IntLit 3))))
+(let out_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
+(let flat (IntAdd (IntMul (CoordVar out_shape 1) (IntLit 3)) (CoordVar out_shape 0)))
 (let value
   (IntAdd
     (IntMul (IntAdd (IntTruncRem (IntTruncDiv flat (IntLit 3)) (IntLit 2)) (IntLit 1)) (IntLit 5))
     (IntAdd (IntTruncRem flat (IntLit 3)) (IntLit 2))))
 (let row_coord (IntTruncDiv value (IntLit 5)))
 (let col_coord (IntTruncRem value (IntLit 5)))
-(let out_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
 (let row_iota (LogicalIota row_coord out_shape))
 (let col_iota (LogicalIota col_coord out_shape))
 (let data_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprCons (IntLit 5) (IntExprNil)))))
@@ -1265,7 +1265,7 @@ mod harness_tests {
     (LogicalTensorCons row_iota (LogicalTensorCons col_iota (LogicalTensorNil)))))
 (let data_layout (RightMajorContiguousElementLayoutLit data_shape (bits-of (F32))))
 (let data_layout_tensor (LayoutTensorLit data_logical data_layout))
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let full = format!("{}\n\n{}", crate::egglog_snippet::assembled_program(), body);
         crate::egglog_snippet::new_egraph()
@@ -1734,7 +1734,7 @@ mod harness_tests {
 (set (buffer-freed-by out_buffer) (CallerFrees))
 (let output
   (BufferOutputLit (BufferTensorCons (BufferTensorLit out_lt out_buffer) (BufferTensorNil))))
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let program = format!("{preamble}\n\n{script}");
         let mut egraph = crate::egglog_snippet::new_egraph();
@@ -2553,7 +2553,7 @@ mod intcoordvar_probe {
 
     /// Today's behavior on the user's own discriminating example: a
     /// 3-vector with slices v[0..2] and v[1..3]. Both slices' coordinate
-    /// is the identical term (CoordVar 0 (IntLit 2)); the VIEW terms stay
+    /// is the identical term (CoordVar out_shape 0); the VIEW terms stay
     /// distinct; an identically-written view hash-conses (free CSE).
     #[test]
     fn x_probe_slice_views_today() {
@@ -2563,16 +2563,16 @@ mod intcoordvar_probe {
 (let vec_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
 (let out_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprNil))))
 (let v_in (LogicalTensorInputLit (LogicalIdLit "v") vec_shape (F32)))
-(let coord (CoordVar 0 (IntLit 2)))
+(let coord (CoordVar out_shape 0))
 (let slice_a (LogicalIndexMapApply v_in
   (IndexMapLit (IntExprCons coord (IntExprNil))) out_shape))
 (let slice_b (LogicalIndexMapApply v_in
   (IndexMapLit (IntExprCons (IntAdd coord (IntLit 1)) (IntExprNil))) out_shape))
 (let slice_a2 (LogicalIndexMapApply v_in
-  (IndexMapLit (IntExprCons (CoordVar 0 (IntLit 2)) (IntExprNil))) out_shape))
+  (IndexMapLit (IntExprCons (CoordVar out_shape 0) (IntExprNil))) out_shape))
 (let v_layout (RightMajorContiguousElementLayoutLit vec_shape (bits-of (F32))))
 (let v_lt (LayoutTensorLit v_in v_layout))
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#,
         );
         let mut egraph = crate::egglog_snippet::new_egraph();
@@ -2590,7 +2590,7 @@ mod intcoordvar_probe {
                 ("distinct-views", "(fail (check (= slice_a slice_b)))"),
                 (
                     "shared-coord-term",
-                    "(check (= coord (CoordVar 0 (IntLit 2))))",
+                    "(check (= coord (CoordVar out_shape 0)))",
                 ),
                 (
                     "corruption-pairs",
@@ -2684,24 +2684,11 @@ pub fn run_ssa_program(
 
 #[cfg(test)]
 mod stage4b_probes {
-    /// PINNED KNOWN UNSOUNDNESS (Step 4b, awaiting Austin's egglog design
-    /// ruling — full dossier in the session memory). Minimal repro: any
-    /// rank-0 -> [1] scalar-broadcast view. Two layers:
+    /// (History: this module held the Step-4b degenerate-broadcast
+    /// unsoundness pin — the stride recovery walks welding the zero
+    /// class. Fixed by the testimony landing; the repro is now the LIVE
+    /// regression `degenerate_broadcast_runs_clean` below.)
     ///
-    /// 1. The user-ratified EXTENT-1 COLLAPSE (CoordVar over a provably-1
-    ///    extent unions with IntLit 0) breaks `coeff-of`'s :no-merge
-    ///    argument on degenerate axes (on domain {0}, c->c and c->0 are
-    ///    equal functions with coefficients 1 vs 0 — both valid strides).
-    ///    (An extent>=2 gate was trialed and REVERTED — Austin's ruling
-    ///    2026-07-31: fix the root cause, not the symptom.)
-    /// 2. With that gate, the same repro still panics `const-part-of`
-    ///    with 0 vs 32 (the f32 bit width) — a REAL unsound union: the
-    ///    collapse feeds CoordVar into the global zero class, and
-    ///    inversion-style rules (bit->element discovery et al.) matching
-    ///    (IntMul ?expr (IntLit ?bits)) inside that class bind ?expr to
-    ///    the wrong zero-product lhs, cross-wiring layouts until exprs
-    ///    disagreeing at the origin merge. Merge-tolerant folds let the
-    ///    crossed-bounds tripwire confirm independently.
     /// PINNED KNOWN GAP (Step 4b): a PURE-IDENTITY graph — an input
     /// directly output(), no ops — panics the axis-extent-lock tripwire
     /// natively (input and output bindings share one BufferLit and one
@@ -2719,9 +2706,14 @@ mod stage4b_probes {
         assert_eq!(got, &vec![1.0, 2.0]);
     }
 
+    /// LIVE REGRESSION (was the pinned Step-4b unsoundness): the
+    /// rank-0 -> [1] broadcast that used to weld the zero class (the
+    /// recovery walks turned "presentations [1] and [0] are both valid"
+    /// into IntExpr equalities 0 ≡ 1 ≡ 32). With recovery deleted and
+    /// strided-presentation testimony in its place, it runs end-to-end
+    /// with every tripwire live.
     #[test]
-    #[ignore = "degenerate-broadcast unsound union — awaiting egglog-level ruling (Step 4b)"]
-    fn pinned_degenerate_broadcast_unsound_union() {
+    fn degenerate_broadcast_runs_clean() {
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor(1);
         let b = (a * 2.0).output();
@@ -2761,19 +2753,13 @@ mod zero_class_probe {
         text.replacen(needle, &format!("; [probe-cut: {label}]\n"), 1)
     }
 
-    const COLLAPSE_RULE: &str = "(rule\n  (\n    (= ?coord (CoordVar ?axis ?extent))\n    (= ?extent_lower (lower-bound-of ?extent))\n    (>= ?extent_lower (bigint 1))\n    (= ?extent_upper (upper-bound-of ?extent))\n    (<= ?extent_upper (bigint 1))\n  )\n  ((union ?coord (IntLit 0)))\n)";
+    const COLLAPSE_RULE: &str = "(rule\n  (\n    (= ?coord (CoordVar ?shape ?axis))\n    (= ?shape (ShapeLit ?dims))\n    (= ?extent (expr-list-nth-from-end ?dims ?axis))\n    (= ?extent_lower (lower-bound-of ?extent))\n    (>= ?extent_lower (bigint 1))\n    (= ?extent_upper (upper-bound-of ?extent))\n    (<= ?extent_upper (bigint 1))\n  )\n  ((union ?coord (IntLit 0)))\n)";
 
     const BOUNDS_ZERO_RULE: &str = "(rule\n  (\n    (= ?lower (lower-bound-of ?expr))\n    (>= ?lower (bigint 0))\n    (= ?upper (upper-bound-of ?expr))\n    (<= ?upper (bigint 0))\n  )\n  ((union ?expr (IntLit 0)))\n)";
 
     const CROSSED_RULE: &str = "(rule\n  (\n    (= ?lower (lower-bound-of ?expr))\n    (= ?upper (upper-bound-of ?expr))\n    (> ?lower ?upper)\n  )\n  ((panic \"crossed IntExpr bounds: unsound union or inconsistent seed\"))\n)";
 
     const DISTINCT_LIT_RULE: &str = "(rule\n  ((= ?expr (IntLit ?a)) (= ?expr (IntLit ?b)) (!= ?a ?b))\n  ((panic \"distinct integer literals unioned: unsound IntExpr equality\"))\n)";
-
-    const COORD_STRIDE_RULE: &str = "(rule\n  ((symbolic-stride-demand ?expr ?axis) (= ?expr (CoordVar ?axis ?extent)))\n  ((set (symbolic-stride-of ?expr ?axis) (IntLit 1)))\n)";
-
-    const MUL_STRIDE_RULE: &str = "(rule\n  (\n    (symbolic-stride-demand ?expr ?axis)\n    (= ?expr (IntMul (CoordVar ?axis ?extent) ?stride))\n    (axis-free ?stride ?axis)\n  )\n  ((set (symbolic-stride-of ?expr ?axis) ?stride))\n)";
-
-    const FREE_STRIDE_RULE: &str = "(rule\n  ((symbolic-stride-demand ?expr ?axis) (axis-free ?expr ?axis))\n  ((set (symbolic-stride-of ?expr ?axis) (IntLit 0)))\n)";
 
     const SUPPORT_RULE: &str = "(rule\n  ((axis-in-support ?expr ?axis) (axis-free ?expr ?axis))\n  ((panic \"axis support contradiction: unsound union or broken support rule\"))\n)";
 
@@ -2904,50 +2890,6 @@ mod zero_class_probe {
             "witness" => {
                 text = witness_mode(text);
             }
-            "w_cut_coordstride" => {
-                text = cut(&text, COORD_STRIDE_RULE, "symbolic CoordVar stride-1");
-                text = witness_mode(text);
-            }
-            "w_cut_pointing" => {
-                text = cut(&text, COORD_STRIDE_RULE, "symbolic CoordVar stride-1");
-                text = cut(&text, MUL_STRIDE_RULE, "symbolic IntMul stride");
-                text = cut(&text, FREE_STRIDE_RULE, "symbolic broadcast stride-0");
-                text = witness_mode(text);
-            }
-            "fix_pointing" => {
-                // The candidate-fix probe: pointing rules cut, every real
-                // tripwire LIVE, and the full pipeline run to numerics.
-                text = cut(&text, COORD_STRIDE_RULE, "symbolic CoordVar stride-1");
-                text = cut(&text, MUL_STRIDE_RULE, "symbolic IntMul stride");
-                text = cut(&text, FREE_STRIDE_RULE, "symbolic broadcast stride-0");
-                let mut egraph = crate::egglog_snippet::new_egraph();
-                match egraph.parse_and_run_program(None, &text) {
-                    Err(err) => {
-                        eprintln!("FIX RUN ERR: {err}");
-                        return;
-                    }
-                    Ok(_) => eprintln!("FIX SATURATION OK"),
-                }
-                let serialized = egraph
-                    .serialize(egglog::SerializeConfig::default())
-                    .egraph;
-                let allow = crate::ssa_reference::reference_allow_list();
-                let extracted = crate::extractor::extract_layout_ir_with_ops(
-                    &serialized,
-                    Some(&allow),
-                )
-                .expect("extracts")
-                .expect("plan");
-                let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))
-                    .expect("bufferizes");
-                let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
-                rt.load_plan(plan);
-                rt.set_data(0i64, vec![0.5]);
-                rt.execute().expect("executes");
-                let got = rt.get_f32(3i64).or_else(|_| rt.get_f32(2i64)).expect("output");
-                eprintln!("FIX NUMERICS: {got:?} (want [1.0])");
-                return;
-            }
             "w_noroads" => {
                 text = cut(&text, COLLAPSE_RULE, "extent-1 collapse");
                 text = cut(&text, BOUNDS_ZERO_RULE, "bounds-zero union");
@@ -2998,7 +2940,7 @@ mod subst_guard_study {
 
     /// The structural arm's rule text as landed (comment elided; the
     /// unique premise pair suffices as the removal anchor).
-    const STRUCTURAL_ARM_ANCHOR: &str = "(rule\n  (\n    (subst-demand ?expr ?map ?source_shape)\n    (= ?expr (CoordVar ?axis ?extent))\n    (= ?map (IndexMapLit ?entries))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?source_dim (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?extent ?source_dim)\n    (= ?entry (CoordVar ?entry_axis ?entry_extent))\n    (= ?entry_extent ?extent)\n  )\n  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n)";
+    const STRUCTURAL_ARM_ANCHOR: &str = "(rule\n  (\n    (subst-demand ?expr ?map ?source_shape)\n    (= ?expr (CoordVar ?source_shape ?axis))\n    (= ?map (IndexMapLit ?entries))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?extent (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?entry (CoordVar ?entry_shape ?entry_axis))\n    (= ?entry_shape (ShapeLit ?entry_dims))\n    (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))\n    (= ?entry_extent ?extent)\n  )\n  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n)";
 
     fn variant(text: &str, name: &str) -> String {
         match name {
@@ -3025,11 +2967,12 @@ mod subst_guard_study {
 (let sgn (IntVar \"sgn\"))\n\
 (set (lower-bound-of sgn) (bigint 1))\n\
 (set (upper-bound-of sgn) (bigint 8))\n\
-(let sg_cout (CoordVar 0 (IntLit 3)))\n\
+(let sg_cout_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))\n\
+(let sg_cout (CoordVar sg_cout_shape 0))\n\
 (let sg_entry (IntAdd sg_cout (IntLit 5)))\n\
 (let sg_src (ShapeLit (IntExprCons sgn (IntExprNil))))\n\
 (let sg_map (IndexMapLit (IntExprCons sg_entry (IntExprNil))))\n\
-(let sg_coord (CoordVar 0 sgn))\n\
+(let sg_coord (CoordVar sg_src 0))\n\
 (subst-demand sg_coord sg_map sg_src)\n\
 (run-schedule (saturate (run)))\n";
         let sg4_common = "\
@@ -3039,18 +2982,19 @@ mod subst_guard_study {
 (let s4_entry (IntLit 5))\n\
 (let s4_src (ShapeLit (IntExprCons s4n (IntExprNil))))\n\
 (let s4_map (IndexMapLit (IntExprCons s4_entry (IntExprNil))))\n\
-(let s4_coord (CoordVar 0 s4n))\n\
+(let s4_coord (CoordVar s4_src 0))\n\
 (subst-demand s4_coord s4_map s4_src)\n\
 (run-schedule (saturate (run)))\n";
         vec![
             ("sg1_admits", format!("{sg1_common}(check (= (subst-of sg_coord sg_map sg_src) sg_entry))\n")),
             ("sg1_tighten", format!("{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (run)))\n")),
             ("sg2_static", "\
-(let s2_cout (CoordVar 0 (IntLit 3)))\n\
+(let s2_cout_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))\n\
+(let s2_cout (CoordVar s2_cout_shape 0))\n\
 (let s2_entry (IntAdd s2_cout (IntLit 1)))\n\
 (let s2_src (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))\n\
 (let s2_map (IndexMapLit (IntExprCons s2_entry (IntExprNil))))\n\
-(let s2_coord (CoordVar 0 (IntLit 4)))\n\
+(let s2_coord (CoordVar s2_src 0))\n\
 (subst-demand s2_coord s2_map s2_src)\n\
 (run-schedule (saturate (run)))\n\
 (check (= (subst-of s2_coord s2_map s2_src) s2_entry))\n".to_string()),
@@ -3058,10 +3002,11 @@ mod subst_guard_study {
 (let s3n (IntVar \"s3n\"))\n\
 (set (lower-bound-of s3n) (bigint 1))\n\
 (set (upper-bound-of s3n) (bigint 8))\n\
-(let s3_entry (CoordVar 1 s3n))\n\
+(let s3_entry_shape (ShapeLit (IntExprCons s3n (IntExprCons s3n (IntExprNil)))))\n\
+(let s3_entry (CoordVar s3_entry_shape 1))\n\
 (let s3_src (ShapeLit (IntExprCons s3n (IntExprNil))))\n\
 (let s3_map (IndexMapLit (IntExprCons s3_entry (IntExprNil))))\n\
-(let s3_coord (CoordVar 0 s3n))\n\
+(let s3_coord (CoordVar s3_src 0))\n\
 (subst-demand s3_coord s3_map s3_src)\n\
 (run-schedule (saturate (run)))\n\
 (check (= (subst-of s3_coord s3_map s3_src) s3_entry))\n".to_string()),
@@ -3083,6 +3028,7 @@ mod subst_guard_study {
                 } else if e.contains("Check failed") || e.contains("check failed") {
                     "refused"
                 } else {
+                    eprintln!("STUDY-ERR detail: {}", &e[..e.len().min(400)]);
                     "other-error"
                 }
             }
@@ -3128,3 +3074,175 @@ mod subst_guard_study {
     }
 }
 
+/// COMMISSIONED ADVERSARIAL STUDY (Austin, deep dive): can any program
+/// induce INFINITE minting of "valid strided terms" — discover stride n
+/// valid, then n+1, then n+2, unboundedly? Method: adversarial seeds run
+/// in BOUNDED schedule blocks with the e-graph serialized and counted
+/// between blocks. Divergence = monotone unbounded growth across blocks;
+/// convergence = plateau (fixpoint). Welding seeds run with first-wins
+/// folds + disarmed tripwires (the zero_class_probe surgery) so growth
+/// is measurable INSTEAD of aborting at the first panic — fold values
+/// are then meaningless; only counts are read.
+/// Run: MDX=1 cargo test -- x_study_mint_divergence --nocapture
+#[cfg(test)]
+mod mint_divergence_study {
+    fn disarm(mut text: String) -> String {
+        text = text.replace(" :no-merge)", " :merge old)");
+        for panic_rule in [
+            "((panic \"crossed IntExpr bounds: unsound union or inconsistent seed\"))",
+            "((panic \"distinct integer literals unioned: unsound IntExpr equality\"))",
+            "((panic \"axis support contradiction: unsound union or broken support rule\"))",
+            "((panic \"provably-cannot-union-with-zero certified the zero class: certificate or union unsound\"))",
+            "((panic \"zero and nonzero certificates on one class: route or union unsound\"))",
+        ] {
+            assert!(text.contains(panic_rule), "tripwire text drifted: {panic_rule}");
+            text = text.replace(panic_rule, "()");
+        }
+        text
+    }
+
+    /// Run `blocks` bounded schedule blocks over `base + seed`, counting
+    /// (nodes, classes) after each; returns the count sequence.
+    fn measure(base: &str, seed: &str, blocks: usize) -> Vec<(usize, usize)> {
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph
+            .parse_and_run_program(None, &format!("{base}\n{seed}"))
+            .expect("seed loads");
+        let mut counts = Vec::new();
+        for _ in 0..blocks {
+            egraph
+                .parse_and_run_program(None, "(run-schedule (repeat 4 (run)))")
+                .expect("block runs");
+            let s = egraph.serialize(egglog::SerializeConfig::default()).egraph;
+            let nodes = s.nodes.len();
+            let classes = s
+                .nodes
+                .values()
+                .map(|n| n.eclass.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            counts.push((nodes, classes));
+        }
+        counts
+    }
+
+    fn verdict(name: &str, counts: &[(usize, usize)]) {
+        let tail_growth = counts[counts.len() - 1].0 as i64 - counts[counts.len() - 2].0 as i64;
+        let plateaued = tail_growth == 0;
+        eprintln!(
+            "MINT {name:<22} | nodes/classes per block: {counts:?} | last-block growth {tail_growth} | {}",
+            if plateaued { "PLATEAU" } else { "STILL GROWING" }
+        );
+    }
+
+    #[test]
+    fn x_study_mint_divergence() {
+        if std::env::var("MDX").is_err() {
+            eprintln!("MDX not set — study inert");
+            return;
+        }
+        let armed = crate::egglog_snippet::assembled_program().to_string();
+        let disarmed = disarm(armed.clone());
+
+        // M1 — LITERAL LADDER: a degenerate coordinate with three literal
+        // strides in play (c·2, c·3, c·5 all provably-nonzero strides of a
+        // [1]-box layout family). The weld (2≡3≡5≡0≡1) fires under
+        // disarmed folds; the question is whether anything then MINTS new
+        // literals/terms unboundedly.
+        let m1 = r#"
+(let one_shape (ShapeLit (IntExprCons (IntLit 1) (IntExprNil))))
+(let c (CoordVar one_shape 0))
+(let p2 (IntMul c (IntLit 2)))
+(let p3 (IntMul c (IntLit 3)))
+(let p5 (IntMul c (IntLit 5)))
+(let l2 (ElementOffsetExpressionLayoutLit p2 one_shape (BitWidthLit 32)))
+(let l3 (ElementOffsetExpressionLayoutLit p3 one_shape (BitWidthLit 32)))
+(let l5 (ElementOffsetExpressionLayoutLit p5 one_shape (BitWidthLit 32)))
+(let t_in (LogicalTensorInputLit (LogicalIdLit "m1") one_shape (F32)))
+(let lt2 (LayoutTensorLit t_in l2))
+(let lt3 (LayoutTensorLit t_in l3))
+(let lt5 (LayoutTensorLit t_in l5))
+"#;
+        verdict("M1 literal ladder", &measure(&armed, m1, 6));
+
+        // M2 — SYMBOLIC SUCCESSOR: strides n and n+1 over a degenerate
+        // coordinate. The pointing arms weld n ≡ n+1; if any rule then
+        // manufactures n+2 from that equality, counts diverge.
+        let m2 = r#"
+(let none_shape (ShapeLit (IntExprCons (IntLit 1) (IntExprNil))))
+(let cs (CoordVar none_shape 0))
+(let nvar (IntVar "mdx_n"))
+(set (lower-bound-of nvar) (bigint 2))
+(set (upper-bound-of nvar) (bigint 8))
+(let nplus (IntAdd nvar (IntLit 1)))
+(let pn (IntMul cs nvar))
+(let pn1 (IntMul cs nplus))
+(let ln (ElementOffsetExpressionLayoutLit pn none_shape (BitWidthLit 32)))
+(let ln1 (ElementOffsetExpressionLayoutLit pn1 none_shape (BitWidthLit 32)))
+(let t2_in (LogicalTensorInputLit (LogicalIdLit "m2") none_shape (F32)))
+(let ltn (LayoutTensorLit t2_in ln))
+(let ltn1 (LayoutTensorLit t2_in ln1))
+"#;
+        verdict("M2 symbolic successor", &measure(&armed, m2, 6));
+
+        // M3 — DEEP DEGENERATE NEST: four stacked [1]-views composed by
+        // subst; the ARMED preamble (no disarm needed if no weld fires
+        // before the walks) — run disarmed anyway for uniformity.
+        let m3 = r#"
+(let s1 (ShapeLit (IntExprCons (IntLit 1) (IntExprNil))))
+(let v0 (LogicalTensorInputLit (LogicalIdLit "m3") s1 (F32)))
+(let id_map (IndexMapLit (IntExprCons (CoordVar s1 0) (IntExprNil))))
+(let v1 (LogicalIndexMapApply v0 id_map s1))
+(let v2 (LogicalIndexMapApply v1 id_map s1))
+(let v3 (LogicalIndexMapApply v2 id_map s1))
+(let v4 (LogicalIndexMapApply v3 id_map s1))
+(let l0 (RightMajorContiguousElementLayoutLit s1 (BitWidthLit 32)))
+(let lt0 (LayoutTensorLit v0 l0))
+"#;
+        verdict("M3 deep degenerate nest", &measure(&disarmed, m3, 6));
+
+        // M4 — CYCLIC SELF-VIEW (the remove/insert-dim cycle preview): a
+        // tensor unioned with a view-of-a-view of itself. Terminates iff
+        // demand machinery tolerates cyclic classes.
+        let m4 = r#"
+(let s4 (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
+(let w0 (LogicalTensorInputLit (LogicalIdLit "m4") s4 (F32)))
+(let id4 (IndexMapLit (IntExprCons (CoordVar s4 0) (IntExprNil))))
+(let w1 (LogicalIndexMapApply w0 id4 s4))
+(let w2 (LogicalIndexMapApply w1 id4 s4))
+(union w2 w0)
+(let l4 (RightMajorContiguousElementLayoutLit s4 (BitWidthLit 32)))
+(let lt4 (LayoutTensorLit w0 l4))
+"#;
+        verdict("M4 cyclic self-view", &measure(&armed, m4, 6));
+
+        // M5 — MAYBE-EMPTY EXTENTS: dims seeded [0,8] and [0,1]. Reports
+        // what fires: coordinate bounds, the collapse, discovery.
+        let m5_seed = r#"
+(let e8 (IntVar "mdx_e8"))
+(set (lower-bound-of e8) (bigint 0))
+(set (upper-bound-of e8) (bigint 8))
+(let se8 (ShapeLit (IntExprCons e8 (IntExprNil))))
+(let ce8 (CoordVar se8 0))
+(let e1 (IntVar "mdx_e1"))
+(set (lower-bound-of e1) (bigint 0))
+(set (upper-bound-of e1) (bigint 1))
+(let se1 (ShapeLit (IntExprCons e1 (IntExprNil))))
+(let ce1 (CoordVar se1 0))
+(run-schedule (saturate (run)))
+"#;
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph
+            .parse_and_run_program(None, &format!("{armed}\n{m5_seed}"))
+            .expect("m5 runs");
+        for (label, check) in [
+            ("[0,8] coord bounds set", "(check (= ?u (upper-bound-of ce8)))"),
+            ("[0,8] coord collapsed", "(check (= ce8 (IntLit 0)))"),
+            ("[0,1] coord bounds set", "(check (= ?u (upper-bound-of ce1)))"),
+            ("[0,1] coord collapsed", "(check (= ce1 (IntLit 0)))"),
+        ] {
+            let ok = egraph.parse_and_run_program(None, check).is_ok();
+            eprintln!("MINT M5 {label:<24} => {}", if ok { "YES" } else { "no" });
+        }
+    }
+}

@@ -8,8 +8,9 @@
 ;   (ii) a PINNED IntVar ((union (IntVar "pinned_dim") (IntLit 3))): folding,
 ;        bounds, and CoordVar extents all see the concrete value through
 ;        congruence;
-;   (iii) Vars in EXTENT position: CoordVar(axis, (IntVar "seq_len")) bounds
-;        derive from the IntVar's seeded bounds.
+;   (iii) Vars in EXTENT position: a coordinate whose owner shape carries
+;        an (IntVar "seq_len") dim gets bounds derived from the IntVar's
+;        seeded bounds.
 ; Plus the bounds demonstration Stage I0 could not host: with symbolic
 ; extents the VALUE world never folds, so bound products march past
 ; i64::MAX losslessly in BigInt. Plus SIZE-ZERO paths: empty tensors are
@@ -46,7 +47,7 @@
 (let row0_map
   (IndexMapLit
     (IntExprCons (IntLit 0)
-      (IntExprCons (CoordVar 0 seq_len)
+      (IntExprCons (CoordVar view_shape 0)
         (IntExprNil)))))
 (let row0_view_logical (LogicalIndexMapApply storage_logical row0_map view_shape))
 
@@ -54,7 +55,7 @@
 (let storage_layout_tensor (LayoutTensorLit storage_logical storage_layout))
 
 ; Hand-written view layout: the row is contiguous over [seq_len].
-(let row0_offset (CoordVar 0 seq_len))
+(let row0_offset (CoordVar view_shape 0))
 (let row0_view_layout (ElementOffsetExpressionLayoutLit row0_offset view_shape (bits-of storage_dtype)))
 (let row0_view_layout_tensor (LayoutTensorLit row0_view_logical row0_view_layout))
 
@@ -66,8 +67,8 @@
 (let transposed_shape (ShapeLit (IntExprCons seq_len (IntExprCons (IntLit 4) (IntExprNil)))))
 (let transpose_map
   (IndexMapLit
-    (IntExprCons (CoordVar 0 (IntLit 4))
-      (IntExprCons (CoordVar 1 seq_len)
+    (IntExprCons (CoordVar transposed_shape 0)
+      (IntExprCons (CoordVar transposed_shape 1)
         (IntExprNil)))))
 (let transposed_view_logical (LogicalIndexMapApply storage_logical transpose_map transposed_shape))
 
@@ -75,7 +76,7 @@
 (let pinned_dim (IntVar "pinned_dim"))
 (union pinned_dim (IntLit 3))
 (let pinned_product (IntMul (IntLit 2) pinned_dim))
-(let pinned_coord (CoordVar 0 pinned_dim))
+(let pinned_coord (CoordVar (ShapeLit (IntExprCons pinned_dim (IntExprNil))) 0))
 
 ; Path (ii-b): a dim pinned BY BOUNDS ALONE (ruling 2026-07-27) — the
 ; BINDING interface: a binding never writes a union, it seeds tight
@@ -96,7 +97,7 @@
 ; Past-i64 bounds: batch_coord * seq_len * seq_len has upper bound
 ; 3 * 10^24 — value-world folding never touches it (symbolic factors),
 ; BigInt bounds hold it.
-(let past_i64_product (IntMul (IntMul (CoordVar 1 (IntLit 4)) seq_len) seq_len))
+(let past_i64_product (IntMul (IntMul (CoordVar storage_shape 1) seq_len) seq_len))
 
 ; SIZE-ZERO paths: empty tensors are legal.
 ; A possibly-empty dim: bounds [0, 8] — its coordinate still gets sound
@@ -104,13 +105,14 @@
 (let maybe_empty_dim (IntVar "maybe_empty_dim"))
 (set (lower-bound-of maybe_empty_dim) (bigint 0))
 (set (upper-bound-of maybe_empty_dim) (bigint 8))
-(let maybe_empty_coord (CoordVar 0 maybe_empty_dim))
+(let maybe_empty_coord
+  (CoordVar (ShapeLit (IntExprCons maybe_empty_dim (IntExprNil))) 0))
 ; A PINNED-empty dim: its coordinate has no values, so it gets NO bounds
 ; (the fail-closed representation of an empty range — never a crossed
 ; interval, which stays reserved for the unsound-union tripwire).
 (let empty_dim (IntVar "empty_dim"))
 (union empty_dim (IntLit 0))
-(let empty_coord (CoordVar 0 empty_dim))
+(let empty_coord (CoordVar (ShapeLit (IntExprCons empty_dim (IntExprNil))) 0))
 
 ; A COMPOUND stride over the pinned-empty dim: provably zero through the
 ; product route, so the strided-indexing fold SKIPS that axis instead of
@@ -144,15 +146,15 @@
   (ShapeLit (IntExprCons gap_probe_dim (IntExprCons (IntLit 3) (IntExprNil)))))
 (let gap_transpose_map
   (IndexMapLit
-    (IntExprCons (CoordVar 0 (IntLit 3))
-      (IntExprCons (CoordVar 1 gap_probe_dim)
+    (IntExprCons (CoordVar gap_transposed_shape 0)
+      (IntExprCons (CoordVar gap_transposed_shape 1)
         (IntExprNil)))))
 (let gap_view_logical
   (LogicalIndexMapApply gap_probe_logical gap_transpose_map gap_transposed_shape))
 (let gap_probe_offset
-  (IntAdd (IntMul (CoordVar 1 (IntLit 3)) gap_probe_dim) (CoordVar 0 gap_probe_dim)))
+  (IntAdd (IntMul (CoordVar gap_probe_shape 1) gap_probe_dim) (CoordVar gap_probe_shape 0)))
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; The right-major fold over [4, seq_len] produces SYMBOLIC strides
 ; [seq_len, 1]...
@@ -165,7 +167,8 @@
 
 ; ...and the strided-indexing foldr the symbolic offset
 ; outer_coord*seq_len + inner_coord.
-(let storage_offset (IntAdd (IntMul (CoordVar 1 (IntLit 4)) seq_len) (CoordVar 0 seq_len)))
+(let storage_offset
+  (IntAdd (IntMul (CoordVar storage_shape 1) seq_len) (CoordVar storage_shape 0)))
 (check
   (= storage_layout
      (ElementOffsetExpressionLayoutLit storage_offset storage_shape (bits-of storage_dtype))))
@@ -195,7 +198,8 @@
      (RightMajorContiguousElementLayoutLit view_shape (bits-of storage_dtype))))
 
 ; Transpose pins: substitution lands the symbolic-coefficient offset...
-(let transposed_offset (IntAdd (IntMul (CoordVar 0 (IntLit 4)) seq_len) (CoordVar 1 seq_len)))
+(let transposed_offset
+  (IntAdd (IntMul (CoordVar transposed_shape 0) seq_len) (CoordVar transposed_shape 1)))
 (check (= (subst-of storage_offset transpose_map storage_shape) transposed_offset))
 ; ...and SYMBOLIC-STRIDE DISCOVERY (single-occurrence extraction) now
 ; derives the strided form ([1, seq_len] over [seq_len, 4]) — this pin
@@ -228,7 +232,8 @@
 ; strided form deliberately never derives.
 (check
   (= (subst-of gap_probe_offset gap_transpose_map gap_probe_shape)
-     (IntAdd (IntMul (CoordVar 0 (IntLit 3)) gap_probe_dim) (CoordVar 1 gap_probe_dim))))
+     (IntAdd (IntMul (CoordVar gap_transposed_shape 0) gap_probe_dim)
+       (CoordVar gap_transposed_shape 1))))
 (fail
   (check
     (= (BitOffsetExpressionLayoutLit
@@ -279,6 +284,6 @@
 (check
   (= skip_layout
      (ElementOffsetExpressionLayoutLit
-       (CoordVar 0 (IntLit 4))
+       (CoordVar skip_shape 0)
        skip_shape
        (bits-of storage_dtype))))

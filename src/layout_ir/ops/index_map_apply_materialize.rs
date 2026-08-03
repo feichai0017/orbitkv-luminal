@@ -180,7 +180,7 @@ impl OpMatcher for IndexMapApplyMaterializeMatcher {
 
 /// Walk the matched term's index-map metadata (child 1) into numeric
 /// entries: `IndexMapLit` → cons spine BY E-CLASS → per element a CoordVar
-/// (axis primitive at child 0) or an IntLit. Anything else (arithmetic
+/// (owner Shape at child 0, axis primitive at child 1) or an IntLit. Anything else (arithmetic
 /// entries) yields `None` — the kernel's loud refusal carries the burden,
 /// extraction never fails.
 fn parse_map_entries(site: &ExtractionSite<'_>) -> Option<Vec<super::iota::IotaExpr>> {

@@ -79,7 +79,8 @@ pub(crate) fn parse_int_expr(
         return Some(IotaExpr::Lit(site.node_in_class_parse_i64(&value_class)?));
     }
     if let Some(coord) = site.node_in_class(class, "CoordVar") {
-        let axis_class = site.class_of_child(coord, 0)?;
+        // Scoped coordinates: child 0 is the owner Shape, child 1 the axis.
+        let axis_class = site.class_of_child(coord, 1)?;
         return Some(IotaExpr::Coord(
             site.node_in_class_parse_i64(&axis_class)? as usize,
         ));

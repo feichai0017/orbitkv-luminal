@@ -29,7 +29,7 @@
 
 ; Axis-1 coordinate (cache columns): the iota passthrough (axis 0 =
 ; innermost, extent 4).
-(let column_iota_logical (LogicalIota (CoordVar 0 (IntLit 4)) row_shape))
+(let column_iota_logical (LogicalIota (CoordVar row_shape 0) row_shape))
 
 (let coordinate_list
   (LogicalTensorCons position_logical
@@ -41,8 +41,8 @@
 
 ; Iota authoring contract: every constructed iota demands its expression's
 ; bounds — an absent entry fails the check loudly at the fixpoint.
-(check (= ?demanded_lower (lower-bound-of (CoordVar 0 (IntLit 4)))))
-(check (= ?demanded_upper (upper-bound-of (CoordVar 0 (IntLit 4)))))
+(check (= ?demanded_lower (lower-bound-of (CoordVar row_shape 0))))
+(check (= ?demanded_upper (upper-bound-of (CoordVar row_shape 0))))
 
 ; --- dtype: carried from init AND src, duplicatively (atoms — the
 ; tripwire is legal, and its silence here IS the agreement proof) ---

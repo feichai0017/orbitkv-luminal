@@ -36,7 +36,13 @@
     ; and gives layout classes extent-true identity: same-strides layouts
     ; over DIFFERENT shapes no longer share an offset-expression class,
     ; while all same-geometry tensors still share everything.
-    (CoordVar i64 IntExpr)
+    ; A coordinate variable is OWNED: it is axis `axis` (0-based from
+    ; the innermost, de Bruijn level) OF `shape`. Its extent is not a
+    ; field — it is (expr-list-nth-from-end dims axis) of its own
+    ; shape, by construction (nth is eager and total), so an
+    ; extent-vs-shape disagreement is unrepresentable and the old
+    ; coordinate-extent lock is deleted rather than enforced.
+    (CoordVar Shape i64)
     (IntAdd IntExpr IntExpr)
     (IntMul IntExpr IntExpr)
     ; THE DIVISION FAMILY (Stage D1). Semantics live in the constructor
@@ -401,6 +407,18 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Helper Functions For IntExpr Lists
 (ruleset layout-tensor-op-metadata)
+; Copy candidates mint AGAINST SETTLED CLASSES (Austin's ruling
+; 2026-08-03): the copy matcher's (!=) is a per-iteration snapshot on
+; canonical ids, so inside the main fixpoint it could admit a pair that
+; later unions — the mint is never retracted and persists as a
+; self-copy (unselectable junk: the extractor's cycle guard kills it,
+; but it pollutes the producer space and burns genome evaluations).
+; Copy mints are pure fixpoint LEAVES (no rule matches LayoutTensorOp
+; constructors in the main phase), so deferring them changes no
+; equality; one non-saturating pass suffices (the rule cannot feed
+; itself). Runs BEFORE layout-tensor-op-metadata so fresh Lits get
+; their list rows.
+(ruleset materializing-copy-mint)
 
 (function expr-list-length-of (IntExprList) i64 :no-merge) ; I think these can be no merge
 (function expr-list-nth-from-end (IntExprList i64) IntExpr :no-merge) ; I think these can be no merge
@@ -1203,7 +1221,7 @@
 ;   5. as a BOUNDED single stroke between saturations.
 ; Backward-only (pure factoring) survives all fixtures but does not
 ; deliver distribution. If a consumer ever needs distributed forms, do it
-; the coeff-of way: a demand-driven fold computing PRIMITIVE values,
+; the old coeff-of way (since retired for testimony): a demand-driven fold,
 ; never IntExpr-level rewrites in the saturating soup.
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1272,7 +1290,9 @@
 ; detector: legal emptiness can never reach it.
 (rule
   (
-    (= ?coord (CoordVar ?axis ?extent))
+    (= ?coord (CoordVar ?shape ?axis))
+    (= ?shape (ShapeLit ?dims))
+    (= ?extent (expr-list-nth-from-end ?dims ?axis))
     (= ?extent_upper (upper-bound-of ?extent))
     (>= ?extent_upper (bigint 1))
   )
@@ -1547,14 +1567,18 @@
 ; variable).
 (rule
   (
-    (= ?coord (CoordVar ?axis (IntLit ?extent_value)))
+    (= ?coord (CoordVar ?shape ?axis))
+    (= ?shape (ShapeLit ?dims))
+    (= (expr-list-nth-from-end ?dims ?axis) (IntLit ?extent_value))
     (< ?extent_value 0)
   )
   ((panic "CoordVar with negative extent: malformed shape"))
 )
 (rule
   (
-    (= ?coord (CoordVar ?axis ?extent))
+    (= ?coord (CoordVar ?shape ?axis))
+    (= ?shape (ShapeLit ?dims))
+    (= ?extent (expr-list-nth-from-end ?dims ?axis))
     (= ?extent_upper (upper-bound-of ?extent))
     (<= ?extent_upper (bigint -1))
   )
@@ -1671,7 +1695,9 @@
 ; box — the stability clause in premise form) ---
 (rule
   (
-    (= ?coord (CoordVar ?axis ?extent))
+    (= ?coord (CoordVar ?shape ?axis))
+    (= ?shape (ShapeLit ?dims))
+    (= ?extent (expr-list-nth-from-end ?dims ?axis))
     (= ?extent_lower (lower-bound-of ?extent))
     (>= ?extent_lower (bigint 2))
   )
@@ -1686,13 +1712,15 @@
 ; axis-free grant on a merged class — the support tripwire is kept sharp
 ; by gating, not weakened. Consequence, accepted under the BUCKETING
 ; DOCTRINE: coordinates of dims seeded [1, N] carry no support facts, so
-; sum-route witnesses and symbolic-stride discovery stall on those axes
+; sum-route witnesses and presentation derivation stall on those axes
 ; until the dim is bucketed ([2, N] seeds) or pinned; a dim pinned to 1
 ; collapses instead, and the broadcast-zero discovery route covers its
 ; axis exactly.
 (rule
   (
-    (= ?coord (CoordVar ?axis ?extent))
+    (= ?coord (CoordVar ?shape ?axis))
+    (= ?shape (ShapeLit ?dims))
+    (= ?extent (expr-list-nth-from-end ?dims ?axis))
     (= ?extent_lower (lower-bound-of ?extent))
     (>= ?extent_lower (bigint 2))
   )
@@ -1713,7 +1741,9 @@
 ; the eliminations and zero-aware substitution then simplify through it.
 (rule
   (
-    (= ?coord (CoordVar ?axis ?extent))
+    (= ?coord (CoordVar ?shape ?axis))
+    (= ?shape (ShapeLit ?dims))
+    (= ?extent (expr-list-nth-from-end ?dims ?axis))
     (= ?extent_lower (lower-bound-of ?extent))
     (>= ?extent_lower (bigint 1))
     (= ?extent_upper (upper-bound-of ?extent))
@@ -1795,7 +1825,7 @@
 (rule
   (
     (axis-free-demand ?expr ?axis)
-    (= ?expr (CoordVar ?other_axis ?extent))
+    (= ?expr (CoordVar ?shape ?other_axis))
     (!= ?other_axis ?axis)
   )
   ((axis-free ?expr ?axis))
@@ -2980,8 +3010,12 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Strided Indexing Fold-Right
 
-(relation strided-indexing-foldr-demand (IntExprList IntExprList))
-(function strided-indexing-foldr-state-of (IntExprList IntExprList) StridedIndexingFoldRState :no-merge)
+; Root-carried (scoped-CoordVar spike): the demand and state carry the
+; ROOT SHAPE so the general arm can mint owned coordinates
+; (CoordVar root axis). Costs tail-suffix sharing across different
+; shapes; buys owner-scoped mints.
+(relation strided-indexing-foldr-demand (Shape IntExprList IntExprList))
+(function strided-indexing-foldr-state-of (Shape IntExprList IntExprList) StridedIndexingFoldRState :no-merge)
 
 ; Demand a folded element offset expression for explicit strided layouts.
 ; Shape and stride lists are in the same order, so:
@@ -2990,33 +3024,34 @@
 ;   offset  = CoordVar(2,d2)*s2 + CoordVar(1,d1)*s1 + CoordVar(0,d0)*s0
 (rule
   (
-    (= ?strided_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+    (= ?strided_layout (StridedElementLayoutLit ?shape ?strides ?bits))
+    (= ?shape (ShapeLit ?dims))
   )
   (
-    (strided-indexing-foldr-demand ?dims ?strides)
+    (strided-indexing-foldr-demand ?shape ?dims ?strides)
   )
 )
 
 ; Propagate demand towards nil while zipping shape and stride suffixes.
 (rule
   (
-    (strided-indexing-foldr-demand
+    (strided-indexing-foldr-demand ?root_shape
       (IntExprCons ?size ?dim_tail)
       (IntExprCons ?stride ?stride_tail))
   )
   (
-    (strided-indexing-foldr-demand ?dim_tail ?stride_tail)
+    (strided-indexing-foldr-demand ?root_shape ?dim_tail ?stride_tail)
   )
 )
 
 ; Empty suffixes: no axis remains and the accumulated element offset is zero.
 (rule
   (
-    (strided-indexing-foldr-demand (IntExprNil) (IntExprNil))
+    (strided-indexing-foldr-demand ?root_shape (IntExprNil) (IntExprNil))
   )
   (
     (set
-      (strided-indexing-foldr-state-of (IntExprNil) (IntExprNil))
+      (strided-indexing-foldr-state-of ?root_shape (IntExprNil) (IntExprNil))
       (StridedIndexingFoldRStateLit 0 (IntLit 0)))
   )
 )
@@ -3024,7 +3059,7 @@
 ; One list ended before the other, so the strided layout is malformed.
 (rule
   (
-    (strided-indexing-foldr-demand (IntExprNil) (IntExprCons ?stride ?stride_tail))
+    (strided-indexing-foldr-demand ?root_shape (IntExprNil) (IntExprCons ?stride ?stride_tail))
   )
   (
     (panic "StridedElementLayoutLit shape and stride ranks differ")
@@ -3033,7 +3068,7 @@
 
 (rule
   (
-    (strided-indexing-foldr-demand (IntExprCons ?size ?dim_tail) (IntExprNil))
+    (strided-indexing-foldr-demand ?root_shape (IntExprCons ?size ?dim_tail) (IntExprNil))
   )
   (
     (panic "StridedElementLayoutLit shape and stride ranks differ")
@@ -3073,21 +3108,21 @@
 ; exclusion with the skip rule and zero-summand hygiene, not soundness.
 (rule
   (
-    (strided-indexing-foldr-demand ?dims ?strides)
+    (strided-indexing-foldr-demand ?root_shape ?dims ?strides)
     (= ?dims (IntExprCons ?size ?dim_tail))
     (= ?strides (IntExprCons ?stride ?stride_tail))
     (provably-cannot-union-with-zero ?stride)
-    (= (strided-indexing-foldr-state-of ?dim_tail ?stride_tail)
+    (= (strided-indexing-foldr-state-of ?root_shape ?dim_tail ?stride_tail)
       (StridedIndexingFoldRStateLit ?axis ?linear))
   )
   (
     (set
-      (strided-indexing-foldr-state-of ?dims ?strides)
+      (strided-indexing-foldr-state-of ?root_shape ?dims ?strides)
       (StridedIndexingFoldRStateLit
         (+ ?axis 1)
         (IntAdd
           (IntMul
-            (CoordVar ?axis ?size)
+            (CoordVar ?root_shape ?axis)
             ?stride)
           ?linear)))
   )
@@ -3101,16 +3136,16 @@
 ; structurally impossible.
 (rule
   (
-    (strided-indexing-foldr-demand ?dims ?strides)
+    (strided-indexing-foldr-demand ?root_shape ?dims ?strides)
     (= ?dims (IntExprCons ?size ?dim_tail))
     (= ?strides (IntExprCons ?stride ?stride_tail))
     (= ?stride (IntLit 0))
-    (= (strided-indexing-foldr-state-of ?dim_tail ?stride_tail)
+    (= (strided-indexing-foldr-state-of ?root_shape ?dim_tail ?stride_tail)
       (StridedIndexingFoldRStateLit ?axis ?linear))
   )
   (
     (set
-      (strided-indexing-foldr-state-of ?dims ?strides)
+      (strided-indexing-foldr-state-of ?root_shape ?dims ?strides)
       (StridedIndexingFoldRStateLit
         (+ ?axis 1)
         ?linear))
@@ -3123,7 +3158,7 @@
   (
     (= ?strided_layout (StridedElementLayoutLit ?shape ?strides ?bits))
     (= ?shape (ShapeLit ?dims))
-    (= (strided-indexing-foldr-state-of ?dims ?strides)
+    (= (strided-indexing-foldr-state-of ?shape ?dims ?strides)
       (StridedIndexingFoldRStateLit ?rank ?indexing_expr))
   )
   (
@@ -3164,17 +3199,6 @@
 ;        factor out is the layout's own BitWidth field (exactly one width
 ;        per layout, nothing speculative; the old dtype gate is subsumed
 ;        by the field).
-; coeff-of / const-part-of / coeff-strides-of are CONSTRUCTORS, not
-; :no-merge functions: different representatives of one expression class
-; yield syntactically different results that must UNION (sound by the
-; function-identity contract; egglog's only union-on-set idiom is the
-; constructor). The scaffolding representatives this leaves in IntExpr
-; classes are inert: no rule or renderer matches them.
-;
-; Trust point (documented, unchecked): a demanded offset expression ranges
-; over ITS tensor's own coordinates — an axis outside [0, rank) would be
-; silently dropped from the discovered strides. Composition guarantees
-; this by construction (output formals ARE the view's coordinates).
 
 ; --- (3a) Strided -> contiguous discovery ---
 (rule
@@ -3221,321 +3245,52 @@
   )
 )
 
-; --- (3b) Element -> Strided discovery: linear coefficient extraction ---
-; Coefficients and remainders are PRIMITIVE i64s, never Exprs: emitting
-; expression intermediates into the global soup feeds the AC/distributivity
-; closure unboundedly (bisected empirically — IntExpr-valued coefficients drove
-; constant products past i64 overflow). Primitives also make :no-merge
-; CORRECT: representatives of one class are equal as functions, so their
-; coefficients agree numerically — a disagreement is a bug and panics
-; loudly. Symbolic strides stay conservatively undiscovered (i64-only, the
-; same precedent as the no-overlap injectivity fold).
-(relation element-to-strided-demand (LayoutTensor))
-(relation coeff-axis-demand (IntExpr i64))
-(relation const-part-demand (IntExpr))
-(relation strides-build-demand (IntExpr i64))
-(function coeff-of (IntExpr i64) i64 :no-merge)
-(function const-part-of (IntExpr) i64 :no-merge)
-(constructor coeff-strides-of (IntExpr i64) IntExprList)
+; --- (3b) STRIDED PRESENTATIONS: existential testimony, never recovery ---
+;
+; RATIFIED INVARIANT (deep dive, 2026-08): a rule may conclude from a
+; class's syntax only what is true of EVERY spelling of that class. A
+; spelling may WITNESS a class-invariant fact; it may never be a VALUE
+; SOURCE for a class-keyed slot.
+;
+; "The stride along axis k" is not class-invariant on degenerate
+; geometry: a one-point box never steps its axis, so EVERY stride
+; presents the same layout (the [1]-contiguous and stride-0 broadcast
+; layouts are extensionally ONE layout, with presentations [1] and [0]
+; both true). The old recovery walks (coeff-of / const-part-of /
+; symbolic-stride-of and their finales) asked the functional question
+; and stored per-spelling answers in unique-answer slots: the :no-merge
+; track panicked on the honest disagreement; the constructor track
+; UNIONED the answers — turning "both valid presentations of this
+; layout" into IntExpr equalities (0 ≡ 1 ≡ s), the category error
+; behind the 2026-07-31 zero-class corruption. DELETED, replaced by
+; TESTIMONY: rows are independently true, never union anything, and a
+; degenerate layout simply carries several. Every consumer is
+; existential — injectivity needs SOME presentation passing no-overlap,
+; a kernel needs SOME constructor spelling — none needs uniqueness.
+;
+; Termination contract (the mint-divergence study is the regression):
+; rows derive from structural spellings only, NEVER from other rows'
+; values — no successor generators, no row-fed arithmetic.
+(relation strided-presentation (Layout IntExprList))
 
-; The SYMBOLIC arm (single-occurrence extraction): strides that are
-; expressions, not literals. Never computes coefficient arithmetic —
-; it POINTS at existing stride subterm classes, which is what keeps it
-; out of the ring rules' reach (the literal-coefficient restriction
-; existed because expression-valued coefficient ARITHMETIC fed the AC
-; closure; pointing mints nothing but list cells and 0/1 literals).
-(relation symbolic-stride-demand (IntExpr i64))
-(constructor symbolic-stride-of (IntExpr i64) IntExpr)
-(relation symbolic-strides-build-demand (IntExpr i64))
-(constructor symbolic-strides-of (IntExpr i64) IntExprList)
+; Witness: a constructor spelling testifies to its own presentation.
+(rule
+  ((= ?layout (StridedElementLayoutLit ?shape ?strides ?bits)))
+  ((strided-presentation ?layout ?strides))
+)
 
-; Kickoff: the demanded tensor supplies the rank; walk axes rank-1 .. 0.
+; Rejoin: testimony mints the constructor spelling and unions at the
+; LAYOUT sort, where identity is extensional by design (the ladder's
+; sanctioned move). Kernels and matchers consuming Strided spellings
+; keep working; multiple constructor spellings in one class are sibling
+; presentations, and any future rule destructuring them inherits the
+; invariant above. Convergent with the witness rule by hash-consing.
 (rule
   (
-    (element-to-strided-demand ?layout_tensor)
-    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
+    (strided-presentation ?layout ?strides)
     (= ?layout (ElementOffsetExpressionLayoutLit ?expr ?shape ?bits))
-    (= ?rank (rank-of ?shape))
   )
-  (
-    (strides-build-demand ?expr ?rank)
-    (symbolic-strides-build-demand ?expr ?rank)
-    (const-part-demand ?expr)
-  )
-)
-
-; Strides-list builder: axis k-1 heads the list for the k outermost-so-far.
-(rule
-  ((strides-build-demand ?expr 0))
-  ((set (coeff-strides-of ?expr 0) (IntExprNil)))
-)
-(rule
-  (
-    (strides-build-demand ?expr ?axis)
-    (> ?axis 0)
-    (= ?axis_minus_one (- ?axis 1))
-  )
-  (
-    (coeff-axis-demand ?expr ?axis_minus_one)
-    (strides-build-demand ?expr ?axis_minus_one)
-  )
-)
-(rule
-  (
-    (strides-build-demand ?expr ?axis)
-    (> ?axis 0)
-    (= ?axis_minus_one (- ?axis 1))
-    (= ?coefficient (coeff-of ?expr ?axis_minus_one))
-    (= ?tail (coeff-strides-of ?expr ?axis_minus_one))
-  )
-  (
-    (set (coeff-strides-of ?expr ?axis) (IntExprCons (IntLit ?coefficient) ?tail))
-  )
-)
-
-; Per-axis coefficients: structural recursion over representatives. Only
-; linear shapes match (IntMul with a IntLit side); nonlinear representatives are
-; silently unmatched — incompleteness, never unsoundness. The i64
-; disequality on axes is primitive (stable — primitives never merge).
-(rule
-  ((coeff-axis-demand ?expr ?axis) (= ?expr (IntLit ?value)))
-  ((set (coeff-of ?expr ?axis) 0))
-)
-(rule
-  ((coeff-axis-demand ?expr ?axis) (= ?expr (CoordVar ?axis ?extent)))
-  ((set (coeff-of ?expr ?axis) 1))
-)
-(rule
-  ((coeff-axis-demand ?expr ?axis) (= ?expr (CoordVar ?other_axis ?extent)) (!= ?other_axis ?axis))
-  ((set (coeff-of ?expr ?axis) 0))
-)
-(rule
-  ((coeff-axis-demand ?expr ?axis) (= ?expr (IntAdd ?lhs ?rhs)))
-  ((coeff-axis-demand ?lhs ?axis) (coeff-axis-demand ?rhs ?axis))
-)
-(rule
-  (
-    (coeff-axis-demand ?expr ?axis)
-    (= ?expr (IntAdd ?lhs ?rhs))
-    (= ?lhs_coeff (coeff-of ?lhs ?axis))
-    (= ?rhs_coeff (coeff-of ?rhs ?axis))
-  )
-  ((set (coeff-of ?expr ?axis) (+ ?lhs_coeff ?rhs_coeff)))
-)
-(rule
-  ((coeff-axis-demand ?expr ?axis) (= ?expr (IntMul ?lhs (IntLit ?multiplier))))
-  ((coeff-axis-demand ?lhs ?axis))
-)
-(rule
-  (
-    (coeff-axis-demand ?expr ?axis)
-    (= ?expr (IntMul ?lhs (IntLit ?multiplier)))
-    (= ?lhs_coeff (coeff-of ?lhs ?axis))
-  )
-  ((set (coeff-of ?expr ?axis) (* ?lhs_coeff ?multiplier)))
-)
-
-; Constant remainder: same recursion, axis-free.
-(rule
-  ((const-part-demand ?expr) (= ?expr (IntLit ?value)))
-  ((set (const-part-of ?expr) ?value))
-)
-(rule
-  ((const-part-demand ?expr) (= ?expr (CoordVar ?axis ?extent)))
-  ((set (const-part-of ?expr) 0))
-)
-(rule
-  ((const-part-demand ?expr) (= ?expr (IntAdd ?lhs ?rhs)))
-  ((const-part-demand ?lhs) (const-part-demand ?rhs))
-)
-(rule
-  (
-    (const-part-demand ?expr)
-    (= ?expr (IntAdd ?lhs ?rhs))
-    (= ?lhs_const (const-part-of ?lhs))
-    (= ?rhs_const (const-part-of ?rhs))
-  )
-  ((set (const-part-of ?expr) (+ ?lhs_const ?rhs_const)))
-)
-(rule
-  ((const-part-demand ?expr) (= ?expr (IntMul ?lhs (IntLit ?multiplier))))
-  ((const-part-demand ?lhs))
-)
-(rule
-  (
-    (const-part-demand ?expr)
-    (= ?expr (IntMul ?lhs (IntLit ?multiplier)))
-    (= ?lhs_const (const-part-of ?lhs))
-  )
-  ((set (const-part-of ?expr) (* ?lhs_const ?multiplier)))
-)
-
-; Discovery finale: every axis's coefficient resolved, remainder provably
-; zero — the expression IS the strided map over its tensor's shape.
-(rule
-  (
-    (element-to-strided-demand ?layout_tensor)
-    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
-    (= ?layout (ElementOffsetExpressionLayoutLit ?expr ?shape ?bits))
-    (= ?rank (rank-of ?shape))
-    (= ?strides (coeff-strides-of ?expr ?rank))
-    (= 0 (const-part-of ?expr))
-  )
-  (
-    (union ?layout (StridedElementLayoutLit ?shape ?strides ?bits))
-  )
-)
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-; SYMBOLIC-STRIDE DISCOVERY (single-occurrence extraction). For fold-
-; and composition-shaped offsets, every axis occurs in exactly ONE
-; summand, so its stride does not need computing — it is an existing
-; subterm class to point at. The axis-support machinery enforces the
-; single-occurrence condition exactly: a summand pair where BOTH sides
-; carry the axis matches no rule (cancellation-unsafe, conservative),
-; and both-sides-free is served by the broadcast rule. Sound per case:
-;   - CoordVar(axis) contributes stride 1;
-;   - IntMul(CoordVar(axis), stride) contributes ?stride PROVIDED the
-;     cofactor is provably axis-free (linearity in the axis);
-;   - IntAdd recurses into the supported side past a provably-free side
-;     (the free side contributes nothing in this axis);
-;   - a whole offset provably free of the axis has stride 0 (broadcast).
-; Different representatives may resolve syntactically different strides;
-; the constructor unions them — sound because equal affine functions
-; have equal per-axis coefficients.
-
-; Builder: axis k-1 heads the list for the k outermost-so-far.
-(rule
-  ((symbolic-strides-build-demand ?expr 0))
-  ((set (symbolic-strides-of ?expr 0) (IntExprNil)))
-)
-(rule
-  (
-    (symbolic-strides-build-demand ?expr ?axis)
-    (> ?axis 0)
-    (= ?axis_minus_one (- ?axis 1))
-  )
-  (
-    (symbolic-stride-demand ?expr ?axis_minus_one)
-    (symbolic-strides-build-demand ?expr ?axis_minus_one)
-  )
-)
-(rule
-  (
-    (symbolic-strides-build-demand ?expr ?axis)
-    (> ?axis 0)
-    (= ?axis_minus_one (- ?axis 1))
-    (= ?stride (symbolic-stride-of ?expr ?axis_minus_one))
-    (= ?tail (symbolic-strides-of ?expr ?axis_minus_one))
-  )
-  (
-    (set (symbolic-strides-of ?expr ?axis) (IntExprCons ?stride ?tail))
-  )
-)
-
-; Pointing rules.
-(rule
-  ((symbolic-stride-demand ?expr ?axis) (= ?expr (CoordVar ?axis ?extent)))
-  ((set (symbolic-stride-of ?expr ?axis) (IntLit 1)))
-)
-(rule
-  ((symbolic-stride-demand ?expr ?axis) (= ?expr (IntMul (CoordVar ?axis ?extent) ?stride)))
-  ((axis-free-demand ?stride ?axis))
-)
-(rule
-  (
-    (symbolic-stride-demand ?expr ?axis)
-    (= ?expr (IntMul (CoordVar ?axis ?extent) ?stride))
-    (axis-free ?stride ?axis)
-  )
-  ((set (symbolic-stride-of ?expr ?axis) ?stride))
-)
-; Broadcast: the whole expression is provably free of the axis.
-(rule
-  ((symbolic-stride-demand ?expr ?axis))
-  ((axis-free-demand ?expr ?axis))
-)
-(rule
-  ((symbolic-stride-demand ?expr ?axis) (axis-free ?expr ?axis))
-  ((set (symbolic-stride-of ?expr ?axis) (IntLit 0)))
-)
-; Sums: recurse into the supported side past a provably-free side.
-(rule
-  ((symbolic-stride-demand ?expr ?axis) (= ?expr (IntAdd ?lhs ?rhs)))
-  (
-    (axis-free-demand ?lhs ?axis)
-    (axis-free-demand ?rhs ?axis)
-  )
-)
-(rule
-  (
-    (symbolic-stride-demand ?expr ?axis)
-    (= ?expr (IntAdd ?lhs ?rhs))
-    (axis-in-support ?lhs ?axis)
-    (axis-free ?rhs ?axis)
-  )
-  ((symbolic-stride-demand ?lhs ?axis))
-)
-(rule
-  (
-    (symbolic-stride-demand ?expr ?axis)
-    (= ?expr (IntAdd ?lhs ?rhs))
-    (axis-in-support ?lhs ?axis)
-    (axis-free ?rhs ?axis)
-    (= ?stride (symbolic-stride-of ?lhs ?axis))
-  )
-  ((set (symbolic-stride-of ?expr ?axis) ?stride))
-)
-(rule
-  (
-    (symbolic-stride-demand ?expr ?axis)
-    (= ?expr (IntAdd ?lhs ?rhs))
-    (axis-in-support ?rhs ?axis)
-    (axis-free ?lhs ?axis)
-  )
-  ((symbolic-stride-demand ?rhs ?axis))
-)
-(rule
-  (
-    (symbolic-stride-demand ?expr ?axis)
-    (= ?expr (IntAdd ?lhs ?rhs))
-    (axis-in-support ?rhs ?axis)
-    (axis-free ?lhs ?axis)
-    (= ?stride (symbolic-stride-of ?rhs ?axis))
-  )
-  ((set (symbolic-stride-of ?expr ?axis) ?stride))
-)
-
-; Constant-term zero propagates through ANY product with a
-; zero-constant-term factor (constant terms multiply — the symbolic
-; generalization of the literal-multiplier rule; needed because
-; IntMul(coordinate, IntVar) has no literal side).
-(rule
-  ((const-part-demand ?expr) (= ?expr (IntMul ?lhs ?rhs)))
-  ((const-part-demand ?lhs) (const-part-demand ?rhs))
-)
-(rule
-  ((const-part-demand ?expr) (= ?expr (IntMul ?lhs ?rhs)) (= 0 (const-part-of ?lhs)))
-  ((set (const-part-of ?expr) 0))
-)
-(rule
-  ((const-part-demand ?expr) (= ?expr (IntMul ?lhs ?rhs)) (= 0 (const-part-of ?rhs)))
-  ((set (const-part-of ?expr) 0))
-)
-
-; Symbolic finale: same contract as the literal one.
-(rule
-  (
-    (element-to-strided-demand ?layout_tensor)
-    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
-    (= ?layout (ElementOffsetExpressionLayoutLit ?expr ?shape ?bits))
-    (= ?rank (rank-of ?shape))
-    (= ?strides (symbolic-strides-of ?expr ?rank))
-    (= 0 (const-part-of ?expr))
-  )
-  (
-    (union ?layout (StridedElementLayoutLit ?shape ?strides ?bits))
-  )
+  ((union ?layout (StridedElementLayoutLit ?shape ?strides ?bits)))
 )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -3623,20 +3378,20 @@
 (rule
   (
     (subst-demand ?expr ?map ?source_shape)
-    (= ?expr (CoordVar ?axis ?extent))
+    ; DOMAIN MEMBERSHIP, STRUCTURAL (scoped-CoordVar spike): a
+    ; coordinate now CARRIES its owner shape, so "a variable OF this
+    ; substitution" is one whose owner IS σ's source shape — matched in
+    ; the term, no extent identification needed (the old extent≡dim
+    ; check could accidentally identify same-extent axes of different
+    ; shapes; ownership cannot). Foreign coordinates fail this premise
+    ; and are left fixed, exactly as σ's definition says.
+    (= ?expr (CoordVar ?source_shape ?axis))
     (= ?map (IndexMapLit ?entries))
     ; nth-from-end is ZERO-based, matching the 0-based de Bruijn axis
     ; levels: axis k reads entry k directly (no bridge).
     (= ?entry (expr-list-nth-from-end ?entries ?axis))
-    ; DOMAIN MEMBERSHIP (Austin's ruling 2026-07-29 — see IDENTIFICATION
-    ; in the contract above): σ's domain is the SOURCE box. Only a
-    ; coordinate whose (axis, extent) matches the source shape's dim for
-    ; that axis is a variable OF this substitution; foreign coordinates —
-    ; other boxes' variables that sound constant-level unions mixed into
-    ; walked classes — are left fixed, exactly as σ's definition says.
     (= ?source_shape (ShapeLit ?source_dims))
-    (= ?source_dim (expr-list-nth-from-end ?source_dims ?axis))
-    (= ?extent ?source_dim)
+    (= ?extent (expr-list-nth-from-end ?source_dims ?axis))
     ; IN-RANGE INSTANTIATION GUARD (the well-definedness condition — see
     ; the contract above), SMALLEST-POSSIBLE-BOX form (deep-dive item 1,
     ; ratified 2026-07-31): the entry must fit the box under EVERY
@@ -3670,13 +3425,14 @@
 (rule
   (
     (subst-demand ?expr ?map ?source_shape)
-    (= ?expr (CoordVar ?axis ?extent))
+    (= ?expr (CoordVar ?source_shape ?axis))
     (= ?map (IndexMapLit ?entries))
     (= ?entry (expr-list-nth-from-end ?entries ?axis))
     (= ?source_shape (ShapeLit ?source_dims))
-    (= ?source_dim (expr-list-nth-from-end ?source_dims ?axis))
-    (= ?extent ?source_dim)
-    (= ?entry (CoordVar ?entry_axis ?entry_extent))
+    (= ?extent (expr-list-nth-from-end ?source_dims ?axis))
+    (= ?entry (CoordVar ?entry_shape ?entry_axis))
+    (= ?entry_shape (ShapeLit ?entry_dims))
+    (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))
     (= ?entry_extent ?extent)
   )
   ((set (subst-of ?expr ?map ?source_shape) ?entry))
@@ -3905,7 +3661,6 @@
     (let view_layout (BitOffsetExpressionLayoutLit ?composed ?shape ?bit_width))
     (let view_lt (LayoutTensorLit ?out_logical view_layout))
     (bit-to-element-demand view_layout)
-    (element-to-strided-demand view_lt)
   )
 )
 
@@ -4183,112 +3938,11 @@
 ; mismatch is a genuine authoring error and collides loudly.
 (function view-arity-lock (LogicalTensor) i64 :no-merge)
 
-; COORDINATE-EXTENT LOCK: every CoordVar(axis, extent) reachable inside a
-; demanded expression must carry the SAME extent class as its axis's dim
-; in the governing shape (axis 0 = innermost = last dim — the standing
-; convention, now enforced). Demanded by iota expressions against their
-; own shape and by every view entry against the view's output shape; the
-; descent walks each IntExpr constructor; the leaf rule writes the dim
-; AND the extent into one :no-merge slot keyed (shape, axis) — at this
-; stratum a collision is a genuinely wrong extent, the loud death the
-; documented convention never had.
-(relation extent-lock-demand (IntExpr Shape))
-(relation extent-lock-list-demand (IntExprList Shape))
-(rule
-  (
-    (extent-lock-list-demand (IntExprCons ?head_expression ?rest_list) ?shape)
-  )
-  (
-    (extent-lock-demand ?head_expression ?shape)
-    (extent-lock-list-demand ?rest_list ?shape)
-  )
-  :ruleset fixpoint-invariants
-)
-(rule
-  (
-    (extent-lock-demand (IntAdd ?lhs ?rhs) ?shape)
-  )
-  (
-    (extent-lock-demand ?lhs ?shape)
-    (extent-lock-demand ?rhs ?shape)
-  )
-  :ruleset fixpoint-invariants
-)
-(rule
-  (
-    (extent-lock-demand (IntMul ?lhs ?rhs) ?shape)
-  )
-  (
-    (extent-lock-demand ?lhs ?shape)
-    (extent-lock-demand ?rhs ?shape)
-  )
-  :ruleset fixpoint-invariants
-)
-(rule
-  (
-    (extent-lock-demand (IntTruncDiv ?lhs ?rhs) ?shape)
-  )
-  (
-    (extent-lock-demand ?lhs ?shape)
-    (extent-lock-demand ?rhs ?shape)
-  )
-  :ruleset fixpoint-invariants
-)
-(rule
-  (
-    (extent-lock-demand (IntTruncRem ?lhs ?rhs) ?shape)
-  )
-  (
-    (extent-lock-demand ?lhs ?shape)
-    (extent-lock-demand ?rhs ?shape)
-  )
-  :ruleset fixpoint-invariants
-)
-(rule
-  (
-    (extent-lock-demand (IntCeilDiv ?lhs ?rhs) ?shape)
-  )
-  (
-    (extent-lock-demand ?lhs ?shape)
-    (extent-lock-demand ?rhs ?shape)
-  )
-  :ruleset fixpoint-invariants
-)
-(rule
-  (
-    (extent-lock-demand (IntMin ?lhs ?rhs) ?shape)
-  )
-  (
-    (extent-lock-demand ?lhs ?shape)
-    (extent-lock-demand ?rhs ?shape)
-  )
-  :ruleset fixpoint-invariants
-)
-(rule
-  (
-    (extent-lock-demand (IntMax ?lhs ?rhs) ?shape)
-  )
-  (
-    (extent-lock-demand ?lhs ?shape)
-    (extent-lock-demand ?rhs ?shape)
-  )
-  :ruleset fixpoint-invariants
-)
-(function axis-extent-lock (Shape i64) IntExpr :no-merge)
-(rule
-  (
-    (extent-lock-demand ?expression ?shape)
-    (= ?expression (CoordVar ?axis ?extent))
-    (= ?shape (ShapeLit ?dim_list))
-    ; nth-from-end is ZERO-based, matching the 0-based axis levels:
-    ; axis k reads dim k directly (no bridge).
-    (= ?dim (expr-list-nth-from-end ?dim_list ?axis))
-  )
-  (
-    (set (axis-extent-lock ?shape ?axis) ?dim)
-    (set (axis-extent-lock ?shape ?axis) ?extent)
-  )
-  :ruleset fixpoint-invariants
-)
+; COORDINATE-EXTENT LOCK: DELETED (scoped-CoordVar spike). A
+; coordinate now carries its owner shape and its extent IS the owner's
+; dim by construction — the extent-vs-shape agreement this stratum
+; policed is unrepresentable to violate, so the lock, its descent
+; walk, and its demand seeds (iota/fixpoint.egg,
+; index_map_apply/fixpoint_3.egg) are removed rather than enforced.
 
 ;; @SPLICE fixpoint

@@ -14,8 +14,8 @@
 (let window_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprCons (IntLit 5) (IntExprNil)))))
 (let window_expr
   (IntAdd
-    (IntMul (CoordVar 1 (IntLit 3)) (IntLit 5))
-    (CoordVar 0 (IntLit 5))))
+    (IntMul (CoordVar window_shape 1) (IntLit 5))
+    (CoordVar window_shape 0)))
 (let linear_iota (LogicalIota window_expr window_shape))
 
 ; The canonical layout the source-op mint must produce.

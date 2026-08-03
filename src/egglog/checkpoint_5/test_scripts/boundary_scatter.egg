@@ -21,7 +21,7 @@
 (let position_layout (RightMajorContiguousElementLayoutLit row_shape (bits-of (Int))))
 (let position_layout_tensor (LayoutTensorLit position_logical position_layout))
 
-(let column_iota_logical (LogicalIota (CoordVar 0 (IntLit 4)) row_shape))
+(let column_iota_logical (LogicalIota (CoordVar row_shape 0) row_shape))
 
 (let updated_logical
   (LogicalScatter cache_logical
@@ -59,12 +59,12 @@
 (let output
   (BufferOutputLit (BufferTensorCons updated_output_buffer_tensor (BufferTensorNil))))
 
-(run-schedule (saturate (run)) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; Iota authoring contract: every constructed iota demands its expression's
 ; bounds — an absent entry fails the check loudly at the fixpoint.
-(check (= ?demanded_lower (lower-bound-of (CoordVar 0 (IntLit 4)))))
-(check (= ?demanded_upper (upper-bound-of (CoordVar 0 (IntLit 4)))))
+(check (= ?demanded_lower (lower-bound-of (CoordVar row_shape 0))))
+(check (= ?demanded_upper (upper-bound-of (CoordVar row_shape 0))))
 
 ; Both implementations are available on the shared output layout tensor.
 (check
