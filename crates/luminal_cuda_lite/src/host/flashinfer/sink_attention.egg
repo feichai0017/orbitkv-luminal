@@ -194,7 +194,7 @@
     )
     (
         (let ?fi (Op (SinkAttention
-            ?nheads (MDiv ?kvdim ?hdim) ?hdim (MVar "s") ?scale_val ?window_val)
+            ?nheads (MDiv ?kvdim ?hdim) ?hdim (MVar "s") ?scale_val ?window_val 1.0)
             (ICons ?q (ICons ?kp (ICons ?vp (ICons ?g
                 (ICons ?qoi (ICons ?kvi (ICons ?s (INil))))))))))
         (union ?out ?fi)
@@ -202,4 +202,133 @@
     )
     :ruleset kernel_fuse_late2
     :name "SinkAttention op"
+)
+
+; ═══════════════════════════════════════════════════════════════════════════
+; Sink-FREE paged attention (llama3 and any plain-softmax GQA model).
+;
+; Why this lives here and not in flashinfer_attention.egg: that rule recovers
+; qo_indptr/kv_indptr by ANALYSING THE MASK EXPRESSION and explicitly refuses a
+; precomputed mask Input, and its premise assumes an F32 chain (it binds
+; Mul(gathered, 1.0) straight onto the Gather). An engine with a host-built
+; mask and a bf16 KV pool can satisfy neither. This rule family already solves
+; both: sa_masked accepts a host-mask Input, and the op takes the indptrs
+; explicitly by name.
+;
+; Reuses sa_masked verbatim — it binds ?scores unconstrained, so the Cast that
+; a bf16 QK reduce forces is not a blocker here.
+;
+; Differences from the sink chain, taken from a real llama3 HLIR dump:
+;   - row max used directly (no lt-select against a sink)
+;   - denominator is Recip(numsum) (no sink term added)
+;   - K/V carry an explicit Mul(_, 1.0) GQA contiguity barrier
+;   - the QK reduce is bf16 and cast to F32 after
+; ═══════════════════════════════════════════════════════════════════════════
+
+(relation pa_island (IR IR IR IR IR Expression Expression Expression f64 f64))
+
+(rule
+    (
+        ; ── K/V pool scatters sharing one flat scatter index ──
+        (= ?k_pool (Op (Scatter ?ksd ?ksdst ?ksis ?ksistr ?ksss)
+            (ICons ?k_dest (ICons ?scat_idx (ICons ?k_src (INil))))))
+        (= ?v_pool (Op (Scatter ?vsd ?vsdst ?vsis ?vsistr ?vsss)
+            (ICons ?v_dest (ICons ?scat_idx (ICons ?v_src (INil))))))
+
+        ; ── Context gathers from both pools via ONE flat gather index ──
+        (= ?k_gathered (Op (Gather
+            (ECons (MVar "c") (ECons ?kvdim (ENil)))
+            ?kg_a
+            (ECons ?nslots (ECons ?kvdim2 (ENil)))
+            ?kg_b)
+            (ICons ?flat_gidx (ICons ?k_pool (INil)))))
+        (= ?v_gathered (Op (Gather
+            (ECons (MVar "c") (ECons ?kvdim3 (ENil)))
+            ?vg_a
+            (ECons ?nslots2 (ECons ?kvdim4 (ENil)))
+            ?vg_b)
+            (ICons ?flat_gidx (ICons ?v_pool (INil)))))
+
+        ; ── GQA broadcast barriers: Mul(gathered, 1.0) ──
+        (= ?k_gqa (Op (Mul ?kq_s ?kq_a ?kq_b ?kq_o)
+            (ICons ?k_gathered (ICons ?k_one (INil)))))
+        (const_like ?k_one 1.000000)
+        (= ?v_gqa (Op (Mul ?vq_s ?vq_a ?vq_b ?vq_o)
+            (ICons ?v_gathered (ICons ?v_one (INil)))))
+        (const_like ?v_one 1.000000)
+        ; V is cast up so the P·V product — and the output point — is F32,
+        ; which is the dtype the op emits.
+        (= ?v_ctx (Op (Cast ?vc_sz (F32)) (ICons ?v_gqa (INil))))
+
+        ; ── Q: the bf16 island operand is simply the QK matmul's first
+        ; operand, bound with NO barrier constraint — matching both the sink
+        ; rule above and flashinfer_attention.egg, which each bind `?q`
+        ; unconstrained. Requiring `Mul(q, 1.0)` here would pin q to a
+        ; CONTIGUITY BARRIER (token-major), and the op's transpose kernel —
+        ; which reads src heads-major — would then double-transpose it.
+
+        ; ── Q·K^T: bf16 mul + reduce over hd, then cast up ──
+        (= ?qk (Op (Mul
+            (ECons ?nheads (ECons (MVar "s") (ECons (MVar "c") (ECons ?hdim (ENil)))))
+            ?qk_a ?qk_b ?qk_o)
+            (ICons ?q_bf (ICons ?k_gqa (INil)))))
+        (= ?scores_bf (Op (Sum ?ss_shape ?hdim ?ss_in ?ss_iter ?ss_out)
+            (ICons ?qk (INil))))
+        (= ?scores (Op (Cast ?sc_sz (F32)) (ICons ?scores_bf (INil))))
+        (flashinfer_head_dim_ok_16bit ?hdim)
+
+        ; ── Masked scores: reuse the sink rule's fact (host-mask Input) ──
+        (sa_masked ?masked ?scores ?scale_val ?window_val)
+
+        ; ── Plain softmax: max, shift, exp2, sum, recip ──
+        (= ?rmax (Op (Max ?rm_shape (MVar "c") ?rm_in ?rm_iter ?rm_out)
+            (ICons ?masked (INil))))
+        (= ?negmax (Op (Mul ?nm_s ?nm_a ?nm_b ?nm_o)
+            (ICons ?rmax (ICons ?neg1 (INil)))))
+        (const_like ?neg1 -1.000000)
+        (= ?shifted (Op (Add ?sh_s ?sh_a ?sh_b ?sh_o)
+            (ICons ?masked (ICons ?negmax (INil)))))
+        (= ?sc2 (Op (Mul ?s2_s ?s2_a ?s2_b ?s2_o)
+            (ICons ?shifted (ICons ?log2e (INil)))))
+        (const_like ?log2e 1.442695)
+        (= ?num (Op (Exp2 ?ex_s ?ex_in ?ex_out) (ICons ?sc2 (INil))))
+        (= ?numsum (Op (Sum ?ns_shape (MVar "c") ?ns_in ?ns_iter ?ns_out)
+            (ICons ?num (INil))))
+        (= ?rdenom (Op (Recip ?r_s ?r_in ?r_out) (ICons ?numsum (INil))))
+        (= ?probs (Op (Mul ?p_s ?p_a ?p_b ?p_o)
+            (ICons ?num (ICons ?rdenom (INil)))))
+
+        ; ── P·V: mul + reduce over c → the F32 output point ──
+        (= ?pv (Op (Mul
+            (ECons ?nheads2 (ECons (MVar "s") (ECons ?hdim2 (ECons (MVar "c") (ENil)))))
+            ?pv_a ?pv_b ?pv_o)
+            (ICons ?probs (ICons ?v_ctx (INil)))))
+        (= ?out (Op (Sum ?o_shape (MVar "c") ?o_in ?o_iter ?o_out)
+            (ICons ?pv (INil))))
+    )
+    (
+        (pa_island ?out ?q_bf ?k_pool ?v_pool ?flat_gidx
+            ?nheads ?kvdim ?hdim ?scale_val ?window_val)
+    )
+    :ruleset kernel_fuse_late
+    :name "PagedAttention (sink-free) island fact"
+)
+
+(rule
+    (
+        (pa_island ?out ?q ?kp ?vp ?g ?nheads ?kvdim ?hdim ?scale_val ?window_val)
+        (= ?qoi (Input ?qo_idx "qo_indptr" (Int)))
+        (= ?kvi (Input ?kv_idx "kv_indptr" (Int)))
+    )
+    (
+        ; has_sinks = 0.0 → six inputs; execute() supplies a neutral sink buffer.
+        (let ?fi (Op (SinkAttention
+            ?nheads (MDiv ?kvdim ?hdim) ?hdim (MVar "s") ?scale_val ?window_val 0.0)
+            (ICons ?q (ICons ?kp (ICons ?vp (ICons ?g
+                (ICons ?qoi (ICons ?kvi (INil)))))))))
+        (union ?out ?fi)
+        (set (dtype ?fi) (F32))
+    )
+    :ruleset kernel_fuse_late2
+    :name "PagedAttention (sink-free) op"
 )

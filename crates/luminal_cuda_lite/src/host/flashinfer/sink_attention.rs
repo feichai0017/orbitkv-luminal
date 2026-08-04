@@ -40,6 +40,13 @@ use super::{INT_WORKSPACE_SIZE, bytes_to_i32_vec, flashinfer_workspaces, page_lo
 static SCRATCH: std::sync::Mutex<Option<(usize, crate::cudarc::driver::CudaSlice<u8>)>> =
     std::sync::Mutex::new(None);
 
+/// Sink value making the kernel's sink-augmented softmax degenerate to plain
+/// softmax. NOT -inf: a fully-masked row would give `-inf - -inf = NaN`.
+/// -1e30 underflows `exp2` to exactly 0 while staying finite.
+const NEUTRAL_SINK: f32 = -1.0e30;
+static NEUTRAL_SINKS: std::sync::Mutex<Option<(usize, crate::cudarc::driver::CudaSlice<u8>)>> =
+    std::sync::Mutex::new(None);
+
 #[derive(Debug)]
 pub struct SinkAttention {
     pub num_qo_heads: usize,
@@ -52,6 +59,13 @@ pub struct SinkAttention {
     /// FlashInfer window_left convention (visible previous positions);
     /// -1 = full attention. Selects the swa .so variant at compile time.
     pub window_left: i64,
+    /// Whether the matched chain had per-head sink logits. `false` is plain
+    /// softmax (llama3): no sink atoms, so no 7th input to wire. The kernel has
+    /// no sink-free mode and rejects null, but its math degenerates exactly —
+    /// `m_new = (log_sink > m) ? log_sink : m`,
+    /// `d_new = exp2(log_sink - m_new) + d*scale` — so `execute` feeds a
+    /// neutral buffer instead of branching the kernel.
+    pub has_sinks: bool,
 }
 
 impl Default for SinkAttention {
@@ -63,6 +77,7 @@ impl Default for SinkAttention {
             batch_dim: Expression::default(),
             sm_scale: 0.0,
             window_left: -1,
+            has_sinks: true,
         }
     }
 }
@@ -79,13 +94,14 @@ impl EgglogOp for SinkAttention {
                 ("batch_dim", EXPRESSION),
                 ("sm_scale", F64),
                 ("window_left", F64),
+                ("has_sinks", F64),
             ],
         )
     }
 
     fn n_inputs(&self) -> usize {
-        // q, k_pool, v_pool, kv_indices, qo_indptr, kv_indptr, sinks
-        7
+        // q, k_pool, v_pool, kv_indices, qo_indptr, kv_indptr[, sinks]
+        if self.has_sinks { 7 } else { 6 }
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -129,6 +145,12 @@ impl EgglogOp for SinkAttention {
             .parse::<f64>()
             .unwrap()
             .round() as i64;
+        let has_sinks = egraph.enodes[kind_children[6]]
+            .0
+            .replace('"', "")
+            .parse::<f64>()
+            .unwrap()
+            != 0.0;
 
         let extracted = Self {
             num_qo_heads,
@@ -137,6 +159,7 @@ impl EgglogOp for SinkAttention {
             batch_dim,
             sm_scale,
             window_left,
+            has_sinks,
         };
 
         // JIT at extract time so the ~45s nvcc cost never lands inside a
@@ -148,15 +171,17 @@ impl EgglogOp for SinkAttention {
         let flat_idx_node = input_enodes[3];
         let gather_idx = super::find_indptrs::try_find_compact_gather_idx(egraph, flat_idx_node)
             .expect("SinkAttention matched a gather without recoverable compact gather_idx");
-        let final_inputs = vec![
+        let mut final_inputs = vec![
             input_enodes[0], // q (bf16)
             input_enodes[1], // k_pool
             input_enodes[2], // v_pool
             gather_idx,      // compact kv_indices
             input_enodes[4], // qo_indptr
             input_enodes[5], // kv_indptr
-            input_enodes[6], // sinks (f32)
         ];
+        if has_sinks {
+            final_inputs.push(input_enodes[6]); // sinks (f32)
+        }
 
         let op = LLIROp::new::<dyn HostOp>(Box::new(extracted) as Box<dyn HostOp>);
         (op, final_inputs)
@@ -176,9 +201,11 @@ impl HostOp for SinkAttention {
         buffers: &FxHashMap<NodeIndex, DeviceBuffer>,
         _dyn_map: &FxHashMap<char, usize>,
     ) -> anyhow::Result<()> {
+        let want = if self.has_sinks { 7 } else { 6 };
         anyhow::ensure!(
-            inputs.len() == 7,
-            "SinkAttention expects 7 inputs, got {}",
+            inputs.len() == want,
+            "SinkAttention expects {want} inputs (has_sinks={}), got {}",
+            self.has_sinks,
             inputs.len()
         );
         let buf = |n: NodeIndex, what: &str| -> anyhow::Result<DeviceBuffer> {
@@ -193,9 +220,40 @@ impl HostOp for SinkAttention {
         let kv_indices = buf(inputs[3], "kv_indices")?;
         let qo_indptr_buf = buf(inputs[4], "qo_indptr")?;
         let kv_indptr_buf = buf(inputs[5], "kv_indptr")?;
-        let sinks = buf(inputs[6], "sinks")?;
+        let mut _neutral_hold = None;
+        let sinks_ptr: u64 = if self.has_sinks {
+            buf(inputs[6], "sinks")?.ptr()
+        } else {
+            let bytes = self.num_qo_heads * std::mem::size_of::<f32>();
+            let mut guard = NEUTRAL_SINKS.lock().unwrap();
+            if guard.as_ref().is_none_or(|(cap, _)| *cap < bytes) {
+                let host = vec![NEUTRAL_SINK; self.num_qo_heads];
+                let mut dev = stream.alloc_zeros::<u8>(bytes)?;
+                stream.memcpy_htod(bytemuck::cast_slice(&host), &mut dev)?;
+                if std::env::var("SA_DEBUG").is_ok() {
+                    // Readback happens HERE, inside the branch that already
+                    // holds `guard`. Re-locking NEUTRAL_SINKS from a second
+                    // site while the guard is live self-deadlocks (std Mutex
+                    // is not reentrant) and silently stalls the whole search.
+                    let back = stream.memcpy_dtov(&dev).unwrap_or_default();
+                    let vals: &[f32] = bytemuck::cast_slice(&back);
+                    eprintln!(
+                        "[SA_DEBUG] nq={} neutral sinks[0..4]={:?}",
+                        self.num_qo_heads,
+                        &vals[..vals.len().min(4)]
+                    );
+                }
+                *guard = Some((bytes, dev));
+            }
+            let ptr = {
+                let (_, dev) = guard.as_ref().unwrap();
+                let (p, _sync) = dev.device_ptr(stream);
+                p
+            };
+            _neutral_hold = Some(guard);
+            ptr
+        };
         let out = buf(self_node, "output")?;
-
         let cu_stream = stream.cu_stream() as *mut std::ffi::c_void;
 
         let lib = jit::ensure_compiled_fa3(self.head_dim, self.window_left >= 0);
@@ -310,7 +368,7 @@ impl HostOp for SinkAttention {
                 k_pool.ptr() as *mut std::ffi::c_void,
                 v_pool.ptr() as *mut std::ffi::c_void,
                 kv_indices.ptr() as *mut i32,
-                sinks.ptr() as *mut f32,
+                sinks_ptr as *mut f32,
                 temp_ptr as *mut std::ffi::c_void,
                 nnz_qo as i32,
                 self.num_qo_heads as i32,
