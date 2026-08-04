@@ -476,6 +476,152 @@ impl<'a> Translator<'a> {
                 return Ok(());
             }
 
+            // Qwen3.5/3.6 op pack
+            "torch.ops.aten.log1p.default" => {
+                // No fused log1p primitive: lower as ln(1 + x) in F32, cast
+                // back. (Loses log1p's near-zero accuracy edge; no observed
+                // model use needs |x| ~ eps.)
+                let a = self.get_input_tensor(node, 0)?;
+                let out_dtype = a.dtype;
+                self.apply_scalar_op(a.cast(DType::F32), 1.0, BinaryOp::Add)
+                    .log()
+                    .cast(out_dtype)
+            }
+            "torch.ops.aten.any.dim" | "torch.ops.aten.any.dims" => {
+                // Boolean OR-reduction = max over the 0/1 cast. dims: single
+                // int (.dim), int list (.dims), or absent (full reduce);
+                // keepdim restores reduced axes as size-1.
+                let a = self.get_input_tensor(node, 0)?;
+                let ndim = a.shape.len();
+                let axes: Vec<usize> = match self.get_ints_arg(node, 1) {
+                    Ok(dims) if !dims.is_empty() => {
+                        dims.iter().map(|&d| normalize_dim(d, ndim)).collect()
+                    }
+                    _ => match self.get_int_arg(node, 1) {
+                        Ok(d) => vec![normalize_dim(d, ndim)],
+                        _ => (0..ndim).collect(),
+                    },
+                };
+                let keepdim = self.get_bool_arg(node, 2).unwrap_or(false);
+                let mut r = a.cast(DType::F32).max(axes.clone()).cast(DType::Bool);
+                if keepdim {
+                    let mut sorted = axes;
+                    sorted.sort_unstable();
+                    for ax in sorted {
+                        r = r.unsqueeze(ax);
+                    }
+                }
+                r
+            }
+            "torch.ops.aten.copy.default" => {
+                // Functionalized in-place copy(self, src): the result is src
+                // broadcast to self's shape and cast to self's dtype —
+                // self's values are irrelevant.
+                let dst = self.get_input_tensor(node, 0)?;
+                let src = self.get_input_tensor(node, 1)?.cast(dst.dtype);
+                let (_, src_b) = broadcast_binary(dst, src);
+                src_b
+            }
+            "torch.ops.aten.constant_pad_nd.default" => {
+                // aten pad list runs LAST dim first: (last_lo, last_hi,
+                // next_lo, next_hi, ...); convert to front-to-back pairs for
+                // the frontend `pad`.
+                let a = self.get_input_tensor(node, 0)?;
+                let pads = self.get_ints_arg(node, 1)?;
+                let value = self.get_float_arg(node, 2).unwrap_or(0.0) as f32;
+                let ndim = a.shape.len();
+                anyhow::ensure!(
+                    pads.len() % 2 == 0 && pads.len() / 2 <= ndim,
+                    "constant_pad_nd: bad pad list (len {})",
+                    pads.len()
+                );
+                // Negative pads TRIM that edge (torch semantics); decompose
+                // into slice_along trims + non-negative pads.
+                let mut t = a;
+                let mut spec: Vec<(Expression, Expression)> = vec![(0.into(), 0.into()); ndim];
+                for i in 0..pads.len() / 2 {
+                    let d = ndim - 1 - i;
+                    let (lo, hi) = (pads[2 * i], pads[2 * i + 1]);
+                    if lo < 0 || hi < 0 {
+                        let size = t.shape.dims[d].to_usize().ok_or_else(|| {
+                            anyhow::anyhow!("constant_pad_nd: trimming needs a concrete dim size")
+                        })?;
+                        let s = (-lo).max(0) as usize;
+                        let e = size - (-hi).max(0) as usize;
+                        anyhow::ensure!(s <= e, "constant_pad_nd: over-trimmed dim {d}");
+                        t = t.slice_along(s..e, d);
+                    }
+                    spec[d] = (
+                        Expression::from(lo.max(0) as usize),
+                        Expression::from(hi.max(0) as usize),
+                    );
+                }
+                t.pad(spec, value)
+            }
+            "torch.ops.aten.slice_scatter.default" => {
+                // (self, src, dim=0, start=None, end=None, step=1): write src
+                // over self[start..end] along dim — lowered as
+                // self[..start] ++ src ++ self[end..] via concat. step must
+                // be 1.
+                let dst = self.get_input_tensor(node, 0)?;
+                let src = self.get_input_tensor(node, 1)?;
+                let ndim = dst.shape.len();
+                let dim = normalize_dim(self.get_int_arg(node, 2).unwrap_or(0), ndim);
+                let size = dst.shape.dims[dim]
+                    .to_usize()
+                    .ok_or_else(|| anyhow::anyhow!("slice_scatter: dim size must be concrete"))?
+                    as i64;
+                let norm = |v: i64| -> usize {
+                    (if v < 0 { size + v } else { v }).clamp(0, size) as usize
+                };
+                let start = norm(self.get_int_arg(node, 3).unwrap_or(0));
+                let end = norm(self.get_int_arg(node, 4).unwrap_or(size));
+                let step = self.get_int_arg(node, 5).unwrap_or(1).max(1) as usize;
+                let src = src.cast(dst.dtype);
+                if step == 1 {
+                    let mut r = src;
+                    if start > 0 {
+                        r = dst.slice_along(0..start, dim).concat_along(r, dim);
+                    }
+                    if end < size as usize {
+                        r = r.concat_along(dst.slice_along(end..size as usize, dim), dim);
+                    }
+                    r
+                } else {
+                    // Strided write (Qwen3-VL deepstack uses step=3): place
+                    // src values at offsets start, start+step, ... by
+                    // interleaving zeros (unsqueeze -> pad -> merge), and
+                    // build the hit-mask by running a ones-tensor through the
+                    // IDENTICAL construction; then arithmetic select. 0/1
+                    // multipliers are exact in every dtype.
+                    let size = size as usize;
+                    let n = src.shape.dims[dim].to_usize().ok_or_else(|| {
+                        anyhow::anyhow!("slice_scatter: src dim size must be concrete")
+                    })?;
+                    let interleave = |t: GraphTensor| -> GraphTensor {
+                        let t = t
+                            .unsqueeze(dim + 1)
+                            .pad_along(0, step - 1, dim + 1, 0.0)
+                            .merge_dims(dim, dim + 1);
+                        // trim the (step-1) tail past the last written slot,
+                        // then pad out to the full dim size
+                        let kept = (n * step + 1 - step).min(size - start);
+                        t.slice_along(0..kept, dim)
+                            .pad_along(start, size - start - kept, dim, 0.0)
+                    };
+                    let zeros = self.apply_scalar_op(src.cast(DType::F32), 0.0, BinaryOp::Mul);
+                    let ones = self.apply_scalar_op(zeros, 1.0, BinaryOp::Add);
+                    let mask = interleave(ones).cast(dst.dtype);
+                    let full_src = interleave(src);
+                    let one = self
+                        .graph
+                        .constant_float(1.0)
+                        .cast(dst.dtype)
+                        .expand_rhs(mask.shape);
+                    mask * full_src + (one - mask) * dst
+                }
+            }
+
             // Split
             "torch.ops.aten.split_with_sizes.default" => self.translate_split_with_sizes(node)?,
 

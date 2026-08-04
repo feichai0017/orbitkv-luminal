@@ -2248,6 +2248,83 @@ def test_compare_promotes_to_int64(device: torch.device):
     expected: torch.Tensor = model(x)  # [1, 0, 1]
     actual: torch.Tensor = compiled(x)
     assert torch.equal(actual, expected), f"{actual=} {expected=}"
+# ---- Qwen3.5/3.6 op pack ----------------------------------------------------
+
+
+def test_log1p(device: torch.device):
+    from test_models import Log1pModel
+
+    model = Log1pModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.rand(2, 8, device=device) * 5 + 0.1
+    assert torch.allclose(compiled(x), model(x), atol=1e-5)
+
+
+def test_any_dims(device: torch.device):
+    from test_models import AnyDimsModel
+
+    model = AnyDimsModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.randn(3, 4, 8, device=device)
+    x[0, 0] = -1.0  # ensure at least one all-False row is possible
+    assert torch.equal(compiled(x), model(x))
+
+
+def test_copy_via_clone(device: torch.device):
+    from test_models import CopyChainModel
+
+    model = CopyChainModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.randn(2, 6, device=device)
+    src = torch.randn(2, 6, device=device)
+    assert torch.allclose(compiled(x, src), model(x, src), atol=1e-6)
+
+
+def test_constant_pad_nd(device: torch.device):
+    from test_models import ConstantPadModel
+
+    model = ConstantPadModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.randn(2, 3, 4, device=device)
+    assert torch.allclose(compiled(x), model(x), atol=1e-6)
+
+
+def test_slice_scatter_assign(device: torch.device):
+    from test_models import SliceAssignModel
+
+    model = SliceAssignModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.randn(3, 10, device=device)
+    src = torch.randn(3, 4, device=device)
+    assert torch.allclose(compiled(x, src), model(x, src), atol=1e-6)
+
+
+def test_slice_strided_read(device: torch.device):
+    from test_models import StridedSliceReadModel
+
+    model = StridedSliceReadModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.randn(2, 12, device=device)
+    assert torch.allclose(compiled(x), model(x), atol=1e-6)
+
+
+def test_constant_pad_nd_trim(device: torch.device):
+    from test_models import TrimPadModel
+
+    model = TrimPadModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.randn(2, 6, 5, device=device)
+    assert torch.allclose(compiled(x), model(x), atol=1e-6)
+
+
+def test_slice_scatter_strided(device: torch.device):
+    from test_models import StridedSliceAssignModel
+
+    model = StridedSliceAssignModel().to(device)
+    compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x = torch.randn(3, 12, device=device)
+    src = torch.randn(3, 3, device=device)  # slots 1, 4, 7
+    assert torch.allclose(compiled(x, src), model(x, src), atol=1e-6)
 
 
 def test_mlp_block(device: torch.device):

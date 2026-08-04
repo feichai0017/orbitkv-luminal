@@ -80,9 +80,22 @@ impl<'a> Translator<'a> {
         let output_names = self.parsed.output_names();
         for name in &output_names {
             let tensor = self.get_tensor(name)?;
+            // Reconcile the produced dtype with the PT2-declared output
+            // dtype: the runtime's typed getters read by declaration (e.g.
+            // torch int64 outputs), while lowerings may legitimately produce
+            // a collapsed type internally (iota/arange -> Int). Cast at the
+            // boundary so the buffer always matches the contract.
+            let declared = self
+                .parsed
+                .tensor_meta(name)
+                .map(|meta| crate::pt2_util::torch_dtype_int_to_luminal(meta.dtype));
+            let tensor = match declared {
+                Some(want) if want != tensor.dtype => tensor.cast(want),
+                _ => tensor,
+            };
             let tensor = if tensor.dtype == DType::Bool {
                 tensor.cast(DType::Int).cast(DType::Bool)
-            } else if tensor.dtype == DType::Int {
+            } else if tensor.dtype == DType::Int || tensor.dtype == DType::I64 {
                 tensor
             } else {
                 tensor + 0.0

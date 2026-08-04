@@ -881,3 +881,25 @@ Also: search-time dummy-1 inputs are not the same shape as runtime inputs. Anyth
 5. **Fix**: guard both rules in `cublaslt_mixed_dtype_rewrite.egg` to only fire on `beta == 0.0` (no C input) — changed `?alpha ?beta ?epilogue` → `?alpha 0.0 ?epilogue`. The mixed-first ordering was already safe because beta fusion has its own `(= ?c_dtype (dtype ?c))` guard; only the beta-first-then-cast ordering (residual fused as a bf16 C *before* the cast) was dangerous. Result: nondeterminism loop 12/20 → **0/20 broken**, minimal repro 11/12 → **0/12**. **Do not delete the rule outright** — it still serves the legitimate case `(a[bf16]·b[bf16]).cast(F32) + c[F32]` (an f32 C added *after* the cast, so `c == d == f32`, which cuBLASLt supports): there `mixed_dtype` fires on the `beta=0` matmul and the f32 C beta-fuses cleanly. The guard preserves that; full removal was tried and **breaks** the (default-`#[ignore]`d) Rust tests `cublaslt_rewrites_cover_{,batched_}mixed_low_precision_inputs_f32_output_and_c` in `tests/cublaslt_rewrite_tests.rs`. A separate lesson: the Python pytest suite does **not** cover these Rust `cargo test` cases, so validating an egglog rewrite change requires running both — and `git log`-ing a file's origin commit to see what it was added for.
 
 6. **Principle**: a cuBLASLt op's `c_dtype` **must** equal its actual C buffer's dtype, and any rewrite that changes output/C dtypes must respect whether a real C (beta!=0) input is present — never flip `c_dtype` on a matmul that has a fused C. More generally: **e-graph rewrites must be exactly numerically equivalent**, because the extraction search optimizes for *speed* and will happily pick a faster-but-wrong candidate — it has no reference-correctness check. When a backend bug is nondeterministic and "every part works alone," suspect a non-equivalent rewrite creating a bad candidate that the search sometimes extracts; quantify the rate, then bisect with minimal reproducers and kernel/trace dumps rather than chasing individual ops.
+
+## Boolean SDPA masks are added as 0/1 bias instead of masked_fill (found 2026-07-23, not yet fixed)
+
+1. **Symptom:** every decoder-only HF causal LM (Llama/Qwen/Mistral/GPT-2, 16 models in a top-100
+   sweep) produced finite-but-garbage logits (cosine vs eager 0.2–0.7, some negative) on BOTH the
+   reference and CUDA backends, with bit-identical wrong results across backends. All 31
+   encoder/vision models matched eager to ~1e-5.
+2. **Root cause:** under torch.compile, transformers 5.x materializes a BOOLEAN (1,1,S,S) causal
+   mask and passes it to sdpa positionally with is_causal=False (in eager it uses is_causal=True
+   with no mask — which is why eager references are correct). `translate_sdpa` treats any
+   attn_mask as an additive bias: the bool mask is cast numerically, so allowed positions get +1
+   and masked positions +0 instead of False → -inf. Attention becomes effectively bidirectional.
+3. **Why hard to find:** the existing HF-model tests pin attn_implementation="eager" and the
+   component tests use additive float masks, so the transformers-default sdpa-under-compile path
+   was never exercised. Backend-identical failures falsely suggested a compiler-search issue
+   rather than a translation bug.
+4. **Fix (proposed):** in `translate_sdpa`, branch on mask dtype: Bool → scores += (1 - mask) *
+   -1e9 (masked_fill semantics); float → additive as today. Add a bool-mask SDPA regression test.
+5. **Principle:** for ops with polymorphic argument semantics (bool vs float masks), the
+   translator must branch on dtype, not assume one convention; and integration tests must run the
+   framework's DEFAULT configuration, not just the convenient one — transformers behaves
+   differently under compile than in eager.

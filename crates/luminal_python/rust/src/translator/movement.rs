@@ -247,10 +247,33 @@ impl<'a> Translator<'a> {
         Ok(a)
     }
 
+    /// Post-pass for `aten.slice.Tensor`'s `step` argument: take every
+    /// `step`-th element of an already start/end-sliced dim. Lowered as
+    /// pad-to-multiple -> split_dims(dim, step) -> lane 0 -> merge, the
+    /// read-side mirror of strided slice_scatter.
+    fn apply_slice_step(t: GraphTensor, dim: usize, step: usize) -> Result<GraphTensor> {
+        if step <= 1 {
+            return Ok(t);
+        }
+        let len = t.shape.dims[dim]
+            .to_usize()
+            .ok_or_else(|| anyhow::anyhow!("slice: strided step needs a concrete dim length"))?;
+        let n = len.div_ceil(step);
+        let t = t.pad_along(0, n * step - len, dim, 0.0);
+        Ok(t.split_dims(dim, step)
+            .slice_along(0..1, dim + 1)
+            .merge_dims(dim, dim + 1))
+    }
+
     pub(crate) fn translate_slice(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let dim = self.get_int_arg(node, 1).unwrap_or(0);
         let dim = normalize_dim(dim, a.shape.len());
+        let step = if node.inputs.len() > 4 {
+            self.get_int_arg(node, 4).unwrap_or(1).max(1) as usize
+        } else {
+            1
+        };
 
         let start: Expression = if node.inputs.len() > 2 {
             self.get_expr_arg(node, 2)
@@ -270,11 +293,12 @@ impl<'a> Translator<'a> {
             .unwrap_or(false);
 
         if end_is_sentinel {
-            return Ok(if start.to_usize() == Some(0) {
+            let t = if start.to_usize() == Some(0) {
                 a
             } else {
                 a.slice_along(start.., dim)
-            });
+            };
+            return Self::apply_slice_step(t, dim, step);
         }
 
         let end: Expression = self.get_expr_arg(node, 3)?;
@@ -283,10 +307,10 @@ impl<'a> Translator<'a> {
         if let Some(s) = start.to_usize()
             && let Some(e) = end.to_usize()
         {
-            return Ok(a.slice_along(s..e, dim));
+            return Self::apply_slice_step(a.slice_along(s..e, dim), dim, step);
         }
 
-        Ok(a.slice_along(start..end, dim))
+        Self::apply_slice_step(a.slice_along(start..end, dim), dim, step)
     }
 
     /// `aten.select.int(self, dim, index)` — select element `index` along

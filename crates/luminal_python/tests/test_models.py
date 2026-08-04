@@ -2565,6 +2565,68 @@ class WideIntCompareModel(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         small = torch.full_like(x, 5, dtype=torch.int32)
         return (x > small).to(torch.float32)
+class Log1pModel(torch.nn.Module):
+    """`torch.log1p(x)` — appears in Qwen3.5-family graphs."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.log1p(x)
+
+
+class AnyDimsModel(torch.nn.Module):
+    """`Tensor.any(dim)` on a bool tensor (`aten.any.dims`)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x > 0).any(dim=-1).to(torch.float32)
+
+
+class CopyChainModel(torch.nn.Module):
+    """`y = x.clone(); y.copy_(src)` — functionalizes to `aten.copy`."""
+
+    def forward(self, x: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+        y = x.clone()
+        y.copy_(src)
+        return y + 1.0
+
+
+class StridedSliceReadModel(torch.nn.Module):
+    """`x[:, 1:10:3]` as a READ — `aten.slice.Tensor` with step=3 (the
+    Qwen3-VL mrope interleave pattern)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x[:, 1:10:3] * 2.0
+
+
+class TrimPadModel(torch.nn.Module):
+    """`F.pad` with NEGATIVE pads (edge trimming) — Qwen3.5 uses this."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.pad(x, (-1, 2, 1, -2), value=0.5)
+
+
+class StridedSliceAssignModel(torch.nn.Module):
+    """`y[:, 1:10:3] = src` — `aten.slice_scatter` with step=3 (the
+    Qwen3-VL deepstack write pattern)."""
+
+    def forward(self, x: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+        y = x.clone()
+        y[:, 1:10:3] = src
+        return y * 2.0
+
+
+class ConstantPadModel(torch.nn.Module):
+    """`F.pad(x, pads, value=c)` — `aten.constant_pad_nd`."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.pad(x, (1, 2, 0, 3), value=1.5)
+
+
+class SliceAssignModel(torch.nn.Module):
+    """`y[:, 2:6] = src` — functionalizes to `aten.slice_scatter`."""
+
+    def forward(self, x: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+        y = x.clone()
+        y[:, 2:6] = src
+        return y * 2.0
 
 
 class RepeatModel(torch.nn.Module):

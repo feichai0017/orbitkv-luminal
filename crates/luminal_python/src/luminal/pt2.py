@@ -717,6 +717,19 @@ def pt2_backend(gm, example_inputs, factory=None):
     # same frame" assertions on the next call. The deepcopy is cheap relative
     # to the rest of the export pipeline.
     gm = _copy.deepcopy(gm).eval()
+    # Shrink recognized unrolled-loop motifs before export. Dynamo unrolls
+    # Python loops in model code; when the loop is a known algorithm (e.g.
+    # Qwen3.5/3.6's chunked delta-rule triangular inverse) the unrolled form
+    # dominates the graph. Rewriting here keeps the big graph out of export,
+    # translation, and the e-graph entirely.
+    try:
+        from .fx_passes import apply_pre_export_passes
+
+        apply_pre_export_passes(gm)
+    except Exception as exc:  # never let an optimization break compilation
+        import warnings
+
+        warnings.warn(f"luminal: pre-export pass skipped ({exc})", stacklevel=2)
     # Dynamo-lifted weights stay in the args and flow through torch.export
     # as ordinary inputs, so artifact reuse across same-shape module
     # instances is correct by construction (LUM-631).
