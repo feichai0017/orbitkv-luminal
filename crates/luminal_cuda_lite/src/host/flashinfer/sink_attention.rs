@@ -110,7 +110,12 @@ impl EgglogOp for SinkAttention {
         if crate::device_compute_major() != 9 {
             return vec![];
         }
-        vec![Rule::raw(include_str!("sink_attention.egg"))]
+        vec![
+            Rule::raw(include_str!("sink_attention.egg")),
+            // Sink-free variant (llama3 and other plain-softmax GQA models),
+            // kept in its own file — see its header.
+            Rule::raw(include_str!("paged_attention.egg")),
+        ]
     }
 
     fn extract<'a>(
@@ -230,19 +235,6 @@ impl HostOp for SinkAttention {
                 let host = vec![NEUTRAL_SINK; self.num_qo_heads];
                 let mut dev = stream.alloc_zeros::<u8>(bytes)?;
                 stream.memcpy_htod(bytemuck::cast_slice(&host), &mut dev)?;
-                if std::env::var("SA_DEBUG").is_ok() {
-                    // Readback happens HERE, inside the branch that already
-                    // holds `guard`. Re-locking NEUTRAL_SINKS from a second
-                    // site while the guard is live self-deadlocks (std Mutex
-                    // is not reentrant) and silently stalls the whole search.
-                    let back = stream.memcpy_dtov(&dev).unwrap_or_default();
-                    let vals: &[f32] = bytemuck::cast_slice(&back);
-                    eprintln!(
-                        "[SA_DEBUG] nq={} neutral sinks[0..4]={:?}",
-                        self.num_qo_heads,
-                        &vals[..vals.len().min(4)]
-                    );
-                }
                 *guard = Some((bytes, dev));
             }
             let ptr = {
