@@ -2781,6 +2781,70 @@ mod stage4b_probes {
         assert_eq!(v[2], Some(ChainStride::Unit), "{v:?}");
     }
 
+    /// Scratch probe (Austin's diagonal question, 2026-08-05): does the
+    /// like-term combiner derive the diagonal's coefficient? Also: does
+    /// the REAL diagonal composition produce that folded offset?
+    #[test]
+    #[ignore = "diagnostic — RRX=1 to run"]
+    fn rrx_diagonal_probe() {
+        if std::env::var("RRX").is_err() {
+            return;
+        }
+        let body = r#"
+(let psh (ShapeLit (IntExprCons (IntLit 3) (IntExprCons (IntLit 3) (IntExprNil)))))
+(let plog (LogicalTensorInputLit (LogicalIdLit "p") psh (F32)))
+(let p (RightMajorContiguousElementLayoutLit psh (bits-of (F32))))
+(let plt (LayoutTensorLit plog p))
+(let osh (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
+(let diag (LogicalIndexMapApply plog
+  (IndexMapLit (IntExprCons (CoordVar osh 0) (IntExprCons (CoordVar osh 0) (IntExprNil))))
+  osh))
+(let hand_diag_offset (IntAdd (IntMul (CoordVar osh 0) (IntLit 3)) (CoordVar osh 0)))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+"#;
+        let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph.parse_and_run_program(None, &full).expect("diag program runs");
+        for (label, check) in [
+            ("combiner folds c*3+c == c*4",
+             "(check (= hand_diag_offset (IntMul (CoordVar osh 0) (IntLit 4))))"),
+            ("composed layout HAS the c*4 element spelling",
+             "(check (= (ElementOffsetExpressionLayoutLit (IntMul (CoordVar osh 0) (IntLit 4)) osh (bits-of (F32))) (ElementOffsetExpressionLayoutLit hand_diag_offset osh (bits-of (F32)))))"),
+            ("composed class == the real view layout",
+             "(check (= (LayoutTensorLit diag (ElementOffsetExpressionLayoutLit (IntMul (CoordVar osh 0) (IntLit 4)) osh (bits-of (F32)))) (LayoutTensorLit diag (ElementOffsetExpressionLayoutLit (IntMul (CoordVar osh 0) (IntLit 4)) osh (bits-of (F32))))))"),
+            ("chain-strided [c*4] spelling exists (accumulate arm)",
+             "(check (= (StridedElementLayoutLit osh (IntAffineExprCons (IntMul (CoordVar osh 0) (IntLit 4)) (IntAffineExprNil)) (bits-of (F32))) (ElementOffsetExpressionLayoutLit (IntMul (CoordVar osh 0) (IntLit 4)) osh (bits-of (F32)))))"),
+        ] {
+            let ok = egraph.parse_and_run_program(None, check).is_ok();
+            eprintln!("[rrx-diag] {label:<48} => {}", if ok { "YES" } else { "NO" });
+        }
+    }
+
+    /// G7 MAP-ENTRY RANGE LOCK (Austin ruled 2026-08-05): the
+    /// adversary's degenerate bypass — a map reading an extent-1 parent
+    /// axis at a 5-extent coordinate — must now DIE LOUDLY in the
+    /// invariants stratum instead of composing silently.
+    #[test]
+    fn map_range_lock_fires_on_degenerate_bypass() {
+        let body = r#"
+(let psh (ShapeLit (IntExprCons (IntLit 1) (IntExprCons (IntLit 4) (IntExprNil)))))
+(let plog (LogicalTensorInputLit (LogicalIdLit "p") psh (F32)))
+(let p (RightMajorContiguousElementLayoutLit psh (bits-of (F32))))
+(let plt (LayoutTensorLit plog p))
+(let osh (ShapeLit (IntExprCons (IntLit 5) (IntExprCons (IntLit 4) (IntExprNil)))))
+(let v (LogicalIndexMapApply plog (IndexMapLit (IntExprCons (CoordVar osh 1) (IntExprCons (CoordVar osh 0) (IntExprNil)))) osh))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+"#;
+        let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
+        let err = crate::egglog_snippet::new_egraph()
+            .parse_and_run_program(None, &full)
+            .expect_err("out-of-range map over a degenerate axis must panic");
+        assert!(
+            err.to_string().contains("range lock"),
+            "wrong failure: {err}"
+        );
+    }
+
     /// LIVE REGRESSION (was the pinned Step-4b unsoundness): the
     /// rank-0 -> [1] broadcast that used to weld the zero class (the
     /// recovery walks turned "presentations [1] and [0] are both valid"

@@ -3813,6 +3813,91 @@
   )
   ((affine-place-out (IntAffineExprCons ?h ?t) ?pos ?v (IntAffineExprCons ?v ?t)))
 )
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; OPTIONAL BLOCK — DIAGONAL ACCUMULATE ARMS (2026-08-05)
+;
+; Everything from here to the END marker is ONE removable unit: four
+; extra hit arms for the place fold, letting the chain walk handle an
+; out axis that is read twice (a diagonal view). Removing the block
+; restores the previous behavior exactly: a doubly-read axis finds its
+; slot occupied, the walk stalls, and the view simply has no chain
+; spelling — conservative, nothing else depends on these arms.
+;
+; CERTIFIED ACCUMULATE ARM (diagonal reads, prototyped 2026-08-05): the
+; slot already holds THIS axis's summand — a second read of the same
+; out coordinate ADDS strides (the composed address function's
+; coefficient for a doubly-read coordinate is the stride sum: Austin's
+; 1 + col). Certification is TWO-PART: (1) occupant and incoming value
+; both destructure by the ownership-and-position pattern; (2) the slot's
+; axis is PROVABLY LIVE (extent lower bound >= 2). Part (2) is
+; load-bearing, not hygiene: on a dead axis the occupant class is the
+; ZERO CLASS, the ownership pattern matches EVERY dead resident, and
+; each accumulate output collapses back in as a NEW resident — the
+; generational resident pump (measured: batch=1 specimens detonate
+; >100k tuples without the gate; atomicity clause 3 forbids exactly
+; this destructuring). Dead and undecided slots keep stalling —
+; fail-closed. Four arms cover the x*1 residue (doctrine clause 4).
+; The (IntAdd ?s_old ?s_new) mint is construction-site material,
+; bounded on live slots (one occupant spelling per slot).
+(rule
+  (
+    (affine-place-demand (IntAffineExprCons ?h ?t) ?pos ?v)
+    (affine-len-out ?t ?pos)
+    (= ?h (IntMul (CoordVar ?osh ?pos) ?s_old))
+    (= ?v (IntMul (CoordVar ?osh ?pos) ?s_new))
+    (= ?osh (ShapeLit ?odims))
+    (= ?ext (expr-list-nth-from-end ?odims ?pos))
+    (= ?extlow (lower-bound-of ?ext))
+    (>= ?extlow (bigint 2))
+  )
+  ((affine-place-out (IntAffineExprCons ?h ?t) ?pos ?v
+    (IntAffineExprCons (IntMul (CoordVar ?osh ?pos) (IntAdd ?s_old ?s_new)) ?t)))
+)
+(rule
+  (
+    (affine-place-demand (IntAffineExprCons ?h ?t) ?pos ?v)
+    (affine-len-out ?t ?pos)
+    (= ?h (IntMul (CoordVar ?osh ?pos) ?s_old))
+    (= ?v (CoordVar ?osh ?pos))
+    (= ?osh (ShapeLit ?odims))
+    (= ?ext (expr-list-nth-from-end ?odims ?pos))
+    (= ?extlow (lower-bound-of ?ext))
+    (>= ?extlow (bigint 2))
+  )
+  ((affine-place-out (IntAffineExprCons ?h ?t) ?pos ?v
+    (IntAffineExprCons (IntMul (CoordVar ?osh ?pos) (IntAdd ?s_old (IntLit 1))) ?t)))
+)
+(rule
+  (
+    (affine-place-demand (IntAffineExprCons ?h ?t) ?pos ?v)
+    (affine-len-out ?t ?pos)
+    (= ?h (CoordVar ?osh ?pos))
+    (= ?v (IntMul (CoordVar ?osh ?pos) ?s_new))
+    (= ?osh (ShapeLit ?odims))
+    (= ?ext (expr-list-nth-from-end ?odims ?pos))
+    (= ?extlow (lower-bound-of ?ext))
+    (>= ?extlow (bigint 2))
+  )
+  ((affine-place-out (IntAffineExprCons ?h ?t) ?pos ?v
+    (IntAffineExprCons (IntMul (CoordVar ?osh ?pos) (IntAdd (IntLit 1) ?s_new)) ?t)))
+)
+(rule
+  (
+    (affine-place-demand (IntAffineExprCons ?h ?t) ?pos ?v)
+    (affine-len-out ?t ?pos)
+    (= ?h (CoordVar ?osh ?pos))
+    (= ?v (CoordVar ?osh ?pos))
+    (= ?osh (ShapeLit ?odims))
+    (= ?ext (expr-list-nth-from-end ?odims ?pos))
+    (= ?extlow (lower-bound-of ?ext))
+    (>= ?extlow (bigint 2))
+  )
+  ((affine-place-out (IntAffineExprCons ?h ?t) ?pos ?v
+    (IntAffineExprCons (IntMul (CoordVar ?osh ?pos) (IntLit 2)) ?t)))
+)
+; END OPTIONAL BLOCK — DIAGONAL ACCUMULATE ARMS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (rule
   (
     (affine-place-demand (IntAffineExprCons ?h ?t) ?pos ?v)
@@ -4181,5 +4266,78 @@
 ; policed is unrepresentable to violate, so the lock, its descent
 ; walk, and its demand seeds (iota/fixpoint.egg,
 ; index_map_apply/fixpoint_3.egg) are removed rather than enforced.
+
+; MAP-ENTRY RANGE LOCK (G7, Austin ruled 2026-08-05): the subst
+; in-range guard checks only coordinates that OCCUR in the composed
+; expression — on an extent-1 parent axis the collapse folds the
+; summand away first, so an out-of-range entry aimed at that axis is
+; never inspected (the adversary's degenerate bypass; pre-chain it
+; manufactured false testimony). This lock walks every map's entries
+; against the parent's dims and PANICS on a provable violation: a
+; coordinate entry whose own axis extent provably exceeds the parent
+; axis extent, or a literal entry provably outside [0, extent).
+; Arithmetic entries (div/rem, slice starts) have no arm yet — they
+; return with their composition stages. Undecidable comparisons stay
+; silent (tripwires detect violations; they cannot demand proofs).
+(relation map-range-walk (IntExprList IntExprList))
+(rule
+  (
+    (= ?out_logical (LogicalIndexMapApply ?in_logical ?map ?shape))
+    (= ?map (IndexMapLit ?entries))
+    (= (shape-of ?in_logical) (ShapeLit ?pdims))
+  )
+  ((map-range-walk ?entries ?pdims))
+  :ruleset fixpoint-invariants
+)
+(rule
+  ((map-range-walk (IntExprCons ?e ?et) (IntExprCons ?d ?dt)))
+  ((map-range-walk ?et ?dt))
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (map-range-walk (IntExprCons ?e ?et) (IntExprCons ?d ?dt))
+    (= ?e (IntLit ?v))
+    (= ?d (IntLit ?ext))
+    (>= ?v ?ext)
+  )
+  ((panic "map-entry range lock: literal entry >= parent axis extent"))
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (map-range-walk (IntExprCons ?e ?et) (IntExprCons ?d ?dt))
+    (= ?e (IntLit ?v))
+    (< ?v 0)
+  )
+  ((panic "map-entry range lock: negative literal entry"))
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (map-range-walk (IntExprCons ?e ?et) (IntExprCons ?d ?dt))
+    (= ?e (CoordVar ?osh ?k))
+    (= ?osh (ShapeLit ?odims))
+    (= ?oext (expr-list-nth-from-end ?odims ?k))
+    (= ?oext (IntLit ?ov))
+    (= ?d (IntLit ?pv))
+    (> ?ov ?pv)
+  )
+  ((panic "map-entry range lock: coordinate ranges past the parent axis extent"))
+  :ruleset fixpoint-invariants
+)
+(rule
+  (
+    (map-range-walk (IntExprCons ?e ?et) (IntExprCons ?d ?dt))
+    (= ?e (CoordVar ?osh ?k))
+    (= ?osh (ShapeLit ?odims))
+    (= ?oext (expr-list-nth-from-end ?odims ?k))
+    (= ?olower (lower-bound-of ?oext))
+    (= ?dupper (upper-bound-of ?d))
+    (> ?olower ?dupper)
+  )
+  ((panic "map-entry range lock: coordinate extent provably exceeds parent axis extent"))
+  :ruleset fixpoint-invariants
+)
 
 ;; @SPLICE fixpoint
