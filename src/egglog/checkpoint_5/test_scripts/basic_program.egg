@@ -63,7 +63,11 @@
     (IntMul (CoordVar x_shape 1) (IntLit 8))
     (IntMul (CoordVar x_shape 0) (IntLit 2))))
 
-(let x_input_layout (StridedElementLayoutLit x_shape x_input_strides (bits-of x_dtype)))
+(let x_input_layout (StridedElementLayoutLit x_shape
+    (IntAffineExprCons (IntMul (CoordVar x_shape 1) (IntLit 8))
+      (IntAffineExprCons (IntMul (CoordVar x_shape 0) (IntLit 2))
+      (IntAffineExprNil)))
+    (bits-of x_dtype)))
 (let x_input_layout_tensor (LayoutTensorLit x_logical x_input_layout))
 
 (let x_input_buffer_id (BufferLit 6))
@@ -137,6 +141,10 @@
 ; Substitution pin (the SWAP case — sequential substitution would botch a
 ; transpose): compose the strided input offset with the transpose map.
 (subst-demand x_input_element_offset x_to_z_transpose_map x_shape)
+
+
+; SOURCE SEAM rows for list-authored strided layouts (affine migration)
+(strided-lists x_input_layout x_shape (IntExprCons (IntLit 4) (IntExprCons (IntLit 2) (IntExprNil))) x_input_strides (bits-of x_dtype))
 
 (run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 

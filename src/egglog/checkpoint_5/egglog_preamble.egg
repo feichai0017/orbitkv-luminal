@@ -105,6 +105,40 @@
   )
 
   ; Expression List
+  ; INT AFFINE EXPR LIST (Austin's chain design, 2026-08-04): one
+  ; summand per axis (from-end), each the IntExpr class of
+  ; (IntMul (CoordVar owner axis) stride). Coordinate and stride are
+  ; never separated: a dead axis pulls its WHOLE summand into the zero
+  ; class, chains that differ only in dead slots become congruent, and
+  ; the extensional quotient happens by hash-consing.
+  ;
+  ; DOCTRINE (codified at the affine landing; every clause was bought
+  ; with a measured divergence or a verified unsoundness):
+  ;  1. A term's cost is the set of committed patterns that can NAME
+  ;     it. Structure constructors (this list, its cons cells) appear
+  ;     in no ring rule's pattern and are free at any depth; scalar
+  ;     IntAdd/IntMul nodes are named by the entire ring-and-
+  ;     certificate machinery. Scalar material is minted only at
+  ;     CONSTRUCTION SITES (the strided-lists seam, the foldr), never
+  ;     per composed generation — ONE scalar spelling family per
+  ;     class. (Per-level spine unions and the in-phase rejoin ladder
+  ;     both detonated; the structure-only variants saturated.)
+  ;  2. Provenance is WRITTEN where lists are inputs (strided-lists,
+  ;     at construction sites), never RECOGNIZED from folded terms:
+  ;     the +0 fold erases dead axes, so axis alignment is
+  ;     unrecoverable downstream (the deleted recovery walks' lesson).
+  ;  3. Zero-class summands are ATOMIC: propagate them as the zero
+  ;     contribution, never destructure a spelling out of the zero
+  ;     class (the representative-matching weld).
+  ;  4. Identities leave canonical residues: x*1 subsumes its product
+  ;     node, so a bare coordinate IS the stride-1 summand. Rules
+  ;     matching the product shape carry the residue arm; fixture
+  ;     chains authored after a run-schedule use canonical spellings
+  ;     ((IntLit 0) for stride-0 slots, the coordinate for stride-1).
+  (IntAffineExprList
+    (IntAffineExprNil)
+    (IntAffineExprCons IntExpr IntAffineExprList))
+
   (IntExprList
     (IntExprCons IntExpr IntExprList)
     (IntExprNil)
@@ -201,7 +235,8 @@
     ; any backend may claim them.
     (BitOffsetExpressionLayoutLit IntExpr Shape BitWidth)
     (ElementOffsetExpressionLayoutLit IntExpr Shape BitWidth)
-    (StridedElementLayoutLit Shape IntExprList BitWidth)
+    ; carries the affine CHAIN; identity IS the presentation.
+    (StridedElementLayoutLit Shape IntAffineExprList BitWidth)
     (RightMajorContiguousElementLayoutLit Shape BitWidth)
     (LeftMajorContiguousElementLayoutLit Shape BitWidth)
   )
@@ -2906,6 +2941,49 @@
 )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; THE SOURCE SEAM (affine migration, 2026-08-04). strided-lists records
+; "this layout was CONSTRUCTED from these (dims, strides) lists" — rows
+; are written only at construction sites (the RM/LM equates below,
+; fixture authoring), NEVER derived from a chain or an expression. All
+; list-based machinery (foldr -> ElementOffset, no-overlap injectivity,
+; contiguous discovery) keys on this seam; the chain and the offset
+; expression are derived from it IN PARALLEL and never from each other.
+(relation strided-lists (Layout Shape IntExprList IntExprList BitWidth))
+
+; Zip a seam row into the affine chain: one (IntMul (CoordVar sh axis)
+; stride) summand per axis, from-end order.
+(relation affine-zip-demand (Shape IntExprList IntExprList))
+(relation affine-zip-out (Shape IntExprList IntExprList IntAffineExprList))
+(rule
+  ((affine-zip-demand ?sh (IntExprCons ?d ?dt) (IntExprCons ?s ?st)))
+  ((affine-zip-demand ?sh ?dt ?st))
+)
+(rule
+  ((affine-zip-demand ?sh (IntExprNil) (IntExprNil)))
+  ((affine-zip-out ?sh (IntExprNil) (IntExprNil) (IntAffineExprNil)))
+)
+(rule
+  (
+    (affine-zip-demand ?sh (IntExprCons ?d ?dt) (IntExprCons ?s ?st))
+    (= ?axis (expr-list-length-of ?dt))
+    (affine-zip-out ?sh ?dt ?st ?tail)
+  )
+  ((affine-zip-out ?sh (IntExprCons ?d ?dt) (IntExprCons ?s ?st)
+    (IntAffineExprCons (IntMul (CoordVar ?sh ?axis) ?s) ?tail)))
+)
+(rule
+  ((strided-lists ?layout ?shape ?dims ?strides ?bits))
+  ((affine-zip-demand ?shape ?dims ?strides))
+)
+(rule
+  (
+    (strided-lists ?layout ?shape ?dims ?strides ?bits)
+    (affine-zip-out ?shape ?dims ?strides ?chain)
+  )
+  ((union ?layout (StridedElementLayoutLit ?shape ?chain ?bits)))
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Equate right-major contiguous element layouts with strided element layouts.
 (rule
   (
@@ -2914,7 +2992,7 @@
       (RightMajorStridesFoldStateLit ?rank ?total-elements ?strides))
   )
   (
-    (union ?right_major_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+    (strided-lists ?right_major_layout (ShapeLit ?dims) ?dims ?strides ?bits)
   )
 )
 
@@ -3003,7 +3081,7 @@
       (LeftMajorStridesFoldStateLit ?rank ?total-elements ?strides))
   )
   (
-    (union ?left_major_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+    (strided-lists ?left_major_layout (ShapeLit ?dims) ?dims ?strides ?bits)
   )
 )
 
@@ -3023,13 +3101,8 @@
 ;   strides = [s2, s1, s0]
 ;   offset  = CoordVar(2,d2)*s2 + CoordVar(1,d1)*s1 + CoordVar(0,d0)*s0
 (rule
-  (
-    (= ?strided_layout (StridedElementLayoutLit ?shape ?strides ?bits))
-    (= ?shape (ShapeLit ?dims))
-  )
-  (
-    (strided-indexing-foldr-demand ?shape ?dims ?strides)
-  )
+  ((strided-lists ?layout ?shape ?dims ?strides ?bits))
+  ((strided-indexing-foldr-demand ?shape ?dims ?strides))
 )
 
 ; Propagate demand towards nil while zipping shape and stride suffixes.
@@ -3156,13 +3229,12 @@
 ; Equate Strided Layouts with Element Offset Expressions
 (rule
   (
-    (= ?strided_layout (StridedElementLayoutLit ?shape ?strides ?bits))
-    (= ?shape (ShapeLit ?dims))
+    (strided-lists ?layout ?shape ?dims ?strides ?bits)
     (= (strided-indexing-foldr-state-of ?shape ?dims ?strides)
       (StridedIndexingFoldRStateLit ?rank ?indexing_expr))
   )
   (
-    (union ?strided_layout (ElementOffsetExpressionLayoutLit ?indexing_expr ?shape ?bits))
+    (union ?layout (ElementOffsetExpressionLayoutLit ?indexing_expr ?shape ?bits))
   )
 )
 
@@ -3200,11 +3272,16 @@
 ;        per layout, nothing speculative; the old dtype gate is subsumed
 ;        by the field).
 
-; --- (3a) Strided -> contiguous discovery ---
+; --- (3a) contiguous discovery, on the CHAIN by CLASS EQUALITY (Austin
+; ruled 2026-08-04): zip the shape's own right/left-major fold into a
+; candidate chain; a layout whose chain IS that class — congruence, no
+; spelling ever opened — is the contiguous layout, so mint the
+; constructor. The ?chain variable appears in the Strided pattern AND
+; as the zip result: one variable, one class, that's the whole test.
+; Reaches chain-only classes (composed views), which the old list-keyed
+; arm never could.
 (rule
-  (
-    (= ?strided_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
-  )
+  ((= ?layout (StridedElementLayoutLit (ShapeLit ?dims) ?chain ?bits)))
   (
     (right-major-strides-demand ?dims)
     (left-major-strides-demand ?dims)
@@ -3212,22 +3289,44 @@
 )
 (rule
   (
-    (= ?strided_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+    (= ?layout (StridedElementLayoutLit ?shape ?chain ?bits))
+    (= ?shape (ShapeLit ?dims))
     (= (right-major-strides-state-of ?dims)
       (RightMajorStridesFoldStateLit ?rank ?total ?strides))
   )
+  ((affine-zip-demand ?shape ?dims ?strides))
+)
+(rule
   (
-    (union ?strided_layout (RightMajorContiguousElementLayoutLit (ShapeLit ?dims) ?bits))
+    (= ?layout (StridedElementLayoutLit ?shape ?chain ?bits))
+    (= ?shape (ShapeLit ?dims))
+    (= (right-major-strides-state-of ?dims)
+      (RightMajorStridesFoldStateLit ?rank ?total ?strides))
+    (affine-zip-out ?shape ?dims ?strides ?chain)
+  )
+  (
+    (union ?layout (RightMajorContiguousElementLayoutLit ?shape ?bits))
   )
 )
 (rule
   (
-    (= ?strided_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
+    (= ?layout (StridedElementLayoutLit ?shape ?chain ?bits))
+    (= ?shape (ShapeLit ?dims))
     (= (left-major-strides-state-of ?dims)
       (LeftMajorStridesFoldStateLit ?rank ?total ?strides))
   )
+  ((affine-zip-demand ?shape ?dims ?strides))
+)
+(rule
   (
-    (union ?strided_layout (LeftMajorContiguousElementLayoutLit (ShapeLit ?dims) ?bits))
+    (= ?layout (StridedElementLayoutLit ?shape ?chain ?bits))
+    (= ?shape (ShapeLit ?dims))
+    (= (left-major-strides-state-of ?dims)
+      (LeftMajorStridesFoldStateLit ?rank ?total ?strides))
+    (affine-zip-out ?shape ?dims ?strides ?chain)
+  )
+  (
+    (union ?layout (LeftMajorContiguousElementLayoutLit ?shape ?bits))
   )
 )
 
@@ -3271,27 +3370,11 @@
 ; Termination contract (the mint-divergence study is the regression):
 ; rows derive from structural spellings only, NEVER from other rows'
 ; values — no successor generators, no row-fed arithmetic.
-(relation strided-presentation (Layout IntExprList))
-
-; Witness: a constructor spelling testifies to its own presentation.
-(rule
-  ((= ?layout (StridedElementLayoutLit ?shape ?strides ?bits)))
-  ((strided-presentation ?layout ?strides))
-)
-
-; Rejoin: testimony mints the constructor spelling and unions at the
-; LAYOUT sort, where identity is extensional by design (the ladder's
-; sanctioned move). Kernels and matchers consuming Strided spellings
-; keep working; multiple constructor spellings in one class are sibling
-; presentations, and any future rule destructuring them inherits the
-; invariant above. Convergent with the witness rule by hash-consing.
-(rule
-  (
-    (strided-presentation ?layout ?strides)
-    (= ?layout (ElementOffsetExpressionLayoutLit ?expr ?shape ?bits))
-  )
-  ((union ?layout (StridedElementLayoutLit ?shape ?strides ?bits)))
-)
+; TESTIMONY RETIRED (affine migration): the chain IN the constructor is
+; the presentation; sibling presentations quotient by congruence, and
+; the rejoin's job (giving composed classes a constructor spelling) is
+; done natively by chain composition. The rejoin's in-phase minting is
+; the verified detonation road — nothing may reintroduce it.
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; INDEX-MAP SUBSTITUTION (the composition workhorse)
@@ -3666,6 +3749,211 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; NATIVE CHAIN COMPOSITION (affine migration, 2026-08-04)
+;
+; The composed view's CHAIN derives from the parent's chain, one summand
+; at a time — never from the composed expression (that would be the
+; deleted recovery), and never lowered TO an expression (the verified
+; detonation). Map entries are stored parallel to the parent's axes
+; (head = highest axis), so the walk consumes the entry list and the
+; parent chain IN LOCKSTEP. v1 scope: selection entries (a coordinate of
+; the view's own shape) and literal-0 entries; arithmetic entries
+; (div/rem reshape, +start slice) have no arm and the walk stalls —
+; conservative silence. A doubly-named out axis (diagonal read) also
+; stalls: the place fold fills VIRGIN slots only.
+;
+; ATOMICITY DISCIPLINE: a parent summand in the ZERO CLASS is never
+; destructured — it contributes nothing whatever its spelling (arm Z).
+; A live summand is destructured by its ownership-and-position pattern
+; (IntMul (CoordVar in_shape axis) stride) with axis pinned to the
+; walk's own position, so a foreign zero-class resident can never leak
+; a stride into a live slot.
+
+; --- chain length (a head's from-end axis = its tail's length) ---
+(relation affine-len-demand (IntAffineExprList))
+(relation affine-len-out (IntAffineExprList i64))
+(rule ((affine-len-demand (IntAffineExprCons ?h ?t))) ((affine-len-demand ?t)))
+(rule ((affine-len-demand (IntAffineExprNil))) ((affine-len-out (IntAffineExprNil) 0)))
+(rule
+  ((affine-len-demand (IntAffineExprCons ?h ?t)) (affine-len-out ?t ?n))
+  ((affine-len-out (IntAffineExprCons ?h ?t) (+ ?n 1)))
+)
+
+; --- the all-zero chain of a given rank (the walk's blank canvas) ---
+(relation affine-zeros-demand (i64))
+(relation affine-zeros-out (i64 IntAffineExprList))
+(rule ((affine-zeros-demand ?n) (> ?n 0)) ((affine-zeros-demand (- ?n 1))))
+(rule ((affine-zeros-demand 0)) ((affine-zeros-out 0 (IntAffineExprNil))))
+(rule
+  ((affine-zeros-demand ?n) (> ?n 0) (affine-zeros-out (- ?n 1) ?tail))
+  ((affine-zeros-out ?n (IntAffineExprCons (IntLit 0) ?tail)))
+)
+
+; --- place a summand at a from-end position; VIRGIN slots only (a
+; doubly-named axis finds its slot occupied and the fold stalls) ---
+(relation affine-place-demand (IntAffineExprList i64 IntExpr))
+(relation affine-place-out (IntAffineExprList i64 IntExpr IntAffineExprList))
+(rule
+  ((affine-place-demand (IntAffineExprCons ?h ?t) ?pos ?v))
+  ((affine-len-demand ?t))
+)
+(rule
+  (
+    (affine-place-demand (IntAffineExprCons ?h ?t) ?pos ?v)
+    (affine-len-out ?t ?tl)
+    (> ?tl ?pos)
+  )
+  ((affine-place-demand ?t ?pos ?v))
+)
+(rule
+  (
+    (affine-place-demand (IntAffineExprCons ?h ?t) ?pos ?v)
+    (affine-len-out ?t ?pos)
+    (= ?h (IntLit 0))
+  )
+  ((affine-place-out (IntAffineExprCons ?h ?t) ?pos ?v (IntAffineExprCons ?v ?t)))
+)
+(rule
+  (
+    (affine-place-demand (IntAffineExprCons ?h ?t) ?pos ?v)
+    (affine-len-out ?t ?tl)
+    (> ?tl ?pos)
+    (affine-place-out ?t ?pos ?v ?placed)
+  )
+  ((affine-place-out (IntAffineExprCons ?h ?t) ?pos ?v (IntAffineExprCons ?h ?placed)))
+)
+
+; --- the walk: (view_layout, out_shape, in_shape,
+;                parent chain suffix, entry suffix, partial out chain) ---
+(relation affine-view-state
+  (Layout Shape Shape IntAffineExprList IntExprList IntAffineExprList))
+
+; Seed: the composition rule's own premises plus the parent's chain
+; spelling (shape field bound to the SAME class as the expression
+; spelling's — a corrupt cross-shape class simply fails the match).
+(rule
+  (
+    (= ?out_logical (LogicalIndexMapApply ?in_logical ?map ?shape))
+    (= ?in_lt (LayoutTensorLit ?in_logical ?in_layout))
+    (= ?in_layout (BitOffsetExpressionLayoutLit ?bit_expr ?in_shape ?bit_width))
+    (= ?in_layout (StridedElementLayoutLit ?in_shape ?pchain ?sbits))
+    (= ?composed (subst-of ?bit_expr ?map ?in_shape))
+    (= ?rank (rank-of ?shape))
+  )
+  ((affine-zeros-demand ?rank))
+)
+(rule
+  (
+    (= ?out_logical (LogicalIndexMapApply ?in_logical ?map ?shape))
+    (= ?in_lt (LayoutTensorLit ?in_logical ?in_layout))
+    (= ?in_layout (BitOffsetExpressionLayoutLit ?bit_expr ?in_shape ?bit_width))
+    (= ?in_layout (StridedElementLayoutLit ?in_shape ?pchain ?sbits))
+    (= ?composed (subst-of ?bit_expr ?map ?in_shape))
+    (= ?rank (rank-of ?shape))
+    (affine-zeros-out ?rank ?zeros)
+    (= ?map (IndexMapLit ?entries))
+  )
+  (
+    (let view_layout (BitOffsetExpressionLayoutLit ?composed ?shape ?bit_width))
+    (affine-view-state view_layout ?shape ?in_shape ?pchain ?entries ?zeros)
+  )
+)
+
+; Every live state demands its chain-suffix tail length (arm S's
+; position pin) up front.
+(rule
+  ((affine-view-state ?vl ?shape ?ish (IntAffineExprCons ?m ?mt) ?es ?partial))
+  ((affine-len-demand ?mt))
+)
+
+; Arm 0: literal-zero entry — the parent axis is read at a pinned 0, so
+; its summand contributes stride*0 = nothing. Drop both heads.
+(rule
+  (
+    (affine-view-state ?vl ?shape ?ish
+      (IntAffineExprCons ?m ?mt) (IntExprCons ?e ?et) ?partial)
+    (= ?e (IntLit 0))
+  )
+  ((affine-view-state ?vl ?shape ?ish ?mt ?et ?partial))
+)
+
+; Arm Z: zero-class parent summand — contributes nothing whatever the
+; entry names (in-range maps only read a dead axis inside its unit
+; box). Never destructured: the atomicity discipline.
+(rule
+  (
+    (affine-view-state ?vl ?shape ?ish
+      (IntAffineExprCons ?m ?mt) (IntExprCons ?e ?et) ?partial)
+    (= ?m (IntLit 0))
+  )
+  ((affine-view-state ?vl ?shape ?ish ?mt ?et ?partial))
+)
+
+; Arm S: selection entry over a live summand — swap the parent
+; coordinate for the entry's own and place at the axis it names.
+(rule
+  (
+    (affine-view-state ?vl ?shape ?ish
+      (IntAffineExprCons ?m ?mt) (IntExprCons ?e ?et) ?partial)
+    (= ?e (CoordVar ?shape ?k))
+    (affine-len-out ?mt ?paxis)
+    (= ?m (IntMul (CoordVar ?ish ?paxis) ?s))
+  )
+  ((affine-place-demand ?partial ?k (IntMul (CoordVar ?shape ?k) ?s)))
+)
+(rule
+  (
+    (affine-view-state ?vl ?shape ?ish
+      (IntAffineExprCons ?m ?mt) (IntExprCons ?e ?et) ?partial)
+    (= ?e (CoordVar ?shape ?k))
+    (affine-len-out ?mt ?paxis)
+    (= ?m (IntMul (CoordVar ?ish ?paxis) ?s))
+    (affine-place-out ?partial ?k (IntMul (CoordVar ?shape ?k) ?s) ?placed)
+  )
+  ((affine-view-state ?vl ?shape ?ish ?mt ?et ?placed))
+)
+
+; Arm S-unit: a BARE-COORDINATE summand is the stride-1 summand — the
+; x*1 elimination rewrite folds (IntMul coord (IntLit 1)) to the coord
+; and SUBSUMES the product node, so the product pattern can never see
+; it. The entry's own coordinate is the composed contribution
+; (extensionally coord*1). Overlap with arm Z on dead slots is benign:
+; a collapsed coordinate placed into a slot is the zero class either
+; way.
+(rule
+  (
+    (affine-view-state ?vl ?shape ?ish
+      (IntAffineExprCons ?m ?mt) (IntExprCons ?e ?et) ?partial)
+    (= ?e (CoordVar ?shape ?k))
+    (affine-len-out ?mt ?paxis)
+    (= ?m (CoordVar ?ish ?paxis))
+  )
+  ((affine-place-demand ?partial ?k (CoordVar ?shape ?k)))
+)
+(rule
+  (
+    (affine-view-state ?vl ?shape ?ish
+      (IntAffineExprCons ?m ?mt) (IntExprCons ?e ?et) ?partial)
+    (= ?e (CoordVar ?shape ?k))
+    (affine-len-out ?mt ?paxis)
+    (= ?m (CoordVar ?ish ?paxis))
+    (affine-place-out ?partial ?k (CoordVar ?shape ?k) ?placed)
+  )
+  ((affine-view-state ?vl ?shape ?ish ?mt ?et ?placed))
+)
+
+; Finale: both suffixes exhausted — the accumulated chain IS the view's
+; strided form. Union at the Layout sort, width from the view's own
+; expression spelling.
+(rule
+  (
+    (affine-view-state ?vl ?shape ?ish (IntAffineExprNil) (IntExprNil) ?final)
+    (= ?vl (BitOffsetExpressionLayoutLit ?ce ?shape ?bits))
+  )
+  ((union ?vl (StridedElementLayoutLit ?shape ?final ?bits)))
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; INJECTIVE-WRITE DOCTRINE
 ;
 ; A write through a non-injective layout is ill-defined (two coordinates, one
@@ -3715,67 +4003,16 @@
   )
 )
 
-; Strided no-overlap fold: walking from the innermost axis outward, each
-; stride must cover the whole extent addressed so far (nested disjoint
-; boxes). Sufficient, not necessary — non-major-ordered permutations and
-; symbolic dims stay unproven, conservatively. Extents are concrete i64s;
-; negative or zero strides fail the >= and stay unproven.
-(relation strided-no-overlap-demand (IntExprList IntExprList))
-(function strided-extent-of (IntExprList IntExprList) i64 :no-merge)
-
-(rule
-  (
-    (= ?strided_layout (StridedElementLayoutLit (ShapeLit ?dims) ?strides ?bits))
-  )
-  (
-    (strided-no-overlap-demand ?dims ?strides)
-  )
-)
-(rule
-  (
-    (strided-no-overlap-demand (IntExprCons ?size ?dim_tail) (IntExprCons ?stride ?stride_tail))
-  )
-  (
-    (strided-no-overlap-demand ?dim_tail ?stride_tail)
-  )
-)
-; Empty suffix addresses one cell.
-(rule
-  (
-    (strided-no-overlap-demand (IntExprNil) (IntExprNil))
-  )
-  (
-    (set (strided-extent-of (IntExprNil) (IntExprNil)) 1)
-  )
-)
-; Non-empty suffix: proven iff the tail is proven and this stride covers the
-; tail's extent. The new extent is stride * size — the box this axis spans.
-(rule
-  (
-    (strided-no-overlap-demand ?dims ?strides)
-    (= ?dims (IntExprCons (IntLit ?size) ?dim_tail))
-    (= ?strides (IntExprCons (IntLit ?stride) ?stride_tail))
-    (= ?tail_extent (strided-extent-of ?dim_tail ?stride_tail))
-    (>= ?stride ?tail_extent)
-  )
-  (
-    (set (strided-extent-of ?dims ?strides) (* ?stride ?size))
-  )
-)
-; A strided layout with a proven no-overlap stride nest is injective for a
-; tensor of exactly the declared shape.
-(rule
-  (
-    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
-    (= ?layout (StridedElementLayoutLit ?shape ?strides ?bits))
-    (= (shape-of ?logical) ?shape)
-    (= ?shape (ShapeLit ?dims))
-    (= ?extent (strided-extent-of ?dims ?strides))
-  )
-  (
-    (set (injectivity-of ?layout_tensor) (Injective))
-  )
-)
+; STRIDED NO-OVERLAP FOLD: DELETED (Austin's ruling, 2026-08-05). The
+; nested-boxes analysis (innermost-out, stride >= footprint-so-far) was
+; sufficient-not-necessary and ORDER-SENSITIVE — a transposed
+; contiguous layout is a bijection it could not see. The ablation ran
+; the full suite green with it disabled: every write path is certified
+; by the contiguous arms; it guarded nothing. If strided-write
+; injectivity is ever needed, the successor should be permutation-
+; invariant (sort the (extent, stride) pairs by stride before the
+; nested-boxes walk) or live in the SMT lane per the symbolic-
+; injectivity ruling.
 
 
 ;; @SPLICE rewrites

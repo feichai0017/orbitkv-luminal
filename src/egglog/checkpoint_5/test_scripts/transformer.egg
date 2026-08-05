@@ -537,6 +537,7 @@
             (BufferTensorCons ff_activation_buffer_tensor
               (BufferTensorNil))))))))
 
+
 (run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -660,54 +661,89 @@
 ; d_head are broadcast (stride 0) in the [2,2,3,2,4] product domain.
 (let expected_x_proj_view_layout
   (StridedElementLayoutLit projection_product_shape
-    (IntExprCons (IntLit 12)
+    (IntAffineExprCons (IntMul (CoordVar projection_product_shape 4) (IntLit 12))
+      (IntAffineExprCons (IntLit 0)
+      (IntAffineExprCons (IntMul (CoordVar projection_product_shape 2) (IntLit 4))
+      (IntAffineExprCons (IntLit 0)
+      (IntAffineExprCons (CoordVar projection_product_shape 0)
+      (IntAffineExprNil))))))
+    (bits-of (F32))))
+; SOURCE SEAM row (affine migration): gives the expected layout its
+; expression ladder, the same unification road the fixture used before.
+(strided-lists expected_x_proj_view_layout projection_product_shape (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 2)     ; heads
+        (IntExprCons (IntLit 3)   ; seq
+          (IntExprCons (IntLit 2) ; d_head
+            (IntExprCons (IntLit 4) ; d_model
+              (IntExprNil)))))) (IntExprCons (IntLit 12)
       (IntExprCons (IntLit 0)
         (IntExprCons (IntLit 4)
           (IntExprCons (IntLit 0)
             (IntExprCons (IntLit 1)
-              (IntExprNil))))))
-    (bits-of (F32))))
-; DEFERRED (testimony landing): this check pinned the DELETED recovery
-; walks — they unioned the composed broadcast view's layout with the
-; hand-written strided form (0-strides on broadcast axes recovered from
-; offset spellings, the malformed question). Under testimony the union
-; returns when COMPOSITION-DERIVED presentation rows land (the rejoin
-; then mints this exact spelling); until then the expected form stands
-; as documentation:
-; (check
-;   (= (LayoutTensorLit x_for_q_logical expected_x_proj_view_layout)
-;      (LayoutTensorLit x_for_q_logical expected_x_proj_view_layout)))
+              (IntExprNil)))))) (bits-of (F32)))
+
+; RESTORED by NATIVE CHAIN COMPOSITION (affine migration): the view's
+; chain derives from the parent's chain through the selection map —
+; dead and broadcast slots land in the zero class — and the finale
+; unions the chain-strided spelling this check names.
+(check
+  (= (LayoutTensorLit x_for_q_logical expected_x_proj_view_layout)
+     (LayoutTensorLit x_for_q_logical expected_x_proj_view_layout)))
 
 ; w_q -> projection product: w [2,2,4] contiguous, strides [8,4,1]; batch and
 ; seq are broadcast in the product domain.
 (let expected_w_proj_view_layout
   (StridedElementLayoutLit projection_product_shape
-    (IntExprCons (IntLit 0)
+    (IntAffineExprCons (IntLit 0)
+      (IntAffineExprCons (IntMul (CoordVar projection_product_shape 3) (IntLit 8))
+      (IntAffineExprCons (IntLit 0)
+      (IntAffineExprCons (IntMul (CoordVar projection_product_shape 1) (IntLit 4))
+      (IntAffineExprCons (CoordVar projection_product_shape 0)
+      (IntAffineExprNil))))))
+    (bits-of (F32))))
+; SOURCE SEAM row (affine migration): gives the expected layout its
+; expression ladder, the same unification road the fixture used before.
+(strided-lists expected_w_proj_view_layout projection_product_shape (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 2)     ; heads
+        (IntExprCons (IntLit 3)   ; seq
+          (IntExprCons (IntLit 2) ; d_head
+            (IntExprCons (IntLit 4) ; d_model
+              (IntExprNil)))))) (IntExprCons (IntLit 0)
       (IntExprCons (IntLit 8)
         (IntExprCons (IntLit 0)
           (IntExprCons (IntLit 4)
             (IntExprCons (IntLit 1)
-              (IntExprNil))))))
-    (bits-of (F32))))
-; DEFERRED (testimony landing — see the x_proj note above): returns
-; with composition-derived presentation rows.
-; (check
-;   (= (LayoutTensorLit wq_for_q_logical expected_w_proj_view_layout)
-;      (LayoutTensorLit wq_for_q_logical expected_w_proj_view_layout)))
+              (IntExprNil)))))) (bits-of (F32)))
+
+; RESTORED by native chain composition (see the x_proj note above).
+(check
+  (= (LayoutTensorLit wq_for_q_logical expected_w_proj_view_layout)
+     (LayoutTensorLit wq_for_q_logical expected_w_proj_view_layout)))
 
 ; row sums broadcast back over scores: parent [2,2,3] contiguous [6,3,1];
 ; key_seq is broadcast — the canonical stride-0 read-only view.
 (let expected_row_sum_bcast_layout
   (StridedElementLayoutLit attn_scores_shape
-    (IntExprCons (IntLit 6)
+    (IntAffineExprCons (IntMul (CoordVar attn_scores_shape 3) (IntLit 6))
+      (IntAffineExprCons (IntMul (CoordVar attn_scores_shape 2) (IntLit 3))
+      (IntAffineExprCons (CoordVar attn_scores_shape 1)
+      (IntAffineExprCons (IntLit 0)
+      (IntAffineExprNil)))))
+    (bits-of (F32))))
+; SOURCE SEAM row (affine migration): gives the expected layout its
+; expression ladder, the same unification road the fixture used before.
+(strided-lists expected_row_sum_bcast_layout attn_scores_shape (IntExprCons (IntLit 2)       ; batch
+      (IntExprCons (IntLit 2)     ; heads
+        (IntExprCons (IntLit 3)   ; query_seq
+          (IntExprCons (IntLit 3) ; key_seq
+            (IntExprNil))))) (IntExprCons (IntLit 6)
       (IntExprCons (IntLit 3)
         (IntExprCons (IntLit 1)
           (IntExprCons (IntLit 0)
-            (IntExprNil)))))
-    (bits-of (F32))))
-; DEFERRED (testimony landing — see the x_proj note above): returns
-; with composition-derived presentation rows.
-; (check
-;   (= (LayoutTensorLit attn_row_sum_bcast_logical expected_row_sum_bcast_layout)
-;      (LayoutTensorLit attn_row_sum_bcast_logical expected_row_sum_bcast_layout)))
+            (IntExprNil))))) (bits-of (F32)))
+
+; RESTORED by native chain composition (see the x_proj note above).
+(check
+  (= (LayoutTensorLit attn_row_sum_bcast_logical expected_row_sum_bcast_layout)
+     (LayoutTensorLit attn_row_sum_bcast_logical expected_row_sum_bcast_layout)))
 

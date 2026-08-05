@@ -2684,6 +2684,7 @@ pub fn run_ssa_program(
 
 #[cfg(test)]
 mod stage4b_probes {
+
     /// (History: this module held the Step-4b degenerate-broadcast
     /// unsoundness pin — the stride recovery walks welding the zero
     /// class. Fixed by the testimony landing; the repro is now the LIVE
@@ -2704,6 +2705,80 @@ mod stage4b_probes {
         let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![1.0, 2.0])]);
         let got = rt.get_f32(b.id.index() as i64).unwrap();
         assert_eq!(got, &vec![1.0, 2.0]);
+    }
+
+    /// Austin's stride-destructuring contract (chain world, 2026-08-04):
+    /// live axes yield their stride class, stride-1 axes yield Unit, a
+    /// zero slot on a live axis is the DETERMINED broadcast Some(Zero),
+    /// and a provably extent-1 slot is None — the free parameter each
+    /// consumer resolves for itself.
+    #[test]
+    fn chain_strides_destructure_contract() {
+        use crate::extractor::{chain_strides, ChainStride};
+        let body = r#"
+(let psh (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
+(let p (RightMajorContiguousElementLayoutLit psh (bits-of (F32))))
+(let plog (LogicalTensorInputLit (LogicalIdLit "p") psh (F32)))
+(let plt (LayoutTensorLit plog p))
+(let osh (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 5) (IntExprCons (IntLit 3) (IntExprNil))))))
+(let v (LogicalIndexMapApply plog (IndexMapLit (IntExprCons (CoordVar osh 2) (IntExprCons (CoordVar osh 0) (IntExprNil)))) osh))
+(let dsh (ShapeLit (IntExprCons (IntLit 1) (IntExprCons (IntLit 2) (IntExprNil)))))
+(let d (RightMajorContiguousElementLayoutLit dsh (bits-of (F32))))
+(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+"#;
+        let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph.parse_and_run_program(None, &full).expect("program runs");
+        let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
+
+        let by_let = |name: &str| {
+            serialized
+                .class_data
+                .iter()
+                .find(|(_, data)| data.extra.get("let").map(String::as_str) == Some(name))
+                .map(|(class, _)| class.clone())
+                .unwrap_or_else(|| panic!("let {name} not found"))
+        };
+
+        // Parent (2,3) right-major: strides [3, 1].
+        let p = chain_strides(&serialized, &by_let("p")).expect("parent destructures");
+        assert_eq!(p.len(), 2);
+        assert!(matches!(p[0], Some(ChainStride::Expr(_))), "{p:?}");
+        assert_eq!(p[1], Some(ChainStride::Unit), "{p:?}");
+
+        // Degenerate (1,2): the extent-1 slot is the FREE parameter.
+        let d = chain_strides(&serialized, &by_let("d")).expect("degenerate destructures");
+        assert_eq!(d[0], None, "extent-1 slot must be the consumer's choice: {d:?}");
+        assert_eq!(d[1], Some(ChainStride::Unit), "{d:?}");
+
+        // Broadcast view (2,5,3): [3, DETERMINED 0, 1].
+        let v_logical = by_let("v");
+        let view_layout = serialized
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                if node.op != "LayoutTensorLit" {
+                    return None;
+                }
+                let logical = node.children.first()?;
+                if serialized.nid_to_cid(logical) != &v_logical {
+                    return None;
+                }
+                // The materializing copy pairs the SAME logical with an
+                // RM target layout — skip it; the view's own layout is
+                // the composed (non-contiguous) one.
+                let layout = serialized.nid_to_cid(node.children.get(1)?).clone();
+                let is_rm = serialized.nodes.iter().any(|(nid2, n2)| {
+                    n2.op == "RightMajorContiguousElementLayoutLit"
+                        && serialized.nid_to_cid(nid2) == &layout
+                });
+                if is_rm { None } else { Some(layout) }
+            })
+            .expect("view LayoutTensor exists");
+        let v = chain_strides(&serialized, &view_layout).expect("view destructures");
+        assert!(matches!(v[0], Some(ChainStride::Expr(_))), "{v:?}");
+        assert_eq!(v[1], Some(ChainStride::Zero), "broadcast axis is determined: {v:?}");
+        assert_eq!(v[2], Some(ChainStride::Unit), "{v:?}");
     }
 
     /// LIVE REGRESSION (was the pinned Step-4b unsoundness): the
@@ -3243,6 +3318,340 @@ mod mint_divergence_study {
         ] {
             let ok = egraph.parse_and_run_program(None, check).is_ok();
             eprintln!("MINT M5 {label:<24} => {}", if ok { "YES" } else { "no" });
+        }
+    }
+}
+
+/// Runaway diagnosis (Austin 2026-08-03): drive a fixed batch-matmul
+/// program ONE ITERATION PER ROUND, printing per-round table-size deltas —
+/// whatever is still growing in late rounds is the runaway. Budgets are
+/// deliberately tight (fail fast): 40 rounds, 60s/round, 2M total tuples,
+/// loud bail on each. Run as
+/// RRX=1 cargo test rrx_round_driver -- --ignored --nocapture
+#[cfg(test)]
+mod runaway_probe {
+    use std::collections::BTreeMap;
+
+    fn table_sizes(egraph: &mut egglog::EGraph) -> BTreeMap<String, i64> {
+        let out = egraph
+            .parse_and_run_program(None, "(print-size)")
+            .expect("print-size runs");
+        let mut map = BTreeMap::new();
+        for chunk in &out {
+            if let egglog::CommandOutput::PrintAllFunctionsSize(sizes) = chunk {
+                for (name, n) in sizes {
+                    map.insert(name.clone(), *n as i64);
+                }
+            }
+        }
+        assert!(!map.is_empty(), "print-size gave no PrintAllFunctionsSize output");
+        map
+    }
+
+    /// One-line handle for an (often unnamed, text-bodied) rule.
+    fn rule_handle(name: &str) -> String {
+        let flat: String = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.len() > 110 {
+            format!("{}…", &flat[..110])
+        } else {
+            flat
+        }
+    }
+
+    #[test]
+    #[ignore = "diagnostic driver — RRX=1 to run"]
+    fn rrx_round_driver_batch_matmul() {
+        if std::env::var("RRX").is_err() {
+            return;
+        }
+        let dims: Vec<usize> = std::env::var("RRX_DIMS")
+            .unwrap_or_else(|_| "2,3,4,5".into())
+            .split(',')
+            .map(|d| d.parse().expect("RRX_DIMS is batch,m,k,n"))
+            .collect();
+        let (batch, m, k, n) = (dims[0], dims[1], dims[2], dims[3]);
+        eprintln!("[rrx] dims: ({batch},{m},{k}) x ({k},{n})");
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor((batch, m, k));
+        let b = cx.tensor((k, n));
+        let _c = a.matmul(b).output();
+        let (pre, _input_slots, _output_slots, post) =
+            cx.logical.native_parts().expect("recorder clean");
+        let full = format!(
+            "{}\n\n{pre}{post}",
+            crate::egglog_snippet::assembled_program()
+        );
+        if let Ok(path) = std::env::var("RRX_DUMP") {
+            std::fs::write(&path, format!("{pre}{post}")).expect("dump writes");
+            eprintln!("[rrx] dumped program body to {path}");
+        }
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph.parse_and_run_program(None, &full).expect("program loads");
+
+        let mut prev = table_sizes(&mut egraph);
+        let mut prev_total: i64 = prev.values().sum();
+        eprintln!("[rrx] load: {prev_total} tuples across {} tables", prev.len());
+        let max_rounds: u32 = std::env::var("RRX_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40);
+        for round in 1..=max_rounds {
+            let start = std::time::Instant::now();
+            let out = match egraph.parse_and_run_program(None, "(run 1)") {
+                Ok(out) => out,
+                Err(err) => {
+                    eprintln!("[rrx] round {round} ERRORED: {err}");
+                    for probe in [
+                        "(print-function canon-conflict 300)",
+                        "(print-function canon-row-out 300)",
+                    ] {
+                        match egraph.parse_and_run_program(None, probe) {
+                            Ok(chunks) => {
+                                for c in &chunks {
+                                    eprintln!("[rrx] {probe}:\n{c}");
+                                }
+                            }
+                            Err(e2) => eprintln!("[rrx] {probe} failed: {e2}"),
+                        }
+                    }
+                    return;
+                }
+            };
+            let secs = start.elapsed().as_secs_f64();
+            let print_rules = std::env::var("RRX_RULES").is_ok() || round % 25 == 0;
+            for chunk in &out {
+                if !print_rules {
+                    break;
+                }
+                if let egglog::CommandOutput::RunSchedule(report) = chunk {
+                    let mut rules: Vec<(usize, String)> = report
+                        .num_matches_per_rule
+                        .iter()
+                        .filter(|(_, n)| **n > 0)
+                        .map(|(name, n)| (*n, rule_handle(name)))
+                        .collect();
+                    rules.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+                    for (n, handle) in rules.iter().take(6) {
+                        eprintln!("[rrx]   fired x{n}: {handle}");
+                    }
+                }
+            }
+            let cur = table_sizes(&mut egraph);
+            let total: i64 = cur.values().sum();
+            let mut deltas: Vec<(i64, &str)> = cur
+                .iter()
+                .map(|(name, n)| {
+                    (n - prev.get(name).copied().unwrap_or(0), name.as_str())
+                })
+                .filter(|(d, _)| *d != 0)
+                .collect();
+            deltas.sort_unstable_by_key(|(d, _)| -d);
+            let top = deltas
+                .iter()
+                .take(8)
+                .map(|(d, name)| format!("{name} +{d}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if round % 5 == 0 || deltas.is_empty() {
+                eprintln!(
+                    "[rrx] round {round}: total {total} (+{}) in {secs:.1}s | {top}",
+                    total - prev_total
+                );
+            }
+            if deltas.is_empty() {
+                eprintln!("[rrx] SATURATED at round {round}");
+                if let Ok(chunks) =
+                    egraph.parse_and_run_program(None, "(print-function canon-conflict 300)")
+                {
+                    for c in &chunks {
+                        eprintln!("[rrx] canon-conflict:\n{c}");
+                    }
+                }
+                return;
+            }
+            if total > 100_000 {
+                eprintln!("[rrx] BUDGET BAIL: >100k tuples at round {round}");
+                return;
+            }
+            if secs > 60.0 {
+                eprintln!("[rrx] BUDGET BAIL: round {round} took {secs:.0}s");
+                return;
+            }
+            prev = cur;
+            prev_total = total;
+        }
+        eprintln!("[rrx] BUDGET BAIL: {max_rounds} rounds without saturation");
+    }
+
+    /// Stage-timed full pipeline on the same fixed batch matmul — finds
+    /// WHERE the wall-clock goes when the round driver says the main
+    /// ruleset converges. Prints before/after each stage (fail-fast
+    /// visibility: the last printed stage is the grinder).
+    #[test]
+    #[ignore = "diagnostic driver — RRX=1 to run"]
+    fn rrx_full_pipeline_batch_matmul() {
+        if std::env::var("RRX").is_err() {
+            return;
+        }
+        let dims: Vec<usize> = std::env::var("RRX_DIMS")
+            .unwrap_or_else(|_| "2,3,4,5".into())
+            .split(',')
+            .map(|d| d.parse().expect("RRX_DIMS is batch,m,k,n"))
+            .collect();
+        let (batch, m, k, n) = (dims[0], dims[1], dims[2], dims[3]);
+        eprintln!("[rrx-pipe] dims: ({batch},{m},{k}) x ({k},{n})");
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor((batch, m, k));
+        let b = cx.tensor((k, n));
+        let c = a.matmul(b).output();
+        let (pre, _input_slots, _output_slots, post) =
+            cx.logical.native_parts().expect("recorder clean");
+        let text = format!(
+            "{}\n\n{pre}{}{post}",
+            crate::egglog_snippet::assembled_program(),
+            crate::reference_binding::SCHEDULE
+        );
+        let mut stage = |label: &str| {
+            eprintln!("[rrx-pipe] -> {label}");
+            std::time::Instant::now()
+        };
+        let t = stage("egglog full schedule");
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph.parse_and_run_program(None, &text).expect("program runs");
+        eprintln!("[rrx-pipe] egglog took {:.1}s", t.elapsed().as_secs_f64());
+        let t = stage("serialize");
+        let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
+        eprintln!(
+            "[rrx-pipe] serialize took {:.1}s ({} nodes)",
+            t.elapsed().as_secs_f64(),
+            serialized.nodes.len()
+        );
+        let t = stage("extract");
+        let allow = crate::ssa_reference::reference_allow_list();
+        let extracted =
+            crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))
+                .expect("extracts")
+                .expect("plan");
+        eprintln!("[rrx-pipe] extract took {:.1}s", t.elapsed().as_secs_f64());
+        let t = stage("dps+bufferize");
+        let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))
+            .expect("bufferizes");
+        eprintln!("[rrx-pipe] bufferize took {:.1}s", t.elapsed().as_secs_f64());
+        let t = stage("execute");
+        let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
+        rt.load_plan(plan);
+        rt.set_data(a.id.index() as i64, vec![1.0; batch * m * k]);
+        rt.set_data(b.id.index() as i64, vec![1.0; k * n]);
+        rt.execute().expect("executes");
+        eprintln!("[rrx-pipe] execute took {:.1}s", t.elapsed().as_secs_f64());
+        let got = rt.get_f32(c.id.index() as i64).unwrap();
+        assert_eq!(got.len(), batch * m * n);
+        assert!((got[0] - k as f32).abs() < 1e-5, "ones matmul spot check: {}", got[0]);
+        eprintln!("[rrx-pipe] DONE");
+    }
+
+    /// Exhaustive dim sweep over the proptest's draw space (batch 1..4,
+    /// m/k/n 1..6): full schedule + extraction + execution spot-check per
+    /// case, ones-seeded. The start line before each case means a hang
+    /// names its case; slow cases (>5s) are called out.
+    #[test]
+    #[ignore = "diagnostic driver — RRX=1 to run"]
+    fn rrx_sweep_batch_matmul() {
+        if std::env::var("RRX").is_err() {
+            return;
+        }
+        let mut slow: Vec<(f64, String)> = Vec::new();
+        for batch in 1..=3usize {
+            for m in 1..=5usize {
+                for k in 1..=5usize {
+                    for n in 1..=5usize {
+                        eprintln!("[rrx-sweep] start ({batch},{m},{k},{n})");
+                        let t = std::time::Instant::now();
+                        let mut cx = crate::graph::Graph::new();
+                        let a = cx.tensor((batch, m, k));
+                        let b = cx.tensor((k, n));
+                        let c = a.matmul(b).output();
+                        let rt = crate::test_support::run_ssa(
+                            &cx,
+                            &[
+                                (a.id, vec![1.0; batch * m * k]),
+                                (b.id, vec![1.0; k * n]),
+                            ],
+                        );
+                        let got = rt.get_f32(c.id.index() as i64).unwrap();
+                        assert_eq!(got.len(), batch * m * n, "({batch},{m},{k},{n})");
+                        for (i, v) in got.iter().enumerate() {
+                            assert!(
+                                (v - k as f32).abs() < 1e-5,
+                                "({batch},{m},{k},{n}) element {i}: {v} != {k}"
+                            );
+                        }
+                        let secs = t.elapsed().as_secs_f64();
+                        if secs > 5.0 {
+                            eprintln!("[rrx-sweep] SLOW ({batch},{m},{k},{n}): {secs:.1}s");
+                            slow.push((secs, format!("({batch},{m},{k},{n})")));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("[rrx-sweep] DONE; {} slow cases: {slow:?}", slow.len());
+    }
+
+    /// Migration debug: run the transformer fixture, tolerate check
+    /// failures, dump the native-composition walk state.
+    #[test]
+    #[ignore = "diagnostic driver — RRX=1 to run"]
+    fn rrx_mig_debug() {
+        if std::env::var("RRX").is_err() {
+            return;
+        }
+        let preamble = crate::egglog_snippet::assembled_program();
+        let source = std::fs::read_to_string(
+            "src/egglog/checkpoint_5/test_scripts/transformer.egg",
+        )
+        .expect("fixture readable");
+        let program = format!("{preamble}\n\n{source}");
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        match egraph.parse_and_run_program(None, &program) {
+            Ok(_) => eprintln!("[rrx-dbg] fixture PASSED entirely"),
+            Err(e) => eprintln!("[rrx-dbg] first failure: {}", &e.to_string()[..800.min(e.to_string().len())]),
+        }
+        for (label, check) in [
+            ("slot0: c0*1 == c0", "(check (= (IntMul (CoordVar projection_product_shape 0) (IntLit 1)) (CoordVar projection_product_shape 0)))"),
+            ("slot1: c1*0 == 0", "(check (= (IntMul (CoordVar projection_product_shape 1) (IntLit 0)) (IntLit 0)))"),
+            ("slot3: c3*0 == 0", "(check (= (IntMul (CoordVar projection_product_shape 3) (IntLit 0)) (IntLit 0)))"),
+            ("slot4 12 exists", "(check (= (IntMul (CoordVar projection_product_shape 4) (IntLit 12)) (IntMul (CoordVar projection_product_shape 4) (IntLit 12))))"),
+            ("slot2 4 exists", "(check (= (IntMul (CoordVar projection_product_shape 2) (IntLit 4)) (IntMul (CoordVar projection_product_shape 2) (IntLit 4))))"),
+        ] {
+            let ok = egraph.parse_and_run_program(None, check).is_ok();
+            eprintln!("[rrx-dbg] {label:<22} => {}", if ok { "YES" } else { "NO" });
+        }
+        let derived = "(StridedElementLayoutLit projection_product_shape (IntAffineExprCons (IntMul (CoordVar projection_product_shape 4) (IntLit 12)) (IntAffineExprCons (IntLit 0) (IntAffineExprCons (IntMul (CoordVar projection_product_shape 2) (IntLit 4)) (IntAffineExprCons (IntLit 0) (IntAffineExprCons (CoordVar projection_product_shape 0) (IntAffineExprNil)))))) (bits-of (F32)))";
+        for (label, check) in [
+            ("expected == derived-strided", format!("(check (= expected_x_proj_view_layout {derived}))")),
+            ("LT with derived exists", format!("(check (= (LayoutTensorLit x_for_q_logical {derived}) (LayoutTensorLit x_for_q_logical {derived})))")),
+        ] {
+            let ok = egraph.parse_and_run_program(None, &check).is_ok();
+            eprintln!("[rrx-dbg] {label:<28} => {}", if ok { "YES" } else { "NO" });
+        }
+        for probe in [
+            "(print-function affine-view-state 60)",
+        ] {
+            match egraph.parse_and_run_program(None, probe) {
+                Ok(chunks) => {
+                    for c in &chunks {
+                        let s = c.to_string();
+                        eprintln!("[rrx-dbg] {probe} ({} bytes)", s.len());
+                        std::fs::write(
+                            format!("/tmp/rrx_dump_{}.txt", probe.split_whitespace().nth(1).unwrap_or("x")),
+                            &s,
+                        )
+                        .ok();
+                    }
+                }
+                Err(e2) => eprintln!("[rrx-dbg] {probe} failed: {e2}"),
+            }
         }
     }
 }

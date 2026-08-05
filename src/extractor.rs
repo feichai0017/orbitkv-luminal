@@ -1256,7 +1256,7 @@ impl<'a> ClassRenderer<'a> {
             self.readable_shape(&shape_class)
                 .unwrap_or_else(|| self.render_class_prefer(&shape_class, 16, Some("ShapeLit"))),
             self.readable_expr_list_display(&strides_class)
-                .unwrap_or_else(|| self.render_class_prefer(&strides_class, 16, Some("IntExprCons"))),
+                .unwrap_or_else(|| self.render_class_prefer(&strides_class, 16, Some("IntAffineExprCons"))),
             self.readable_bit_width(&bits_class),
         ))
     }
@@ -2614,6 +2614,118 @@ const LAYOUT_RENDER_OPS: &[&str] = &[
 
 fn is_simple_literal(op: &str) -> bool {
     op.parse::<i64>().is_ok() || op.starts_with('"')
+}
+
+/// Per-axis stride classification destructured from a chain-carrying
+/// StridedElementLayoutLit (Austin's Vec<Option<...>> contract,
+/// 2026-08-04). Outermost axis first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainStride {
+    /// Live axis: the stride is this IntExpr class (literal or symbolic).
+    Expr(ClassId),
+    /// Stride-1 axis (the x*1 fold collapses the summand to its bare
+    /// coordinate, so no stride node exists to point at).
+    Unit,
+    /// Zero contribution on an axis NOT provably extent-1: a DETERMINED
+    /// broadcast — the stride must be 0, this is not a choice.
+    Zero,
+}
+
+/// Walk a layout class's chain-strided spelling into per-axis strides.
+/// `None` per slot = the axis is provably extent-1, so the stride is a
+/// FREE PARAMETER: each consumer picks its own default (the e-graph
+/// never answers this question — the impossibility result). Whole-call
+/// `None` = the class has no chain-strided spelling, ranks disagree, or
+/// a slot is opaque (e.g. an accumulated diagonal summand) — fail
+/// closed, never guess.
+pub fn chain_strides(egraph: &EGraph, layout: &ClassId) -> Option<Vec<Option<ChainStride>>> {
+    let mut class_nodes: HashMap<ClassId, Vec<NodeId>> = HashMap::new();
+    for (node_id, node) in &egraph.nodes {
+        class_nodes
+            .entry(egraph.nid_to_cid(node_id).clone())
+            .or_default()
+            .push(node_id.clone());
+    }
+    let find = |class: &ClassId, op: &str| -> Option<NodeId> {
+        class_nodes.get(class)?.iter().find(|node_id| {
+            egraph.nodes.get(*node_id).is_some_and(|node| node.op == op)
+        }).cloned()
+    };
+    let numeric = |class: &ClassId| -> Option<i64> {
+        let lit = find(class, "IntLit")?;
+        let value_class = child_class(egraph, egraph.nodes.get(&lit)?, 0)?;
+        class_nodes.get(&value_class)?.iter().find_map(|node_id| {
+            egraph.nodes.get(node_id)?.op.parse::<i64>().ok()
+        })
+    };
+
+    let strided = find(layout, "StridedElementLayoutLit")?;
+    let strided_node = egraph.nodes.get(&strided)?;
+    let shape_class = child_class(egraph, strided_node, 0)?;
+    let chain_class = child_class(egraph, strided_node, 1)?;
+
+    // Dims, outermost first.
+    let shape_lit = find(&shape_class, "ShapeLit")?;
+    let mut dims = Vec::new();
+    let mut cursor = child_class(egraph, egraph.nodes.get(&shape_lit)?, 0)?;
+    loop {
+        if let Some(cons) = find(&cursor, "IntExprCons") {
+            let node = egraph.nodes.get(&cons)?;
+            dims.push(child_class(egraph, node, 0)?);
+            cursor = child_class(egraph, node, 1)?;
+        } else if find(&cursor, "IntExprNil").is_some() {
+            break;
+        } else {
+            return None;
+        }
+    }
+
+    // Chain, outermost first, in lockstep with dims.
+    let mut out = Vec::new();
+    let mut cursor = chain_class;
+    let mut axis = 0usize;
+    loop {
+        if let Some(cons) = find(&cursor, "IntAffineExprCons") {
+            let node = egraph.nodes.get(&cons)?;
+            let summand = child_class(egraph, node, 0)?;
+            let extent = dims.get(axis).and_then(numeric);
+            let slot = if numeric(&summand) == Some(0) {
+                // Zero contribution. Provably-1 axis: free parameter.
+                // Otherwise the broadcast stride 0 is determined.
+                if extent == Some(1) { None } else { Some(ChainStride::Zero) }
+            } else if find(&summand, "CoordVar").is_some() {
+                Some(ChainStride::Unit)
+            } else if let Some(stride) = class_nodes.get(&summand).and_then(|nodes| {
+                nodes.iter().find_map(|node_id| {
+                    let candidate = egraph.nodes.get(node_id)?;
+                    if candidate.op != "IntMul" {
+                        return None;
+                    }
+                    let coord = child_class(egraph, candidate, 0)?;
+                    if find(&coord, "CoordVar").is_some() {
+                        child_class(egraph, candidate, 1)
+                    } else {
+                        None
+                    }
+                })
+            }) {
+                Some(ChainStride::Expr(stride))
+            } else {
+                return None; // opaque slot: fail closed
+            };
+            out.push(slot);
+            axis += 1;
+            cursor = child_class(egraph, node, 1)?;
+        } else if find(&cursor, "IntAffineExprNil").is_some() {
+            break;
+        } else {
+            return None;
+        }
+    }
+    if out.len() != dims.len() {
+        return None;
+    }
+    Some(out)
 }
 
 fn child_class(egraph: &EGraph, node: &Node, index: usize) -> Option<ClassId> {

@@ -101,11 +101,16 @@
 ; top: it owns coord_inner/coord_outer, so stall_offset below IS the fold's
 ; would-be output, keeping the fail pin sharp.)
 (let stall_layout
-  (StridedElementLayoutLit
-    stall_shape
-    (IntExprCons maybe_empty_dim (IntExprCons (IntLit 1) (IntExprNil)))
+  (StridedElementLayoutLit stall_shape
+    (IntAffineExprCons (IntMul (CoordVar stall_shape 1) maybe_empty_dim)
+      (IntAffineExprCons (CoordVar stall_shape 0)
+      (IntAffineExprNil)))
     (bits-of (F32))))
 (let stall_offset (IntAdd (IntMul coord_outer maybe_empty_dim) coord_inner))
+
+
+; SOURCE SEAM rows for list-authored strided layouts (affine migration)
+(strided-lists stall_layout stall_shape (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil))) (IntExprCons maybe_empty_dim (IntExprCons (IntLit 1) (IntExprNil))) (bits-of (F32)))
 
 (run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
 

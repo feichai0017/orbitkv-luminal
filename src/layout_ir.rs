@@ -279,6 +279,28 @@ impl ExtractionSite<'_> {
             .find(|node| node.eclass == *class && node.op == op && !node.subsumed)
     }
 
+    /// Every node of this op in the class for VALUE PARSING, unsubsumed
+    /// spellings first, subsumed ones as fallback. Subsumption is a
+    /// MATCHING fence (it steers rules and cost away from non-canonical
+    /// spellings); denotationally a subsumed node is still a true member
+    /// of its class, and a kernel evaluating any spelling computes the
+    /// same function. Saturation can subsume EVERY constructor spelling
+    /// of a class (the 2026-08-05 slice_pad regression), so value
+    /// readers must not starve behind the fence. Op MATCHERS keep the
+    /// strict accessor.
+    pub fn nodes_in_class_value<'a>(
+        &'a self,
+        class: &'a egraph_serialize::ClassId,
+        op: &'a str,
+    ) -> impl Iterator<Item = &'a egraph_serialize::Node> + 'a {
+        self.nodes_in_class(class, op).chain(
+            self.egraph
+                .nodes
+                .values()
+                .filter(move |node| node.eclass == *class && node.op == op && node.subsumed),
+        )
+    }
+
     /// EVERY non-subsumed node of this op in the class — for parsers that
     /// must backtrack across a saturated class's many representations.
     pub fn nodes_in_class<'a>(

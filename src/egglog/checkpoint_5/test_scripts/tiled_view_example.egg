@@ -92,10 +92,12 @@
        (subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map flat_shape)
        tiled_shape
        (bits-of storage_dtype))
-     (StridedElementLayoutLit
-       tiled_shape
-       (IntExprCons (IntLit 128) (IntExprCons (IntLit 64) (IntExprCons (IntLit 1) (IntExprNil))))
-       (bits-of storage_dtype))))
+     (StridedElementLayoutLit tiled_shape
+    (IntAffineExprCons (IntMul (CoordVar tiled_shape 2) (IntLit 128))
+      (IntAffineExprCons (IntMul (CoordVar tiled_shape 1) (IntLit 64))
+      (IntAffineExprCons (CoordVar tiled_shape 0)
+      (IntAffineExprNil))))
+    (bits-of storage_dtype))))
 (check
   (= (BitOffsetExpressionLayoutLit
        (subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map flat_shape)

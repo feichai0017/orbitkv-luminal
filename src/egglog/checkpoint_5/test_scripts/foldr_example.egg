@@ -76,7 +76,12 @@
   right_strides3_concrete)
 
 (let layout3_strided_contiguous
-  (StridedElementLayoutLit shape3_concrete strides3_contiguous (bits-of (F32))))
+  (StridedElementLayoutLit shape3_concrete
+    (IntAffineExprCons (IntMul (CoordVar shape3_concrete 2) (IntLit 200))
+      (IntAffineExprCons (IntMul (CoordVar shape3_concrete 1) (IntLit 10))
+      (IntAffineExprCons (CoordVar shape3_concrete 0)
+      (IntAffineExprNil))))
+    (bits-of (F32))))
 
 ; Rank-3 strided layout with non-contiguous element strides:
 ;   element offset =
@@ -89,7 +94,12 @@
         (IntExprNil)))))
 
 (let layout3_strided_noncontiguous
-  (StridedElementLayoutLit shape3_concrete strides3_noncontiguous (bits-of (F32))))
+  (StridedElementLayoutLit shape3_concrete
+    (IntAffineExprCons (IntMul (CoordVar shape3_concrete 2) (IntLit 300))
+      (IntAffineExprCons (IntMul (CoordVar shape3_concrete 1) (IntLit 20))
+      (IntAffineExprCons (IntMul (CoordVar shape3_concrete 0) (IntLit 2))
+      (IntAffineExprNil))))
+    (bits-of (F32))))
 
 (let linear3_strided_noncontiguous
   (IntAdd
@@ -109,9 +119,17 @@
 (let strides_2_1
   (IntExprCons (IntLit 2) (IntExprCons (IntLit 1) (IntExprNil))))
 (let layout_4x2_strided
-  (StridedElementLayoutLit shape_4x2 strides_2_1 (bits-of (F32))))
+  (StridedElementLayoutLit shape_4x2
+    (IntAffineExprCons (IntMul (CoordVar shape_4x2 1) (IntLit 2))
+      (IntAffineExprCons (CoordVar shape_4x2 0)
+      (IntAffineExprNil)))
+    (bits-of (F32))))
 (let layout_3x2_strided
-  (StridedElementLayoutLit shape_3x2 strides_2_1 (bits-of (F32))))
+  (StridedElementLayoutLit shape_3x2
+    (IntAffineExprCons (IntMul (CoordVar shape_3x2 1) (IntLit 2))
+      (IntAffineExprCons (CoordVar shape_3x2 0)
+      (IntAffineExprNil)))
+    (bits-of (F32))))
 
 ; Downward-discovery scenarios: layouts born as bare expressions, paired
 ; with tensors, rejoin the constructor ladder on demand.
@@ -158,7 +176,10 @@
 ; The strided form the slice must NOT discover (constructed up front so the
 ; distinctness check below has a term to look up).
 (let disc_slice_strided_hypothesis
-  (StridedElementLayoutLit disc_slice_shape (IntExprCons (IntLit 1) (IntExprNil)) (bits-of (F32))))
+  (StridedElementLayoutLit disc_slice_shape
+    (IntAffineExprCons (CoordVar disc_slice_shape 0)
+      (IntAffineExprNil))
+    (bits-of (F32))))
 
 ; A BROADCAST (zero-stride) strided layout: [4,2] with strides [0,1] — the
 ; outer axis contributes no offset. Its fold must mint NO IntMul(CoordVar, 0)
@@ -168,8 +189,26 @@
   (ShapeLit (IntExprCons (IntLit 4) (IntExprCons (IntLit 2) (IntExprNil)))))
 (let bcast_layout
   (StridedElementLayoutLit bcast_shape
-    (IntExprCons (IntLit 0) (IntExprCons (IntLit 1) (IntExprNil)))
+    (IntAffineExprCons (IntLit 0)
+      (IntAffineExprCons (CoordVar bcast_shape 0)
+      (IntAffineExprNil)))
     (bits-of (F32))))
+
+
+; SOURCE SEAM rows for list-authored strided layouts (affine migration)
+(strided-lists layout3_strided_noncontiguous shape3_concrete (IntExprCons (IntLit 30)
+      (IntExprCons (IntLit 20)
+        (IntExprCons (IntLit 10)
+          (IntExprNil)))) strides3_noncontiguous (bits-of (F32)))
+(strided-lists layout_4x2_strided shape_4x2 (IntExprCons (IntLit 4) (IntExprCons (IntLit 2) (IntExprNil))) strides_2_1 (bits-of (F32)))
+(strided-lists layout_3x2_strided shape_3x2 (IntExprCons (IntLit 3) (IntExprCons (IntLit 2) (IntExprNil))) strides_2_1 (bits-of (F32)))
+(strided-lists disc_slice_strided_hypothesis disc_slice_shape (IntExprCons (IntLit 9) (IntExprNil)) (IntExprCons (IntLit 1) (IntExprNil)) (bits-of (F32)))
+(strided-lists bcast_layout bcast_shape (IntExprCons (IntLit 4) (IntExprCons (IntLit 2) (IntExprNil))) (IntExprCons (IntLit 0) (IntExprCons (IntLit 1) (IntExprNil))) (bits-of (F32)))
+
+(strided-lists layout3_strided_contiguous shape3_concrete (IntExprCons (IntLit 30)
+      (IntExprCons (IntLit 20)
+        (IntExprCons (IntLit 10)
+          (IntExprNil)))) strides3_contiguous (bits-of (F32)))
 
 (run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
@@ -186,10 +225,10 @@
 ; Rank-1 checks.
 (check
   (= layout1
-     (StridedElementLayoutLit
-       shape1
-       (IntExprCons (IntLit 1) (IntExprNil))
-       (bits-of (Int)))))
+     (StridedElementLayoutLit shape1
+    (IntAffineExprCons (CoordVar shape1 0)
+      (IntAffineExprNil))
+    (bits-of (Int)))))
 
 (check
   (= layout1
@@ -205,7 +244,9 @@
 ; Scalar checks.
 (check
   (= layout_scalar
-     (StridedElementLayoutLit shape_scalar (IntExprNil) (bits-of (F32)))))
+     (StridedElementLayoutLit shape_scalar
+    (IntAffineExprNil)
+    (bits-of (F32)))))
 
 (check
   (= layout_scalar
@@ -229,7 +270,12 @@
 
 (check
   (= layout3_concrete
-     (StridedElementLayoutLit shape3_concrete right_strides3_concrete (bits-of (F32)))))
+     (StridedElementLayoutLit shape3_concrete
+    (IntAffineExprCons (IntMul (CoordVar shape3_concrete 2) (IntLit 200))
+      (IntAffineExprCons (IntMul (CoordVar shape3_concrete 1) (IntLit 10))
+      (IntAffineExprCons (CoordVar shape3_concrete 0)
+      (IntAffineExprNil))))
+    (bits-of (F32)))))
 
 (check
   (= layout3_concrete
@@ -256,7 +302,12 @@
 
 (check
   (= layout3_left_concrete
-     (StridedElementLayoutLit shape3_concrete left_strides3_concrete (bits-of (F32)))))
+     (StridedElementLayoutLit shape3_concrete
+    (IntAffineExprCons (CoordVar shape3_concrete 2)
+      (IntAffineExprCons (IntMul (CoordVar shape3_concrete 1) (IntLit 30))
+      (IntAffineExprCons (IntMul (CoordVar shape3_concrete 0) (IntLit 600))
+      (IntAffineExprNil))))
+    (bits-of (F32)))))
 
 (check
   (= layout3_left_concrete
@@ -315,13 +366,19 @@
 ; its strided form...
 (check
   (= disc_elem_layout
-     (StridedElementLayoutLit disc_shape (IntExprCons (IntLit 2) (IntExprNil)) (bits-of (F32)))))
+     (StridedElementLayoutLit disc_shape
+    (IntAffineExprCons (IntMul (CoordVar disc_shape 0) (IntLit 2))
+      (IntAffineExprNil))
+    (bits-of (F32)))))
 
 ; ...the contiguous-equivalent one discovers strided and (rank-1:
 ; right == left major) both contiguous constructors...
 (check
   (= disc7_elem_layout
-     (StridedElementLayoutLit disc7_shape (IntExprCons (IntLit 1) (IntExprNil)) (bits-of (F32)))))
+     (StridedElementLayoutLit disc7_shape
+    (IntAffineExprCons (CoordVar disc7_shape 0)
+      (IntAffineExprNil))
+    (bits-of (F32)))))
 (check
   (= disc7_elem_layout
      (RightMajorContiguousElementLayoutLit disc7_shape (bits-of (F32)))))

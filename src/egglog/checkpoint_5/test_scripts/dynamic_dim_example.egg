@@ -120,9 +120,10 @@
 (let compound_zero_stride (IntMul (IntLit 4) empty_dim))
 (let skip_shape (ShapeLit (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil)))))
 (let skip_layout
-  (StridedElementLayoutLit
-    skip_shape
-    (IntExprCons compound_zero_stride (IntExprCons (IntLit 1) (IntExprNil)))
+  (StridedElementLayoutLit skip_shape
+    (IntAffineExprCons (IntMul (CoordVar skip_shape 1) compound_zero_stride)
+      (IntAffineExprCons (CoordVar skip_shape 0)
+      (IntAffineExprNil)))
     (bits-of storage_dtype)))
 
 ; GAP-DIM PROBE (Stage C1): an UNBUCKETED dim seeded [1, 64]. Its
@@ -154,16 +155,21 @@
 (let gap_probe_offset
   (IntAdd (IntMul (CoordVar gap_probe_shape 1) gap_probe_dim) (CoordVar gap_probe_shape 0)))
 
+
+; SOURCE SEAM rows for list-authored strided layouts (affine migration)
+(strided-lists skip_layout skip_shape (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil))) (IntExprCons compound_zero_stride (IntExprCons (IntLit 1) (IntExprNil))) (bits-of storage_dtype))
+
 (run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; The right-major fold over [4, seq_len] produces SYMBOLIC strides
 ; [seq_len, 1]...
 (check
   (= storage_layout
-     (StridedElementLayoutLit
-       storage_shape
-       (IntExprCons seq_len (IntExprCons (IntLit 1) (IntExprNil)))
-       (bits-of storage_dtype))))
+     (StridedElementLayoutLit storage_shape
+    (IntAffineExprCons (IntMul (CoordVar storage_shape 1) seq_len)
+      (IntAffineExprCons (CoordVar storage_shape 0)
+      (IntAffineExprNil)))
+    (bits-of storage_dtype))))
 
 ; ...and the strided-indexing foldr the symbolic offset
 ; outer_coord*seq_len + inner_coord.
@@ -192,7 +198,10 @@
 ; contiguous — a SYMBOLIC-length contiguous row, discovered, not declared.
 (check
   (= row0_view_layout
-     (StridedElementLayoutLit view_shape (IntExprCons (IntLit 1) (IntExprNil)) (bits-of storage_dtype))))
+     (StridedElementLayoutLit view_shape
+    (IntAffineExprCons (CoordVar view_shape 0)
+      (IntAffineExprNil))
+    (bits-of storage_dtype))))
 (check
   (= row0_view_layout
      (RightMajorContiguousElementLayoutLit view_shape (bits-of storage_dtype))))
@@ -210,10 +219,11 @@
        (subst-of (IntMul storage_offset (IntLit 32)) transpose_map storage_shape)
        transposed_shape
        (bits-of storage_dtype))
-     (StridedElementLayoutLit
-       transposed_shape
-       (IntExprCons (IntLit 1) (IntExprCons seq_len (IntExprNil)))
-       (bits-of storage_dtype))))
+     (StridedElementLayoutLit transposed_shape
+    (IntAffineExprCons (CoordVar transposed_shape 1)
+      (IntAffineExprCons (IntMul (CoordVar transposed_shape 0) seq_len)
+      (IntAffineExprNil)))
+    (bits-of storage_dtype))))
 ; ...and the discovery CASCADES: a transposed right-major view is
 ; left-major contiguous, and the strides fold recognizes [1, seq_len]
 ; over [seq_len, 4] as exactly that — a symbolic transpose, fully
@@ -240,10 +250,11 @@
          (subst-of (IntMul gap_probe_offset (IntLit 32)) gap_transpose_map gap_probe_shape)
          gap_transposed_shape
          (bits-of storage_dtype))
-       (StridedElementLayoutLit
-         gap_transposed_shape
-         (IntExprCons (IntLit 1) (IntExprCons gap_probe_dim (IntExprNil)))
-         (bits-of storage_dtype)))))
+       (StridedElementLayoutLit gap_transposed_shape
+    (IntAffineExprCons (CoordVar gap_transposed_shape 1)
+      (IntAffineExprCons (IntMul (CoordVar gap_transposed_shape 0) gap_probe_dim)
+      (IntAffineExprNil)))
+    (bits-of storage_dtype)))))
 
 ; Path (ii) pins: the pin is congruence-visible everywhere.
 (check (= pinned_product (IntLit 6)))

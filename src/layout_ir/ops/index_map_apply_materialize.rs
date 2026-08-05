@@ -182,22 +182,47 @@ impl OpMatcher for IndexMapApplyMaterializeMatcher {
 /// entries: `IndexMapLit` → cons spine BY E-CLASS → per element a CoordVar
 /// (owner Shape at child 0, axis primitive at child 1) or an IntLit. Anything else (arithmetic
 /// entries) yields `None` — the kernel's loud refusal carries the burden,
+/// Parse the map's entries numerically. EXISTENTIAL AT EVERY LEVEL (the
+/// R8/backtracking doctrine): a saturated map class holds several
+/// IndexMapLit spellings and a list class several cons spellings — some
+/// reference function-value classes with no constructor members (their
+/// values resolve elsewhere), so the parser tries every spelling and
+/// takes the first that parses all the way down. All spellings of a
+/// class denote the same map, so any parseable one is correct. `None` =
+/// no spelling parses — the kernel's loud refusal carries the burden,
 /// extraction never fails.
 fn parse_map_entries(site: &ExtractionSite<'_>) -> Option<Vec<super::iota::IotaExpr>> {
     let map_class = site.child_class(1);
-    let map_node = site.node_in_class(&map_class, "IndexMapLit")?;
-    let mut current = site.class_of_child(map_node, 0)?;
-    let mut entries = Vec::new();
-    loop {
-        if let Some(cons) = site.node_in_class(&current, "IntExprCons") {
-            let element = site.class_of_child(cons, 0)?;
-            let tail = site.class_of_child(cons, 1)?;
-            entries.push(super::iota::parse_int_expr(site, &element, 64)?);
-            current = tail;
-        } else if site.node_in_class(&current, "IntExprNil").is_some() {
+    let mut memo = std::collections::HashMap::new();
+    for map_node in site.nodes_in_class_value(&map_class, "IndexMapLit") {
+        let Some(head) = site.class_of_child(map_node, 0) else { continue };
+        if let Some(entries) = parse_entry_list(site, &head, 64, &mut memo) {
             return Some(entries);
-        } else {
-            return None;
         }
     }
+    None
+}
+
+fn parse_entry_list(
+    site: &ExtractionSite<'_>,
+    class: &egraph_serialize::ClassId,
+    depth: usize,
+    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, Option<super::iota::IotaExpr>>,
+) -> Option<Vec<super::iota::IotaExpr>> {
+    if depth == 0 {
+        return None;
+    }
+    if site.nodes_in_class_value(class, "IntExprNil").next().is_some() {
+        return Some(Vec::new());
+    }
+    for cons in site.nodes_in_class_value(class, "IntExprCons") {
+        let Some(element) = site.class_of_child(cons, 0) else { continue };
+        let Some(tail) = site.class_of_child(cons, 1) else { continue };
+        let Some(expr) = super::iota::parse_int_expr_memo(site, &element, 64, memo) else { continue };
+        if let Some(mut rest) = parse_entry_list(site, &tail, depth - 1, memo) {
+            rest.insert(0, expr);
+            return Some(rest);
+        }
+    }
+    None
 }

@@ -71,14 +71,43 @@ pub(crate) fn parse_int_expr(
     class: &egraph_serialize::ClassId,
     depth: usize,
 ) -> Option<IotaExpr> {
+    parse_int_expr_memo(site, class, depth, &mut std::collections::HashMap::new())
+}
+
+/// Memoized worker: each class parses at most once — the subsumed-
+/// spelling fallback widens the branching factor enough that the naive
+/// backtracking walk goes exponential on fat saturated classes.
+/// In-progress classes are marked None (cycle guard, same effect as the
+/// old depth exhaustion).
+pub(crate) fn parse_int_expr_memo(
+    site: &ExtractionSite<'_>,
+    class: &egraph_serialize::ClassId,
+    depth: usize,
+    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, Option<IotaExpr>>,
+) -> Option<IotaExpr> {
+    if let Some(cached) = memo.get(class) {
+        return cached.clone();
+    }
+    memo.insert(class.clone(), None);
+    let parsed = parse_int_expr_uncached(site, class, depth, memo);
+    memo.insert(class.clone(), parsed.clone());
+    parsed
+}
+
+fn parse_int_expr_uncached(
+    site: &ExtractionSite<'_>,
+    class: &egraph_serialize::ClassId,
+    depth: usize,
+    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, Option<IotaExpr>>,
+) -> Option<IotaExpr> {
     if depth == 0 {
         return None;
     }
-    if let Some(lit) = site.node_in_class(class, "IntLit") {
+    if let Some(lit) = site.nodes_in_class_value(class, "IntLit").next() {
         let value_class = site.class_of_child(lit, 0)?;
         return Some(IotaExpr::Lit(site.node_in_class_parse_i64(&value_class)?));
     }
-    if let Some(coord) = site.node_in_class(class, "CoordVar") {
+    if let Some(coord) = site.nodes_in_class_value(class, "CoordVar").next() {
         // Scoped coordinates: child 0 is the owner Shape, child 1 the axis.
         let axis_class = site.class_of_child(coord, 1)?;
         return Some(IotaExpr::Coord(
@@ -98,23 +127,23 @@ pub(crate) fn parse_int_expr(
         ("IntMax", |a, b| IotaExpr::Max(a, b)),
     ];
     for (kind, build) in binary_kinds {
-        for node in site.nodes_in_class(class, kind) {
+        for node in site.nodes_in_class_value(class, kind) {
             let Some(lhs_class) = site.class_of_child(node, 0) else { continue };
             let Some(rhs_class) = site.class_of_child(node, 1) else { continue };
-            let Some(lhs) = parse_int_expr(site, &lhs_class, depth - 1) else { continue };
-            let Some(rhs) = parse_int_expr(site, &rhs_class, depth - 1) else { continue };
+            let Some(lhs) = parse_int_expr_memo(site, &lhs_class, depth - 1, memo) else { continue };
+            let Some(rhs) = parse_int_expr_memo(site, &rhs_class, depth - 1, memo) else { continue };
             return Some(build(Box::new(lhs), Box::new(rhs)));
         }
     }
-    for cast in site.nodes_in_class(class, "IntCastFromBool") {
+    for cast in site.nodes_in_class_value(class, "IntCastFromBool") {
         let Some(bool_class) = site.class_of_child(cast, 0) else { continue };
-        let Some(less_than) = site.node_in_class(&bool_class, "BoolLessThanInt") else {
+        let Some(less_than) = site.nodes_in_class_value(&bool_class, "BoolLessThanInt").next() else {
             continue;
         };
         let Some(lhs_class) = site.class_of_child(less_than, 0) else { continue };
         let Some(rhs_class) = site.class_of_child(less_than, 1) else { continue };
-        let Some(lhs) = parse_int_expr(site, &lhs_class, depth - 1) else { continue };
-        let Some(rhs) = parse_int_expr(site, &rhs_class, depth - 1) else { continue };
+        let Some(lhs) = parse_int_expr_memo(site, &lhs_class, depth - 1, memo) else { continue };
+        let Some(rhs) = parse_int_expr_memo(site, &rhs_class, depth - 1, memo) else { continue };
         return Some(IotaExpr::LessThanCast(Box::new(lhs), Box::new(rhs)));
     }
     None
