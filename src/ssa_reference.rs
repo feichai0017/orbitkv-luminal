@@ -27,7 +27,15 @@ pub fn reference_allow_list() -> Vec<&'static str> {
     crate::layout_ir::ops::built_in_matchers()
         .iter()
         .map(|matcher| matcher.egglog_constructor())
-        .filter(|constructor| *constructor != "LayoutTensorOpIndexMapApplyViewGeneric")
+        // The allow list states what THIS runtime actually implements
+        // (Austin's ruling, 2026-08-05): the reference runtime reads
+        // through nothing (no view op) and mutates nothing in place —
+        // the Mutating family has no reference kernels, and an allow
+        // list that over-claims turns kernel gaps into search refusals.
+        .filter(|constructor| {
+            *constructor != "LayoutTensorOpIndexMapApplyViewGeneric"
+                && !constructor.contains("Mutating")
+        })
         .collect()
 }
 

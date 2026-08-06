@@ -2842,6 +2842,29 @@ mod stage4b_probes {
         }
     }
 
+    /// Scratch: reproduce the activation search refusal in-crate.
+    #[test]
+    #[ignore = "diagnostic — RRX=1 to run"]
+    fn rrx_scalar_constant_ladder() {
+        if std::env::var("RRX").is_err() {
+            return;
+        }
+        let mut cx = crate::graph::Graph::new();
+        let x = cx.tensor(5);
+        let out = x.relu().output();
+        let mut data = rustc_hash::FxHashMap::default();
+        data.insert(x.id, vec![1., 2., 3., 4., 5.]);
+        let mut rt = crate::ssa_reference::SsaReferenceRuntime::load(&cx).expect("load");
+        match rt.search(&data, &crate::implementation_search::ImplementationSearchOptions::default()) {
+            Ok(_) => {
+                rt.set_data(x.id, vec![1., 2., 3., 4., 5.]);
+                rt.execute().expect("executes");
+                eprintln!("[rrx-scalar] OK: {:?}", rt.get_f32(out.id).unwrap());
+            }
+            Err(err) => eprintln!("[rrx-scalar] SEARCH REFUSED: {err}"),
+        }
+    }
+
     /// G7 MAP-ENTRY RANGE LOCK (Austin ruled 2026-08-05): the
     /// adversary's degenerate bypass — a map reading an extent-1 parent
     /// axis at a 5-extent coordinate — must now DIE LOUDLY in the

@@ -97,6 +97,7 @@ pub fn search_implementations_with_ops(
         .collect();
     let input_data = &buffer_data;
     let allow = allow_override.unwrap_or_else(crate::ssa_reference::reference_allow_list);
+    let mut session = extractor::ExtractionSession::new(egraph, Some(&allow));
     let index = extractor::producer_index_with_ops(egraph, Some(&allow));
     ensure!(!index.is_empty(), "no producer classes to search over");
     let classes: Vec<_> = index.keys().cloned().collect();
@@ -125,6 +126,10 @@ pub fn search_implementations_with_ops(
     let mut cache: FxHashMap<u64, u128> = FxHashMap::default();
     let mut plans_profiled = 0usize;
     let mut fingerprint_hits = 0usize;
+    // Refusal accounting, minimal form (Step 5 down-payment): keep the
+    // first few refusal reasons so a fully-refused search names its
+    // causes instead of shrugging.
+    let mut refusals: Vec<String> = Vec::new();
     let mut best: Option<(u128, Genome, BufferIrGraph)> = None;
 
     let profile_plan = |plan: &BufferIrGraph, trials: usize| -> Result<u128> {
@@ -162,10 +167,20 @@ pub fn search_implementations_with_ops(
         for genome in candidates {
             // Extraction failure = invalid genome (cycle, contract breach):
             // discard; the next generation's fresh mutations are the repair.
-            let Ok(Some(graph)) =
-                extractor::extract_layout_ir_with_genome_and_ops(egraph, &genome, Some(&allow))
-            else {
-                continue;
+            let graph = match session.extract_with_genome(&genome) {
+                Ok(Some(graph)) => graph,
+                Ok(None) => {
+                    if refusals.len() < 8 {
+                        refusals.push("extract: no boundary reached".to_string());
+                    }
+                    continue;
+                }
+                Err(err) => {
+                    if refusals.len() < 8 {
+                        refusals.push(format!("extract: {err:#}"));
+                    }
+                    continue;
+                }
             };
             let fingerprint = extractor::plan_fingerprint(&graph);
             let nanos = match cache.get(&fingerprint) {
@@ -174,13 +189,23 @@ pub fn search_implementations_with_ops(
                     *nanos
                 }
                 None => {
-                    let Ok(plan) =
-                        crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph))
-                    else {
-                        continue;
+                    let plan = match crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph)) {
+                        Ok(plan) => plan,
+                        Err(err) => {
+                            if refusals.len() < 8 {
+                                refusals.push(format!("bufferize: {err:#}"));
+                            }
+                            continue;
+                        }
                     };
-                    let Ok(nanos) = profile_plan(&plan, options.trials) else {
-                        continue;
+                    let nanos = match profile_plan(&plan, options.trials) {
+                        Ok(nanos) => nanos,
+                        Err(err) => {
+                            if refusals.len() < 8 {
+                                refusals.push(format!("execute: {err:#}"));
+                            }
+                            continue;
+                        }
                     };
                     cache.insert(fingerprint, nanos);
                     plans_profiled += 1;
@@ -205,7 +230,9 @@ pub fn search_implementations_with_ops(
     }
 
     let (best_nanos, best_genome, best_plan) =
-        best.ok_or_else(|| anyhow!("no candidate genome produced an executable plan"))?;
+        best.ok_or_else(|| {
+            anyhow!("no candidate genome produced an executable plan; refusals: {refusals:#?}")
+        })?;
     let _ = program; // binding tables travel with the caller; kept for future bucket plumbing
     Ok(SearchOutcome {
         best_plan,

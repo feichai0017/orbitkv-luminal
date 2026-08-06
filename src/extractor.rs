@@ -28,7 +28,7 @@ struct Extractor<'a> {
     input_terminals: HashMap<ClassId, InputInfo>,
     /// The search genome, when this walk is genome-driven (see [`Genome`]).
     /// `None` = the deterministic fixture extractor (min-cost tooling).
-    genome: Option<&'a Genome>,
+    genome: Option<Genome>,
     memo: HashMap<ClassId, Option<Plan>>,
 }
 
@@ -112,6 +112,33 @@ pub fn extract_layout_ir(egraph: &EGraph) -> Result<Option<ExtractedGraph>> {
 /// extractor (min-cost, tie-broken) — tooling for fixtures and goldens,
 /// not the selection mechanism. The search path is
 /// [`extract_layout_ir_with_genome`].
+/// A reusable extraction session: the immutable analysis (class maps, op
+/// specs, the runtime-viability fixpoint) is computed ONCE, and genomes
+/// are swapped in per extraction. The implementation search runs dozens
+/// of genome extractions per call — reconstructing the analysis each
+/// time doubled suite wall time (measured 2026-08-05).
+pub struct ExtractionSession<'a> {
+    extractor: Extractor<'a>,
+}
+
+impl<'a> ExtractionSession<'a> {
+    pub fn new(egraph: &'a EGraph, allowed_ops: Option<&[&str]>) -> Self {
+        let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
+        let mut extractor = Extractor::new(egraph, allowed, None);
+        extractor.apply_viability_filter();
+        Self { extractor }
+    }
+
+    pub fn extract_with_genome(
+        &mut self,
+        genome: &Genome,
+    ) -> Result<Option<ExtractedGraph>> {
+        self.extractor.genome = Some(genome.clone());
+        self.extractor.memo.clear();
+        self.extractor.extract()
+    }
+}
+
 pub fn extract_layout_ir_with_ops(
     egraph: &EGraph,
     allowed_ops: Option<&[&str]>,
@@ -120,6 +147,7 @@ pub fn extract_layout_ir_with_ops(
     let mut extractor = Extractor::new(egraph, allowed, None);
     extractor.extract()
 }
+
 
 /// One genome choice: the concrete implementation enode that produces the
 /// keyed LayoutTensor class, and which of its output slots carries it.
@@ -165,6 +193,7 @@ pub fn extract_layout_ir_with_genome_and_ops(
 ) -> Result<Option<ExtractedGraph>> {
     let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
     let mut extractor = Extractor::new(egraph, allowed, Some(genome));
+    extractor.apply_viability_filter();
     extractor.extract()
 }
 
@@ -187,7 +216,9 @@ pub fn producer_index_with_ops(
     allowed_ops: Option<&[&str]>,
 ) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
     let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
-    let extractor = Extractor::new(egraph, allowed, None);
+    let mut extractor = Extractor::new(egraph, allowed, None);
+    extractor.apply_viability_filter();
+    let extractor = extractor;
     let mut index = std::collections::BTreeMap::new();
     for (class, producers) in &extractor.producer_index {
         let mut entries: Vec<(String, ProducerChoice)> = Vec::new();
@@ -276,9 +307,9 @@ impl<'a> Extractor<'a> {
     fn new(
         egraph: &'a EGraph,
         allowed_ops: Option<HashSet<String>>,
-        genome: Option<&'a Genome>,
+        genome: Option<&Genome>,
     ) -> Self {
-        let matchers = built_in_matchers()
+        let matchers: HashMap<&'static str, Box<dyn OpMatcher>> = built_in_matchers()
             .into_iter()
             .filter(|matcher| {
                 allowed_ops
@@ -299,6 +330,8 @@ impl<'a> Extractor<'a> {
             &input_buffer_classes,
         );
 
+
+
         Self {
             egraph,
             matchers,
@@ -307,9 +340,74 @@ impl<'a> Extractor<'a> {
             op_specs,
             producer_index,
             input_terminals,
-            genome,
+            genome: genome.cloned(),
             memo: HashMap::new(),
         }
+    }
+
+
+    /// RUNTIME-VIABILITY FILTER (Austin's ruling, 2026-08-05): restrict
+    /// the producer index to ops the runtime can actually realize — a
+    /// matched, unsubsumed implementation whose operand LayoutTensors
+    /// are all transitively realizable from the program inputs. Any
+    /// genome over the filtered index assembles an executable graph;
+    /// residual discards are choice-cycles. LAZY: only genome-driven
+    /// extraction needs this (the plain cost walk backtracks past dead
+    /// candidates on its own), and the fixpoint is too expensive to pay
+    /// on every plain extraction.
+    fn apply_viability_filter(&mut self) {
+        let op_matched: HashMap<&ClassId, bool> = self
+            .op_specs
+            .keys()
+            .map(|op_class| {
+                let matched = self
+                    .class_nodes
+                    .get(op_class)
+                    .into_iter()
+                    .flatten()
+                    .any(|node_id| {
+                        self.egraph.nodes.get(node_id).is_some_and(|node| {
+                            !node.subsumed && self.matchers.contains_key(node.op.as_str())
+                        })
+                    });
+                (op_class, matched)
+            })
+            .collect();
+        let mut viable: HashSet<ClassId> = self.input_terminals.keys().cloned().collect();
+        loop {
+            let mut changed = false;
+            for (op_class, specs) in &self.op_specs {
+                if !op_matched.get(op_class).copied().unwrap_or(false) {
+                    continue;
+                }
+                for spec in specs {
+                    if spec.inputs.iter().all(|class| viable.contains(class)) {
+                        for output in &spec.outputs {
+                            if viable.insert(output.clone()) {
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let op_matched: HashMap<ClassId, bool> =
+            op_matched.into_iter().map(|(k, v)| (k.clone(), v)).collect();
+        for producers in self.producer_index.values_mut() {
+            producers.retain(|producer| {
+                op_matched.get(&producer.op_class).copied().unwrap_or(false)
+                    && self
+                        .op_specs
+                        .get(&producer.op_class)
+                        .into_iter()
+                        .flatten()
+                        .any(|spec| spec.inputs.iter().all(|class| viable.contains(class)))
+            });
+        }
+        self.producer_index.retain(|_, producers| !producers.is_empty());
     }
 
     fn extract(&mut self) -> Result<Option<ExtractedGraph>> {
@@ -366,7 +464,10 @@ impl<'a> Extractor<'a> {
         // produced class missing from the genome violates the total-genome
         // contract: candidates empty out and extraction fails loudly at the
         // root (fail-open, no silent substitution).
-        if let Some(genome) = self.genome {
+        if let Some(genome) = self.genome.as_ref() {
+            // The viability-filtered index IS the genome contract: every
+            // indexed class has an entry in every genome; unindexed
+            // classes are not decision points.
             if self.producer_index.contains_key(class) {
                 match genome.choices.get(class) {
                     Some(choice) => candidates.retain(|candidate| {
@@ -1966,7 +2067,7 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
     /// the genome maps that class to exactly this enode and slot — the
     /// genome, not emission order, decides ownership.
     fn slot_claimed(&self, output: &ClassId, enode: &NodeId, slot: usize) -> bool {
-        match self.extractor.genome {
+        match self.extractor.genome.as_ref() {
             None => true,
             Some(genome) => genome
                 .choices
