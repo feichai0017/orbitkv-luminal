@@ -58,10 +58,26 @@ pub trait DynBackend {
     }
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>);
 
+    /// Report names for selected backend host operations that opt into stats.
+    /// This is diagnostic metadata used to verify backend selection; runtimes
+    /// that do not expose their selected operations may keep the default.
+    fn selected_host_op_names(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
     // --- Optional device pointer support (GPU backends) --------------------
 
     fn supports_device_ptrs(&self) -> bool {
         false
+    }
+    /// Order this backend's device stream after work already submitted to an
+    /// external CUDA stream. GPU frontends that pass raw pointers must call
+    /// this before execution so producers and consumers cannot race.
+    fn wait_for_external_cuda_stream(&self, _stream: u64) -> Result<(), String> {
+        Err(format!(
+            "wait_for_external_cuda_stream not supported by '{}'",
+            self.name()
+        ))
     }
     /// # Safety
     /// Device pointer must be valid and point to at least `n_bytes` bytes.

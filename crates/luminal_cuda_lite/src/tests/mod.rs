@@ -23,6 +23,8 @@ mod op_functional_tests;
 #[cfg(test)]
 mod performance_tests;
 #[cfg(test)]
+mod qwen3_moe_pt2_rewrite;
+#[cfg(test)]
 mod qwen3_moe_rewrite;
 mod qwen_bf16_repro;
 #[cfg(test)]

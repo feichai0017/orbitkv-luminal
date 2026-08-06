@@ -154,6 +154,14 @@ class CompiledModel:
                 dtype_code = _torch_dtype_code(t.dtype)
                 self._graph.set_input_from_ptr(name, t.data_ptr(), n_bytes, dtype_code)
 
+        # Raw CUDA pointers do not communicate PyTorch's producer-stream
+        # dependency to Luminal. Record/wait at the backend boundary after all
+        # detach/contiguous work above so Luminal cannot race asynchronous
+        # tensor creation or mutation on PyTorch's current stream.
+        if self._supports_device_ptrs and _input_refs:
+            producer_stream = torch.cuda.current_stream(input_device)
+            self._graph.wait_for_external_cuda_stream(producer_stream.cuda_stream)
+
         # Resolve output shapes before run() (needed for pre-allocation).
         if self._has_dynamic_dims:
             output_shapes = self._graph.resolve_output_shapes()

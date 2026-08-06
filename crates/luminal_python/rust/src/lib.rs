@@ -12,7 +12,7 @@ mod pt2_util;
 mod translator;
 
 use compiled_graph::CompiledGraph;
-use pt2_compiled_model::process_pt2;
+use pt2_compiled_model::{process_pt2, translate_pt2_to_dot, translate_pt2_to_egglog};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use std::collections::HashMap;
@@ -21,6 +21,8 @@ use torch_dtype::TorchDType;
 #[pymodule]
 fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_pt2, m)?)?;
+    m.add_function(wrap_pyfunction!(translate_pt2_to_dot, m)?)?;
+    m.add_function(wrap_pyfunction!(translate_pt2_to_egglog, m)?)?;
     m.add_class::<CompiledGraph>()?;
     m.add_function(wrap_pyfunction!(_reference_factory_capsule, m)?)?;
     m.add_function(wrap_pyfunction!(_torch_dtype_codes, m)?)?;

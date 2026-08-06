@@ -6,7 +6,12 @@ from .cache_utils import _register_cache_serialization
 from .compiled_model import CompiledModel
 
 # Import Rust extension components (built by maturin)
-from .luminal import CompiledGraph, process_pt2
+from .luminal import (
+    CompiledGraph,
+    process_pt2,
+    translate_pt2_to_dot,
+    translate_pt2_to_egglog,
+)
 from .main import luminal_backend, register_backend
 
 _register_cache_serialization()
@@ -18,4 +23,6 @@ __all__ = [
     "register_backend",
     "CompiledGraph",
     "process_pt2",
+    "translate_pt2_to_dot",
+    "translate_pt2_to_egglog",
 ]

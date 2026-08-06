@@ -259,6 +259,12 @@ impl CompiledGraph {
         self.runtime.name()
     }
 
+    /// Names of reportable host operations in the selected backend graph.
+    #[getter]
+    fn selected_host_ops(&self) -> Vec<&'static str> {
+        self.runtime.selected_host_op_names()
+    }
+
     /// The device type this backend operates on (e.g. "cpu", "cuda").
     #[getter]
     fn device_type(&self) -> &str {
@@ -269,6 +275,21 @@ impl CompiledGraph {
     #[getter]
     fn supports_device_ptrs(&self) -> bool {
         self.runtime.supports_device_ptrs()
+    }
+
+    /// Order the backend's CUDA stream after all work currently queued on an
+    /// external producer stream. This is required before consuming raw
+    /// PyTorch device pointers because the pointers themselves do not carry
+    /// CUDA stream dependency information.
+    fn wait_for_external_cuda_stream(&self, cuda_stream: u64) -> PyResult<()> {
+        if !self.runtime.supports_device_ptrs() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "wait_for_external_cuda_stream requires a GPU backend",
+            ));
+        }
+        self.runtime
+            .wait_for_external_cuda_stream(cuda_stream)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
 
     /// Whether this graph has dynamic (symbolic) dimensions.

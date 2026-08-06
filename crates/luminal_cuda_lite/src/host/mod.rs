@@ -7,12 +7,14 @@ use luminal::{op::EgglogOp, prelude::*};
 pub(crate) mod cublaslt;
 pub mod flashinfer;
 pub mod moe;
+pub mod qwen3_moe;
 
 pub type Ops = (
     cublaslt::CuBlasLt,
     cublaslt::CuBlasLtScaled,
     moe::GLUMoE,
     moe::fused::FusedMoE,
+    qwen3_moe::Qwen3Moe,
     flashinfer::FlashInferAttention,
     flashinfer::sink_attention::SinkAttention,
 );

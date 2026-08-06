@@ -19,6 +19,55 @@ const MAIN_SCHEDULE_MAX_TUPLES: usize = 10_000_000;
 const SLOW_PHASE_TIME: Duration = Duration::from_secs(1);
 const BIG_TUPLE_DELTA: isize = 5_000;
 
+fn maybe_dump_named_dtype_facts(program: &str, egraph: &mut egglog::EGraph) {
+    let Ok(dir) = std::env::var("LUMINAL_EGRAPH_DUMP_DIR")
+        .or_else(|_| std::env::var("LUMINAL_COMPILER_DUMP_DIR"))
+    else {
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!("failed to create Egglog dtype dump directory {dir}: {error}");
+        return;
+    }
+
+    static DTYPE_DUMP_SEQUENCE: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    let sequence = DTYPE_DUMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = format!("{dir}/saturated-dtypes-{sequence:04}.tsv");
+    let mut output = String::from("variable\tdtype\texpression\n");
+
+    for line in program.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix("(let ") else {
+            continue;
+        };
+        let Some(variable) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if !variable.starts_with('t') || !variable[1..].chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let dtype_expr = egglog::call!("dtype", vec![egglog::var!(variable.to_string())]);
+        let dtype = match egraph.eval_expr(&dtype_expr) {
+            Ok((sort, value)) => egraph
+                .extract_value_to_string(&sort, value)
+                .map(|(value, _)| value)
+                .unwrap_or_else(|error| format!("<extract-error:{error}>")),
+            Err(error) => format!("<missing:{error}>"),
+        };
+        let expression = line.replace('\t', "\\t");
+        let _ = std::fmt::Write::write_fmt(
+            &mut output,
+            format_args!("{variable}\t{dtype}\t{expression}\n"),
+        );
+    }
+
+    if let Err(error) = std::fs::write(&path, output) {
+        eprintln!("failed to write {path}: {error}");
+    } else {
+        println!("   Egglog dtype dump {path}");
+    }
+}
+
 const EGGLOG_RULESETS: &[&str] = &[
     "matmul_flatten",
     "kernel_lower",
@@ -1047,6 +1096,35 @@ fn print_run_summary_with_log(run_report: &EgglogRunReport, log: bool) {
             metric_duration(*elapsed)
         );
     }
+
+    // Exact staged backend matches are intentionally split across many small
+    // rules. They are usually too fast to appear in the "slow" top-N above,
+    // which makes it impossible to tell whether a long matcher completed or
+    // where it stopped. Keep this opt-in with EGGLOG_DEBUG and report the
+    // cumulative totals from the complete run rather than one schedule cycle.
+    let mut qwen3_moe_rules = rules
+        .iter()
+        .filter(|(rule, _, _)| rule.starts_with("Qwen3-MoE "))
+        .collect_vec();
+    qwen3_moe_rules.sort_by(|a, b| {
+        let (a_prefix, a_stage) =
+            a.0.rsplit_once(" stage ")
+                .map(|(prefix, stage)| (prefix, stage.parse::<usize>().unwrap_or(usize::MAX)))
+                .unwrap_or((a.0.as_str(), usize::MAX));
+        let (b_prefix, b_stage) =
+            b.0.rsplit_once(" stage ")
+                .map(|(prefix, stage)| (prefix, stage.parse::<usize>().unwrap_or(usize::MAX)))
+                .unwrap_or((b.0.as_str(), usize::MAX));
+        a_prefix.cmp(b_prefix).then_with(|| a_stage.cmp(&b_stage))
+    });
+    for (rule, elapsed, matches) in qwen3_moe_rules {
+        eprintln!(
+            "      qwen    {:<96} {:>10} | matches {}",
+            metric_name(rule),
+            metric_duration(*elapsed),
+            matches
+        );
+    }
 }
 
 fn print_serialized_shape_with_log(s: &egglog::SerializeOutput, log: bool) {
@@ -1395,6 +1473,8 @@ fn run_egglog_with_report_parts_impl(
         )
         .green()
     );
+
+    maybe_dump_named_dtype_facts(program, &mut egraph);
 
     let (sort, value) = egraph.eval_expr(&var!(root))?;
     let s = egraph.serialize(egglog::SerializeConfig {

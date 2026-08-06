@@ -408,7 +408,16 @@ fn validate_dim_buckets(dimension: char, buckets: &[DimBucket]) {
 }
 
 fn maybe_dump_selected_llir(label: &str, dyn_map: &FxHashMap<char, usize>, llir: &LLIRGraph) {
-    let Ok(dir) = std::env::var("LLIR_DUMP_DIR") else {
+    let (dir, sequence) = if let Ok(dir) = std::env::var("LLIR_DUMP_DIR") {
+        (dir, None)
+    } else if let Ok(dir) = std::env::var("LUMINAL_COMPILER_DUMP_DIR") {
+        static LLIR_DUMP_SEQUENCE: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        (
+            dir,
+            Some(LLIR_DUMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
+        )
+    } else {
         return;
     };
 
@@ -427,6 +436,9 @@ fn maybe_dump_selected_llir(label: &str, dyn_map: &FxHashMap<char, usize>, llir:
     } else {
         format!("selected-llir-{label}-{dims}")
     };
+    let stem = sequence
+        .map(|sequence| format!("{stem}-{sequence:04}"))
+        .unwrap_or(stem);
     let dot_path = format!("{dir}/{stem}.dot");
     let summary_path = format!("{dir}/{stem}.txt");
 
@@ -473,6 +485,151 @@ fn maybe_dump_selected_llir(label: &str, dyn_map: &FxHashMap<char, usize>, llir:
     } else {
         println!("   LLIR dump {summary_path}");
     }
+}
+
+fn eclass_labels(egraph: &SerializedEGraph, class: &crate::egglog_utils::ClassId) -> Vec<String> {
+    let mut labels = egraph
+        .eclasses
+        .get(class)
+        .into_iter()
+        .flat_map(|(_, nodes)| nodes)
+        .filter_map(|node| egraph.enodes.get(node).map(|(label, _)| label.clone()))
+        .collect_vec();
+    labels.sort();
+    labels.dedup();
+    labels
+}
+
+fn saturated_dtype_facts(
+    egraph: &SerializedEGraph,
+) -> FxHashMap<crate::egglog_utils::ClassId, Vec<String>> {
+    let mut facts = FxHashMap::<_, Vec<String>>::default();
+    for (node, (label, children)) in &egraph.enodes {
+        if !label.starts_with("dtype") || children.is_empty() {
+            continue;
+        }
+        let Some(dtype_class) = egraph.node_to_class.get(node) else {
+            continue;
+        };
+        let entry = facts.entry(children[0].clone()).or_default();
+        entry.extend(eclass_labels(egraph, dtype_class));
+        entry.sort();
+        entry.dedup();
+    }
+    facts
+}
+
+fn saturated_egraph_debug_text(egraph: &SerializedEGraph) -> String {
+    let dtype_facts = saturated_dtype_facts(egraph);
+    let mut classes = egraph.eclasses.iter().collect_vec();
+    classes.sort_by_key(|(class, _)| format!("{class:?}"));
+
+    let mut output = String::new();
+    let _ = writeln!(output, "roots: {:?}", egraph.roots);
+    let _ = writeln!(
+        output,
+        "eclasses={} enodes={}",
+        egraph.eclasses.len(),
+        egraph.enodes.len()
+    );
+    for (class, (sort, nodes)) in classes {
+        let dtypes = dtype_facts
+            .get(class)
+            .map(|values| values.join("|"))
+            .unwrap_or_else(|| "<missing>".to_string());
+        let _ = writeln!(output, "\neclass {class:?} sort={sort} dtype={dtypes}");
+        let mut nodes = nodes.iter().collect_vec();
+        nodes.sort_by_key(|node| format!("{node:?}"));
+        for node in nodes {
+            if let Some((label, children)) = egraph.enodes.get(node) {
+                let _ = writeln!(
+                    output,
+                    "  enode {node:?} label={label} children={children:?}"
+                );
+            }
+        }
+    }
+    output
+}
+
+fn saturated_egraph_dot(egraph: &SerializedEGraph) -> String {
+    let dtype_facts = saturated_dtype_facts(egraph);
+    let mut classes = egraph.eclasses.iter().collect_vec();
+    classes.sort_by_key(|(class, _)| format!("{class:?}"));
+    let mut class_names = FxHashMap::default();
+    for (index, (class, _)) in classes.iter().enumerate() {
+        class_names.insert((*class).clone(), format!("c{index}"));
+    }
+
+    let escape = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut output = String::from("digraph saturated_egraph {\n  rankdir=LR;\n");
+    for (class, (sort, nodes)) in &classes {
+        let dtypes = dtype_facts
+            .get(*class)
+            .map(|values| values.join("|"))
+            .unwrap_or_else(|| "<missing>".to_string());
+        let mut labels = nodes
+            .iter()
+            .filter_map(|node| egraph.enodes.get(node).map(|(label, _)| label.clone()))
+            .collect_vec();
+        labels.sort();
+        labels.dedup();
+        let label = escape(&format!(
+            "{:?}\\nsort={} dtype={}\\n{}",
+            class,
+            sort,
+            dtypes,
+            labels.join(" | ")
+        ));
+        let _ = writeln!(
+            output,
+            "  {} [shape=box,label=\"{}\"];",
+            class_names[*class], label
+        );
+    }
+    for (class, (_, nodes)) in &classes {
+        for node in nodes.iter() {
+            let Some((label, children)) = egraph.enodes.get(node) else {
+                continue;
+            };
+            for (input, child) in children.iter().enumerate() {
+                let (Some(source), Some(target)) =
+                    (class_names.get(*class), class_names.get(child))
+                else {
+                    continue;
+                };
+                let edge_label = escape(&format!("{label}[{input}]"));
+                let _ = writeln!(output, "  {source} -> {target} [label=\"{edge_label}\"];");
+            }
+        }
+    }
+    output.push_str("}\n");
+    output
+}
+
+fn maybe_dump_saturated_egraph(index: usize, egraph: &SerializedEGraph) {
+    let Ok(dir) = std::env::var("LUMINAL_EGRAPH_DUMP_DIR")
+        .or_else(|_| std::env::var("LUMINAL_COMPILER_DUMP_DIR"))
+    else {
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!("failed to create e-graph dump directory {dir}: {error}");
+        return;
+    }
+    static EGRAPH_DUMP_SEQUENCE: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    let sequence = EGRAPH_DUMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stem = format!("saturated-egraph-{sequence:04}-context-{index:02}");
+    let text_path = format!("{dir}/{stem}.txt");
+    let dot_path = format!("{dir}/{stem}.dot");
+    if let Err(error) = std::fs::write(&text_path, saturated_egraph_debug_text(egraph)) {
+        eprintln!("failed to write {text_path}: {error}");
+    }
+    if let Err(error) = std::fs::write(&dot_path, saturated_egraph_dot(egraph)) {
+        eprintln!("failed to write {dot_path}: {error}");
+    }
+    println!("   EGraph dump {text_path}");
 }
 
 fn random_choice_generation<'a, G: rand::Rng>(
@@ -1614,6 +1771,9 @@ impl Graph {
                 .unwrap()
             })
             .collect();
+        for (index, egraph) in self.egraphs.iter().enumerate() {
+            maybe_dump_saturated_egraph(index, egraph);
+        }
         self.egraph_contexts = contexts;
         self.ops = Some(ops);
         self.search_space_dim_buckets = dim_buckets;
@@ -4230,6 +4390,20 @@ mod tests {
     };
     use crate::hlir::{ReferenceData, ReferenceOp};
     use rand::SeedableRng;
+
+    #[test]
+    fn saturated_egraph_dump_includes_dtype_facts() {
+        let mut cx = Graph::new();
+        let input = cx.tensor(4).as_dtype(DType::F16);
+        input.output();
+        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
+
+        let egraph = cx.egraph().expect("search space should contain an e-graph");
+        let text = saturated_egraph_debug_text(egraph);
+        let dot = saturated_egraph_dot(egraph);
+        assert!(text.contains("dtype=F16"), "dump omitted F16 fact:\n{text}");
+        assert!(dot.contains("dtype=F16"), "DOT omitted F16 fact:\n{dot}");
+    }
 
     // A rolling candidate is only collapsible if every non-state boundary input
     // is fed from OUTSIDE the candidate's occurrences. A non-state input produced

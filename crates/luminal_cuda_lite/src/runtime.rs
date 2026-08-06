@@ -40,6 +40,7 @@ use uuid::Uuid;
 
 const ARENA_ALIGNMENT: usize = 256;
 const MIN_ARENA_ALLOCATION_BYTES: usize = 16 * 1024 * 1024;
+const PRESERVE_INTERMEDIATES_ENV: &str = "LUMINAL_CUDA_PRESERVE_INTERMEDIATES";
 
 pub enum CudaInput {
     Buffer { buf: CudaSlice<u8>, len: usize },
@@ -215,6 +216,11 @@ pub(crate) struct CompiledBucket {
 
 impl CompiledBucket {
     fn new() -> Self {
+        // Diagnostic mode for isolating arena live-range/aliasing bugs. This is
+        // sampled before the bucket's first memory plan so every logical
+        // intermediate receives a distinct, non-reused arena range.
+        let preserve_intermediate_buffers_for_debug =
+            std::env::var_os(PRESERVE_INTERMEDIATES_ENV).is_some();
         CompiledBucket {
             exec_graph: StableGraph::default(),
             node_to_exec: FxHashMap::default(),
@@ -246,7 +252,7 @@ impl CompiledBucket {
             cached_device_buffers: FxHashMap::default(),
             bucket_indices: FxHashMap::default(),
             hlir_synced: false,
-            preserve_intermediate_buffers_for_debug: false,
+            preserve_intermediate_buffers_for_debug,
             stabilize_intermediate_pointers: false,
         }
     }
@@ -473,6 +479,37 @@ impl CudaRuntime {
             .node_weights()
             .map(|op| op.internal.as_ref().as_ref() as &dyn HostOp)
             .collect()
+    }
+
+    /// Order Luminal's CUDA stream after work submitted by an external
+    /// producer stream (for example PyTorch's current stream).
+    ///
+    /// Raw device pointers carry no stream dependency metadata. Recording an
+    /// event on the producer and waiting on it here preserves zero-copy input
+    /// while preventing Luminal from reading tensors whose asynchronous
+    /// creation or mutation has not completed yet.
+    ///
+    /// # Safety
+    /// `external_stream` must be a live CUDA stream in this device's primary
+    /// context for the duration of this call.
+    pub unsafe fn wait_for_external_cuda_stream(
+        &self,
+        external_stream: u64,
+    ) -> Result<(), cudarc::driver::DriverError> {
+        self.cuda_stream.context().bind_to_thread()?;
+        let event = result::event::create(sys::CUevent_flags::CU_EVENT_DISABLE_TIMING)?;
+        let producer = external_stream as usize as sys::CUstream;
+        let wait_result = unsafe {
+            result::event::record(event, producer).and_then(|()| {
+                result::stream::wait_event(
+                    self.cuda_stream.cu_stream(),
+                    event,
+                    sys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT,
+                )
+            })
+        };
+        let destroy_result = unsafe { result::event::destroy(event) };
+        wait_result.and(destroy_result)
     }
 
     fn bucket_buffer(
@@ -1568,6 +1605,10 @@ impl CudaRuntime {
         }
 
         if bucket.preserve_intermediate_buffers_for_debug {
+            eprintln!(
+                "CUDA_ARENA_DEBUG preserving {} logical intermediates in distinct arena slots ({PRESERVE_INTERMEDIATES_ENV} is set)",
+                planned.len(),
+            );
             planned.sort_by_key(|buf| buf.node.index());
             for buf in planned {
                 let slot_idx = bucket.arena_slots.len();

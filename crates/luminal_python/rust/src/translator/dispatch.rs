@@ -311,11 +311,11 @@ impl<'a> Translator<'a> {
             // Cumsum
             "torch.ops.aten.cumsum.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let a = if a.dtype == DType::Bool {
-                    a.cast(DType::Int)
-                } else {
-                    a
-                };
+                // `aten.cumsum` may request an output dtype independently of
+                // its input dtype (HF MoE does histc(F32).cumsum(dtype=Int32)
+                // to build grouped-mm offsets). Use authoritative PT2 output
+                // metadata rather than silently preserving the input dtype.
+                let a = a.cast(self.output_meta_dtype(node)?);
                 // Rank-0 (scalar) input: cumsum of a single element is the element
                 // itself. PyTorch eager treats `dim=0` on a 0-d as an identity op,
                 // and the underlying `cumop` indexes `shape.dims[axis]` which would

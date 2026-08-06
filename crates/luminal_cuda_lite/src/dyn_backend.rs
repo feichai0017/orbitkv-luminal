@@ -50,9 +50,20 @@ impl DynBackend for CudaLiteDynBackend {
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) {
         self.runtime.execute(dyn_map);
     }
+    fn selected_host_op_names(&self) -> Vec<&'static str> {
+        self.runtime
+            .host_ops()
+            .into_iter()
+            .filter_map(|op| op.stats_name())
+            .collect()
+    }
 
     fn supports_device_ptrs(&self) -> bool {
         true
+    }
+    fn wait_for_external_cuda_stream(&self, stream: u64) -> Result<(), String> {
+        unsafe { self.runtime.wait_for_external_cuda_stream(stream) }
+            .map_err(|error| error.to_string())
     }
     unsafe fn set_device_ptr(&mut self, node: NodeIndex, ptr: u64, n: usize) {
         unsafe { self.runtime.set_device_ptr(node, ptr, n) }

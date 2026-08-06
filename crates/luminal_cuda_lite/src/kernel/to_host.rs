@@ -52,6 +52,9 @@ use crate::{
     runtime::partition_marked_convex,
 };
 
+const REBUILD_GRAPH_EACH_RUN_ENV: &str = "LUMINAL_CUDA_REBUILD_GRAPH_EACH_RUN";
+const DEBUG_KERNEL_BINDINGS_ENV: &str = "LUMINAL_CUDA_DEBUG_KERNEL_BINDINGS";
+
 #[derive(Debug, Clone)]
 pub struct CudaGraphDebugSummary {
     pub n_kernels: usize,
@@ -1317,6 +1320,24 @@ impl CudaGraphOp {
         let mut state = self.state.borrow_mut();
         let _span = span!(Level::TRACE, "cuda_graph", kernels = state.kernels.len()).entered();
 
+        // Diagnostic mode for separating stale CUDA graph state from arena
+        // planning and kernel correctness. Throw away both the mutable source
+        // graph and its executable so build_graph captures every kernel and
+        // library island from the current pointers and dynamic dimensions.
+        if std::env::var_os(REBUILD_GRAPH_EACH_RUN_ENV).is_some() {
+            eprintln!(
+                "CUDA_GRAPH_DEBUG rebuilding graph from scratch kernels={} cublaslt={} flashinfer={} dyn={dyn_map:?} ({REBUILD_GRAPH_EACH_RUN_ENV} is set)",
+                state.kernels.len(),
+                state.cublaslt_ops.len(),
+                state.flashinfer_ops.len(),
+            );
+            state.cuda_graph = None;
+            state.cuda_graph_exec = None;
+            state.node_to_graph_node.clear();
+            state.producer_to_graph_node.clear();
+            state.kernel_params.clear();
+        }
+
         // Check if dyn_map changed
         let dyn_map_changed = dyn_map.len() != state.last_dyn_values.len()
             || dyn_map
@@ -1410,6 +1431,55 @@ impl CudaGraphOp {
             }
         }
         profile.collect_buffer_ptrs += timer.elapsed();
+
+        if std::env::var_os(DEBUG_KERNEL_BINDINGS_ENV).is_some() {
+            eprintln!(
+                "CUDA_KERNEL_BINDINGS begin kernels={} cublaslt={} flashinfer={} dyn={dyn_map:?}",
+                state.kernels.len(),
+                state.cublaslt_ops.len(),
+                state.flashinfer_ops.len(),
+            );
+            for kernel in &state.kernels {
+                let grid = (
+                    kernel.grid.0.exec(dyn_map),
+                    kernel.grid.1.exec(dyn_map),
+                    kernel.grid.2.exec(dyn_map),
+                );
+                let block = (
+                    kernel.block.0.exec(dyn_map),
+                    kernel.block.1.exec(dyn_map),
+                    kernel.block.2.exec(dyn_map),
+                );
+                let output = buffers.get(&kernel.node).copied();
+                eprintln!(
+                    "CUDA_KERNEL_BINDINGS kernel={} node={} grid={grid:?} block={block:?} output_elements={:?} output_bytes={:?} output_ptr={} output_available={}",
+                    kernel.kernel_name,
+                    kernel.node.index(),
+                    kernel.kernel_op.output_size().exec(dyn_map),
+                    kernel.kernel_op.output_bytes().exec(dyn_map),
+                    output
+                        .map(|buffer| format!("0x{:x}", buffer.ptr()))
+                        .unwrap_or_else(|| "missing".to_string()),
+                    output.map(DeviceBuffer::len).unwrap_or(0),
+                );
+                for (input_idx, input_node) in kernel.inputs.iter().copied().enumerate() {
+                    let input = buffers.get(&input_node).copied();
+                    eprintln!(
+                        "CUDA_KERNEL_BINDINGS   input={input_idx} node={} label={} ptr={} available={}",
+                        input_node.index(),
+                        kernel
+                            .input_labels
+                            .get(input_idx)
+                            .map(String::as_str)
+                            .unwrap_or("unknown"),
+                        input
+                            .map(|buffer| format!("0x{:x}", buffer.ptr()))
+                            .unwrap_or_else(|| "missing".to_string()),
+                        input.map(DeviceBuffer::len).unwrap_or(0),
+                    );
+                }
+            }
+        }
 
         // Always call pre_execute for each kernel to reset internal state
         // (e.g., MegakernelOps need work queue, head, barriers, lock reset every execution)

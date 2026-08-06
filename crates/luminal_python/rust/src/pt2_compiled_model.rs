@@ -1,6 +1,7 @@
 use luminal::dyn_backend::BackendFactory;
 use luminal::prelude::tracing::warn;
 use luminal::prelude::*;
+use luminal::visualization::ToDot;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyCapsuleMethods};
 use std::collections::HashMap;
@@ -105,6 +106,39 @@ pub fn process_pt2(
         factory,
     )
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))
+}
+
+/// Parse and translate a PT2 archive into Luminal HLIR, then return that
+/// pre-backend graph as Graphviz DOT.
+///
+/// This intentionally stops before `CompiledGraph::parse_graph`: it does not
+/// build an egglog search space, initialize a backend/runtime, profile kernels,
+/// or load parameter data. That makes graph inspection usable on machines
+/// without the target accelerator and avoids copying large checkpoint tensors
+/// merely to inspect their graph structure.
+#[pyfunction]
+pub fn translate_pt2_to_dot(pt2_path: &str) -> PyResult<String> {
+    let parsed = pt2_parser::parse_pt2(pt2_path)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))?;
+    let translated = translator::translate(&parsed)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))?;
+    translated
+        .graph
+        .to_dot()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))
+}
+
+/// Parse and translate a PT2 archive into Luminal HLIR, then serialize the
+/// exact egglog input program and its root term without constructing a backend.
+/// Unlike DOT, this representation preserves ordered op inputs and is the
+/// machine-readable source used by Luminal's rewrite engine.
+#[pyfunction]
+pub fn translate_pt2_to_egglog(pt2_path: &str) -> PyResult<(String, String)> {
+    let parsed = pt2_parser::parse_pt2(pt2_path)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))?;
+    let translated = translator::translate(&parsed)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))?;
+    Ok(luminal::egglog_utils::hlir_to_egglog(&translated.graph))
 }
 
 fn compile_pt2(

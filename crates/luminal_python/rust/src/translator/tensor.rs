@@ -180,7 +180,7 @@ impl<'a> Translator<'a> {
         Ok(value.expand_rhs(reference.shape))
     }
 
-    fn output_meta_dtype(&self, node: &Node) -> Result<DType> {
+    pub(crate) fn output_meta_dtype(&self, node: &Node) -> Result<DType> {
         let output_name = node
             .outputs
             .first()

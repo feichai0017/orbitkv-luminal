@@ -9,11 +9,13 @@ import inspect
 import os
 import shutil
 import tempfile
+import warnings
+from pathlib import Path
 
 import torch
 
 from .compiled_model import CompiledModel
-from .luminal import process_pt2
+from .luminal import process_pt2, translate_pt2_to_dot, translate_pt2_to_egglog
 from .main import _collect_weight_pointers, _detect_factory_capsule, _load_cpu_weights
 
 # ---------------------------------------------------------------------------
@@ -186,6 +188,8 @@ def _save_and_compile(
             pt2_path = ep_or_path
             weight_source = {}
 
+        _dump_pt2_translation_if_requested(pt2_path)
+
         # Collect weight pointers for Rust (avoids duplicate GPU buffer allocation)
         keep_alive, weight_device_ptrs, cpu_weights = _collect_weight_pointers(
             weight_source
@@ -207,6 +211,50 @@ def _save_and_compile(
     finally:
         if owns_tmpdir and tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _dump_pt2_translation_if_requested(pt2_path):
+    """Persist the exact pre-backend PT2 translation for rewrite debugging.
+
+    ``torch.compile`` normally stores its re-export in a temporary directory
+    that is removed as soon as compilation finishes. Setting
+    ``LUMINAL_COMPILER_DUMP_DIR`` writes the complete compiler-debug bundle;
+    the legacy ``LUMINAL_PT2_DUMP_DIR`` still writes this pre-backend portion.
+    Each compilation gets a unique stem derived from its temporary directory,
+    so parameterized tests do not overwrite one another.
+    """
+    dump_dir = os.getenv("LUMINAL_COMPILER_DUMP_DIR") or os.getenv(
+        "LUMINAL_PT2_DUMP_DIR"
+    )
+    if not dump_dir:
+        return
+
+    destination = Path(dump_dir).expanduser().resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    source = Path(pt2_path)
+    temp_name = source.parent.name.replace("luminal_", "")
+    stem = f"{source.stem}_{temp_name}"
+
+    try:
+        egg_program, root = translate_pt2_to_egglog(str(source))
+        egg_path = destination / f"{stem}.egg"
+        root_path = destination / f"{stem}.root"
+        dot_path = destination / f"{stem}.dot"
+        egg_path.write_text(egg_program, encoding="utf-8")
+        root_path.write_text(f"{root}\n", encoding="utf-8")
+        dot_path.write_text(translate_pt2_to_dot(str(source)), encoding="utf-8")
+        print(
+            "Luminal PT2 translation dump:\n"
+            f"  egg:  {egg_path}\n"
+            f"  root: {root_path}\n"
+            f"  dot:  {dot_path}"
+        )
+    except Exception as error:
+        warnings.warn(
+            f"failed to dump PT2 translation for {source}: {error}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 def _safe_int_bound(value):
