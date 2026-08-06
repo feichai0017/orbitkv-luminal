@@ -1166,6 +1166,9 @@ mod tests {
         // view-only outputs share the input's buffer id — the 4d binding
         // gap (see stage4b_probes::pinned_pure_identity_output).
         test_unary((2, 1, 3), |a| a.squeeze(1) * 1.0, |a| a.reshape((2, 3)).unwrap());
+        // Bare squeeze — a pure-VIEW output, no materializing op. The
+        // delivery-copy fix (2026-08-05) materializes it at the boundary.
+        test_unary((2, 1, 3), |a| a.squeeze(1), |a| a.reshape((2, 3)).unwrap());
     }
 
     #[test]
@@ -1225,7 +1228,7 @@ mod tests {
         let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])]);
 
         assert_exact(
-            rt.get_f32(repeated.id.index() as i64).unwrap(),
+            rt.get_f32(repeated.id).unwrap(),
             &[
                 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, //
                 4.0, 5.0, 6.0, 4.0, 5.0, 6.0, //

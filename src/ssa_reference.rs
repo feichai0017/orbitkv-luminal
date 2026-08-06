@@ -37,8 +37,8 @@ pub fn reference_allow_list() -> Vec<&'static str> {
 /// binding calls accumulate before `search` assembles and saturates.
 struct NativeSpec {
     pre_schedule: String,
-    input_slots: Vec<(petgraph::graph::NodeIndex, u64)>,
-    output_slots: Vec<(usize, u64)>,
+    input_slots: Vec<crate::graph::InputSlot>,
+    output_slots: Vec<crate::graph::OutputSlot>,
     post_checks: String,
     binding_seeds: String,
     ops: Option<Vec<&'static str>>,
@@ -53,11 +53,28 @@ pub struct SsaReferenceRuntime {
     storage: FxHashMap<BufferId, TypedBuffer>,
     /// `BufferLit` id → plan buffer, built at `load_plan`.
     lit_index: FxHashMap<i64, BufferId>,
+    /// Role-split tensor→buffer maps (the retired-HLIR-keyspace design,
+    /// 2026-08-05): `set_data` consults inputs ONLY, `get_*` consults
+    /// outputs ONLY. When one tensor is both (an input passed straight
+    /// to output), writes stage the input buffer and reads see the
+    /// output buffer — two buffers, no ambiguity, no fallback.
+    input_buffers: FxHashMap<petgraph::graph::NodeIndex, i64>,
+    output_buffers: FxHashMap<petgraph::graph::NodeIndex, i64>,
     /// M3 Step 2 native-ladder state (`load` → bind → `with_ops` → `search`).
     native: Option<NativeSpec>,
 }
 
 impl SsaReferenceRuntime {
+    /// Register the tensor→buffer role maps from a program's slots.
+    pub fn stage_slots(
+        &mut self,
+        inputs: &[crate::graph::InputSlot],
+        outputs: &[crate::graph::OutputSlot],
+    ) {
+        self.input_buffers = inputs.iter().map(|s| (s.tensor, s.buffer)).collect();
+        self.output_buffers = outputs.iter().map(|s| (s.tensor, s.buffer)).collect();
+    }
+
     pub fn load_plan(&mut self, plan: BufferIrGraph) {
         self.lit_index = plan
             .buffers
@@ -111,7 +128,7 @@ impl SsaReferenceRuntime {
     /// plan on this runtime with the given data; the winner loads.
     pub fn search(
         &mut self,
-        input_data: &FxHashMap<i64, Vec<f32>>,
+        input_data: &FxHashMap<petgraph::graph::NodeIndex, Vec<f32>>,
         options: &crate::implementation_search::ImplementationSearchOptions,
     ) -> Result<crate::implementation_search::SearchOutcome> {
         let spec = self.native.take().ok_or_else(|| anyhow!("search before load"))?;
@@ -146,13 +163,24 @@ impl SsaReferenceRuntime {
             options,
             spec.ops,
         )?;
+        self.stage_slots(&program.input_slots, &program.output_slots);
         self.load_plan(outcome.best_plan.clone());
         Ok(outcome)
     }
 
-    /// Stage caller data for the boundary buffer with this `BufferLit` id.
-    pub fn set_data(&mut self, id: impl Into<i64>, data: Vec<f32>) {
-        self.staged.insert(id.into(), data);
+    /// Stage caller data for an INPUT tensor. Loud if the tensor is not
+    /// a bound input of the loaded program.
+    pub fn set_data(&mut self, tensor: petgraph::graph::NodeIndex, data: Vec<f32>) {
+        let buffer = *self
+            .input_buffers
+            .get(&tensor)
+            .unwrap_or_else(|| panic!("tensor {tensor:?} is not a bound input"));
+        self.staged.insert(buffer, data);
+    }
+
+    /// Buffer-id staging for search internals (the slots carry the ids).
+    pub fn set_data_buffer(&mut self, buffer: i64, data: Vec<f32>) {
+        self.staged.insert(buffer, data);
     }
 
     fn numel(dims: &[i64]) -> usize {
@@ -296,16 +324,30 @@ impl SsaReferenceRuntime {
         Ok(())
     }
 
-    /// The f32 contents of the boundary buffer with this `BufferLit` id.
-    /// Loud on a boolean buffer — use [`Self::get_bool`] for those.
-    pub fn get_f32(&self, id: impl Into<i64>) -> Result<&Vec<f32>> {
-        self.get_typed(id.into())?.as_f32()
+    /// The f32 contents of an OUTPUT tensor's buffer. Loud if the tensor
+    /// is not a bound output, and loud on a boolean buffer — use
+    /// [`Self::get_bool8`] for those. Returns a borrow: reads never
+    /// mutate or consume runtime state.
+    pub fn get_f32(&self, tensor: petgraph::graph::NodeIndex) -> Result<&Vec<f32>> {
+        self.get_typed(self.output_buffer(tensor)?)?.as_f32()
     }
 
-    /// The Bool8 codes of the boundary buffer with this `BufferLit` id
-    /// (each element exactly 0 or 1 — the two legal codes).
-    pub fn get_bool8(&self, id: impl Into<i64>) -> Result<&Vec<u8>> {
-        self.get_typed(id.into())?.as_bool8()
+    /// The Bool8 codes of an OUTPUT tensor's buffer (each element exactly
+    /// 0 or 1 — the two legal codes).
+    pub fn get_bool8(&self, tensor: petgraph::graph::NodeIndex) -> Result<&Vec<u8>> {
+        self.get_typed(self.output_buffer(tensor)?)?.as_bool8()
+    }
+
+    /// Buffer-id read for search internals.
+    pub fn get_f32_buffer(&self, buffer: i64) -> Result<&Vec<f32>> {
+        self.get_typed(buffer)?.as_f32()
+    }
+
+    fn output_buffer(&self, tensor: petgraph::graph::NodeIndex) -> Result<i64> {
+        self.output_buffers
+            .get(&tensor)
+            .copied()
+            .ok_or_else(|| anyhow!("tensor {tensor:?} is not a bound output of this program"))
     }
 
     fn get_typed(&self, id: i64) -> Result<&TypedBuffer> {
@@ -368,8 +410,8 @@ mod tests {
                 (e2.id, e_data),
             ],
         );
-        assert_close(ours.get_f32(a2.id.index() as i64).unwrap(), &expected_a);
-        assert_close(ours.get_f32(d2.id.index() as i64).unwrap(), &expected_d);
+        assert_close(ours.get_f32(a2.id).unwrap(), &expected_a);
+        assert_close(ours.get_f32(d2.id).unwrap(), &expected_d);
     }
 
     /// Slice-2 differential: a permuted operand (transpose view) through
@@ -390,7 +432,7 @@ mod tests {
         let expected = vec![10.0, 80.0, 60.0, 200.0, 150.0, 360.0];
         let (cx2, x2, y2, out2) = build();
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
-        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
     /// Slice-2 differential: subtraction routes through their Neg (a
@@ -411,7 +453,7 @@ mod tests {
         let expected = vec![9.0, 18.0, 27.0, 36.0];
         let (cx2, x2, y2, out2) = build();
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
-        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
     /// THE MATMUL DIFFERENTIAL: their fully-decomposed frontend matmul
@@ -433,7 +475,7 @@ mod tests {
         let expected = vec![38.0, 44.0, 50.0, 56.0, 83.0, 98.0, 113.0, 128.0];
         let (cx2, a2, b2, c2) = build();
         let ours = run_ssa(&cx2, &[(a2.id, a_data), (b2.id, b_data)]);
-        assert_close(ours.get_f32(c2.id.index() as i64).unwrap(), &expected);
+        assert_close(ours.get_f32(c2.id).unwrap(), &expected);
     }
 
     /// DYNAMIC DIMS over the bounds interface: the model declares
@@ -467,7 +509,7 @@ mod tests {
             // injects (bigint {pin}) bounds from the graph's dyn_map — the
             // execution below at both pins is the proof.
             let ours = run_ssa(&cx2, &[(x2.id, data_x), (y2.id, data_y)]);
-            assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+            assert_close(ours.get_f32(out2.id).unwrap(), &expected);
         }
     }
 
@@ -495,7 +537,7 @@ mod tests {
             program.text
         );
         let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
-        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
     /// THE SEAM PAYOFF: a 2-D nonzero-start slice arrives structure-intact
@@ -522,7 +564,7 @@ mod tests {
             program.text
         );
         let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
-        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
     /// UNFOLD differential through the seam: sliding windows (with a
@@ -553,9 +595,9 @@ mod tests {
             program.text
         );
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
-        assert_close(ours.get_f32(plain2.id.index() as i64).unwrap(), &expected_plain);
+        assert_close(ours.get_f32(plain2.id).unwrap(), &expected_plain);
         assert_close(
-            ours.get_f32(dilated2.id.index() as i64).unwrap(),
+            ours.get_f32(dilated2.id).unwrap(),
             &expected_dilated,
         );
     }
@@ -587,7 +629,7 @@ mod tests {
                 program.text
             );
             let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
-            assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+            assert_close(ours.get_f32(out2.id).unwrap(), &expected);
         }
     }
 
@@ -616,7 +658,7 @@ mod tests {
                 program.text
             );
             let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
-            assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+            assert_close(ours.get_f32(out2.id).unwrap(), &expected);
         }
     }
 
@@ -659,7 +701,7 @@ mod tests {
                 (col2.id, col_vals),
             ],
         );
-        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
     /// COORDINATE-FORM SCATTER differential: dest updated at (row, col)
@@ -701,7 +743,7 @@ mod tests {
                 (src2.id, src_vals),
             ],
         );
-        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
     /// Uncovered constructs POISON the recorder with an attributable
@@ -752,8 +794,8 @@ mod tests {
                 (e2.id, e_data),
             ],
         );
-        assert_close(ours.get_f32(a2.id.index() as i64).unwrap(), &expected_a);
-        assert_close(ours.get_f32(d2.id.index() as i64).unwrap(), &expected_d);
+        assert_close(ours.get_f32(a2.id).unwrap(), &expected_a);
+        assert_close(ours.get_f32(d2.id).unwrap(), &expected_d);
     }
 
     /// TYPED-BUFFERS differential: lt produces a genuinely BOOLEAN
@@ -784,7 +826,7 @@ mod tests {
             program.text
         );
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
-        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
     /// BOOL8 BOUNDARY differential (ruling 2026-07-30): a bare lt output
@@ -819,7 +861,7 @@ mod tests {
             program.text
         );
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
-        let codes = ours.get_bool8(out2.id.index() as i64).expect("bool8 boundary");
+        let codes = ours.get_bool8(out2.id).expect("bool8 boundary");
         assert_eq!(codes.len(), expected.len());
         for (index, (code, truth)) in codes.iter().zip(&expected).enumerate() {
             assert!(*code <= 1, "ill-formed Bool8 code {code} at {index}");
@@ -874,10 +916,10 @@ mod tests {
                 (f2.id, v12f),
             ],
         );
-        assert_close(ours.get_f32(split2.id.index() as i64).unwrap(), &expected_split);
-        assert_close(ours.get_f32(merge2.id.index() as i64).unwrap(), &expected_merge);
+        assert_close(ours.get_f32(split2.id).unwrap(), &expected_split);
+        assert_close(ours.get_f32(merge2.id).unwrap(), &expected_merge);
         assert_close(
-            ours.get_f32(flatten2.id.index() as i64).unwrap(),
+            ours.get_f32(flatten2.id).unwrap(),
             &expected_flatten,
         );
     }
@@ -900,7 +942,7 @@ mod tests {
         let expected = vec![0.5, 3.0, 7.5, 3.5, 9.0, 16.5, 6.5, 15.0, 25.5, 9.5, 21.0, 34.5];
         let (cx2, x2, y2, out2) = build();
         let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
-        assert_close(ours.get_f32(out2.id.index() as i64).unwrap(), &expected);
+        assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
     /// Reduction differential: sum over the front axis of a [2, 3] tensor,
@@ -919,6 +961,6 @@ mod tests {
         let expected = vec![11.0, 22.0, 33.0];
         let (cx2, x2, s2) = build();
         let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
-        assert_close(ours.get_f32(s2.id.index() as i64).unwrap(), &expected);
+        assert_close(ours.get_f32(s2.id).unwrap(), &expected);
     }
 }

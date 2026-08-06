@@ -2673,9 +2673,10 @@ pub fn run_ssa_program(
     let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))
         .expect("bufferizes");
     let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
+    rt.stage_slots(&program.input_slots, &program.output_slots);
     rt.load_plan(plan);
     for (node, data) in inputs {
-        rt.set_data(node.index() as i64, data.clone());
+        rt.set_data(*node, data.clone());
     }
     rt.execute().expect("executes");
     rt
@@ -2697,13 +2698,12 @@ mod stage4b_probes {
     /// exists for exactly this; the real fix is binding-level (4d/M4
     /// aliasing/donation design).
     #[test]
-    #[ignore = "pure-identity output unsupported natively — binding-level fix at 4d/M4"]
     fn pinned_pure_identity_output() {
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor(2);
         let b = a.output();
         let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![1.0, 2.0])]);
-        let got = rt.get_f32(b.id.index() as i64).unwrap();
+        let got = rt.get_f32(b.id).unwrap();
         assert_eq!(got, &vec![1.0, 2.0]);
     }
 
@@ -2820,6 +2820,28 @@ mod stage4b_probes {
         }
     }
 
+    /// Scratch: dump the pure-identity graph's emitted bindings.
+    #[test]
+    #[ignore = "diagnostic — RRX=1 to run"]
+    fn rrx_identity_binding_dump() {
+        if std::env::var("RRX").is_err() {
+            return;
+        }
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor(2);
+        let b = a.output();
+        let (pre, input_slots, output_slots, post) =
+            cx.logical.native_parts().expect("recorder clean");
+        eprintln!("[idb] input_slots: {input_slots:?}");
+        eprintln!("[idb] output_slots: {output_slots:?}");
+        eprintln!("[idb] a.id={:?} b.id={:?}", a.id, b.id);
+        for line in pre.lines().chain(post.lines()) {
+            if line.contains("Buffer") || line.contains("buffer") || line.contains("Output") {
+                eprintln!("[idb] {line}");
+            }
+        }
+    }
+
     /// G7 MAP-ENTRY RANGE LOCK (Austin ruled 2026-08-05): the
     /// adversary's degenerate bypass — a map reading an extent-1 parent
     /// axis at a 5-extent coordinate — must now DIE LOUDLY in the
@@ -2857,7 +2879,7 @@ mod stage4b_probes {
         let a = cx.tensor(1);
         let b = (a * 2.0).output();
         let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![0.5])]);
-        let got = rt.get_f32(b.id.index() as i64).unwrap();
+        let got = rt.get_f32(b.id).unwrap();
         assert!((got[0] - 1.0).abs() < 1e-6, "{got:?}");
     }
 }
@@ -3604,11 +3626,11 @@ mod runaway_probe {
         let t = stage("execute");
         let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
         rt.load_plan(plan);
-        rt.set_data(a.id.index() as i64, vec![1.0; batch * m * k]);
-        rt.set_data(b.id.index() as i64, vec![1.0; k * n]);
+        rt.set_data(a.id, vec![1.0; batch * m * k]);
+        rt.set_data(b.id, vec![1.0; k * n]);
         rt.execute().expect("executes");
         eprintln!("[rrx-pipe] execute took {:.1}s", t.elapsed().as_secs_f64());
-        let got = rt.get_f32(c.id.index() as i64).unwrap();
+        let got = rt.get_f32(c.id).unwrap();
         assert_eq!(got.len(), batch * m * n);
         assert!((got[0] - k as f32).abs() < 1e-5, "ones matmul spot check: {}", got[0]);
         eprintln!("[rrx-pipe] DONE");
@@ -3642,7 +3664,7 @@ mod runaway_probe {
                                 (b.id, vec![1.0; k * n]),
                             ],
                         );
-                        let got = rt.get_f32(c.id.index() as i64).unwrap();
+                        let got = rt.get_f32(c.id).unwrap();
                         assert_eq!(got.len(), batch * m * n, "({batch},{m},{k},{n})");
                         for (i, v) in got.iter().enumerate() {
                             assert!(

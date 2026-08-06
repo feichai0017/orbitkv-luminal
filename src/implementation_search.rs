@@ -67,7 +67,7 @@ pub struct SearchOutcome {
 pub fn search_implementations(
     egraph: &egraph_serialize::EGraph,
     program: &LogicalProgram,
-    input_data: &FxHashMap<i64, Vec<f32>>,
+    input_data: &FxHashMap<petgraph::graph::NodeIndex, Vec<f32>>,
     options: &ImplementationSearchOptions,
 ) -> Result<SearchOutcome> {
     search_implementations_with_ops(egraph, program, input_data, options, None)
@@ -78,10 +78,24 @@ pub fn search_implementations(
 pub fn search_implementations_with_ops(
     egraph: &egraph_serialize::EGraph,
     program: &LogicalProgram,
-    input_data: &FxHashMap<i64, Vec<f32>>,
+    input_data: &FxHashMap<petgraph::graph::NodeIndex, Vec<f32>>,
     options: &ImplementationSearchOptions,
     allow_override: Option<Vec<&'static str>>,
 ) -> Result<SearchOutcome> {
+    // Tensor-keyed at the boundary (the retired-HLIR-keyspace design);
+    // buffer-keyed internally via the program's slots.
+    let buffer_data: FxHashMap<i64, Vec<f32>> = input_data
+        .iter()
+        .map(|(tensor, data)| {
+            let slot = program
+                .input_slots
+                .iter()
+                .find(|slot| slot.tensor == *tensor)
+                .unwrap_or_else(|| panic!("tensor {tensor:?} is not a bound input"));
+            (slot.buffer, data.clone())
+        })
+        .collect();
+    let input_data = &buffer_data;
     let allow = allow_override.unwrap_or_else(crate::ssa_reference::reference_allow_list);
     let index = extractor::producer_index_with_ops(egraph, Some(&allow));
     ensure!(!index.is_empty(), "no producer classes to search over");
@@ -117,7 +131,7 @@ pub fn search_implementations_with_ops(
         let mut runtime = SsaReferenceRuntime::default();
         runtime.load_plan(plan.clone());
         for (id, data) in input_data {
-            runtime.set_data(*id, data.clone());
+            runtime.set_data_buffer(*id, data.clone());
         }
         runtime.execute()?; // warmup + validity
         let mut best_nanos = u128::MAX;
@@ -226,7 +240,7 @@ pub struct BucketPlan {
 pub fn bucketed_search_implementations(
     graph: &crate::graph::Graph,
     dim_buckets: &BTreeMap<char, Vec<crate::graph::DimBucket>>,
-    input_data: impl Fn(&FxHashMap<char, usize>) -> FxHashMap<i64, Vec<f32>>,
+    input_data: impl Fn(&FxHashMap<char, usize>) -> FxHashMap<petgraph::graph::NodeIndex, Vec<f32>>,
     options: &ImplementationSearchOptions,
 ) -> Result<Vec<BucketPlan>> {
     ensure!(!dim_buckets.is_empty(), "no dim buckets supplied");
@@ -380,8 +394,8 @@ mod tests {
         let serialized = egraph.serialize(SerializeConfig::default()).egraph;
 
         let mut inputs = FxHashMap::default();
-        inputs.insert(x2.id.index() as i64, x_data.clone());
-        inputs.insert(y2.id.index() as i64, y_data.clone());
+        inputs.insert(x2.id, x_data.clone());
+        inputs.insert(y2.id, y_data.clone());
         let outcome = search_implementations(
             &serialized,
             &program,
@@ -399,12 +413,13 @@ mod tests {
         );
 
         let mut runtime = SsaReferenceRuntime::default();
+        runtime.stage_slots(&program.input_slots, &program.output_slots);
         runtime.load_plan(outcome.best_plan.clone());
-        runtime.set_data(x2.id.index() as i64, x_data);
-        runtime.set_data(y2.id.index() as i64, y_data);
+        runtime.set_data(x2.id, x_data);
+        runtime.set_data(y2.id, y_data);
         runtime.execute().expect("best plan executes");
-        let ours_a = runtime.get_f32(a2.id.index() as i64).unwrap();
-        let ours_m = runtime.get_f32(m2.id.index() as i64).unwrap();
+        let ours_a = runtime.get_f32(a2.id).unwrap();
+        let ours_m = runtime.get_f32(m2.id).unwrap();
         for (ours, theirs) in [(ours_a, &their_a), (ours_m, &their_m)] {
             assert_eq!(ours.len(), theirs.len());
             for (index, (lhs, rhs)) in ours.iter().zip(theirs).enumerate() {
@@ -445,8 +460,8 @@ mod tests {
         let data_for = |rep: &FxHashMap<char, usize>| {
             let n = rep[&'a'] * 2;
             let mut data = FxHashMap::default();
-            data.insert(x.id.index() as i64, (0..n).map(|v| v as f32 + 1.0).collect());
-            data.insert(y.id.index() as i64, (0..n).map(|v| v as f32 * 0.5).collect());
+            data.insert(x.id, (0..n).map(|v| v as f32 + 1.0).collect::<Vec<f32>>());
+            data.insert(y.id, (0..n).map(|v| v as f32 * 0.5).collect());
             data
         };
         let plans = bucketed_search_implementations(
@@ -477,13 +492,14 @@ mod tests {
             let data = data_for(&plan.representative);
 
             let mut runtime = SsaReferenceRuntime::default();
+            runtime.stage_slots(&plan.program.input_slots, &plan.program.output_slots);
             runtime.load_plan(plan.outcome.best_plan.clone());
             for (id, values) in &data {
                 runtime.set_data(*id, values.clone());
             }
             runtime.execute().expect("bucket plan executes at representative");
             let ours = runtime
-                .get_f32(plan.program.output_slots[0].1 as i64)
+                .get_f32(plan.program.output_slots[0].tensor)
                 .unwrap();
             assert_eq!(ours.len(), expected.len());
             for (index, (lhs, rhs)) in ours.iter().zip(&expected).enumerate() {

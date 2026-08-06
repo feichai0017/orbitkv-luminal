@@ -1358,6 +1358,28 @@ fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) {
             buffer.lit = boundary_lits.get(eclass).copied();
         }
     }
+    // A delivery copy's destination inherits its source's geometry (same
+    // value, same shape — the dst had no value of its own to join on).
+    let copy_pairs: Vec<(BufferId, BufferId)> = plan
+        .dag
+        .node_weights()
+        .filter_map(|node| match node {
+            BufferNode::BufferCopy { src, dst } => Some((src.clone(), dst.clone())),
+            _ => None,
+        })
+        .collect();
+    for (src, dst) in copy_pairs {
+        let Some(source) = plan.buffers.get(&src) else { continue };
+        let (dims, bits) = (source.dims.clone(), source.element_bits);
+        if let Some(buffer) = plan.buffers.get_mut(&dst) {
+            if buffer.dims.is_none() {
+                buffer.dims = dims;
+            }
+            if buffer.element_bits.is_none() {
+                buffer.element_bits = bits;
+            }
+        }
+    }
 }
 
 /// The PLANNING half of [`bufferize`]: validate the input program, analyze,
@@ -1870,6 +1892,38 @@ pub(crate) fn lower(bt: crate::buffer_tensor_ir::BufferTensorIrGraph) -> Result<
                 let out_node = dag.add_node(BufferNode::BufferOutput { slots: bindings });
                 outputs.push(out_node);
                 lowered.insert(index, out_node);
+                // DELIVERY COPY: a slot demanding its value in a buffer
+                // nothing wrote it to (an input passed straight to output
+                // gets a fresh output buffer, never the input's ReadOnly
+                // one). Materialize with a bufferizer copy from the value's
+                // current residence.
+                for slot in slots.iter() {
+                    if producer.contains_key(&residence(slot)) {
+                        continue;
+                    }
+                    let source = producer
+                        .iter()
+                        .find(|((value, buffer), _)| {
+                            *value == slot.value && *buffer != slot.buffer
+                        })
+                        .map(|((_, buffer), node)| (buffer.clone(), *node));
+                    if let Some((src_buffer, from)) = source {
+                        let copy = dag.add_node(BufferNode::BufferCopy {
+                            src: src_buffer.clone(),
+                            dst: slot.buffer.clone(),
+                        });
+                        dag.add_edge(
+                            from,
+                            copy,
+                            BufferEdge {
+                                buffer: src_buffer,
+                                port: "in".to_string(),
+                                kind: EdgeKind::Data,
+                            },
+                        );
+                        producer.insert(residence(slot), copy);
+                    }
+                }
                 for (index, slot) in slots.iter().enumerate() {
                     if let Some(&from) = producer.get(&residence(slot)) {
                         dag.add_edge(

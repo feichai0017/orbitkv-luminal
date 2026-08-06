@@ -1101,8 +1101,8 @@ impl LogicalGraph {
     ) -> Result<
         (
             String,
-            Vec<(petgraph::graph::NodeIndex, u64)>,
-            Vec<(usize, u64)>,
+            Vec<InputSlot>,
+            Vec<OutputSlot>,
             String,
         ),
         String,
@@ -1110,19 +1110,26 @@ impl LogicalGraph {
         let mut text = self.model_text()?;
         let mut input_slots = Vec::new();
         let mut input_buffer_tensors = Vec::new();
+        let mut next_buffer: i64 = 0;
         for (index, value) in self.values.iter().enumerate() {
             let Some(slot) = value.input_slot else { continue };
             let shape = Self::shape_term(&value.dims)?;
             let stem = format!("nat{slot}");
+            let buffer = next_buffer;
+            next_buffer += 1;
             text.push_str(&crate::reference_binding::input_binding(
                 &stem,
-                slot,
+                buffer as usize,
                 &format!("v{index}"),
                 &shape,
                 &crate::reference_binding::width_term(value.dtype),
             ));
             input_buffer_tensors.push(format!("{stem}_buffer_tensor"));
-            input_slots.push((petgraph::graph::NodeIndex::new(slot), slot as u64));
+            input_slots.push(InputSlot {
+                tensor: petgraph::graph::NodeIndex::new(slot),
+                buffer,
+                size: slot as u64,
+            });
         }
         let mut output_slots = Vec::new();
         let mut output_buffer_tensors = Vec::new();
@@ -1130,15 +1137,21 @@ impl LogicalGraph {
             let value = &self.values[id.0 as usize];
             let shape = Self::shape_term(&value.dims)?;
             let stem = format!("natout{key}");
+            let buffer = next_buffer;
+            next_buffer += 1;
             text.push_str(&crate::reference_binding::output_binding(
                 &stem,
-                *key,
+                buffer as usize,
                 &format!("v{}", id.0),
                 &shape,
                 value.dtype,
             ));
             output_buffer_tensors.push(format!("{stem}_buffer_tensor"));
-            output_slots.push((*key, *key as u64));
+            output_slots.push(OutputSlot {
+                tensor: petgraph::graph::NodeIndex::new(*key),
+                buffer,
+                size: *key as u64,
+            });
         }
         text.push_str(&crate::reference_binding::boundary_lists(
             &input_buffer_tensors,
@@ -1162,20 +1175,38 @@ impl LogicalGraph {
 
 // ─── Survivors of the interim translator (M3 Topic D) ───
 
+/// One bound input: the graph tensor it carries, the buffer the runtime
+/// allocated for it, and its declared size. Buffer ids are an internal,
+/// sequential, binding-time allocation — inputs first, outputs after —
+/// never derived from graph node indices (the retired HLIR keyspace).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputSlot {
+    pub tensor: petgraph::graph::NodeIndex,
+    pub buffer: i64,
+    pub size: u64,
+}
+
+/// One bound output. See [`InputSlot`] for the allocation discipline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputSlot {
+    pub tensor: petgraph::graph::NodeIndex,
+    pub buffer: i64,
+    pub size: u64,
+}
+
 /// The assembled program plus the I/O binding tables the runtime needs
 /// (moved here when the interim translator was deleted, M3 Topic D).
-/// Buffer ids equal HLIR node indices, matching `ReferenceRuntime`'s
-/// `set_data`/`get_f32` keying so differential tests bind identically.
+/// Buffer ids are runtime-internal sequential allocations; the runtime's
+/// role-split maps translate tensor identities to buffers.
 #[derive(Debug, Clone)]
 pub struct LogicalProgram {
     /// Model + binding + schedule + authoring-contract checks. Run as
     /// `format!("{}\n\n{}", egglog_snippet::assembled_program(), text)`.
     pub text: String,
-    /// `(HLIR input node, BufferLit id)` in signature order.
-    pub input_slots: Vec<(petgraph::graph::NodeIndex, u64)>,
-    /// `(Output.node key, BufferLit id)` in output-slot order — the key
-    /// their `get_f32` matches on (the SOURCE tensor's node index).
-    pub output_slots: Vec<(usize, u64)>,
+    /// Bound inputs in signature order.
+    pub input_slots: Vec<InputSlot>,
+    /// Bound outputs in output-slot order.
+    pub output_slots: Vec<OutputSlot>,
 }
 
 /// Their RPN index expression rendered as OUR IntExpr term, with `z`

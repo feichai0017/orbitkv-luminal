@@ -488,7 +488,7 @@ pub(super) mod tests {
         let ref_b = Tensor::from_vec(rhs_values, b_shape, &device).unwrap();
         let ref_c = ref_func(ref_a, ref_b).flatten_all().unwrap();
 
-        assert_close(rt.get_f32(c.id.index() as i64).unwrap(), &ref_c.to_vec1::<f32>().unwrap())
+        assert_close(rt.get_f32(c.id).unwrap(), &ref_c.to_vec1::<f32>().unwrap())
     }
 
     #[test]

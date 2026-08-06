@@ -193,7 +193,7 @@ mod tests {
         let ref_b = ref_func(&device).flatten_all().unwrap();
 
         // need to assert close because some unaries (exp and log) are (good) approximations
-        assert_close(rt.get_f32(b.id.index() as i64).unwrap(), &ref_b.to_vec1::<f32>().unwrap())
+        assert_close(rt.get_f32(b.id).unwrap(), &ref_b.to_vec1::<f32>().unwrap())
     }
 
     proptest! {
@@ -280,7 +280,7 @@ mod tests {
         let ref_stacked = Tensor::stack(&[&ref_a, &ref_b, &ref_c], 0).unwrap();
 
         assert_close(
-            rt.get_f32(stacked.id.index() as i64).unwrap(),
+            rt.get_f32(stacked.id).unwrap(),
             &ref_stacked.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
         );
     }

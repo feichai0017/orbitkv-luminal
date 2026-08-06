@@ -546,7 +546,7 @@ pub(super) mod tests {
         let ref_b = ref_func(ref_a).flatten_all().unwrap();
 
         // need to assert close because some unaries (exp and log) are (good) approximations
-        assert_close(rt.get_f32(b.id.index() as i64).unwrap(), &ref_b.to_vec1::<f32>().unwrap())
+        assert_close(rt.get_f32(b.id).unwrap(), &ref_b.to_vec1::<f32>().unwrap())
     }
 
     proptest! {

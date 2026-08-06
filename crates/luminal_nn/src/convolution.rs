@@ -449,7 +449,7 @@ mod forward_tests {
             &cx,
             &[(x.id, x_data.clone()), (conv.weight.id, w_data.clone())],
         );
-        let got = rt.get_f32(out.id.index() as i64).unwrap().clone();
+        let got = rt.get_f32(out.id).unwrap().clone();
 
         // Naive conv; weight layout is (co, ci * k * k), ci-major.
         let mut want = vec![0.0f32; b * co * oh * ow];
