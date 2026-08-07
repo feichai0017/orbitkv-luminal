@@ -1,18 +1,18 @@
-//! Elementwise sine.
+//! Elementwise reciprocal.
 
 use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
 use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 
-/// `SinFunctionalGeneric(input) -> out`
+/// `RecipFunctionalGeneric(input) -> out`
 ///
 /// Functional form: pure dataflow, conservative [`Bufferizable`] defaults
 /// (every operand read, the result freshly allocated). Elementwise: element
 /// `i` of `input` is read before element `i` of `out` is written (op-level
 /// all-pairs claim — see the NOTE on `bufferizes_to_elementwise_access`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SinFunctional;
+pub struct RecipFunctional;
 
-impl OpSlotNames for SinFunctional {
+impl OpSlotNames for RecipFunctional {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -21,31 +21,31 @@ impl OpSlotNames for SinFunctional {
     }
 }
 
-impl BufferTensorIrOp for SinFunctional {
+impl BufferTensorIrOp for RecipFunctional {
     fn label(&self) -> &str {
-        "SinFunctionalGeneric"
+        "RecipFunctionalGeneric"
     }
 }
 
-impl Bufferizable for SinFunctional {}
+impl Bufferizable for RecipFunctional {}
 
-impl ToDps for SinFunctional {
+impl ToDps for RecipFunctional {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(SinFunctionalDps))
+        Some(Box::new(RecipFunctionalDps))
     }
 }
 
-impl LayoutIrOp for SinFunctional {}
+impl LayoutIrOp for RecipFunctional {}
 
-/// Destination-passing form of [`SinFunctional`], signature spelled slot by slot:
+/// Destination-passing form of [`RecipFunctional`], signature spelled slot by slot:
 ///
 /// ```text
-/// SinGeneric(input: read, dest0: write-only ↔ out0) -> out0
+/// RecipGeneric(input: read, dest0: write-only ↔ out0) -> out0
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SinFunctionalDps;
+pub struct RecipFunctionalDps;
 
-impl OpSlotNames for SinFunctionalDps {
+impl OpSlotNames for RecipFunctionalDps {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -55,16 +55,9 @@ impl OpSlotNames for SinFunctionalDps {
     }
 }
 
-impl BufferTensorIrOp for SinFunctionalDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        ctx.unary_elementwise(|x| x.sin())
-    }
-
+impl BufferTensorIrOp for RecipFunctionalDps {
     fn label(&self) -> &str {
-        "SinFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
+        "RecipFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
 
     fn operand_reads_memory(&self, operand: usize) -> bool {
@@ -76,21 +69,21 @@ impl BufferTensorIrOp for SinFunctionalDps {
     }
 }
 
-impl Bufferizable for SinFunctionalDps {
+impl Bufferizable for RecipFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for SinFunctionalDps {
+impl ToDps for RecipFunctionalDps {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already DPS — keeps the rewrite pass idempotent
     }
 }
 
-impl LayoutIrOp for SinFunctionalDps {}
+impl LayoutIrOp for RecipFunctionalDps {}
 
-/// `SinMutatingGeneric(x: read+write) -> out`
+/// `RecipMutatingGeneric(x: read+write) -> out`
 ///
 /// Mutating form: the kernel reads and overwrites ONE storage — its
 /// single operand's. Matched in egglog only when the output layout equals
@@ -100,9 +93,9 @@ impl LayoutIrOp for SinFunctionalDps {}
 /// result's fresh buffer (copy-in) and mutates there — the kernel's
 /// one-buffer contract is invariant under relocation, never a hard error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SinMutating;
+pub struct RecipMutating;
 
-impl OpSlotNames for SinMutating {
+impl OpSlotNames for RecipMutating {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -111,50 +104,50 @@ impl OpSlotNames for SinMutating {
     }
 }
 
-impl BufferTensorIrOp for SinMutating {
+impl BufferTensorIrOp for RecipMutating {
     fn label(&self) -> &str {
-        "SinMutatingGeneric"
+        "RecipMutatingGeneric"
     }
 }
 
-impl Bufferizable for SinMutating {
+impl Bufferizable for RecipMutating {
 
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for SinMutating {
+impl ToDps for RecipMutating {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already destination-form: the destination IS operand 0
     }
 }
 
-impl LayoutIrOp for SinMutating {}
+impl LayoutIrOp for RecipMutating {}
 
 // ---------------------------------------------------------------------------
 // Matchers
 // ---------------------------------------------------------------------------
 
-/// Matches `LayoutTensorOpSinFunctionalGeneric` enodes and produces
-/// [`SinFunctional`] instances. Metadata children: `layout` at child 1.
+/// Matches `LayoutTensorOpRecipFunctionalGeneric` enodes and produces
+/// [`RecipFunctional`] instances. Metadata children: `layout` at child 1.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SinFunctionalMatcher;
+pub struct RecipFunctionalMatcher;
 
-impl OpMatcher for SinFunctionalMatcher {
+impl OpMatcher for RecipFunctionalMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpSinFunctionalGeneric"
+        "LayoutTensorOpRecipFunctionalGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("sin/match_functional_constructor.egg"),
+                text: include_str!("recip/match_functional_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("sin/match_functional.egg"),
+                text: include_str!("recip/match_functional.egg"),
             },
         ]
     }
@@ -165,36 +158,36 @@ impl OpMatcher for SinFunctionalMatcher {
     }
 
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(SinFunctional)
+        Box::new(RecipFunctional)
     }
 }
 
-/// Matches `LayoutTensorOpSinMutatingGeneric` enodes and produces
-/// [`SinMutating`] instances. No metadata children: the output layout IS
+/// Matches `LayoutTensorOpRecipMutatingGeneric` enodes and produces
+/// [`RecipMutating`] instances. No metadata children: the output layout IS
 /// the mutated operand's, by the match rule's precondition.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SinMutatingMatcher;
+pub struct RecipMutatingMatcher;
 
-impl OpMatcher for SinMutatingMatcher {
+impl OpMatcher for RecipMutatingMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpSinMutatingGeneric"
+        "LayoutTensorOpRecipMutatingGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("sin/match_mutating_constructor.egg"),
+                text: include_str!("recip/match_mutating_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("sin/match_mutating.egg"),
+                text: include_str!("recip/match_mutating.egg"),
             },
         ]
     }
 
 
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(SinMutating)
+        Box::new(RecipMutating)
     }
 }

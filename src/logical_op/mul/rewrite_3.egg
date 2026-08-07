@@ -1,5 +1,42 @@
-; Logical Distributivity : Mul and Add
-(birewrite
-  (LogicalMul (LogicalAdd ?lhs ?rhs) ?shared_factor)
-  (LogicalAdd (LogicalMul ?lhs ?shared_factor) (LogicalMul ?rhs ?shared_factor))
+; Logical Distributivity : Mul over Add — EXACT DTYPES ONLY (ruling
+; 2026-08-06, same policy as the associativity gates: distributing or
+; factoring f32 arithmetic changes rounding; integer arithmetic is
+; exact). The old birewrite becomes two directed rules per exact dtype —
+; the factored and distributed spellings each trigger the weld when
+; their class's dtype is proven integral.
+(rule
+  (
+    (= ?t (LogicalMul (LogicalAdd ?lhs ?rhs) ?shared_factor))
+    (= (Int) (dtype-of ?t))
+  )
+  (
+    (union ?t (LogicalAdd (LogicalMul ?lhs ?shared_factor) (LogicalMul ?rhs ?shared_factor)))
+  )
+)
+(rule
+  (
+    (= ?t (LogicalAdd (LogicalMul ?lhs ?shared_factor) (LogicalMul ?rhs ?shared_factor)))
+    (= (Int) (dtype-of ?t))
+  )
+  (
+    (union ?t (LogicalMul (LogicalAdd ?lhs ?rhs) ?shared_factor))
+  )
+)
+(rule
+  (
+    (= ?t (LogicalMul (LogicalAdd ?lhs ?rhs) ?shared_factor))
+    (= (Int64) (dtype-of ?t))
+  )
+  (
+    (union ?t (LogicalAdd (LogicalMul ?lhs ?shared_factor) (LogicalMul ?rhs ?shared_factor)))
+  )
+)
+(rule
+  (
+    (= ?t (LogicalAdd (LogicalMul ?lhs ?shared_factor) (LogicalMul ?rhs ?shared_factor)))
+    (= (Int64) (dtype-of ?t))
+  )
+  (
+    (union ?t (LogicalMul (LogicalAdd ?lhs ?rhs) ?shared_factor))
+  )
 )

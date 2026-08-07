@@ -1,18 +1,18 @@
-//! Elementwise reciprocal.
+//! Elementwise base-2 logarithm.
 
 use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
 use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 
-/// `RecipFunctionalGeneric(input) -> out`
+/// `Log2FunctionalGeneric(input) -> out`
 ///
 /// Functional form: pure dataflow, conservative [`Bufferizable`] defaults
 /// (every operand read, the result freshly allocated). Elementwise: element
 /// `i` of `input` is read before element `i` of `out` is written (op-level
 /// all-pairs claim — see the NOTE on `bufferizes_to_elementwise_access`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecipFunctional;
+pub struct Log2Functional;
 
-impl OpSlotNames for RecipFunctional {
+impl OpSlotNames for Log2Functional {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -21,31 +21,31 @@ impl OpSlotNames for RecipFunctional {
     }
 }
 
-impl BufferTensorIrOp for RecipFunctional {
+impl BufferTensorIrOp for Log2Functional {
     fn label(&self) -> &str {
-        "RecipFunctionalGeneric"
+        "Log2FunctionalGeneric"
     }
 }
 
-impl Bufferizable for RecipFunctional {}
+impl Bufferizable for Log2Functional {}
 
-impl ToDps for RecipFunctional {
+impl ToDps for Log2Functional {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(RecipFunctionalDps))
+        Some(Box::new(Log2FunctionalDps))
     }
 }
 
-impl LayoutIrOp for RecipFunctional {}
+impl LayoutIrOp for Log2Functional {}
 
-/// Destination-passing form of [`RecipFunctional`], signature spelled slot by slot:
+/// Destination-passing form of [`Log2Functional`], signature spelled slot by slot:
 ///
 /// ```text
-/// RecipGeneric(input: read, dest0: write-only ↔ out0) -> out0
+/// Log2Generic(input: read, dest0: write-only ↔ out0) -> out0
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecipFunctionalDps;
+pub struct Log2FunctionalDps;
 
-impl OpSlotNames for RecipFunctionalDps {
+impl OpSlotNames for Log2FunctionalDps {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -55,16 +55,9 @@ impl OpSlotNames for RecipFunctionalDps {
     }
 }
 
-impl BufferTensorIrOp for RecipFunctionalDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        ctx.unary_elementwise(|x| x.recip())
-    }
-
+impl BufferTensorIrOp for Log2FunctionalDps {
     fn label(&self) -> &str {
-        "RecipFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
+        "Log2FunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
 
     fn operand_reads_memory(&self, operand: usize) -> bool {
@@ -76,21 +69,21 @@ impl BufferTensorIrOp for RecipFunctionalDps {
     }
 }
 
-impl Bufferizable for RecipFunctionalDps {
+impl Bufferizable for Log2FunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for RecipFunctionalDps {
+impl ToDps for Log2FunctionalDps {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already DPS — keeps the rewrite pass idempotent
     }
 }
 
-impl LayoutIrOp for RecipFunctionalDps {}
+impl LayoutIrOp for Log2FunctionalDps {}
 
-/// `RecipMutatingGeneric(x: read+write) -> out`
+/// `Log2MutatingGeneric(x: read+write) -> out`
 ///
 /// Mutating form: the kernel reads and overwrites ONE storage — its
 /// single operand's. Matched in egglog only when the output layout equals
@@ -100,9 +93,9 @@ impl LayoutIrOp for RecipFunctionalDps {}
 /// result's fresh buffer (copy-in) and mutates there — the kernel's
 /// one-buffer contract is invariant under relocation, never a hard error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecipMutating;
+pub struct Log2Mutating;
 
-impl OpSlotNames for RecipMutating {
+impl OpSlotNames for Log2Mutating {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -111,50 +104,50 @@ impl OpSlotNames for RecipMutating {
     }
 }
 
-impl BufferTensorIrOp for RecipMutating {
+impl BufferTensorIrOp for Log2Mutating {
     fn label(&self) -> &str {
-        "RecipMutatingGeneric"
+        "Log2MutatingGeneric"
     }
 }
 
-impl Bufferizable for RecipMutating {
+impl Bufferizable for Log2Mutating {
 
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for RecipMutating {
+impl ToDps for Log2Mutating {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already destination-form: the destination IS operand 0
     }
 }
 
-impl LayoutIrOp for RecipMutating {}
+impl LayoutIrOp for Log2Mutating {}
 
 // ---------------------------------------------------------------------------
 // Matchers
 // ---------------------------------------------------------------------------
 
-/// Matches `LayoutTensorOpRecipFunctionalGeneric` enodes and produces
-/// [`RecipFunctional`] instances. Metadata children: `layout` at child 1.
+/// Matches `LayoutTensorOpLog2FunctionalGeneric` enodes and produces
+/// [`Log2Functional`] instances. Metadata children: `layout` at child 1.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct RecipFunctionalMatcher;
+pub struct Log2FunctionalMatcher;
 
-impl OpMatcher for RecipFunctionalMatcher {
+impl OpMatcher for Log2FunctionalMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpRecipFunctionalGeneric"
+        "LayoutTensorOpLog2FunctionalGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("recip/match_functional_constructor.egg"),
+                text: include_str!("log2/match_functional_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("recip/match_functional.egg"),
+                text: include_str!("log2/match_functional.egg"),
             },
         ]
     }
@@ -165,36 +158,36 @@ impl OpMatcher for RecipFunctionalMatcher {
     }
 
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(RecipFunctional)
+        Box::new(Log2Functional)
     }
 }
 
-/// Matches `LayoutTensorOpRecipMutatingGeneric` enodes and produces
-/// [`RecipMutating`] instances. No metadata children: the output layout IS
+/// Matches `LayoutTensorOpLog2MutatingGeneric` enodes and produces
+/// [`Log2Mutating`] instances. No metadata children: the output layout IS
 /// the mutated operand's, by the match rule's precondition.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct RecipMutatingMatcher;
+pub struct Log2MutatingMatcher;
 
-impl OpMatcher for RecipMutatingMatcher {
+impl OpMatcher for Log2MutatingMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpRecipMutatingGeneric"
+        "LayoutTensorOpLog2MutatingGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("recip/match_mutating_constructor.egg"),
+                text: include_str!("log2/match_mutating_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("recip/match_mutating.egg"),
+                text: include_str!("log2/match_mutating.egg"),
             },
         ]
     }
 
 
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(RecipMutating)
+        Box::new(Log2Mutating)
     }
 }

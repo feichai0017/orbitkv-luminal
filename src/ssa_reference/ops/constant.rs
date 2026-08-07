@@ -61,14 +61,6 @@ impl OpSlotNames for ConstantDps {
 }
 
 impl BufferTensorIrOp for ConstantDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        ctx.dests[0].as_f32_mut()?.fill(self.value as f32);
-        Ok(())
-    }
-
     fn label(&self) -> &str {
         "ConstantGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

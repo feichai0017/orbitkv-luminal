@@ -1,5 +1,22 @@
-; Logical Associativity : Mul
-(rewrite
-  (LogicalMul (LogicalMul ?lhs ?rhs) ?outer)
-  (LogicalMul ?lhs (LogicalMul ?rhs ?outer))
+; Logical Associativity : Mul — EXACT DTYPES ONLY (ruling 2026-08-06,
+; same policy as Add associativity: f32 multiplication reassociation
+; changes rounding/overflow behavior; integer products reassociate
+; exactly). One rule per exact dtype; fail-safe on underived dtypes.
+(rule
+  (
+    (= ?product (LogicalMul (LogicalMul ?lhs ?rhs) ?outer))
+    (= (Int) (dtype-of ?product))
+  )
+  (
+    (union ?product (LogicalMul ?lhs (LogicalMul ?rhs ?outer)))
+  )
+)
+(rule
+  (
+    (= ?product (LogicalMul (LogicalMul ?lhs ?rhs) ?outer))
+    (= (Int64) (dtype-of ?product))
+  )
+  (
+    (union ?product (LogicalMul ?lhs (LogicalMul ?rhs ?outer)))
+  )
 )

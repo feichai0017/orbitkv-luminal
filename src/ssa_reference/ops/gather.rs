@@ -85,45 +85,6 @@ impl OpSlotNames for GatherDps {
 }
 
 impl BufferTensorIrOp for GatherDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        let data_dims = &ctx.operand_dims[0];
-        anyhow::ensure!(
-            data_dims.len() == self.rank,
-            "gather kernel: data rank {} vs op rank {}",
-            data_dims.len(),
-            self.rank
-        );
-        let mut data_strides = vec![1usize; self.rank];
-        for k in (0..self.rank.saturating_sub(1)).rev() {
-            data_strides[k] = data_strides[k + 1] * data_dims[k + 1];
-        }
-        let data = ctx.operands[0].as_f32()?.clone();
-        let coord_operands: Vec<&Vec<f32>> = ctx.operands[1..1 + self.rank]
-            .iter()
-            .map(|operand| operand.as_f32())
-            .collect::<anyhow::Result<_>>()?;
-        let dest = ctx.dests[0].as_f32_mut()?;
-        for flat in 0..dest.len() {
-            let mut data_flat = 0usize;
-            for axis in 0..self.rank {
-                let coord = coord_operands[axis][flat];
-                let coord = coord as i64;
-                anyhow::ensure!(
-                    coord >= 0 && (coord as usize) < data_dims[axis],
-                    "gather coordinate {coord} out of bounds for axis {axis} (extent {}) — \
-                     UB per the scatter/gather ruling, surfaced loudly",
-                    data_dims[axis]
-                );
-                data_flat += coord as usize * data_strides[axis];
-            }
-            dest[flat] = data[data_flat];
-        }
-        Ok(())
-    }
-
     fn label(&self) -> &str {
         "GatherGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

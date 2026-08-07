@@ -1,116 +1,144 @@
-// use luminal::{prelude::*, tests::random_vec};
+use luminal::prelude::*;
+use luminal::shape::Expression;
 
-// pub struct Embedding {
-//     permute: bool,
-//     pub weight: GraphTensor, // n embeddings x embedding dim
-//     embedding_dim: usize,
-// }
+/// Token embedding: a (n_embeddings, embedding_dim) table indexed by Int
+/// token ids. Forward is a row-gather over the flattened index tensor —
+/// the B-tail path (gather1d → coordinate gather), no legacy Module/
+/// SerializeModule machinery; weights bind through the ladder like any
+/// other named tensor.
+pub struct Embedding {
+    pub weight: GraphTensor,
+    permute: bool,
+    embedding_dim: usize,
+}
 
-// impl Embedding {
-//     pub fn new(n_embeddings: usize, embedding_dim: usize, cx: &mut Graph) -> Self {
-//         Self {
-//             weight: cx.named_tensor("Embedding Weight", (n_embeddings, embedding_dim)),
-//             permute: false,
-//             embedding_dim,
-//         }
-//     }
+impl Embedding {
+    pub fn new(n_embeddings: usize, embedding_dim: usize, cx: &mut Graph) -> Self {
+        Self {
+            weight: cx.named_tensor("Embedding Weight", (n_embeddings, embedding_dim)),
+            permute: false,
+            embedding_dim,
+        }
+    }
 
-//     pub fn new_permuted(n_embeddings: usize, embedding_dim: usize, cx: &mut Graph) -> Self {
-//         Self {
-//             weight: cx.named_tensor("Embedding Weight", (embedding_dim, n_embeddings)),
-//             permute: true,
-//             embedding_dim,
-//         }
-//     }
+    pub fn new_permuted(n_embeddings: usize, embedding_dim: usize, cx: &mut Graph) -> Self {
+        Self {
+            weight: cx.named_tensor("Embedding Weight", (embedding_dim, n_embeddings)),
+            permute: true,
+            embedding_dim,
+        }
+    }
 
-//     pub fn initialize(self) -> Self {
-//         self.weight.set(random_vec(
-//             self.weight.shape.n_elements().to_usize().unwrap(),
-//         ));
-//         self
-//     }
-// }
+    /// input: Int indices of any shape; output: input.dims() + [embedding_dim].
+    pub fn forward(&self, input: GraphTensor) -> GraphTensor {
+        assert_eq!(input.dtype, DType::Int, "embedding indices must be Int");
+        let in_dims = input.dims();
+        let table = if self.permute {
+            self.weight.permute((1, 0))
+        } else {
+            self.weight
+        };
+        let flat = input.flatten();
+        let rows = crate::attention::gather_rows(table, flat, self.embedding_dim); // (N, D)
 
-// impl SerializeModule for Embedding {
-//     fn serialize(&self, s: &mut luminal::module::Serializer) {
-//         s.tensor("weight", self.weight);
-//     }
-// }
+        // Rebuild the batch shape with recorded splits: (N, D) → (in_dims.., D)
+        let mut out = rows;
+        for axis in 0..in_dims.len().saturating_sub(1) {
+            let inner: Expression = in_dims[axis + 1..]
+                .iter()
+                .copied()
+                .fold(Expression::from(1), |acc, d| acc * d)
+                .simplify();
+            out = out.split_dims(axis, inner);
+        }
+        out
+    }
 
-// impl Module<GraphTensor> for Embedding {
-//     type Output = GraphTensor;
+    /// Reverse from embedding space to token distribution (tied head).
+    pub fn reverse(&self, input: GraphTensor) -> GraphTensor {
+        if self.permute {
+            input.matmul(self.weight)
+        } else {
+            input.matmul(self.weight.permute((1, 0)))
+        }
+    }
+}
 
-//     fn forward(&self, input: GraphTensor) -> Self::Output {
-//         // Flatten batches
-//         let batch_size = input.shape.n_elements();
-//         let inp = input.reshape(batch_size);
-//         // Gather
-//         let out = if self.permute {
-//             self.weight.permute((1, 0)).gather(inp)
-//         } else {
-//             self.weight.gather(inp)
-//         };
-//         // Unflatten
-//         let mut new_shape = input.dims();
-//         new_shape.push(self.embedding_dim.into());
-//         out.reshape(new_shape)
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::Embedding;
+    use luminal::implementation_search::ImplementationSearchOptions;
+    use luminal::prelude::*;
+    use luminal::ssa_reference::SsaReferenceRuntime;
+    use luminal::shape::Expression;
+    use rustc_hash::FxHashMap;
 
-// impl Embedding {
-//     // Reverse from embedding to token distribution
-//     pub fn reverse(&self, input: GraphTensor) -> GraphTensor {
-//         if self.permute {
-//             input.matmul(self.weight)
-//         } else {
-//             input.matmul(self.weight.permute((1, 0)))
-//         }
-//     }
-// }
+    fn assert_close(ours: &[f32], expected: &[f32]) {
+        assert_eq!(ours.len(), expected.len(), "length mismatch");
+        for (index, (a, b)) in ours.iter().zip(expected).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-4 * b.abs().max(1.0),
+                "element {index}: ours {a} vs expected {b}"
+            );
+        }
+    }
 
-// #[cfg(test)]
-// mod tests {
-//     use dfdx::{
-//         prelude::Module as DfdxModule,
-//         tensor::{Cpu, TensorFromVec},
-//     };
+    const WEIGHT: [f32; 12] = [1.1, 2., 3., 1., 2., 3., 14., 2., 33., 1., 2., 3.];
 
-//     use luminal::prelude::Module;
+    /// 1-D index lookup through the M3 ladder: out[i] = weight[ids[i]].
+    #[test]
+    fn embedding_looks_up_rows() {
+        let mut cx = Graph::new();
+        let model = Embedding::new(3, 4, &mut cx);
+        let ids = cx.tensor_dtyped(3, DType::Int);
+        let out = model.forward(ids).output();
+        assert_eq!(out.dims(), vec![Expression::from(3), Expression::from(4)]);
 
-//     use super::Embedding;
-//     use dfdx::nn::BuildOnDevice;
-//     luminal::test_imports!();
+        let ids_data = vec![1.0f32, 0.0, 2.0];
+        // Hand golden: rows 1, 0, 2 of the table.
+        let mut expected = Vec::new();
+        for id in [1usize, 0, 2] {
+            expected.extend_from_slice(&WEIGHT[id * 4..id * 4 + 4]);
+        }
 
-//     #[test]
-//     fn test_embedding() {
-//         let mut cx = Graph::new();
-//         let batch = cx.tensor((2, 3)).set(vec![1.0, 0.0, 2.0, 1.0, 0.0, 1.0]);
-//         let a = cx.tensor(3).set(vec![1.0, 0.0, 1.0]).retrieve();
+        let mut data = FxHashMap::default();
+        data.insert(ids.id, ids_data.clone());
+        data.insert(model.weight.id, WEIGHT.to_vec());
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        rt.search(&data, &ImplementationSearchOptions::default())
+            .expect("search finds a plan");
+        rt.set_data(ids.id, ids_data);
+        rt.set_data(model.weight.id, WEIGHT.to_vec());
+        rt.execute().expect("winner executes");
+        assert_close(rt.get_f32(out.id).expect("output"), &expected);
+    }
 
-//         let model = Embedding::new(3, 4, &mut cx).initialize();
-//         model
-//             .weight
-//             .set(vec![1.1, 2., 3., 1., 2., 3., 14., 2., 33., 1., 2., 3.]);
-//         let mut b = model.forward(a).retrieve();
-//         let mut batch_out = model.forward(batch).retrieve();
+    /// Batched (2, 3) indices: the batch shape is rebuilt around the
+    /// embedding axis — out (2, 3, 4).
+    #[test]
+    fn embedding_batches_rebuild_shape() {
+        let mut cx = Graph::new();
+        let model = Embedding::new(3, 4, &mut cx);
+        let ids = cx.tensor_dtyped((2, 3), DType::Int);
+        let out = model.forward(ids).output();
+        assert_eq!(out.dims(), vec![Expression::from(2), Expression::from(3), Expression::from(4)]);
 
-//         cx.compile(GenericCompiler::default(), (&mut b, &mut batch_out));
+        let id_ints = [1usize, 0, 2, 1, 0, 1];
+        let ids_data: Vec<f32> = id_ints.iter().map(|v| *v as f32).collect();
+        let mut expected = Vec::new();
+        for id in id_ints {
+            expected.extend_from_slice(&WEIGHT[id * 4..id * 4 + 4]);
+        }
 
-//         cx.execute();
-
-//         let d_dev = Cpu::default();
-//         let mut d_model = <dfdx::nn::modules::builders::Embedding<3, 4>>::build_on_device(&d_dev);
-//         d_model.weight = d_dev.tensor_from_vec(
-//             vec![1.1, 2., 3., 1., 2., 3., 14., 2., 33., 1., 2., 3.],
-//             (DConst::<3>, DConst::<4>),
-//         );
-//         let d_a = d_dev.tensor_from_vec(vec![1, 0, 1], (DConst::<3>,));
-//         let d_batch = d_dev.tensor_from_vec(vec![1, 0, 2, 1, 0, 1], (DConst::<2>, DConst::<3>));
-
-//         let d_b = d_model.forward(d_a);
-//         let d_batch_out = d_model.forward(d_batch);
-
-//         assert_close(&b.data(), &d_b.as_vec());
-//         assert_close(&batch_out.data(), &d_batch_out.as_vec());
-//     }
-// }
+        let mut data = FxHashMap::default();
+        data.insert(ids.id, ids_data.clone());
+        data.insert(model.weight.id, WEIGHT.to_vec());
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        rt.search(&data, &ImplementationSearchOptions::default())
+            .expect("search finds a plan");
+        rt.set_data(ids.id, ids_data);
+        rt.set_data(model.weight.id, WEIGHT.to_vec());
+        rt.execute().expect("winner executes");
+        assert_close(rt.get_f32(out.id).expect("output"), &expected);
+    }
+}

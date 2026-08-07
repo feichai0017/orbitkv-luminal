@@ -419,13 +419,14 @@ pub trait OpMatcher: std::fmt::Debug {
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp>;
 }
 
-/// The built-in op set: one module per op pair (functional form + DPS form +
-/// matcher(s), defined side by side), every definition hand-written — no
-/// macro, no shared arithmetic. Each op spells out its operand signature,
-/// which operands it reads, and which destination operand is tied to which
-/// result, slot by slot.
-pub mod ops;
-pub use ops::*;
+// The op INVENTORY does not live here (ruling 2026-08-06): layout_ir
+// defines the IR framework — the traits, extraction machinery, and plan
+// types — and stays distant from where ops are implemented. The
+// reference runtime's inventory is `crate::ssa_reference::ops`; a future
+// runtime crate brings its own. (Remaining crate-split coupling: the
+// extractor and egglog assembly still call
+// ssa_reference::ops::built_in_matchers directly — the plugin registry
+// parameter is the next seam.)
 
 /// The petgraph carrying the dataflow DAG.
 pub type ExtractedDag = DiGraph<ExtractedNode, ExtractedEdge>;

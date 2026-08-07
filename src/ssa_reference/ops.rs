@@ -80,6 +80,32 @@ pub use scatter::{ScatterFunctional, ScatterMutating};
 pub use sin::{SinFunctional, SinMutating};
 pub use sqrt::{SqrtFunctional, SqrtMutating};
 
+// DPS forms, re-exported for the reference runtime's kernel registry
+// (ssa_reference::kernels downcasts plan ops to these concrete types —
+// ops carry no execution of their own, ruling 2026-08-06).
+pub use add::AddFunctionalDps;
+pub use add_mul_fused::AddMulFusedDps;
+pub use cast::CastDps;
+pub use constant::ConstantDps;
+pub use div::DivFunctionalDps;
+pub use exp::ExpFunctionalDps;
+pub use exp2::Exp2FunctionalDps;
+pub use gather::GatherDps;
+pub use index_map_apply_materialize::IndexMapApplyMaterializeDps;
+pub use iota::IotaDps;
+pub use less_than::LessThanDps;
+pub use log2::Log2FunctionalDps;
+pub use materialize_layout_copy::MaterializeLayoutCopyDps;
+pub use matmul_fused::MatMulFusedDps;
+pub use modulo::ModFunctionalDps;
+pub use mul::MulFunctionalDps;
+pub use recip::RecipFunctionalDps;
+pub use reduce_max::ReduceMaxDps;
+pub use reduce_sum::ReduceSumDps;
+pub use scatter::ScatterFunctionalDps;
+pub use sin::SinFunctionalDps;
+pub use sqrt::SqrtFunctionalDps;
+
 pub use add::{AddFunctionalMatcher, AddMutatingInputAliasSafeMatcher, AddMutatingMatcher};
 pub use add_mul_fused::AddMulFusedMatcher;
 pub use cast::CastMatcher;

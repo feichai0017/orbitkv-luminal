@@ -1,8 +1,12 @@
 //! Coordinate-form scatter (R8 dual):
 //! `out[coord_0[c], .., coord_{r-1}[c]] = src[c]` for `c` over src's shape;
 //! everywhere else `out = init`. One Int coordinate tensor per INIT axis,
-//! all sharing SRC's shape. Duplicate coordinates and out-of-bounds
-//! coordinate VALUES are undefined behavior (user ruling 2026-07-22).
+//! all sharing SRC's shape. Out-of-bounds coordinate VALUES are undefined
+//! behavior (user ruling 2026-07-22). Duplicate coordinates: the FUNCTIONAL
+//! reference kernel (ssa_reference::kernels) deterministically detects the
+//! conflicting writes and panics (ruling 2026-08-06, superseding the
+//! earlier duplicate-UB ruling for the reference path); the mutating form
+//! has NO reference kernel — the reference runtime is out-of-place only.
 //!
 //! Operand 0 is named `init` — it provides the result's initial contents
 //! (MLIR's term) — NOT `dest`, deliberately: the DPS rewrite appends a
@@ -131,13 +135,6 @@ impl OpSlotNames for ScatterFunctionalDps {
 }
 
 impl BufferTensorIrOp for ScatterFunctionalDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        scatter_reference(self.rank, ctx)
-    }
-
     fn label(&self) -> &str {
         "ScatterFunctionalGeneric" // DPS forms keep the IR name
     }
@@ -169,7 +166,8 @@ impl LayoutIrOp for ScatterFunctionalDps {}
 /// always: a rejected mutation copies init into the tied result's fresh
 /// buffer and mutates there. NOTE: no write-map injectivity gate exists or
 /// can — scatter's writes are data-dependent, and duplicate coordinates
-/// are UB by ruling.
+/// are UB by ruling. No reference kernel exists for this form (the
+/// reference runtime is out-of-place only, ruling 2026-08-05/06).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScatterMutating {
     pub rank: usize,
@@ -187,13 +185,6 @@ impl OpSlotNames for ScatterMutating {
 }
 
 impl BufferTensorIrOp for ScatterMutating {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        scatter_reference(self.rank, ctx)
-    }
-
     fn label(&self) -> &str {
         "ScatterMutatingGeneric"
     }
@@ -281,48 +272,4 @@ impl OpMatcher for ScatterMutatingMatcher {
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
         Box::new(ScatterMutating { rank: coordinate_rank(site, 2) })
     }
-}
-
-/// The shared scatter reference kernel: operands [init, src, coord0..] (+
-/// dest for the DPS form); dest starts as a copy of init, then
-/// dest[coords(i)] = src[i] over the src iteration space. Out-of-bounds
-/// coordinates are UB by ruling — surfaced LOUDLY here (their reference
-/// silently skips them; differentials must stay in bounds).
-fn scatter_reference(
-    rank: usize,
-    ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-) -> anyhow::Result<()> {
-    let init_dims = ctx.operand_dims[0].clone();
-    anyhow::ensure!(
-        init_dims.len() == rank,
-        "scatter kernel: init rank {} vs op rank {rank}",
-        init_dims.len()
-    );
-    let mut strides = vec![1usize; rank];
-    for k in (0..rank.saturating_sub(1)).rev() {
-        strides[k] = strides[k + 1] * init_dims[k + 1];
-    }
-    let init = ctx.operands[0].as_f32()?.clone();
-    let src = ctx.operands[1].as_f32()?.clone();
-    let coord_operands: Vec<Vec<f32>> = ctx.operands[2..2 + rank]
-        .iter()
-        .map(|operand| operand.as_f32().cloned())
-        .collect::<anyhow::Result<_>>()?;
-    let dest = ctx.dests[0].as_f32_mut()?;
-    dest.copy_from_slice(&init);
-    for i in 0..src.len() {
-        let mut flat = 0usize;
-        for axis in 0..rank {
-            let coord = coord_operands[axis][i] as i64;
-            anyhow::ensure!(
-                coord >= 0 && (coord as usize) < init_dims[axis],
-                "scatter coordinate {coord} out of bounds for axis {axis} (extent {}) — \
-                 UB per ruling, surfaced loudly",
-                init_dims[axis]
-            );
-            flat += coord as usize * strides[axis];
-        }
-        dest[flat] = src[i];
-    }
-    Ok(())
 }

@@ -157,8 +157,173 @@ pub fn paged_attention(
     (out, k_cache, v_cache)
 }
 
-// TESTS: B-TAIL-GATED (M3 Step 4b). The attention forward paths ride the
-// flat gather1d/scatter1d pair, which the logical recorder still poisons;
-// their tests ran on the deleted their-pipeline. They return when the
-// B-tail records the flat sugar in coordinate form (and the paged-cache
-// exemplar re-seats on runtime bindings).
+#[cfg(test)]
+mod tests {
+    use super::{gather_rows, paged_attention, scatter_rows};
+    use luminal::implementation_search::ImplementationSearchOptions;
+    use luminal::prelude::*;
+    use luminal::shape::Expression;
+    use luminal::ssa_reference::SsaReferenceRuntime;
+    use rustc_hash::FxHashMap;
+
+    fn assert_close(ours: &[f32], expected: &[f32]) {
+        assert_eq!(ours.len(), expected.len(), "length mismatch");
+        for (index, (a, b)) in ours.iter().zip(expected).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-4 * b.abs().max(1.0),
+                "element {index}: ours {a} vs expected {b}"
+            );
+        }
+    }
+
+    /// Row gather through the M3 ladder: out[i] = data[indices[i]].
+    #[test]
+    fn gather_rows_selects_rows() {
+        let mut cx = Graph::new();
+        let data = cx.tensor((4, 3));
+        let idx = cx.tensor_dtyped(2, DType::Int);
+        let out = gather_rows(data, idx, 3).output();
+
+        let data_vals: Vec<f32> = (0..12).map(|v| v as f32).collect();
+        let idx_vals = vec![2.0f32, 0.0];
+        let expected = vec![6.0, 7.0, 8.0, 0.0, 1.0, 2.0];
+
+        let mut inputs = FxHashMap::default();
+        inputs.insert(data.id, data_vals.clone());
+        inputs.insert(idx.id, idx_vals.clone());
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        rt.search(&inputs, &ImplementationSearchOptions::default())
+            .expect("search finds a plan");
+        rt.set_data(data.id, data_vals);
+        rt.set_data(idx.id, idx_vals);
+        rt.execute().expect("winner executes");
+        assert_close(rt.get_f32(out.id).expect("output"), &expected);
+    }
+
+    /// Row scatter through the M3 ladder: copy dest, replace the indexed
+    /// rows with src.
+    #[test]
+    fn scatter_rows_replaces_rows() {
+        let mut cx = Graph::new();
+        let src = cx.tensor((2, 3));
+        let idx = cx.tensor_dtyped(2, DType::Int);
+        let dest = cx.tensor((4, 3));
+        let out = scatter_rows(src, idx, dest, 3).output();
+        assert_eq!(out.dims(), dest.dims());
+
+        let src_vals = vec![100.0f32, 101.0, 102.0, 200.0, 201.0, 202.0];
+        let idx_vals = vec![1.0f32, 3.0];
+        let dest_vals: Vec<f32> = (0..12).map(|v| v as f32).collect();
+        let expected = vec![
+            0.0, 1.0, 2.0, 100.0, 101.0, 102.0, 6.0, 7.0, 8.0, 200.0, 201.0, 202.0,
+        ];
+
+        let mut inputs = FxHashMap::default();
+        inputs.insert(src.id, src_vals.clone());
+        inputs.insert(idx.id, idx_vals.clone());
+        inputs.insert(dest.id, dest_vals.clone());
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        rt.search(&inputs, &ImplementationSearchOptions::default())
+            .expect("search finds a plan");
+        rt.set_data(src.id, src_vals);
+        rt.set_data(idx.id, idx_vals);
+        rt.set_data(dest.id, dest_vals);
+        rt.execute().expect("winner executes");
+        assert_close(rt.get_f32(out.id).expect("output"), &expected);
+    }
+
+    /// Full paged attention, decode step: one new token (s=1) after one
+    /// cached token, 2 KV heads with no grouping (kv_groups=1), head_dim 2.
+    /// Reference computed by scalar loops below; the graph runs the plain
+    /// extraction path (run_ssa) — the search ladder is exercised by the
+    /// smaller units above.
+    #[test]
+    fn paged_attention_decode_step_matches_scalar_reference() {
+        const N_HEADS: usize = 2;
+        const N_KV_HEADS: usize = 2;
+        const HEAD_DIM: usize = 2;
+        const HIDDEN: usize = N_HEADS * HEAD_DIM; // == kv_dim here
+        const SLOTS: usize = 4;
+        const CTX: usize = 2;
+        let prev_seq = 1usize;
+
+        let mut cx = Graph::new();
+        let q = cx.tensor((1, HIDDEN));
+        let k_new = cx.tensor((1, HIDDEN));
+        let v_new = cx.tensor((1, HIDDEN));
+        let k_cache = cx.tensor((SLOTS, HIDDEN));
+        let v_cache = cx.tensor((SLOTS, HIDDEN));
+        let gather_idx = cx.tensor_dtyped(CTX, DType::Int);
+        let scatter_idx = cx.tensor_dtyped(1, DType::Int);
+        let (attn, k_cache_new, v_cache_new) = paged_attention(
+            q,
+            k_new,
+            v_new,
+            k_cache,
+            v_cache,
+            gather_idx,
+            scatter_idx,
+            Expression::from(prev_seq),
+            N_HEADS,
+            N_KV_HEADS,
+            HEAD_DIM,
+        );
+        let attn = attn.output();
+        let k_cache_new = k_cache_new.output();
+        let v_cache_new = v_cache_new.output();
+
+        let q_vals = vec![0.5f32, -0.3, 0.8, 0.1];
+        let k_new_vals = vec![0.2f32, 0.4, -0.1, 0.3];
+        let v_new_vals = vec![1.0f32, -1.0, 0.5, 2.0];
+        let k_cache_vals: Vec<f32> = (0..SLOTS * HIDDEN).map(|v| v as f32 * 0.1).collect();
+        let v_cache_vals: Vec<f32> = (0..SLOTS * HIDDEN).map(|v| v as f32 * 0.2 + 1.0).collect();
+        let gather_vals = vec![0.0f32, 1.0]; // context = slots 0, 1
+        let scatter_vals = vec![1.0f32]; // new KV lands in slot 1
+
+        // Scalar reference. Cache update: row 1 replaced by k_new/v_new.
+        let mut k_cache_ref = k_cache_vals.clone();
+        let mut v_cache_ref = v_cache_vals.clone();
+        k_cache_ref[HIDDEN..2 * HIDDEN].copy_from_slice(&k_new_vals);
+        v_cache_ref[HIDDEN..2 * HIDDEN].copy_from_slice(&v_new_vals);
+        // Attention per head over the gathered context rows (slots 0, 1).
+        // The query is token index prev_seq = 1, so both context positions
+        // are causally visible.
+        let scale = 1.0 / (HEAD_DIM as f32).sqrt();
+        let mut attn_ref = vec![0.0f32; HIDDEN];
+        for h in 0..N_HEADS {
+            let q_h = &q_vals[h * HEAD_DIM..(h + 1) * HEAD_DIM];
+            let mut scores = [0.0f32; CTX];
+            for (j, score) in scores.iter_mut().enumerate() {
+                let slot = gather_vals[j] as usize;
+                let k_row = &k_cache_ref[slot * HIDDEN + h * HEAD_DIM..][..HEAD_DIM];
+                *score = q_h.iter().zip(k_row).map(|(a, b)| a * b).sum::<f32>() * scale;
+            }
+            let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+            let denom: f32 = exps.iter().sum();
+            for (j, e) in exps.iter().enumerate() {
+                let slot = gather_vals[j] as usize;
+                let v_row = &v_cache_ref[slot * HIDDEN + h * HEAD_DIM..][..HEAD_DIM];
+                for (d, v) in v_row.iter().enumerate() {
+                    attn_ref[h * HEAD_DIM + d] += e / denom * v;
+                }
+            }
+        }
+
+        let rt = luminal::test_support::run_ssa(
+            &cx,
+            &[
+                (q.id, q_vals),
+                (k_new.id, k_new_vals),
+                (v_new.id, v_new_vals),
+                (k_cache.id, k_cache_vals),
+                (v_cache.id, v_cache_vals),
+                (gather_idx.id, gather_vals),
+                (scatter_idx.id, scatter_vals),
+            ],
+        );
+        assert_close(rt.get_f32(attn.id).expect("attn out"), &attn_ref);
+        assert_close(rt.get_f32(k_cache_new.id).expect("k cache"), &k_cache_ref);
+        assert_close(rt.get_f32(v_cache_new.id).expect("v cache"), &v_cache_ref);
+    }
+}

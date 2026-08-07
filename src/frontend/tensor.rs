@@ -64,54 +64,30 @@ impl GraphTensor {
         self
     }
 
-    /// Replace this handle's dims wholesale — POISONED-path plumbing only
-    /// (the flat gather/scatter lowerings reshape by fiat; their honest
-    /// coordinate-form replacements record real views).
-    pub(crate) fn set_dims(&mut self, shape: impl ToShape) {
-        self.dims = shape.to_shape().into_iter().collect();
-    }
-
     /// Get a mutable reference to the graph this tensor belongs to
     #[allow(clippy::mut_from_ref)]
     pub fn graph(&self) -> &mut Graph {
         unsafe { self.graph_ref.as_mut().unwrap() }
     }
 
-    /// Mark this tensor as an observable output. Unlike [`GraphTensor::persist`],
-    /// this protects the tensor's logical value from a later in-place update.
-    /// Viewed sources output as the views they are — the BINDING states the
-    /// contiguous boundary and search prices any materialization (Step 4a).
+    /// Mark this tensor as an observable output — this protects the
+    /// tensor's logical value from a later in-place update. Viewed sources
+    /// output as the views they are — the BINDING states the contiguous
+    /// boundary and search prices any materialization (Step 4a).
+    ///
+    /// (The old `persist()` residency marker is DELETED — ruling
+    /// 2026-08-06: storage residency across executions is runtime-BINDING
+    /// information, decided at the 4d/M4 binding surface, never authored
+    /// into the graph.)
     pub fn output(&self) -> GraphTensor {
-        self.output_raw(*self, false)
-    }
-
-    /// Mark a tensor as an output without any contiguous materialization.
-    /// Used internally by graph_break and persist.
-    fn output_raw(&self, source: GraphTensor, persist_only: bool) -> GraphTensor {
-        if persist_only {
-            self.graph().logical.poison(format!(
-                "persist_only output of t{} (recorder Phase B)",
-                source.id.index()
-            ));
-        } else {
-            let dims = source.dims();
-            self.graph().logical.output(
-                source.id.index(),
-                &(source.logical_value, dims),
-                source.id.index(),
-            );
-        }
+        let source = *self;
+        let dims = source.dims();
+        self.graph().logical.output(
+            source.id.index(),
+            &(source.logical_value, dims),
+            source.id.index(),
+        );
         source
-    }
-
-    /// Mark this tensor's storage to persist across executions. Creates a
-    /// persist-only Output marker so the buffer is not consumed after
-    /// execute(), but does not request an immutable observable snapshot. Call
-    /// [`GraphTensor::output`] separately when the pre-update logical value is
-    /// user-visible. Returns the original tensor rather than the Output marker.
-    pub fn persist(&self) -> GraphTensor {
-        self.output_raw(*self, true);
-        *self
     }
 
     pub fn dims(&self) -> Vec<Expression> {

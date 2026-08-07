@@ -2247,7 +2247,7 @@ mod tests {
     /// (never op-internal allocations), and never undefined contents.
     #[test]
     fn builtin_ops_declare_out_of_place_defaults() {
-        use crate::layout_ir::{AddFunctional, IndexMapApplyMaterialize, ReduceSum, SqrtFunctional};
+        use crate::ssa_reference::ops::{AddFunctional, IndexMapApplyMaterialize, ReduceSum, SqrtFunctional};
         let ops: Vec<Box<dyn LayoutIrOp>> = vec![
             Box::new(AddFunctional),
             Box::new(SqrtFunctional),
@@ -2700,11 +2700,7 @@ mod tests {
     /// blanket permit the engine would have to trust.
     #[test]
     fn builtin_ops_declare_no_unconditional_permits() {
-        use crate::layout_ir::{
-            AddFunctional, AddMulFused, AddMutating, DivFunctional, ExpFunctional,
-            IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax,
-            ReduceSum, SqrtFunctional, SqrtMutating,
-        };
+        use crate::ssa_reference::ops::{AddFunctional, AddMulFused, AddMutating, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax, ReduceSum, SqrtFunctional, SqrtMutating};
         let ops: Vec<Box<dyn LayoutIrOp>> = vec![
             Box::new(SqrtFunctional),
             Box::new(ExpFunctional),
@@ -2731,7 +2727,7 @@ mod tests {
         // layouts equal, discharging the permit's precondition at match time.
         // rhs may share the mutated storage; the reverse direction (reading
         // the mutated operand against... nothing ties operand 1) is no permit.
-        let alias_safe = crate::layout_ir::AddMutatingInputAliasSafe;
+        let alias_safe = crate::ssa_reference::ops::AddMutatingInputAliasSafe;
         assert!(permits_sharing(&alias_safe, 1, 0));
         assert!(!permits_sharing(&alias_safe, 0, 1));
     }

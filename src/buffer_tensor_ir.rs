@@ -214,8 +214,22 @@ impl ReferenceKernelCtx {
     }
 }
 
-pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + Debug {
-    /// The op's IR name (see the label policy in [`crate::layout_ir::ops`]).
+/// Blanket downcast access for kernel dispatch: the reference runtime's
+/// registry (`ssa_reference::kernels`) keys kernels by CONCRETE op type.
+/// Ops themselves carry no execution (ruling 2026-08-06) — a runtime that
+/// implements an op holds its kernel in that runtime's own folder.
+pub trait AsAnyOp {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+impl<T: 'static> AsAnyOp for T {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + AsAnyOp + Debug {
+    /// The op's IR name (see the label policy in [`crate::ssa_reference::ops`]).
     fn label(&self) -> &str;
 
     /// Is this operand's buffer read? (Inputs are read.)
@@ -226,14 +240,6 @@ pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + Debug {
     /// Is this result's buffer written? (Outputs are written.)
     fn result_writes_memory(&self, _result: usize) -> bool {
         true
-    }
-
-    /// Execute this op on raw f32 storage — the `SsaReferenceRuntime`
-    /// kernel. Ops without one refuse LOUDLY (never silently skip); kernels
-    /// live beside their op in its module, registry-style.
-    fn reference_execute(&self, ctx: &mut ReferenceKernelCtx) -> Result<()> {
-        let _ = ctx;
-        anyhow::bail!("no reference kernel for {}", self.label())
     }
 
     /// Does this result start as undefined CONTENTS (like `tensor.empty` /
@@ -299,11 +305,6 @@ impl OpSlotNames for BufferAlloc {
 }
 
 impl BufferTensorIrOp for BufferAlloc {
-    fn reference_execute(&self, _ctx: &mut ReferenceKernelCtx) -> Result<()> {
-        // No computation: storage is pre-materialized; contents start undefined (zeros here).
-        Ok(())
-    }
-
     fn label(&self) -> &str {
         "BufferAlloc"
     }
@@ -331,11 +332,6 @@ impl OpSlotNames for BufferFree {
 }
 
 impl BufferTensorIrOp for BufferFree {
-    fn reference_execute(&self, _ctx: &mut ReferenceKernelCtx) -> Result<()> {
-        // No computation: liveness bookkeeping only; the reference executor keeps storage.
-        Ok(())
-    }
-
     fn label(&self) -> &str {
         "BufferFree"
     }

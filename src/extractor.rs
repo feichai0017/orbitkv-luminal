@@ -4,10 +4,11 @@ use anyhow::{Context, Result, bail};
 use egraph_serialize::{ClassId, EGraph, Node, NodeId};
 use petgraph::graph::{DiGraph, NodeIndex};
 
+use crate::ssa_reference::ops::built_in_matchers;
 use crate::layout_ir::{
     Access, BufferInfo, ExtractedDag, ExtractedEdge, ExtractedGraph, ExtractedNode,
     ExtractionSite, FreedBy, InputNode, LayoutInfo, LayoutIrOp, LayoutTensorInfo, LogicalInfo,
-    OpInput, OpMatcher, OpNode, OutputNode, OutputSlot, ops::built_in_matchers,
+    OpInput, OpMatcher, OpNode, OutputNode, OutputSlot,
 };
 use crate::logical_op::{LogicalRender, logical_op_for};
 

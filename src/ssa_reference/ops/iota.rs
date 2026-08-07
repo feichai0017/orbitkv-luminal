@@ -74,23 +74,57 @@ pub(crate) fn parse_int_expr(
     parse_int_expr_memo(site, class, depth, &mut std::collections::HashMap::new())
 }
 
+/// Memo entry: a finished parse, or the in-progress cycle guard.
+#[derive(Clone)]
+pub(crate) enum ParseMemo {
+    InProgress,
+    Done(Option<IotaExpr>),
+}
+
 /// Memoized worker: each class parses at most once — the subsumed-
 /// spelling fallback widens the branching factor enough that the naive
 /// backtracking walk goes exponential on fat saturated classes.
-/// In-progress classes are marked None (cycle guard, same effect as the
-/// old depth exhaustion).
+///
+/// CYCLE-TAINT RULE (2026-08-06, found by the MoE map parse): hitting an
+/// in-progress class fails THAT spelling, but the failure is contextual —
+/// the same class can parse fine once its ancestor resolves. So a `None`
+/// outcome whose walk touched the cycle guard is NOT cached (a later
+/// query retries from a clean stack), while an untainted `None` — every
+/// spelling genuinely outside the subset — caches as before, keeping the
+/// exponential-blowup protection.
 pub(crate) fn parse_int_expr_memo(
     site: &ExtractionSite<'_>,
     class: &egraph_serialize::ClassId,
     depth: usize,
-    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, Option<IotaExpr>>,
+    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, ParseMemo>,
 ) -> Option<IotaExpr> {
-    if let Some(cached) = memo.get(class) {
-        return cached.clone();
+    parse_int_expr_tainting(site, class, depth, memo, &mut false)
+}
+
+fn parse_int_expr_tainting(
+    site: &ExtractionSite<'_>,
+    class: &egraph_serialize::ClassId,
+    depth: usize,
+    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, ParseMemo>,
+    tainted: &mut bool,
+) -> Option<IotaExpr> {
+    match memo.get(class) {
+        Some(ParseMemo::Done(cached)) => return cached.clone(),
+        Some(ParseMemo::InProgress) => {
+            *tainted = true;
+            return None;
+        }
+        None => {}
     }
-    memo.insert(class.clone(), None);
-    let parsed = parse_int_expr_uncached(site, class, depth, memo);
-    memo.insert(class.clone(), parsed.clone());
+    memo.insert(class.clone(), ParseMemo::InProgress);
+    let mut local_taint = false;
+    let parsed = parse_int_expr_uncached(site, class, depth, memo, &mut local_taint);
+    if parsed.is_none() && local_taint {
+        memo.remove(class);
+        *tainted = true;
+    } else {
+        memo.insert(class.clone(), ParseMemo::Done(parsed.clone()));
+    }
     parsed
 }
 
@@ -98,7 +132,8 @@ fn parse_int_expr_uncached(
     site: &ExtractionSite<'_>,
     class: &egraph_serialize::ClassId,
     depth: usize,
-    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, Option<IotaExpr>>,
+    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, ParseMemo>,
+    tainted: &mut bool,
 ) -> Option<IotaExpr> {
     if depth == 0 {
         return None;
@@ -130,8 +165,8 @@ fn parse_int_expr_uncached(
         for node in site.nodes_in_class_value(class, kind) {
             let Some(lhs_class) = site.class_of_child(node, 0) else { continue };
             let Some(rhs_class) = site.class_of_child(node, 1) else { continue };
-            let Some(lhs) = parse_int_expr_memo(site, &lhs_class, depth - 1, memo) else { continue };
-            let Some(rhs) = parse_int_expr_memo(site, &rhs_class, depth - 1, memo) else { continue };
+            let Some(lhs) = parse_int_expr_tainting(site, &lhs_class, depth - 1, memo, tainted) else { continue };
+            let Some(rhs) = parse_int_expr_tainting(site, &rhs_class, depth - 1, memo, tainted) else { continue };
             return Some(build(Box::new(lhs), Box::new(rhs)));
         }
     }
@@ -142,8 +177,8 @@ fn parse_int_expr_uncached(
         };
         let Some(lhs_class) = site.class_of_child(less_than, 0) else { continue };
         let Some(rhs_class) = site.class_of_child(less_than, 1) else { continue };
-        let Some(lhs) = parse_int_expr_memo(site, &lhs_class, depth - 1, memo) else { continue };
-        let Some(rhs) = parse_int_expr_memo(site, &rhs_class, depth - 1, memo) else { continue };
+        let Some(lhs) = parse_int_expr_tainting(site, &lhs_class, depth - 1, memo, tainted) else { continue };
+        let Some(rhs) = parse_int_expr_tainting(site, &rhs_class, depth - 1, memo, tainted) else { continue };
         return Some(IotaExpr::LessThanCast(Box::new(lhs), Box::new(rhs)));
     }
     None
@@ -191,28 +226,6 @@ impl OpSlotNames for IotaDps {
 }
 
 impl BufferTensorIrOp for IotaDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        let Some(expr) = &self.expr else {
-            anyhow::bail!("iota reference kernel supports Lit/Coord/Add/Mul expressions only");
-        };
-        let out_dims = ctx.operand_dims.last().cloned().unwrap_or_default();
-        let rank = out_dims.len();
-        let dest = ctx.dests[0].as_f32_mut()?;
-        for flat in 0..dest.len() {
-            let mut remainder = flat;
-            let mut coords = vec![0usize; rank];
-            for axis in (0..rank).rev() {
-                coords[axis] = remainder % out_dims[axis];
-                remainder /= out_dims[axis];
-            }
-            dest[flat] = expr.eval(&coords) as f32;
-        }
-        Ok(())
-    }
-
     fn label(&self) -> &str {
         "IotaGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

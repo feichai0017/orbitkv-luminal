@@ -54,47 +54,6 @@ impl OpSlotNames for CastDps {
 }
 
 impl BufferTensorIrOp for CastDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        // The conversion is driven by the BUFFER types the plan annotated —
-        // the op needs no dtype field of its own. Covered pairs only;
-        // anything else refuses loudly (never a silent reinterpretation).
-        use crate::buffer_tensor_ir::TypedBuffer;
-        match (&ctx.operands[0], &mut ctx.dests[0]) {
-            // Same-type: value-preserving copy (their Int-iota → F32 path
-            // stores integer VALUES in f32, so this stays exact).
-            (TypedBuffer::F32(input), TypedBuffer::F32(dest)) => {
-                anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
-                dest.copy_from_slice(input);
-            }
-            (TypedBuffer::Bool8(input), TypedBuffer::Bool8(dest)) => {
-                anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
-                dest.copy_from_slice(input);
-            }
-            // The indicator bridge: bool -> float is exactly 0.0 / 1.0.
-            (TypedBuffer::Bool8(input), TypedBuffer::F32(dest)) => {
-                anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
-                for (out, code) in dest.iter_mut().zip(input) {
-                    // The Bool8 invariant, enforced at the read: only the
-                    // two legal codes exist; anything else is ill-formed
-                    // data, not a truthy byte.
-                    anyhow::ensure!(*code <= 1, "Bool8 buffer holds ill-formed code {code}");
-                    *out = f32::from(*code);
-                }
-            }
-            (TypedBuffer::F32(_), TypedBuffer::Bool8(_)) => {
-                anyhow::bail!(
-                    "cast f32 -> Bool8 is not a reinterpretation: the != 0 \
-                     reading is a PROJECTION and must appear as an explicit \
-                     comparison in the model (LessThan), never as a cast"
-                );
-            }
-        }
-        Ok(())
-    }
-
     fn label(&self) -> &str {
         "CastGeneric" // DPS forms keep the IR name
     }

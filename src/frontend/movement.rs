@@ -218,9 +218,6 @@ impl GraphTensor {
     ///
     /// indices must have the same rank as self and the same shape as the output.
     pub fn gather_elements(self, indexes: GraphTensor, axis: usize) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("gather_elements at t{} (recorder Phase B)", self.id.index()));
         let dims = self.dims();
         let rank = dims.len();
         let out_shape: Vec<usize> = indexes
@@ -295,9 +292,6 @@ impl GraphTensor {
         updates: GraphTensor,
         axis: usize,
     ) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("scatter_elements at t{} (recorder Phase B)", self.id.index()));
         let data_dims = self.dims();
         let rank = data_dims.len();
         let idx_shape: Vec<usize> = indices
@@ -362,16 +356,9 @@ impl GraphTensor {
         let flat_updates = updates.flatten();
         let flat_data = self.flatten();
 
-        // Use HLIR Scatter: dest[indexes[i]] = src[i]
+        // dest.flat[indexes[i]] = src[i], then rebuild data's shape
         let output_flat = flat_updates.scatter1d(flat_dest_1d, flat_data);
-
-        // Reshape back to data_shape
-        let data_shape_usize: Vec<usize> =
-            data_dims.iter().map(|d| d.to_usize().unwrap()).collect();
-        let mut result = output_flat;
-        result.set_dims(data_shape_usize);
-
-        result
+        output_flat.unflatten_to(&data_dims)
     }
 
     /// Scatter updates into a copy of self using multi-dimensional index vectors (ONNX ScatterND semantics).
@@ -382,9 +369,6 @@ impl GraphTensor {
     ///   multi_idx = indices[s0, ..., sq-2, :]
     ///   output[multi_idx[0], ..., multi_idx[K-1], :, ..] = updates[s0, ..., sq-2, :, ..]
     pub fn scatter_nd(self, indices: GraphTensor, updates: GraphTensor) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("scatter_nd at t{} (recorder Phase B)", self.id.index()));
         let indices = indices.cast(DType::Int);
         let data_dims = self.dims();
         let data_rank = data_dims.len();
@@ -419,10 +403,10 @@ impl GraphTensor {
             .map(|i| data_shape[i + 1..].iter().product::<usize>().max(1))
             .collect();
 
-        // Flatten batch dims of indices to [batch_numel, K] using materialize + reshape
+        // Flatten batch dims of indices to [batch_numel, K] with recorded merges
         let mut indices_flat = indices;
-        if idx_rank > 2 {
-            indices_flat.set_dims(vec![batch_numel, k]);
+        while indices_flat.rank() > 2 {
+            indices_flat = indices_flat.merge_dims(0, 1);
         }
         // indices_flat: [batch_numel, K] or [K] if idx_rank == 1
 
@@ -460,11 +444,8 @@ impl GraphTensor {
                     ar_shaped = ar_shaped.expand_dim(0, 1);
                 }
                 ar_shaped = ar_shaped.expand(trailing_shape.clone());
-                // Flatten trailing dims using materialize + reshape
-                let mut ar_flat = ar_shaped;
-                ar_flat.set_dims(vec![trailing_numel]);
-                // Expand to [batch_numel, trailing_numel]
-                ar_flat = ar_flat.expand_dim(0, batch_numel);
+                // Flatten trailing dims with recorded merges, then broadcast
+                let ar_flat = ar_shaped.flatten().expand_dim(0, batch_numel);
 
                 let stride_tensor = self
                     .graph()
@@ -481,14 +462,9 @@ impl GraphTensor {
         let flat_updates = updates.flatten();
         let flat_data = self.flatten();
 
-        // Use HLIR Scatter: dest[indexes[i]] = src[i]
+        // dest.flat[indexes[i]] = src[i], then rebuild data's shape
         let output_flat = flat_updates.scatter1d(full_flat_dest, flat_data);
-
-        // Reshape back to data_shape
-        let mut result = output_flat;
-        result.set_dims(data_shape);
-
-        result
+        output_flat.unflatten_to(&data_dims)
     }
 
     /// COORDINATE-FORM gather — THE primary (ruling 2026-07-31): one Int
@@ -562,35 +538,54 @@ impl GraphTensor {
         GraphTensor::from_id(id, dims, self.graph_ref, self.dtype).with_logical(logical)
     }
 
-    /// FLAT gather (the rank-1 primitive): out[i] = data[indexes[i]].
+    /// Rebuild a multi-dim shape from a flat tensor with recorded splits
+    /// (the inverse of `flatten`; there is no wholesale reshape in the
+    /// recorded vocabulary).
+    pub(crate) fn unflatten_to(mut self, dims: &[Expression]) -> GraphTensor {
+        assert_eq!(self.rank(), 1, "unflatten_to starts from a flat tensor");
+        for axis in 0..dims.len().saturating_sub(1) {
+            let inner: Expression = dims[axis + 1..]
+                .iter()
+                .copied()
+                .fold(Expression::from(1), |acc, d| acc * d)
+                .simplify();
+            self = self.split_dims(axis, inner);
+        }
+        self
+    }
+
+    /// FLAT gather over flat data: out[c] = data.flat[indexes[c]], out
+    /// shape = indexes' shape. Sugar over the coordinate form: flatten the
+    /// data, then the index tensor IS the single coordinate tensor.
     pub fn gather1d(self, indexes: GraphTensor) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("gather at t{} (recorder Phase B)", self.id.index()));
         assert_eq!(
             indexes.dtype,
             DType::Int,
             "Gather indexes must have an integer dtype!"
         );
-        let id = self.graph().mint_id();
-        GraphTensor::from_id(id, indexes.dims(), self.graph_ref, self.dtype)
+        self.flatten().gather(&[indexes])
     }
 
     /// Scatter self (src) into dest at flat 1D positions given by indexes.
-    /// output = copy(dest); output[indexes[i]] = src[i]
-    /// FLAT scatter (the rank-1 primitive): dest with src written at
-    /// flat positions indexes (copy-then-write).
+    /// output = copy(dest); output.flat[indexes[i]] = src[i]
+    /// Sugar over the coordinate form: flatten dest/src/indexes, scatter,
+    /// then rebuild dest's shape with recorded splits.
     pub fn scatter1d(self, indexes: GraphTensor, dest: GraphTensor) -> GraphTensor {
-        self.graph()
-            .logical
-            .poison(format!("scatter at t{} (recorder Phase B)", self.id.index()));
         assert_eq!(
             indexes.dtype,
             DType::Int,
             "Scatter indexes must have an integer dtype!"
         );
-        let id = self.graph().mint_id();
-        GraphTensor::from_id(id, dest.dims(), self.graph_ref, self.dtype)
+        assert_eq!(
+            indexes.dims(),
+            self.dims(),
+            "scatter1d: indexes and src (self) share a shape"
+        );
+        let out_dims = dest.dims();
+        let flat = dest
+            .flatten()
+            .scatter(&[indexes.flatten()], self.flatten());
+        flat.unflatten_to(&out_dims)
     }
 
     /// Extracts sliding local windows from an input tensor.

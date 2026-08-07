@@ -99,7 +99,10 @@ pub fn search_implementations_with_ops(
     let allow = allow_override.unwrap_or_else(crate::ssa_reference::reference_allow_list);
     let mut session = extractor::ExtractionSession::new(egraph, Some(&allow));
     let index = extractor::producer_index_with_ops(egraph, Some(&allow));
-    ensure!(!index.is_empty(), "no producer classes to search over");
+    // An empty index is NOT an error: a graph with no searchable producer
+    // classes (pure identity — every output is an input value) has a
+    // one-point genome space, the empty genome. The search still profiles
+    // that single candidate; the fingerprint cache collapses the rest.
     let classes: Vec<_> = index.keys().cloned().collect();
     let mut rng = StdRng::seed_from_u64(options.seed);
 
@@ -113,6 +116,9 @@ pub fn search_implementations_with_ops(
     };
     let mutate = |parent: &Genome, rng: &mut StdRng, count: usize| {
         let mut child = parent.clone();
+        if classes.is_empty() {
+            return child; // one-point genome space: nothing to mutate
+        }
         for _ in 0..count {
             let class = &classes[rng.random_range(0..classes.len())];
             let candidates = &index[class];

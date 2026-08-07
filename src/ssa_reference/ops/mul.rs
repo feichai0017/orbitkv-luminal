@@ -1,200 +1,197 @@
-//! Elementwise base-2 exponential.
+//! Elementwise multiplication.
 
 use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
 use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 
-/// `Exp2FunctionalGeneric(input) -> out`
+/// `MulFunctionalGeneric(lhs, rhs) -> out`
 ///
 /// Functional form: pure dataflow, conservative [`Bufferizable`] defaults
 /// (every operand read, the result freshly allocated). Elementwise: element
-/// `i` of `input` is read before element `i` of `out` is written (op-level
+/// `i` of each input is read before element `i` of `out` is written (op-level
 /// all-pairs claim — see the NOTE on `bufferizes_to_elementwise_access`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Exp2Functional;
+pub struct MulFunctional;
 
-impl OpSlotNames for Exp2Functional {
+impl OpSlotNames for MulFunctional {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
-            0 => "input".to_string(),
+            0 => "lhs".to_string(),
+            1 => "rhs".to_string(),
             _ => format!("in{operand}"),
         }
     }
 }
 
-impl BufferTensorIrOp for Exp2Functional {
+impl BufferTensorIrOp for MulFunctional {
     fn label(&self) -> &str {
-        "Exp2FunctionalGeneric"
+        "MulFunctionalGeneric"
     }
 }
 
-impl Bufferizable for Exp2Functional {}
+impl Bufferizable for MulFunctional {}
 
-impl ToDps for Exp2Functional {
+impl ToDps for MulFunctional {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(Exp2FunctionalDps))
+        Some(Box::new(MulFunctionalDps))
     }
 }
 
-impl LayoutIrOp for Exp2Functional {}
+impl LayoutIrOp for MulFunctional {}
 
-/// Destination-passing form of [`Exp2Functional`], signature spelled slot by slot:
+/// Destination-passing form of [`MulFunctional`], signature spelled slot by slot:
 ///
 /// ```text
-/// Exp2Generic(input: read, dest0: write-only ↔ out0) -> out0
+/// MulGeneric(lhs: read, rhs: read, dest0: write-only ↔ out0) -> out0
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Exp2FunctionalDps;
+pub struct MulFunctionalDps;
 
-impl OpSlotNames for Exp2FunctionalDps {
+impl OpSlotNames for MulFunctionalDps {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
-            0 => "input".to_string(),
-            1 => "dest0".to_string(),
+            0 => "lhs".to_string(),
+            1 => "rhs".to_string(),
+            2 => "dest0".to_string(),
             _ => format!("in{operand}"),
         }
     }
 }
 
-impl BufferTensorIrOp for Exp2FunctionalDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        ctx.unary_elementwise(|x| x.exp2())
-    }
-
+impl BufferTensorIrOp for MulFunctionalDps {
     fn label(&self) -> &str {
-        "Exp2FunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
+        "MulFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
 
     fn operand_reads_memory(&self, operand: usize) -> bool {
         match operand {
-            0 => true,  // input
-            1 => false, // dest0: write-only destination
+            0 => true,  // lhs
+            1 => true,  // rhs
+            2 => false, // dest0: write-only destination
             _ => true,  // outside the signature: conservative default
         }
     }
 }
 
-impl Bufferizable for Exp2FunctionalDps {
+impl Bufferizable for MulFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo { operand: 2, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for Exp2FunctionalDps {
+impl ToDps for MulFunctionalDps {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already DPS — keeps the rewrite pass idempotent
     }
 }
 
-impl LayoutIrOp for Exp2FunctionalDps {}
+impl LayoutIrOp for MulFunctionalDps {}
 
-/// `Exp2MutatingGeneric(x: read+write) -> out`
+/// `MulMutatingGeneric(lhs: read+write, rhs: read) -> out`
 ///
 /// Mutating form: the kernel reads and overwrites ONE storage — its
-/// single operand's. Matched in egglog only when the output layout equals
+/// first operand's. Matched in egglog only when the output layout equals
 /// that operand's layout AND the written tensor is provably injective, so an
 /// admitted tie is descriptor-exact by construction. The tie is `May` in the
 /// relocation sense: a rejected mutation relocates the operand into the tied
 /// result's fresh buffer (copy-in) and mutates there — the kernel's
 /// one-buffer contract is invariant under relocation, never a hard error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Exp2Mutating;
+pub struct MulMutating;
 
-impl OpSlotNames for Exp2Mutating {
+impl OpSlotNames for MulMutating {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
-            0 => "input".to_string(),
+            0 => "lhs".to_string(),
+            1 => "rhs".to_string(),
             _ => format!("in{operand}"),
         }
     }
 }
 
-impl BufferTensorIrOp for Exp2Mutating {
+impl BufferTensorIrOp for MulMutating {
     fn label(&self) -> &str {
-        "Exp2MutatingGeneric"
+        "MulMutatingGeneric"
     }
 }
 
-impl Bufferizable for Exp2Mutating {
+impl Bufferizable for MulMutating {
 
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for Exp2Mutating {
+impl ToDps for MulMutating {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already destination-form: the destination IS operand 0
     }
 }
 
-impl LayoutIrOp for Exp2Mutating {}
+impl LayoutIrOp for MulMutating {}
 
 // ---------------------------------------------------------------------------
 // Matchers
 // ---------------------------------------------------------------------------
 
-/// Matches `LayoutTensorOpExp2FunctionalGeneric` enodes and produces
-/// [`Exp2Functional`] instances. Metadata children: `layout` at child 1.
+/// Matches `LayoutTensorOpMulFunctionalGeneric` enodes and produces
+/// [`MulFunctional`] instances. Metadata children: `out_layout` at child 2.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Exp2FunctionalMatcher;
+pub struct MulFunctionalMatcher;
 
-impl OpMatcher for Exp2FunctionalMatcher {
+impl OpMatcher for MulFunctionalMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpExp2FunctionalGeneric"
+        "LayoutTensorOpMulFunctionalGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("exp2/match_functional_constructor.egg"),
+                text: include_str!("mul/match_functional_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("exp2/match_functional.egg"),
+                text: include_str!("mul/match_functional.egg"),
             },
         ]
     }
 
 
     fn metadata_slots(&self) -> &'static [(&'static str, usize)] {
-        &[("layout", 1)]
+        &[("out_layout", 2)]
     }
 
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(Exp2Functional)
+        Box::new(MulFunctional)
     }
 }
 
-/// Matches `LayoutTensorOpExp2MutatingGeneric` enodes and produces
-/// [`Exp2Mutating`] instances. No metadata children: the output layout IS
+/// Matches `LayoutTensorOpMulMutatingGeneric` enodes and produces
+/// [`MulMutating`] instances. No metadata children: the output layout IS
 /// the mutated operand's, by the match rule's precondition.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Exp2MutatingMatcher;
+pub struct MulMutatingMatcher;
 
-impl OpMatcher for Exp2MutatingMatcher {
+impl OpMatcher for MulMutatingMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpExp2MutatingGeneric"
+        "LayoutTensorOpMulMutatingGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("exp2/match_mutating_constructor.egg"),
+                text: include_str!("mul/match_mutating_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("exp2/match_mutating.egg"),
+                text: include_str!("mul/match_mutating.egg"),
             },
         ]
     }
 
 
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(Exp2Mutating)
+        Box::new(MulMutating)
     }
 }

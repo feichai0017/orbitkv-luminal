@@ -67,8 +67,76 @@ impl MoE {
     }
 }
 
-// TESTS: B-TAIL-GATED (M3 Step 4b). The moe forward paths ride the
-// flat gather1d/scatter1d pair, which the logical recorder still poisons;
-// their tests ran on the deleted their-pipeline. They return when the
-// B-tail records the flat sugar in coordinate form (and the paged-cache
-// exemplar re-seats on runtime bindings).
+#[cfg(test)]
+mod tests {
+    use super::MoE;
+    use luminal::prelude::*;
+
+    fn assert_close(ours: &[f32], expected: &[f32]) {
+        assert_eq!(ours.len(), expected.len(), "length mismatch");
+        for (index, (a, b)) in ours.iter().zip(expected).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-4 * b.abs().max(1.0),
+                "element {index}: ours {a} vs expected {b}"
+            );
+        }
+    }
+
+    /// Full MoE forward (router softmax → topk → routing-value and
+    /// expert-weight gathers → batched matmul → weighted sum) against a
+    /// scalar reference, k=1 over 2 experts. Runs the plain extraction
+    /// path — the chain rides stable_argsort's rank scatter, both flat
+    /// gather sugars, and Int↔F32 index arithmetic.
+    #[test]
+    fn moe_forward_matches_scalar_reference() {
+        const E: usize = 2;
+        const IN: usize = 2;
+        const OUT: usize = 2;
+        const BATCH: usize = 3;
+
+        let mut cx = Graph::new();
+        let model = MoE {
+            expert_weights: cx.named_tensor("Experts", (E, IN, OUT)),
+            router: cx.named_tensor("Router", (IN, E)),
+            k: 1,
+        };
+        let x = cx.tensor((BATCH, IN));
+        let out = model.forward(x).output();
+
+        let x_vals = vec![1.0f32, 0.5, -1.0, 2.0, 0.25, -0.75];
+        // Router picks expert 0 for positive-x0-heavy rows, expert 1 otherwise
+        // (logits differ per row; no ties).
+        let router_vals = vec![2.0f32, -1.0, -0.5, 1.5];
+        let expert_vals: Vec<f32> = (0..E * IN * OUT).map(|v| v as f32 * 0.3 - 1.0).collect();
+
+        // Scalar reference.
+        let mut expected = vec![0.0f32; BATCH * OUT];
+        for b in 0..BATCH {
+            let xr = &x_vals[b * IN..(b + 1) * IN];
+            let mut logits = [0.0f32; E];
+            for (e, logit) in logits.iter_mut().enumerate() {
+                *logit = (0..IN).map(|i| xr[i] * router_vals[i * E + e]).sum();
+            }
+            let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = logits.iter().map(|l| (l - max).exp()).collect();
+            let denom: f32 = exps.iter().sum();
+            let best = (0..E).max_by(|a, b| logits[*a].partial_cmp(&logits[*b]).unwrap()).unwrap();
+            let weight = exps[best] / denom;
+            let w = &expert_vals[best * IN * OUT..(best + 1) * IN * OUT];
+            for o in 0..OUT {
+                expected[b * OUT + o] =
+                    (0..IN).map(|i| xr[i] * w[i * OUT + o]).sum::<f32>() * weight;
+            }
+        }
+
+        let rt = luminal::test_support::run_ssa(
+            &cx,
+            &[
+                (x.id, x_vals),
+                (model.router.id, router_vals),
+                (model.expert_weights.id, expert_vals),
+            ],
+        );
+        assert_close(rt.get_f32(out.id).expect("output"), &expected);
+    }
+}

@@ -1,18 +1,18 @@
-//! Elementwise multiplication.
+//! Elementwise modulo (remainder — luminal's Mod).
 
 use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
 use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 
-/// `MulFunctionalGeneric(lhs, rhs) -> out`
+/// `ModFunctionalGeneric(numerator, denominator) -> out`
 ///
 /// Functional form: pure dataflow, conservative [`Bufferizable`] defaults
 /// (every operand read, the result freshly allocated). Elementwise: element
 /// `i` of each input is read before element `i` of `out` is written (op-level
 /// all-pairs claim — see the NOTE on `bufferizes_to_elementwise_access`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MulFunctional;
+pub struct ModFunctional;
 
-impl OpSlotNames for MulFunctional {
+impl OpSlotNames for ModFunctional {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "lhs".to_string(),
@@ -22,31 +22,31 @@ impl OpSlotNames for MulFunctional {
     }
 }
 
-impl BufferTensorIrOp for MulFunctional {
+impl BufferTensorIrOp for ModFunctional {
     fn label(&self) -> &str {
-        "MulFunctionalGeneric"
+        "ModFunctionalGeneric"
     }
 }
 
-impl Bufferizable for MulFunctional {}
+impl Bufferizable for ModFunctional {}
 
-impl ToDps for MulFunctional {
+impl ToDps for ModFunctional {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(MulFunctionalDps))
+        Some(Box::new(ModFunctionalDps))
     }
 }
 
-impl LayoutIrOp for MulFunctional {}
+impl LayoutIrOp for ModFunctional {}
 
-/// Destination-passing form of [`MulFunctional`], signature spelled slot by slot:
+/// Destination-passing form of [`ModFunctional`], signature spelled slot by slot:
 ///
 /// ```text
-/// MulGeneric(lhs: read, rhs: read, dest0: write-only ↔ out0) -> out0
+/// ModGeneric(numerator: read, denominator: read, dest0: write-only ↔ out0) -> out0
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MulFunctionalDps;
+pub struct ModFunctionalDps;
 
-impl OpSlotNames for MulFunctionalDps {
+impl OpSlotNames for ModFunctionalDps {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "lhs".to_string(),
@@ -57,43 +57,36 @@ impl OpSlotNames for MulFunctionalDps {
     }
 }
 
-impl BufferTensorIrOp for MulFunctionalDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        ctx.binary_elementwise(|a, b| a * b)
-    }
-
+impl BufferTensorIrOp for ModFunctionalDps {
     fn label(&self) -> &str {
-        "MulFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
+        "ModFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
 
     fn operand_reads_memory(&self, operand: usize) -> bool {
         match operand {
-            0 => true,  // lhs
-            1 => true,  // rhs
+            0 => true,  // numerator
+            1 => true,  // denominator
             2 => false, // dest0: write-only destination
             _ => true,  // outside the signature: conservative default
         }
     }
 }
 
-impl Bufferizable for MulFunctionalDps {
+impl Bufferizable for ModFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![AliasInfo { operand: 2, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for MulFunctionalDps {
+impl ToDps for ModFunctionalDps {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already DPS — keeps the rewrite pass idempotent
     }
 }
 
-impl LayoutIrOp for MulFunctionalDps {}
+impl LayoutIrOp for ModFunctionalDps {}
 
-/// `MulMutatingGeneric(lhs: read+write, rhs: read) -> out`
+/// `ModMutatingGeneric(numerator: read+write, denominator: read) -> out`
 ///
 /// Mutating form: the kernel reads and overwrites ONE storage — its
 /// first operand's. Matched in egglog only when the output layout equals
@@ -103,9 +96,9 @@ impl LayoutIrOp for MulFunctionalDps {}
 /// result's fresh buffer (copy-in) and mutates there — the kernel's
 /// one-buffer contract is invariant under relocation, never a hard error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MulMutating;
+pub struct ModMutating;
 
-impl OpSlotNames for MulMutating {
+impl OpSlotNames for ModMutating {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "lhs".to_string(),
@@ -115,50 +108,50 @@ impl OpSlotNames for MulMutating {
     }
 }
 
-impl BufferTensorIrOp for MulMutating {
+impl BufferTensorIrOp for ModMutating {
     fn label(&self) -> &str {
-        "MulMutatingGeneric"
+        "ModMutatingGeneric"
     }
 }
 
-impl Bufferizable for MulMutating {
+impl Bufferizable for ModMutating {
 
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for MulMutating {
+impl ToDps for ModMutating {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already destination-form: the destination IS operand 0
     }
 }
 
-impl LayoutIrOp for MulMutating {}
+impl LayoutIrOp for ModMutating {}
 
 // ---------------------------------------------------------------------------
 // Matchers
 // ---------------------------------------------------------------------------
 
-/// Matches `LayoutTensorOpMulFunctionalGeneric` enodes and produces
-/// [`MulFunctional`] instances. Metadata children: `out_layout` at child 2.
+/// Matches `LayoutTensorOpModFunctionalGeneric` enodes and produces
+/// [`ModFunctional`] instances. Metadata children: `out_layout` at child 2.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct MulFunctionalMatcher;
+pub struct ModFunctionalMatcher;
 
-impl OpMatcher for MulFunctionalMatcher {
+impl OpMatcher for ModFunctionalMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpMulFunctionalGeneric"
+        "LayoutTensorOpModFunctionalGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("mul/match_functional_constructor.egg"),
+                text: include_str!("modulo/match_functional_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("mul/match_functional.egg"),
+                text: include_str!("modulo/match_functional.egg"),
             },
         ]
     }
@@ -169,36 +162,36 @@ impl OpMatcher for MulFunctionalMatcher {
     }
 
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(MulFunctional)
+        Box::new(ModFunctional)
     }
 }
 
-/// Matches `LayoutTensorOpMulMutatingGeneric` enodes and produces
-/// [`MulMutating`] instances. No metadata children: the output layout IS
+/// Matches `LayoutTensorOpModMutatingGeneric` enodes and produces
+/// [`ModMutating`] instances. No metadata children: the output layout IS
 /// the mutated operand's, by the match rule's precondition.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct MulMutatingMatcher;
+pub struct ModMutatingMatcher;
 
-impl OpMatcher for MulMutatingMatcher {
+impl OpMatcher for ModMutatingMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpMulMutatingGeneric"
+        "LayoutTensorOpModMutatingGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("mul/match_mutating_constructor.egg"),
+                text: include_str!("modulo/match_mutating_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("mul/match_mutating.egg"),
+                text: include_str!("modulo/match_mutating.egg"),
             },
         ]
     }
 
 
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(MulMutating)
+        Box::new(ModMutating)
     }
 }

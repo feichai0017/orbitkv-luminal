@@ -5,11 +5,15 @@
 //! Executes a [`BufferIrGraph`] directly: every buffer is a [`TypedBuffer`] sized
 //! from the plan's annotated numeric geometry (dims × 32-bit elements —
 //! slice 1 is f32-only and bails loudly otherwise); compute nodes dispatch
-//! through each op's own `reference_execute` kernel (registry-style, no
-//! match statements — an op without a kernel refuses by name). Caller data
-//! binds by the numeric `BufferLit` id, the same key `hlir_to_logical`
-//! derives from HLIR node indices, so differential tests against
-//! `ReferenceRuntime` bind identically on both sides.
+//! through THIS runtime's kernel registry ([`kernels`]) by concrete op
+//! type — ops carry no execution of their own (ruling 2026-08-06), and an
+//! op without a kernel here refuses by name. Caller data binds by the
+//! numeric `BufferLit` id, the same key `hlir_to_logical` derives from
+//! HLIR node indices, so differential tests against `ReferenceRuntime`
+//! bind identically on both sides.
+
+pub mod kernels;
+pub mod ops;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use petgraph::algo::toposort;
@@ -18,23 +22,24 @@ use rustc_hash::FxHashMap;
 use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 use crate::bufferize::{BufferId, BufferIrGraph, BufferNode};
 
-/// The reference backend's implementation inventory: every registered op
-/// EXCEPT the zero-copy view (ruling 2026-07-28: the reference runtime
-/// implements views by literally materializing into contiguous layout —
-/// the kernels are layout-blind, so every operand buffer must be its own
-/// contiguous home).
+/// The reference backend's implementation inventory, DERIVED from the
+/// kernel registry: a matcher's op is claimed iff a kernel bearing its
+/// label exists in [`kernels`] (ruling 2026-08-06 — the runtime can
+/// neither over-claim, turning kernel gaps into search refusals, nor
+/// silently under-claim). The view op and the Mutating family fall out
+/// naturally: neither has a kernel (the reference runtime materializes
+/// views and mutates nothing in place — rulings 2026-07-28 / 2026-08-05).
 pub fn reference_allow_list() -> Vec<&'static str> {
-    crate::layout_ir::ops::built_in_matchers()
+    let implemented: rustc_hash::FxHashSet<&'static str> = kernels::reference_kernels()
+        .iter()
+        .map(|kernel| kernel.label)
+        .collect();
+    crate::ssa_reference::ops::built_in_matchers()
         .iter()
         .map(|matcher| matcher.egglog_constructor())
-        // The allow list states what THIS runtime actually implements
-        // (Austin's ruling, 2026-08-05): the reference runtime reads
-        // through nothing (no view op) and mutates nothing in place —
-        // the Mutating family has no reference kernels, and an allow
-        // list that over-claims turns kernel gaps into search refusals.
         .filter(|constructor| {
-            *constructor != "LayoutTensorOpIndexMapApplyViewGeneric"
-                && !constructor.contains("Mutating")
+            let label = constructor.strip_prefix("LayoutTensorOp").unwrap_or(constructor);
+            implemented.contains(label)
         })
         .collect()
 }
@@ -319,8 +324,11 @@ impl SsaReferenceRuntime {
                         });
                     }
                     let mut ctx = ReferenceKernelCtx { operands, operand_dims, dests };
-                    op.reference_execute(&mut ctx)
-                        .with_context(|| format!("executing {}", op.label()))?;
+                    match kernels::kernel_for(op.as_ref()) {
+                        Some(kernel) => (kernel.execute)(op.as_ref(), &mut ctx)
+                            .with_context(|| format!("executing {}", op.label()))?,
+                        None => anyhow::bail!("no reference kernel for {}", op.label()),
+                    }
                     for (id, data) in writes.iter().zip(ctx.dests) {
                         *storage.get_mut(id).expect("write buffer exists") = data;
                     }
@@ -347,6 +355,12 @@ impl SsaReferenceRuntime {
     }
 
     /// Buffer-id read for search internals.
+    /// RRX diagnostics: the full post-execute storage map (buffer id →
+    /// typed contents), for probe-side dumps of intermediate values.
+    pub(crate) fn debug_storage(&self) -> &FxHashMap<BufferId, TypedBuffer> {
+        &self.storage
+    }
+
     pub fn get_f32_buffer(&self, buffer: i64) -> Result<&Vec<f32>> {
         self.get_typed(buffer)?.as_f32()
     }
@@ -372,7 +386,55 @@ impl SsaReferenceRuntime {
 #[cfg(test)]
 mod tests {
     use crate::graph::Graph;
-    use crate::test_support::{run_ssa, run_ssa_program};
+    use crate::test_support::run_ssa;
+
+    /// The allow list is DERIVED from the kernel registry; this pins the
+    /// resolved claim set so a registry edit that silently grows or
+    /// shrinks the runtime's claims is loud. (Div/Exp/Copy are claimed
+    /// because their kernels exist — the 2026-08-06 relocation closed the
+    /// over-claim the old hardcoded filter hid.)
+    #[test]
+    fn allow_list_matches_the_kernel_registry() {
+        let mut allow = crate::ssa_reference::reference_allow_list();
+        allow.sort_unstable();
+        let expected = vec![
+            "LayoutTensorOpAddFunctionalGeneric",
+            "LayoutTensorOpAddMulFusedGeneric",
+            "LayoutTensorOpCastGeneric",
+            "LayoutTensorOpConstantGeneric",
+            "LayoutTensorOpCopyGeneric",
+            "LayoutTensorOpDivFunctionalGeneric",
+            "LayoutTensorOpExp2FunctionalGeneric",
+            "LayoutTensorOpExpFunctionalGeneric",
+            "LayoutTensorOpGatherGeneric",
+            "LayoutTensorOpIndexMapApplyMaterialize",
+            "LayoutTensorOpIotaGeneric",
+            "LayoutTensorOpLessThanGeneric",
+            "LayoutTensorOpLog2FunctionalGeneric",
+            "LayoutTensorOpMatMulFusedGeneric",
+            "LayoutTensorOpModFunctionalGeneric",
+            "LayoutTensorOpMulFunctionalGeneric",
+            "LayoutTensorOpRecipFunctionalGeneric",
+            "LayoutTensorOpReduceMaxGeneric",
+            "LayoutTensorOpReduceSumGeneric",
+            "LayoutTensorOpScatterFunctionalGeneric",
+            "LayoutTensorOpSinFunctionalGeneric",
+            "LayoutTensorOpSqrtFunctionalGeneric",
+        ];
+        assert_eq!(allow, expected, "derived allow list drifted");
+        // Registry coherence: no two rows claim one concrete type, and no
+        // Mutating/View label carries a kernel.
+        let table = crate::ssa_reference::kernels::reference_kernels();
+        let mut seen = std::collections::HashSet::new();
+        for kernel in table {
+            assert!(seen.insert(kernel.op_type), "duplicate registry row for {}", kernel.label);
+            assert!(
+                !kernel.label.contains("Mutating") && !kernel.label.contains("View"),
+                "the reference runtime is out-of-place and view-free; {} cannot have a kernel",
+                kernel.label
+            );
+        }
+    }
 
     fn assert_close(ours: &[f32], theirs: &[f32]) {
         assert_eq!(ours.len(), theirs.len(), "length mismatch");
@@ -701,8 +763,7 @@ mod tests {
             "coordinate-form gather expected in the model:\n{}",
             program.text
         );
-        let ours = run_ssa_program(
-            program,
+        let ours = run_ssa(&cx2,
             &[
                 (data2.id, data_vals),
                 (row2.id, row_vals),
@@ -742,8 +803,7 @@ mod tests {
             "coordinate-form scatter expected in the model:\n{}",
             program.text
         );
-        let ours = run_ssa_program(
-            program,
+        let ours = run_ssa(&cx2,
             &[
                 (dest2.id, dest_vals),
                 (row2.id, row_vals),
@@ -754,16 +814,187 @@ mod tests {
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
-    /// Uncovered constructs POISON the recorder with an attributable
-    /// reason — the native path refuses loudly, never mistranslates.
+    /// FLAT gather1d sugar (B-tail 2026-08-06): out[c] = data.flat[idx[c]]
+    /// — delegates to flatten + coordinate gather, records natively.
     #[test]
-    fn recorder_poisons_on_uncovered_family() {
+    fn differential_flat_gather1d_sugar() {
+        let mut cx = Graph::new();
+        let data = cx.tensor((3, 4));
+        let idx = cx.tensor_dtyped((2, 3), crate::dtype::DType::Int);
+        let out = data.gather1d(idx).output();
+        assert_eq!(out.dims(), idx.dims(), "out shape = index shape");
+
+        let data_vals: Vec<f32> = (0..12).map(|v| v as f32 * 1.5 + 1.0).collect();
+        let idx_ints = [0i32, 5, 11, 7, 3, 2];
+        let idx_vals: Vec<f32> = idx_ints.iter().map(|v| *v as f32).collect();
+        // Hand golden: data.flat[i] = i*1.5 + 1.
+        let expected = vec![1.0, 8.5, 17.5, 11.5, 5.5, 4.0];
+
+        let program = cx.logical.native_program().expect("native program");
+        assert!(
+            program.text.contains("(LogicalGather v"),
+            "flat sugar lowers to coordinate gather:\n{}",
+            program.text
+        );
+        let ours = run_ssa(&cx, &[(data.id, data_vals), (idx.id, idx_vals)]);
+        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+    }
+
+    /// FLAT scatter1d sugar (B-tail 2026-08-06): copy dest, write src at
+    /// flat positions, rebuild dest's shape with recorded splits.
+    #[test]
+    fn differential_flat_scatter1d_sugar() {
+        let mut cx = Graph::new();
+        let dest = cx.tensor((2, 6));
+        let idx = cx.tensor_dtyped(4, crate::dtype::DType::Int);
+        let src = cx.tensor(4);
+        let out = src.scatter1d(idx, dest).output();
+        assert_eq!(out.dims(), dest.dims(), "out shape = dest shape");
+
+        let dest_vals: Vec<f32> = (0..12).map(|v| v as f32).collect();
+        let idx_vals = vec![3.0f32, 0.0, 11.0, 6.0];
+        let src_vals = vec![100.0f32, 200.0, 300.0, 400.0];
+        let expected = vec![200.0, 1.0, 2.0, 100.0, 4.0, 5.0, 400.0, 7.0, 8.0, 9.0, 10.0, 300.0];
+
+        let program = cx.logical.native_program().expect("native program");
+        assert!(
+            program.text.contains("(LogicalScatter v"),
+            "flat sugar lowers to coordinate scatter:\n{}",
+            program.text
+        );
+        let ours = run_ssa(&cx,
+            &[(dest.id, dest_vals), (idx.id, idx_vals), (src.id, src_vals)],
+        );
+        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+    }
+
+    /// ONNX GatherElements over axis 1 (rides the flat sugar + the
+    /// iota/normalization index arithmetic), including a negative index.
+    #[test]
+    fn differential_gather_elements_axis1() {
+        let mut cx = Graph::new();
+        let data = cx.tensor((2, 3));
+        let idx = cx.tensor_dtyped((2, 2), crate::dtype::DType::Int);
+        let out = data.gather_elements(idx, 1).output();
+
+        let data_vals: Vec<f32> = (0..6).map(|v| v as f32 * 10.0).collect();
+        // out[i, j] = data[i, idx[i, j]]; -1 normalizes to axis extent - 1 = 2.
+        let idx_vals = vec![2.0f32, 0.0, -1.0, 1.0];
+        let expected = vec![20.0, 0.0, 50.0, 40.0];
+
+        cx.logical.native_program().expect("native program");
+        let ours = run_ssa(&cx, &[(data.id, data_vals), (idx.id, idx_vals)]);
+        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+    }
+
+    /// ONNX ScatterElements over axis 0: updates land at per-element row
+    /// targets; everywhere else the data copies through.
+    #[test]
+    fn differential_scatter_elements_axis0() {
+        let mut cx = Graph::new();
+        let data = cx.tensor((3, 2));
+        let idx = cx.tensor_dtyped((1, 2), crate::dtype::DType::Int);
+        let upd = cx.tensor((1, 2));
+        let out = data.scatter_elements(idx, upd, 0).output();
+        assert_eq!(out.dims(), data.dims());
+
+        let data_vals: Vec<f32> = (0..6).map(|v| v as f32).collect();
+        // out[idx[0, j], j] = upd[0, j]: column 0 → row 2, column 1 → row 0.
+        let idx_vals = vec![2.0f32, 0.0];
+        let upd_vals = vec![100.0f32, 200.0];
+        let expected = vec![0.0, 200.0, 2.0, 3.0, 100.0, 5.0];
+
+        cx.logical.native_program().expect("native program");
+        let ours = run_ssa(&cx,
+            &[(data.id, data_vals), (idx.id, idx_vals), (upd.id, upd_vals)],
+        );
+        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+    }
+
+    /// ONNX ScatterND, K=1 row scatter: indices (2,1) select rows of a
+    /// (3,2) data tensor, updates (2,2) replace them wholesale.
+    #[test]
+    fn differential_scatter_nd_row_case() {
+        let mut cx = Graph::new();
+        let data = cx.tensor((3, 2));
+        let idx = cx.tensor_dtyped((2, 1), crate::dtype::DType::Int);
+        let upd = cx.tensor((2, 2));
+        let out = data.scatter_nd(idx, upd).output();
+        assert_eq!(out.dims(), data.dims());
+
+        let data_vals: Vec<f32> = (0..6).map(|v| v as f32).collect();
+        let idx_vals = vec![2.0f32, 0.0];
+        let upd_vals = vec![100.0f32, 101.0, 200.0, 201.0];
+        let expected = vec![200.0, 201.0, 2.0, 3.0, 100.0, 101.0];
+
+        cx.logical.native_program().expect("native program");
+        let ours = run_ssa(&cx,
+            &[(data.id, data_vals), (idx.id, idx_vals), (upd.id, upd_vals)],
+        );
+        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+    }
+
+    /// CONFLICTING SCATTER WRITES are a deterministic runtime panic in the
+    /// checked functional reference kernel (ruling 2026-08-06): duplicate
+    /// flat targets refuse loudly instead of silently picking a winner.
+    #[test]
+    fn scatter_conflicting_writes_panic() {
+        let mut cx = Graph::new();
+        let dest = cx.tensor(6);
+        let idx = cx.tensor_dtyped(3, crate::dtype::DType::Int);
+        let src = cx.tensor(3);
+        let out = src.scatter1d(idx, dest).output();
+
+        let (pre, input_slots, output_slots, post) =
+            cx.logical.native_parts().expect("recorder clean");
+        let program = crate::graph::LogicalProgram {
+            text: format!("{pre}{}{post}", crate::reference_binding::SCHEDULE),
+            input_slots,
+            output_slots,
+        };
+        let text = format!(
+            "{}\n\n{}",
+            crate::egglog_snippet::assembled_program(),
+            program.text
+        );
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph.parse_and_run_program(None, &text).expect("program runs");
+        let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
+        let allow = crate::ssa_reference::reference_allow_list();
+        let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))
+            .expect("extracts")
+            .expect("plan");
+        let plan =
+            crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted)).expect("bufferizes");
+        let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
+        rt.stage_slots(&program.input_slots, &program.output_slots);
+        rt.load_plan(plan);
+        rt.set_data(dest.id, (0..6).map(|v| v as f32).collect());
+        rt.set_data(idx.id, vec![1.0, 4.0, 1.0]); // 1 appears twice — conflict
+        rt.set_data(src.id, vec![10.0, 20.0, 30.0]);
+        let err = rt.execute().expect_err("duplicate targets must refuse");
+        assert!(
+            format!("{err:#}").contains("conflicting scatter writes"),
+            "attributable conflict message, got: {err:#}"
+        );
+
+        let _ = out;
+    }
+
+    /// The poison MECHANISM: a poisoned recorder refuses the native path
+    /// loudly with its attributable reason — never mistranslates. (As of
+    /// the persist deletion, 2026-08-06, NO public frontend construct
+    /// poisons — the recorder covers the whole live surface — so this
+    /// pokes the mechanism directly; internal guards like the multi-dim
+    /// iota tripwire still route through it.)
+    #[test]
+    fn recorder_poisons_refuse_loudly() {
         let mut cx = Graph::new();
         let x = cx.tensor((2, 3));
-        let y = cx.tensor_dtyped(6, crate::dtype::DType::Int);
-        let _out = x.flatten().gather1d(y).output();
-        let reason = cx.logical.poisoned().expect("gather poisons the recorder");
-        assert!(reason.contains("gather"), "attributable reason: {reason}");
+        let _out = x.output();
+        cx.logical.poison("synthetic guard tripped at t0 (mechanism test)".to_string());
+        let reason = cx.logical.poisoned().expect("poison recorded");
+        assert!(reason.contains("synthetic guard"), "attributable reason: {reason}");
         assert!(cx.logical.native_program().is_err());
     }
 
@@ -792,9 +1023,8 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected_d = vec![0.9092974, 0.5984721, 0.7780732];
         let (cx2, b2, c2, g2, e2, a2, d2) = build();
-        let program = cx2.logical.native_program().expect("native program");
-        let ours = run_ssa_program(
-            program,
+        cx2.logical.native_program().expect("native program");
+        let ours = run_ssa(&cx2,
             &[
                 (b2.id, b_data),
                 (c2.id, c_data),

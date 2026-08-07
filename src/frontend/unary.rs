@@ -692,9 +692,27 @@ pub(super) mod tests {
             test_unary((rows, cols), |a| a.std(1), |a| a.var(1).unwrap().sqrt().unwrap());
         }
 
-        // test_topk: B-TAIL-GATED (Step 4b). topk_indexes rides
-        // stable_argsort -> scatter1d, the flat scatter the recorder still
-        // poisons; the test returns when the B-tail records gather1d/
-        // scatter1d as coordinate-form sugar.
+    }
+
+    /// topk_indexes rides stable_argsort → the rank scatter (the B-tail
+    /// flat sugar). Concrete hand case with an exact value tie in row 1 to
+    /// pin the STABLE tiebreak: first occurrence outranks its twin.
+    #[test]
+    fn test_topk_indexes() {
+        let mut cx = Graph::new();
+        let x = cx.tensor((2, 4));
+        let out = x.topk_indexes(2, 1).cast(DType::F32).output();
+
+        // row 0: [0.1, 3.0, 2.0, -1.0] → top-2 desc = idx 1, 2
+        // row 1: [5.0, 5.0, 0.0, 7.0] → 7.0 at idx 3, then the 5.0 tie —
+        //        stable → idx 0 before idx 1
+        let x_vals = vec![0.1f32, 3.0, 2.0, -1.0, 5.0, 5.0, 0.0, 7.0];
+        let expected = [1.0f32, 2.0, 3.0, 0.0];
+        let rt = crate::test_support::run_ssa(&cx, &[(x.id, x_vals)]);
+        let got = rt.get_f32(out.id).unwrap();
+        assert_eq!(got.len(), expected.len());
+        for (index, (a, b)) in got.iter().zip(expected).enumerate() {
+            assert_eq!(*a, b, "element {index}: got {a} vs expected {b}");
+        }
     }
 }

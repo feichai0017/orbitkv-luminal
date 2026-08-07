@@ -1,19 +1,19 @@
-//! Max reduction along one axis (the axis is op metadata, not an operand).
+//! Sum reduction along one axis (the axis is op metadata, not an operand).
 
 use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
 use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 
-/// `ReduceMaxGeneric(input) -> out`
+/// `ReduceSumGeneric(input) -> out`
 ///
 /// Functional form: pure dataflow, conservative [`Bufferizable`] defaults
 /// (every operand read, the result freshly allocated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReduceMax {
+pub struct ReduceSum {
     /// Reduction axis, zero-based FROM THE END (the term's i64 metadata).
     pub axis: i64,
 }
 
-impl OpSlotNames for ReduceMax {
+impl OpSlotNames for ReduceSum {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -22,34 +22,34 @@ impl OpSlotNames for ReduceMax {
     }
 }
 
-impl BufferTensorIrOp for ReduceMax {
+impl BufferTensorIrOp for ReduceSum {
     fn label(&self) -> &str {
-        "ReduceMaxGeneric"
+        "ReduceSumGeneric"
     }
 }
 
-impl Bufferizable for ReduceMax {}
+impl Bufferizable for ReduceSum {}
 
-impl ToDps for ReduceMax {
+impl ToDps for ReduceSum {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(ReduceMaxDps { axis: self.axis }))
+        Some(Box::new(ReduceSumDps { axis: self.axis }))
     }
 }
 
-impl LayoutIrOp for ReduceMax {}
+impl LayoutIrOp for ReduceSum {}
 
-/// Destination-passing form of [`ReduceMax`], signature spelled slot by slot:
+/// Destination-passing form of [`ReduceSum`], signature spelled slot by slot:
 ///
 /// ```text
-/// ReduceMaxGeneric(input: read, dest0: write-only ↔ out0) -> out0
+/// ReduceSumGeneric(input: read, dest0: write-only ↔ out0) -> out0
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReduceMaxDps {
+pub struct ReduceSumDps {
     /// Reduction axis, zero-based FROM THE END (the term's i64 metadata).
     pub axis: i64,
 }
 
-impl OpSlotNames for ReduceMaxDps {
+impl OpSlotNames for ReduceSumDps {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -59,16 +59,9 @@ impl OpSlotNames for ReduceMaxDps {
     }
 }
 
-impl BufferTensorIrOp for ReduceMaxDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        ctx.reduce_axis(self.axis, f32::NEG_INFINITY, |acc, x| acc.max(x))
-    }
-
+impl BufferTensorIrOp for ReduceSumDps {
     fn label(&self) -> &str {
-        "ReduceMaxGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
+        "ReduceSumGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
 
     fn operand_reads_memory(&self, operand: usize) -> bool {
@@ -80,43 +73,43 @@ impl BufferTensorIrOp for ReduceMaxDps {
     }
 }
 
-impl Bufferizable for ReduceMaxDps {
+impl Bufferizable for ReduceSumDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for ReduceMaxDps {
+impl ToDps for ReduceSumDps {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already DPS — keeps the rewrite pass idempotent
     }
 }
 
-impl LayoutIrOp for ReduceMaxDps {}
+impl LayoutIrOp for ReduceSumDps {}
 
 // ---------------------------------------------------------------------------
 // Matchers
 // ---------------------------------------------------------------------------
 
-/// Matches `LayoutTensorOpReduceMaxGeneric` enodes and produces
-/// [`ReduceMax`] instances. Metadata children: `axis` at child 1, `out_layout` at child 2.
+/// Matches `LayoutTensorOpReduceSumGeneric` enodes and produces
+/// [`ReduceSum`] instances. Metadata children: `axis` at child 1, `out_layout` at child 2.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ReduceMaxMatcher;
+pub struct ReduceSumMatcher;
 
-impl OpMatcher for ReduceMaxMatcher {
+impl OpMatcher for ReduceSumMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpReduceMaxGeneric"
+        "LayoutTensorOpReduceSumGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("reduce_max/match_functional_constructor.egg"),
+                text: include_str!("reduce_sum/match_functional_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("reduce_max/match_functional.egg"),
+                text: include_str!("reduce_sum/match_functional.egg"),
             },
         ]
     }
@@ -127,6 +120,6 @@ impl OpMatcher for ReduceMaxMatcher {
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ReduceMax { axis: site.child_i64(1) })
+        Box::new(ReduceSum { axis: site.child_i64(1) })
     }
 }

@@ -1,18 +1,18 @@
-//! Elementwise base-2 logarithm.
+//! Elementwise sine.
 
 use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
 use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 
-/// `Log2FunctionalGeneric(input) -> out`
+/// `SinFunctionalGeneric(input) -> out`
 ///
 /// Functional form: pure dataflow, conservative [`Bufferizable`] defaults
 /// (every operand read, the result freshly allocated). Elementwise: element
 /// `i` of `input` is read before element `i` of `out` is written (op-level
 /// all-pairs claim — see the NOTE on `bufferizes_to_elementwise_access`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Log2Functional;
+pub struct SinFunctional;
 
-impl OpSlotNames for Log2Functional {
+impl OpSlotNames for SinFunctional {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -21,31 +21,31 @@ impl OpSlotNames for Log2Functional {
     }
 }
 
-impl BufferTensorIrOp for Log2Functional {
+impl BufferTensorIrOp for SinFunctional {
     fn label(&self) -> &str {
-        "Log2FunctionalGeneric"
+        "SinFunctionalGeneric"
     }
 }
 
-impl Bufferizable for Log2Functional {}
+impl Bufferizable for SinFunctional {}
 
-impl ToDps for Log2Functional {
+impl ToDps for SinFunctional {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(Log2FunctionalDps))
+        Some(Box::new(SinFunctionalDps))
     }
 }
 
-impl LayoutIrOp for Log2Functional {}
+impl LayoutIrOp for SinFunctional {}
 
-/// Destination-passing form of [`Log2Functional`], signature spelled slot by slot:
+/// Destination-passing form of [`SinFunctional`], signature spelled slot by slot:
 ///
 /// ```text
-/// Log2Generic(input: read, dest0: write-only ↔ out0) -> out0
+/// SinGeneric(input: read, dest0: write-only ↔ out0) -> out0
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Log2FunctionalDps;
+pub struct SinFunctionalDps;
 
-impl OpSlotNames for Log2FunctionalDps {
+impl OpSlotNames for SinFunctionalDps {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -55,16 +55,9 @@ impl OpSlotNames for Log2FunctionalDps {
     }
 }
 
-impl BufferTensorIrOp for Log2FunctionalDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        ctx.unary_elementwise(|x| x.log2())
-    }
-
+impl BufferTensorIrOp for SinFunctionalDps {
     fn label(&self) -> &str {
-        "Log2FunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
+        "SinFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
 
     fn operand_reads_memory(&self, operand: usize) -> bool {
@@ -76,21 +69,21 @@ impl BufferTensorIrOp for Log2FunctionalDps {
     }
 }
 
-impl Bufferizable for Log2FunctionalDps {
+impl Bufferizable for SinFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for Log2FunctionalDps {
+impl ToDps for SinFunctionalDps {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already DPS — keeps the rewrite pass idempotent
     }
 }
 
-impl LayoutIrOp for Log2FunctionalDps {}
+impl LayoutIrOp for SinFunctionalDps {}
 
-/// `Log2MutatingGeneric(x: read+write) -> out`
+/// `SinMutatingGeneric(x: read+write) -> out`
 ///
 /// Mutating form: the kernel reads and overwrites ONE storage — its
 /// single operand's. Matched in egglog only when the output layout equals
@@ -100,9 +93,9 @@ impl LayoutIrOp for Log2FunctionalDps {}
 /// result's fresh buffer (copy-in) and mutates there — the kernel's
 /// one-buffer contract is invariant under relocation, never a hard error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Log2Mutating;
+pub struct SinMutating;
 
-impl OpSlotNames for Log2Mutating {
+impl OpSlotNames for SinMutating {
     fn operand_name(&self, operand: usize) -> String {
         match operand {
             0 => "input".to_string(),
@@ -111,50 +104,50 @@ impl OpSlotNames for Log2Mutating {
     }
 }
 
-impl BufferTensorIrOp for Log2Mutating {
+impl BufferTensorIrOp for SinMutating {
     fn label(&self) -> &str {
-        "Log2MutatingGeneric"
+        "SinMutatingGeneric"
     }
 }
 
-impl Bufferizable for Log2Mutating {
+impl Bufferizable for SinMutating {
 
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
     }
 }
 
-impl ToDps for Log2Mutating {
+impl ToDps for SinMutating {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
         None // already destination-form: the destination IS operand 0
     }
 }
 
-impl LayoutIrOp for Log2Mutating {}
+impl LayoutIrOp for SinMutating {}
 
 // ---------------------------------------------------------------------------
 // Matchers
 // ---------------------------------------------------------------------------
 
-/// Matches `LayoutTensorOpLog2FunctionalGeneric` enodes and produces
-/// [`Log2Functional`] instances. Metadata children: `layout` at child 1.
+/// Matches `LayoutTensorOpSinFunctionalGeneric` enodes and produces
+/// [`SinFunctional`] instances. Metadata children: `layout` at child 1.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Log2FunctionalMatcher;
+pub struct SinFunctionalMatcher;
 
-impl OpMatcher for Log2FunctionalMatcher {
+impl OpMatcher for SinFunctionalMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpLog2FunctionalGeneric"
+        "LayoutTensorOpSinFunctionalGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("log2/match_functional_constructor.egg"),
+                text: include_str!("sin/match_functional_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("log2/match_functional.egg"),
+                text: include_str!("sin/match_functional.egg"),
             },
         ]
     }
@@ -165,36 +158,36 @@ impl OpMatcher for Log2FunctionalMatcher {
     }
 
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(Log2Functional)
+        Box::new(SinFunctional)
     }
 }
 
-/// Matches `LayoutTensorOpLog2MutatingGeneric` enodes and produces
-/// [`Log2Mutating`] instances. No metadata children: the output layout IS
+/// Matches `LayoutTensorOpSinMutatingGeneric` enodes and produces
+/// [`SinMutating`] instances. No metadata children: the output layout IS
 /// the mutated operand's, by the match rule's precondition.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Log2MutatingMatcher;
+pub struct SinMutatingMatcher;
 
-impl OpMatcher for Log2MutatingMatcher {
+impl OpMatcher for SinMutatingMatcher {
     fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpLog2MutatingGeneric"
+        "LayoutTensorOpSinMutatingGeneric"
     }
 
     fn snippets(&self) -> Vec<crate::egglog_snippet::EgglogSnippet> {
         vec![
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("log2/match_mutating_constructor.egg"),
+                text: include_str!("sin/match_mutating_constructor.egg"),
             },
             crate::egglog_snippet::EgglogSnippet {
                 category: crate::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("log2/match_mutating.egg"),
+                text: include_str!("sin/match_mutating.egg"),
             },
         ]
     }
 
 
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(Log2Mutating)
+        Box::new(SinMutating)
     }
 }

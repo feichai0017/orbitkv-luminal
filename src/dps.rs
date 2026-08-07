@@ -17,9 +17,10 @@
 
 use egraph_serialize::ClassId;
 
+use crate::ssa_reference::ops::Poison;
 use crate::layout_ir::{
     ExtractedEdge, ExtractedGraph, ExtractedNode, LayoutTensorInfo, LogicalInfo, OpInput, OpNode,
-    Poison, Provenance,
+    Provenance,
 };
 
 /// Rewrite every DPS-capable op into its destination-passing form. Out of

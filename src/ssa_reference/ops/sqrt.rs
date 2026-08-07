@@ -56,13 +56,6 @@ impl OpSlotNames for SqrtFunctionalDps {
 }
 
 impl BufferTensorIrOp for SqrtFunctionalDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        ctx.unary_elementwise(|x| x.sqrt())
-    }
-
     fn label(&self) -> &str {
         "SqrtFunctionalGeneric" // DPS forms keep the IR name; DPS-ness shows in the operands
     }

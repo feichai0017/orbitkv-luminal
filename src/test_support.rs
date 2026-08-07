@@ -1480,8 +1480,13 @@ mod harness_tests {
 
     /// RANK 3: the goldens are ENFORCED pins, not documentation. Every boundary
     /// script's plan summary must match the checked-in output/<stem>.bufferized.txt
-    /// byte for byte. Workflow: `cargo run` regenerates the goldens; this test
-    /// keeps them honest (and, via the `anti (N):` section, pins WAR edges).
+    /// byte for byte. Workflow: `RRX_REGEN=1 cargo test golden_plans_are_pinned`
+    /// rewrites the goldens (the old `cargo run` regenerator died with the
+    /// prototype's bin target); this test keeps them honest (and, via the
+    /// `anti (N):` section, pins WAR edges). Regenerated diffs are REVIEWED,
+    /// never rubber-stamped — a golden change must trace to an intended
+    /// ruling (e.g. 2026-08-06: the transformer golden had pinned a
+    /// float-reassociated residual sum the dtype-gate removed).
     #[test]
     fn golden_plans_are_pinned() {
         let scripts = [
@@ -1503,11 +1508,15 @@ mod harness_tests {
         ];
         for stem in scripts {
             let golden_path = format!("output/{stem}.bufferized.txt");
-            let golden = fs::read_to_string(&golden_path).unwrap_or_else(|_| {
-                panic!("{golden_path} missing — run `cargo run` to regenerate goldens")
-            });
             let graph = extract_fixture(&format!("{stem}.egg"));
             let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect(stem);
+            if std::env::var("RRX_REGEN").is_ok() {
+                fs::write(&golden_path, plan.summary()).expect("golden writes");
+                continue;
+            }
+            let golden = fs::read_to_string(&golden_path).unwrap_or_else(|_| {
+                panic!("{golden_path} missing — RRX_REGEN=1 to regenerate goldens")
+            });
             assert_eq!(plan.summary(), golden, "plan for {stem} diverged from golden");
         }
     }
@@ -1925,7 +1934,7 @@ mod harness_tests {
     #[test]
     fn real_view_op_feeds_compute_with_zero_plan_nodes() {
         use crate::bufferize::BufferNode;
-        use crate::layout_ir::IndexMapApplyView;
+        use crate::ssa_reference::ops::IndexMapApplyView;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -1971,7 +1980,7 @@ mod harness_tests {
     #[test]
     fn real_view_op_to_output_slot_pays_a_boundary_copy() {
         use crate::bufferize::BufferNode;
-        use crate::layout_ir::IndexMapApplyView;
+        use crate::ssa_reference::ops::IndexMapApplyView;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2376,7 +2385,7 @@ mod harness_tests {
     #[test]
     fn multi_destination_pairs_get_distinct_allocations() {
         use crate::bufferize::BufferNode;
-        use crate::layout_ir::AddMulFused;
+        use crate::ssa_reference::ops::AddMulFused;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2418,7 +2427,7 @@ mod harness_tests {
     /// span, and both results must dock at their tie rows' east sides.
     #[test]
     fn slot_tables_render_ties_as_spanning_rows() {
-        use crate::layout_ir::AddMulFused;
+        use crate::ssa_reference::ops::AddMulFused;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2617,68 +2626,45 @@ mod intcoordvar_probe {
     }
 }
 
-/// M3 Step 4b: the NATIVE test harness — recorder model + reference
-/// binding + dyn pins as tight bounds seeds, saturated, extracted,
-/// bufferized, executed on `SsaReferenceRuntime`. The frontend candle
-/// differentials and the ssa_reference differentials both run through
-/// here.
-/// Their graph → our whole pipeline → an executed plan.
-/// M3 Topic C: the differentials' "ours" side runs the NATIVE path —
-/// recorder model + reference binding, with the graph's dyn pins
-/// injected as tight bounds seeds (the binding interface; the [n,n]
-/// collapse delivers literals by congruence).
-pub fn run_ssa(cx: &crate::graph::Graph, inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)]) -> crate::ssa_reference::SsaReferenceRuntime {
-    let (pre, input_slots, output_slots, post) =
-        cx.logical.native_parts().expect("recorder clean for a covered graph");
-    let mut vars: Vec<_> = cx.dyn_map.iter().collect();
-    vars.sort();
-    let mut seeds = String::new();
-    for (var, value) in vars {
-        seeds.push_str(&format!(
-            "(set (lower-bound-of (IntVar \"{var}\")) (bigint {value}))\n\
-             (set (upper-bound-of (IntVar \"{var}\")) (bigint {value}))\n"
-        ));
+/// The test harness's search budget — the SAME genetic algorithm as the
+/// module-level ladder tests, sized for a suite of hundreds of graphs
+/// (ruling 2026-08-06: everything in the main tree runs the genetic
+/// implementation search — there is no plain-walk bypass). Deterministic
+/// (fixed seed); 2 generations × 4 genomes exercises random genomes plus
+/// the mutation step without profiling 64 candidates per differential.
+pub fn harness_search_options() -> crate::implementation_search::ImplementationSearchOptions {
+    crate::implementation_search::ImplementationSearchOptions {
+        generations: 2,
+        generation_size: 4,
+        mutations: 2,
+        trials: 1,
+        seed: 0,
     }
-    let program = crate::graph::LogicalProgram {
-        text: format!(
-            "{pre}{seeds}{}{post}",
-            crate::reference_binding::SCHEDULE
-        ),
-        input_slots,
-        output_slots,
-    };
-    run_ssa_program(program, inputs)
 }
 
-
-
-/// The pipeline from an assembled LogicalProgram — shared by the
-/// translator path (run_ssa) and the native recorder path (M3).
-pub fn run_ssa_program(
-    program: crate::graph::LogicalProgram,
-    inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)],
-) -> crate::ssa_reference::SsaReferenceRuntime {
-    let text = format!(
-        "{}\n\n{}",
-        crate::egglog_snippet::assembled_program(),
-        program.text
-    );
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    egraph.parse_and_run_program(None, &text).expect("program runs");
-    let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
-    let allow = crate::ssa_reference::reference_allow_list();
-    let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))
-        .expect("extracts")
-        .expect("plan");
-    let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))
-        .expect("bufferizes");
-    let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
-    rt.stage_slots(&program.input_slots, &program.output_slots);
-    rt.load_plan(plan);
-    for (node, data) in inputs {
-        rt.set_data(*node, data.clone());
+/// M3 Step 4b: the NATIVE test harness — recorder model + reference
+/// binding + dyn pins as tight [n,n] bounds seeds, saturated, then the
+/// GENETIC IMPLEMENTATION SEARCH picks the winning plan (executing every
+/// candidate with the given data), which executes and stays loaded for
+/// output reads. The frontend candle differentials and the ssa_reference
+/// differentials both run through here — the same load → bind → search →
+/// execute ladder as the nn module tests, on the harness budget above.
+pub fn run_ssa(cx: &crate::graph::Graph, inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)]) -> crate::ssa_reference::SsaReferenceRuntime {
+    let mut rt = crate::ssa_reference::SsaReferenceRuntime::load(cx)
+        .expect("recorder clean for a covered graph");
+    let mut vars: Vec<_> = cx.dyn_map.iter().collect();
+    vars.sort();
+    for (var, value) in vars {
+        rt.bind_dyn_range(*var, *value as u64, *value as u64)
+            .expect("dyn pin binds");
     }
-    rt.execute().expect("executes");
+    let data: rustc_hash::FxHashMap<_, _> = inputs.iter().cloned().collect();
+    rt.search(&data, &harness_search_options())
+        .expect("search finds a plan");
+    for (node, values) in inputs {
+        rt.set_data(*node, values.clone());
+    }
+    rt.execute().expect("winner executes");
     rt
 }
 
@@ -2842,6 +2828,81 @@ mod stage4b_probes {
         }
     }
 
+    /// DOSSIER REPRO (2026-08-06): float-associativity unsoundness. The
+    /// LogicalAdd assoc rewrite welds f32-inequivalent association orders
+    /// into one class; on cummax's -3.4e38 pad fill, the association
+    /// ((-fill·ind) + x·ind) + fill ABSORBS x (ULP(3.4e38) ≈ 3.9e31) and
+    /// the running max comes out 0 wherever the true prefix max is
+    /// negative. The genetic search picks among the welded orders by
+    /// timing, so test_cumulative flips. Awaiting the egglog-level ruling
+    /// (assoc/distributivity policy for float tensor ops).
+    #[test]
+    #[ignore = "diagnostic — RRX=1 to run"]
+    fn rrx_float_assoc_absorption() {
+        if std::env::var("RRX").is_err() {
+            return;
+        }
+        let build = || {
+            let mut cx = crate::graph::Graph::new();
+            let a = cx.tensor((1, 11));
+            let out = a.cummax(1).output();
+            (cx, a, out)
+        };
+        // NEGATIVE data: a zeroed pad fill (instead of -inf) makes the
+        // running max come out 0 exactly here, invisible on positives.
+        let data: Vec<f32> = (1..=11).map(|v| v as f32 * -0.1).collect();
+        let mut expected = data.clone();
+        for i in 1..expected.len() {
+            expected[i] = expected[i].max(expected[i - 1]);
+        }
+
+        // Run the ladder 12 times: the winner is min-nanos over one trial,
+        // so with >1 distinct plan the pick is timing-dependent — print
+        // the values (and plan) whenever a run disagrees with expected.
+        for round in 0..12 {
+            let (cx, a, out) = build();
+            let mut rt = crate::ssa_reference::SsaReferenceRuntime::load(&cx).unwrap();
+            let mut inputs = rustc_hash::FxHashMap::default();
+            inputs.insert(a.id, data.clone());
+            let outcome = rt.search(&inputs, &crate::test_support::harness_search_options()).unwrap();
+            rt.set_data(a.id, data.clone());
+            rt.execute().unwrap();
+            let got = rt.get_f32(out.id).unwrap().clone();
+            let ok = got.iter().zip(&expected).all(|(x, y)| (x - y).abs() < 1e-3);
+            eprintln!("[czp] round {round}: plans_profiled={} ok={ok}", outcome.plans_profiled);
+            if !ok {
+                eprintln!("[czp] WRONG values: {got:?}");
+                eprintln!("[czp] expected:     {expected:?}");
+                eprintln!("[czp] wrong plan:\n{}", outcome.best_plan.summary());
+                for node in outcome.best_plan.dag.node_weights() {
+                    if let crate::bufferize::BufferNode::Compute { op, writes, .. } = node {
+                        eprintln!("[czp] op {op:?} -> {writes:?}");
+                    }
+                }
+                let mut dump: Vec<_> = rt.debug_storage().iter().collect();
+                dump.sort_by_key(|(id, _)| format!("{id:?}"));
+                for (id, buffer) in dump {
+                    eprintln!("[czp] buffer {id:?}: {buffer:?}");
+                }
+                break;
+            }
+        }
+
+        // The no-genome extraction for comparison.
+        let (cx2, _a2, _out2) = build();
+        let program = cx2.logical.native_program().unwrap();
+        let text = format!("{}\n\n{}", crate::egglog_snippet::assembled_program(), program.text);
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph.parse_and_run_program(None, &text).unwrap();
+        let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
+        let allow = crate::ssa_reference::reference_allow_list();
+        let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))
+            .unwrap()
+            .unwrap();
+        let plain = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted)).unwrap();
+        eprintln!("[czp] plain plan:\n{}", plain.summary());
+    }
+
     /// Scratch: reproduce the activation search refusal in-crate.
     #[test]
     #[ignore = "diagnostic — RRX=1 to run"]
@@ -2862,6 +2923,107 @@ mod stage4b_probes {
                 eprintln!("[rrx-scalar] OK: {:?}", rt.get_f32(out.id).unwrap());
             }
             Err(err) => eprintln!("[rrx-scalar] SEARCH REFUSED: {err}"),
+        }
+    }
+
+    /// SATURATION PROFILER (Austin commissioned 2026-08-05): run each
+    /// specimen's FULL schedule once and read egglog's own RunReport —
+    /// per-rule search+apply times and per-ruleset totals. Suspect under
+    /// test: the a9fb4b55 commit (map-range lock + diagonal arms)
+    /// roughly doubled movement-shard wall time.
+    /// Run: RRX=1 cargo test rrx_profile -- --ignored --nocapture
+    #[test]
+    #[ignore = "diagnostic — RRX=1 to run"]
+    fn rrx_profile() {
+        if std::env::var("RRX").is_err() {
+            return;
+        }
+        let specimens: Vec<(&str, String)> = vec![
+            ("slice_pad(27x10)", {
+                let mut cx = crate::graph::Graph::new();
+                let a = cx.tensor((27usize, 10usize));
+                let _out = a
+                    .slice((2..6, 7..10))
+                    .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
+                    .output();
+                let (pre, _is, _os, post) = cx.logical.native_parts().expect("recorder clean");
+                format!("{pre}{}{post}", crate::reference_binding::SCHEDULE)
+            }),
+            ("batch_matmul(2,3,4,5)", {
+                let mut cx = crate::graph::Graph::new();
+                let a = cx.tensor((2usize, 3usize, 4usize));
+                let b = cx.tensor((4usize, 5usize));
+                let _out = a.matmul(b).output();
+                let (pre, _is, _os, post) = cx.logical.native_parts().expect("recorder clean");
+                format!("{pre}{}{post}", crate::reference_binding::SCHEDULE)
+            }),
+        ];
+        // The fixed floor: parse + declare the assembled preamble alone.
+        {
+            let preamble = crate::egglog_snippet::assembled_program();
+            let start = std::time::Instant::now();
+            let mut egraph = crate::egglog_snippet::new_egraph();
+            egraph.parse_and_run_program(None, &preamble).expect("preamble loads");
+            eprintln!(
+                "[prof] ===== preamble only (parse+declare, no body/schedule): {:.2}s, {} lines =====",
+                start.elapsed().as_secs_f64(),
+                preamble.lines().count()
+            );
+        }
+        for (name, body) in specimens {
+            let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
+            let mut egraph = crate::egglog_snippet::new_egraph();
+            let start = std::time::Instant::now();
+            let outputs = egraph.parse_and_run_program(None, &full).expect("program runs");
+            let wall = start.elapsed().as_secs_f64();
+            eprintln!("\n[prof] ===== {name}: total wall {wall:.2}s =====");
+            for chunk in &outputs {
+                let egglog::CommandOutput::RunSchedule(report) = chunk else {
+                    continue;
+                };
+                let mut rulesets: Vec<(String, f64)> = report
+                    .search_and_apply_time_per_ruleset
+                    .iter()
+                    .map(|(name, time)| (name.to_string(), time.as_secs_f64()))
+                    .collect();
+                rulesets.sort_by(|a, b| b.1.total_cmp(&a.1));
+                for (ruleset, secs) in rulesets.iter().take(6) {
+                    let label = if ruleset.is_empty() { "(default)" } else { ruleset };
+                    let rebuild = report
+                        .rebuild_time_per_ruleset
+                        .iter()
+                        .find(|(name, _)| name.as_ref() == label || (label == "(default)" && name.is_empty()))
+                        .map(|(_, time)| time.as_secs_f64())
+                        .unwrap_or(0.0);
+                    let merge = report
+                        .merge_time_per_ruleset
+                        .iter()
+                        .find(|(name, _)| name.as_ref() == label || (label == "(default)" && name.is_empty()))
+                        .map(|(_, time)| time.as_secs_f64())
+                        .unwrap_or(0.0);
+                    eprintln!(
+                        "[prof] ruleset {label:<28} search+apply {secs:>7.3}s  rebuild {rebuild:>7.3}s  merge {merge:>7.3}s"
+                    );
+                }
+                let mut rules: Vec<(String, f64, usize)> = report
+                    .search_and_apply_time_per_rule
+                    .iter()
+                    .map(|(name, time)| {
+                        let matches = report
+                            .num_matches_per_rule
+                            .get(name)
+                            .copied()
+                            .unwrap_or(0);
+                        (name.to_string(), time.as_secs_f64(), matches)
+                    })
+                    .collect();
+                rules.sort_by(|a, b| b.1.total_cmp(&a.1));
+                for (rule, secs, matches) in rules.iter().take(15) {
+                    let flat: String = rule.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let head: String = flat.chars().take(110).collect();
+                    eprintln!("[prof] {secs:>7.3}s x{matches:<6} {head}");
+                }
+            }
         }
     }
 

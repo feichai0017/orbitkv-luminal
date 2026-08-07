@@ -67,53 +67,6 @@ impl OpSlotNames for IndexMapApplyMaterializeDps {
 }
 
 impl BufferTensorIrOp for IndexMapApplyMaterializeDps {
-    fn reference_execute(
-        &self,
-        ctx: &mut crate::buffer_tensor_ir::ReferenceKernelCtx,
-    ) -> anyhow::Result<()> {
-        let Some(entries) = &self.entries else {
-            anyhow::bail!(
-                "materialize reference kernel: index map beyond the parsed expression subset"
-            );
-        };
-        let parent_dims = &ctx.operand_dims[0];
-        let out_dims = &ctx.operand_dims[1];
-        anyhow::ensure!(
-            entries.len() == parent_dims.len(),
-            "index map arity {} vs parent rank {}",
-            entries.len(),
-            parent_dims.len()
-        );
-        let mut parent_strides = vec![1usize; parent_dims.len()];
-        for k in (0..parent_dims.len().saturating_sub(1)).rev() {
-            parent_strides[k] = parent_strides[k + 1] * parent_dims[k + 1];
-        }
-        let out_rank = out_dims.len();
-        let parent = ctx.operands[0].as_f32()?.clone();
-        let dest = ctx.dests[0].as_f32_mut()?;
-        for flat in 0..dest.len() {
-            // Decompose the flat OUT index into row-major coordinates.
-            let mut remainder = flat;
-            let mut coords = vec![0usize; out_rank];
-            for axis in (0..out_rank).rev() {
-                coords[axis] = remainder % out_dims[axis];
-                remainder /= out_dims[axis];
-            }
-            let mut parent_flat = 0usize;
-            for (k, entry) in entries.iter().enumerate() {
-                let index = entry.eval(&coords);
-                anyhow::ensure!(
-                    index >= 0 && (index as usize) < parent_dims[k],
-                    "materialize index {index} out of bounds for parent axis {k} (extent {})",
-                    parent_dims[k]
-                );
-                parent_flat += index as usize * parent_strides[k];
-            }
-            dest[flat] = parent[parent_flat];
-        }
-        Ok(())
-    }
-
     fn label(&self) -> &str {
         "IndexMapApplyMaterialize" // DPS forms keep the IR name; DPS-ness shows in the operands
     }
@@ -200,6 +153,39 @@ fn parse_map_entries(site: &ExtractionSite<'_>) -> Option<Vec<super::iota::IotaE
             return Some(entries);
         }
     }
+    // RRX_MAP_PARSE=1: name what the parser refused — per unparseable
+    // entry class, the constructor inventory (the loud-bail diagnosis aid).
+    if std::env::var("RRX_MAP_PARSE").is_ok() {
+        eprintln!("RRX_MAP_PARSE: map class {map_class} has no parseable spelling");
+        for map_node in site.nodes_in_class_value(&map_class, "IndexMapLit") {
+            let Some(mut spine) = site.class_of_child(map_node, 0) else { continue };
+            let mut entry_index = 0usize;
+            for _ in 0..64 {
+                if site.nodes_in_class_value(&spine, "IntExprNil").next().is_some() {
+                    break;
+                }
+                let Some(cons) = site.nodes_in_class_value(&spine, "IntExprCons").next() else {
+                    eprintln!("  spine class {spine}: no cons/nil spelling");
+                    break;
+                };
+                if let Some(element) = site.class_of_child(cons, 0) {
+                    if super::iota::parse_int_expr(site, &element, 64).is_none() {
+                        let ops: Vec<&str> = site
+                            .egraph
+                            .nodes
+                            .values()
+                            .filter(|node| node.eclass == element)
+                            .map(|node| node.op.as_str())
+                            .collect();
+                        eprintln!("  entry {entry_index} class {element} UNPARSED; constructors: {ops:?}");
+                    }
+                }
+                let Some(tail) = site.class_of_child(cons, 1) else { break };
+                spine = tail;
+                entry_index += 1;
+            }
+        }
+    }
     None
 }
 
@@ -207,7 +193,7 @@ fn parse_entry_list(
     site: &ExtractionSite<'_>,
     class: &egraph_serialize::ClassId,
     depth: usize,
-    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, Option<super::iota::IotaExpr>>,
+    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, super::iota::ParseMemo>,
 ) -> Option<Vec<super::iota::IotaExpr>> {
     if depth == 0 {
         return None;

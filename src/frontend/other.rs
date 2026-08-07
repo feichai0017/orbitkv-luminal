@@ -24,10 +24,17 @@ impl Graph {
         tensor.with_logical(logical)
     }
 
-    /// Iota expression
+    /// Iota expression (over the FLAT coordinate of `shape`). Multi-dim
+    /// shapes record as the rank-1 iota over the flat total — the value
+    /// expression is over the flat coordinate either way — with the
+    /// requested shape rebuilt by recorded splits.
     pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
         let sh = shape.to_shape();
         let expr = i.into().simplify();
+        if sh.len() > 1 {
+            let total = sh.iter().copied().product::<Expression>().simplify();
+            return self.iota(expr, total).unflatten_to(&sh);
+        }
         let range = sh.iter().copied().product::<Expression>().simplify();
         let id = self.mint_id();
         let tensor = GraphTensor::from_id(id, sh.clone(), self, DType::Int);
