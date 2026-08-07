@@ -39,6 +39,7 @@ rayon = "1.10"
 edition = "2024"
 
 [dev-dependencies]
+luminal_nn = { path = "crates/luminal_nn" }
 candle-core = "0.9.2"
 candle-nn = "0.9.2"
 ordered-float = "5.1.0"
@@ -56,3 +57,22 @@ members = [
 
 [patch.crates-io]
 candle-kernels = { git = "https://github.com/huggingface/candle.git", rev = "a0dbd8b8aef6bde9adca3e8ad90791609d64974b" }
+
+# Mini-model demos (ruling 2026-08-07): models are DEFINED in core
+# (crates/luminal_nn); these runners belong to the reference runtime and
+# live in examples/mini/ beside the full-size example models.
+[[example]]
+name = "mini_llama"
+path = "examples/mini/llama.rs"
+
+[[example]]
+name = "mini_moe"
+path = "examples/mini/moe.rs"
+
+[[example]]
+name = "mini_whisper"
+path = "examples/mini/whisper.rs"
+
+[[example]]
+name = "mini_conv"
+path = "examples/mini/conv.rs"

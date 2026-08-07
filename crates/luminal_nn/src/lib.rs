@@ -12,8 +12,12 @@ mod norm;
 pub use norm::*;
 mod pooling;
 pub use pooling::*;
+#[cfg(test)]
+mod test_refs;
 mod models;
 pub use models::*;
+mod mini;
+pub use mini::*;
 mod moe;
 pub use moe::*;
 mod attention;

@@ -1,0 +1,59 @@
+//! MiniLlama demo on the REFERENCE RUNTIME (the model is defined in
+//! luminal core — crates/luminal_nn — this runner belongs to the
+//! runtime): one decode step through the native ladder.
+//! Run: cargo run --release --example mini_llama
+
+use luminal::implementation_search::ImplementationSearchOptions;
+use luminal::prelude::*;
+use luminal::shape::Expression;
+use luminal::ssa_reference::SsaReferenceRuntime;
+use luminal_nn::{GatedFfn, MiniLlama};
+
+fn weights(n: usize, seed: usize) -> Vec<f32> {
+    (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
+}
+
+fn main() {
+    const VOCAB: usize = 5;
+    const D: usize = 8;
+    let mut cx = Graph::new();
+    let model = MiniLlama::new(VOCAB, D, 12, 4, 2, 1, GatedFfn::SwiGlu, &mut cx);
+    let ids = cx.tensor_dtyped(1, DType::Int);
+    let k_cache = cx.tensor((4, 4));
+    let v_cache = cx.tensor((4, 4));
+    let gather_idx = cx.tensor_dtyped(2, DType::Int);
+    let scatter_idx = cx.tensor_dtyped(1, DType::Int);
+    let caches = vec![(k_cache, v_cache)];
+    let (logits, _caches_out) =
+        model.forward(ids, &caches, gather_idx, scatter_idx, Expression::from(1usize));
+    let logits = logits.output();
+
+    let block = &model.blocks[0];
+    let pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
+        (ids.id, vec![3.0]),
+        (model.embed.weight.id, weights(VOCAB * D, 1)),
+        (block.wq.weight.id, weights(D * D, 2)),
+        (block.wk.weight.id, weights(D * 4, 3)),
+        (block.wv.weight.id, weights(D * 4, 4)),
+        (block.wo.weight.id, weights(D * D, 5)),
+        (block.gate.weight.id, weights(D * 12, 6)),
+        (block.up.weight.id, weights(D * 12, 7)),
+        (block.down.weight.id, weights(12 * D, 8)),
+        (k_cache.id, weights(16, 9)),
+        (v_cache.id, weights(16, 10)),
+        (gather_idx.id, vec![0.0, 1.0]),
+        (scatter_idx.id, vec![1.0]),
+    ];
+    let data = pairs.iter().cloned().collect();
+    let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+    let outcome = rt
+        .search(&data, &ImplementationSearchOptions::default())
+        .expect("search finds a plan");
+    println!("search: {}", outcome.timings.summary());
+    println!("refusals: {}", outcome.refusal_breakdown.summary());
+    for (id, values) in &pairs {
+        rt.set_data(*id, values.clone());
+    }
+    rt.execute().expect("winner executes");
+    println!("logits: {:?}", rt.get_f32(logits.id).unwrap());
+}
