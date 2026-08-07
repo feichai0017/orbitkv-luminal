@@ -66,12 +66,18 @@ impl IotaExpr {
 /// Parse one IntExpr class into an [`IotaExpr`], preferring folded literals;
 /// depth-guarded (saturated classes hold many equal representations — any
 /// one denotes the same function). `None` = unsupported constructors.
+/// `expected_shape` is the OWNER-SHAPE GUARD (Design A fold-in,
+/// 2026-08-06): a CoordVar spelling counts only if its owner shape class
+/// IS the consumer's out shape — a foreign shape's coordinate must never
+/// be silently read as an out-coordinate; the kernel's loud refusal
+/// carries the burden instead.
 pub(crate) fn parse_int_expr(
     site: &ExtractionSite<'_>,
     class: &egraph_serialize::ClassId,
     depth: usize,
+    expected_shape: Option<&egraph_serialize::ClassId>,
 ) -> Option<IotaExpr> {
-    parse_int_expr_memo(site, class, depth, &mut std::collections::HashMap::new())
+    parse_int_expr_memo(site, class, depth, expected_shape, &mut std::collections::HashMap::new())
 }
 
 /// Memo entry: a finished parse, or the in-progress cycle guard.
@@ -96,15 +102,17 @@ pub(crate) fn parse_int_expr_memo(
     site: &ExtractionSite<'_>,
     class: &egraph_serialize::ClassId,
     depth: usize,
+    expected_shape: Option<&egraph_serialize::ClassId>,
     memo: &mut std::collections::HashMap<egraph_serialize::ClassId, ParseMemo>,
 ) -> Option<IotaExpr> {
-    parse_int_expr_tainting(site, class, depth, memo, &mut false)
+    parse_int_expr_tainting(site, class, depth, expected_shape, memo, &mut false)
 }
 
 fn parse_int_expr_tainting(
     site: &ExtractionSite<'_>,
     class: &egraph_serialize::ClassId,
     depth: usize,
+    expected_shape: Option<&egraph_serialize::ClassId>,
     memo: &mut std::collections::HashMap<egraph_serialize::ClassId, ParseMemo>,
     tainted: &mut bool,
 ) -> Option<IotaExpr> {
@@ -118,7 +126,7 @@ fn parse_int_expr_tainting(
     }
     memo.insert(class.clone(), ParseMemo::InProgress);
     let mut local_taint = false;
-    let parsed = parse_int_expr_uncached(site, class, depth, memo, &mut local_taint);
+    let parsed = parse_int_expr_uncached(site, class, depth, expected_shape, memo, &mut local_taint);
     if parsed.is_none() && local_taint {
         memo.remove(class);
         *tainted = true;
@@ -132,6 +140,7 @@ fn parse_int_expr_uncached(
     site: &ExtractionSite<'_>,
     class: &egraph_serialize::ClassId,
     depth: usize,
+    expected_shape: Option<&egraph_serialize::ClassId>,
     memo: &mut std::collections::HashMap<egraph_serialize::ClassId, ParseMemo>,
     tainted: &mut bool,
 ) -> Option<IotaExpr> {
@@ -142,9 +151,19 @@ fn parse_int_expr_uncached(
         let value_class = site.class_of_child(lit, 0)?;
         return Some(IotaExpr::Lit(site.node_in_class_parse_i64(&value_class)?));
     }
-    if let Some(coord) = site.nodes_in_class_value(class, "CoordVar").next() {
-        // Scoped coordinates: child 0 is the owner Shape, child 1 the axis.
-        let axis_class = site.class_of_child(coord, 1)?;
+    for coord in site.nodes_in_class_value(class, "CoordVar") {
+        // Scoped coordinates: child 0 is the owner Shape, child 1 the
+        // axis. The owner-shape guard: when the caller names its out
+        // shape, a CoordVar owned by any OTHER shape is not an
+        // out-coordinate and cannot parse (loud kernel refusal instead
+        // of a silently misread axis).
+        if let Some(expected) = expected_shape {
+            let Some(owner_class) = site.class_of_child(coord, 0) else { continue };
+            if owner_class != *expected {
+                continue;
+            }
+        }
+        let Some(axis_class) = site.class_of_child(coord, 1) else { continue };
         return Some(IotaExpr::Coord(
             site.node_in_class_parse_i64(&axis_class)? as usize,
         ));
@@ -165,8 +184,8 @@ fn parse_int_expr_uncached(
         for node in site.nodes_in_class_value(class, kind) {
             let Some(lhs_class) = site.class_of_child(node, 0) else { continue };
             let Some(rhs_class) = site.class_of_child(node, 1) else { continue };
-            let Some(lhs) = parse_int_expr_tainting(site, &lhs_class, depth - 1, memo, tainted) else { continue };
-            let Some(rhs) = parse_int_expr_tainting(site, &rhs_class, depth - 1, memo, tainted) else { continue };
+            let Some(lhs) = parse_int_expr_tainting(site, &lhs_class, depth - 1, expected_shape, memo, tainted) else { continue };
+            let Some(rhs) = parse_int_expr_tainting(site, &rhs_class, depth - 1, expected_shape, memo, tainted) else { continue };
             return Some(build(Box::new(lhs), Box::new(rhs)));
         }
     }
@@ -177,8 +196,8 @@ fn parse_int_expr_uncached(
         };
         let Some(lhs_class) = site.class_of_child(less_than, 0) else { continue };
         let Some(rhs_class) = site.class_of_child(less_than, 1) else { continue };
-        let Some(lhs) = parse_int_expr_tainting(site, &lhs_class, depth - 1, memo, tainted) else { continue };
-        let Some(rhs) = parse_int_expr_tainting(site, &rhs_class, depth - 1, memo, tainted) else { continue };
+        let Some(lhs) = parse_int_expr_tainting(site, &lhs_class, depth - 1, expected_shape, memo, tainted) else { continue };
+        let Some(rhs) = parse_int_expr_tainting(site, &rhs_class, depth - 1, expected_shape, memo, tainted) else { continue };
         return Some(IotaExpr::LessThanCast(Box::new(lhs), Box::new(rhs)));
     }
     None
@@ -292,6 +311,6 @@ impl OpMatcher for IotaMatcher {
     /// fixpoint-invariants stratum panics on a PROVEN violation. An enode
     /// reaching this matcher is certified by construction.
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(Iota { expr: parse_int_expr(site, &site.child_class(0), 64) })
+        Box::new(Iota { expr: parse_int_expr(site, &site.child_class(0), 64, Some(&site.child_class(1))) })
     }
 }

@@ -6,7 +6,7 @@ impl Graph {
         let expr = i.into();
         let id = self.mint_id();
         let tensor = GraphTensor::from_id(id, (), self, DType::Int);
-        let logical = self.record_iota(id.index(), &expr, &[], 1);
+        let logical = self.logical.record_iota(id.index(), &expr, &[]);
         tensor.with_logical(logical)
     }
 
@@ -24,77 +24,18 @@ impl Graph {
         tensor.with_logical(logical)
     }
 
-    /// Iota expression (over the FLAT coordinate of `shape`). Multi-dim
-    /// shapes record as the rank-1 iota over the flat total — the value
-    /// expression is over the flat coordinate either way — with the
-    /// requested shape rebuilt by recorded splits.
+    /// Iota expression, authored over the FLAT coordinate of `shape`
+    /// (the `'z'` surface syntax). The recorder rewrites it into a true
+    /// per-coordinate function over the declared shape at ANY rank —
+    /// `z := Σ CoordVar(shape, axis)·stride` — so multi-dim iotas record
+    /// natively, with no view detour (Design A, ruling 2026-08-06).
     pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
         let sh = shape.to_shape();
         let expr = i.into().simplify();
-        if sh.len() > 1 {
-            let total = sh.iter().copied().product::<Expression>().simplify();
-            return self.iota(expr, total).unflatten_to(&sh);
-        }
-        let range = sh.iter().copied().product::<Expression>().simplify();
         let id = self.mint_id();
         let tensor = GraphTensor::from_id(id, sh.clone(), self, DType::Int);
-        let range_value = range.to_usize().unwrap_or(0);
-        let logical = self.record_iota(id.index(), &expr, &sh, range_value);
+        let logical = self.logical.record_iota(id.index(), &expr, &sh);
         tensor.with_logical(logical)
-    }
-
-    /// Record a LogicalIota for the recorder: the iota's value expression
-    /// over its FLAT coordinate (z -> CoordVar([range], 0)), plus the
-    /// authoring-contract bounds check pair. Rank-0 (range 1) iotas emit
-    /// over the empty shape — a scalar.
-    fn record_iota(
-        &mut self,
-        node: usize,
-        expr: &Expression,
-        dims: &[Expression],
-        range: usize,
-    ) -> Option<crate::graph::ValueId> {
-        let coord = if range <= 1 {
-            "(IntLit 0)".to_string()
-        } else {
-            format!(
-                "(CoordVar (ShapeLit (IntExprCons (IntLit {range}) (IntExprNil))) 0)"
-            )
-        };
-        let value_expr = match crate::graph::int_expr_term(
-            expr,
-            &coord,
-            &Default::default(),
-            &format!("recorder iota t{node}"),
-        ) {
-            Ok(text) => text,
-            Err(err) => {
-                self.logical.poison(format!("iota at t{node}: {err}"));
-                return None;
-            }
-        };
-        let shape = if dims.is_empty() {
-            "(ShapeLit (IntExprNil))".to_string()
-        } else if dims.len() == 1 {
-            format!("(ShapeLit (IntExprCons (IntLit {range}) (IntExprNil)))")
-        } else {
-            self.logical.poison(format!(
-                "iota at t{node} over multi-dim shape {dims:?} (flat consumption only)"
-            ));
-            return None;
-        };
-        let logical = self.logical.source_op(
-            node,
-            "LogicalIota",
-            &format!("{value_expr} {shape}"),
-            dims.to_vec(),
-            DType::Int,
-        );
-        self.logical.post_check(&format!(
-            "(check (= ?reclo{node} (lower-bound-of {value_expr})))\n\
-             (check (= ?rechi{node} (upper-bound-of {value_expr})))\n"
-        ));
-        logical
     }
 
     /// ARange from 0 to N

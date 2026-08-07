@@ -12,6 +12,8 @@ mod norm;
 pub use norm::*;
 mod pooling;
 pub use pooling::*;
+mod models;
+pub use models::*;
 mod moe;
 pub use moe::*;
 mod attention;

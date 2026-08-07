@@ -355,12 +355,6 @@ impl SsaReferenceRuntime {
     }
 
     /// Buffer-id read for search internals.
-    /// RRX diagnostics: the full post-execute storage map (buffer id →
-    /// typed contents), for probe-side dumps of intermediate values.
-    pub(crate) fn debug_storage(&self) -> &FxHashMap<BufferId, TypedBuffer> {
-        &self.storage
-    }
-
     pub fn get_f32_buffer(&self, buffer: i64) -> Result<&Vec<f32>> {
         self.get_typed(buffer)?.as_f32()
     }
@@ -865,6 +859,70 @@ mod tests {
         let ours = run_ssa(&cx,
             &[(dest.id, dest_vals), (idx.id, idx_vals), (src.id, src_vals)],
         );
+        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+    }
+
+    /// NATIVE RANK-N IOTA (Design A, 2026-08-06): a multi-dim iota
+    /// records as ONE LogicalIota over its true shape — a per-coordinate
+    /// function, no flat-then-reshape view detour in the model.
+    #[test]
+    fn differential_rank2_iota_records_natively() {
+        let mut cx = Graph::new();
+        // out[r, c] = flat·2 = (r·3 + c)·2 over (2, 3), cast to observe.
+        let out = cx
+            .iota(crate::shape::Expression::from('z') * 2, (2, 3))
+            .cast(crate::dtype::DType::F32)
+            .output();
+
+        let program = cx.logical.native_program().expect("native program");
+        assert!(
+            program.text.contains("(LogicalIota"),
+            "iota expected in the model:\n{}",
+            program.text
+        );
+        assert!(
+            !program.text.contains("LogicalIndexMapApply"),
+            "no view detour for a bare multi-dim iota:\n{}",
+            program.text
+        );
+        let expected = vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0];
+        let ours = run_ssa(&cx, &[]);
+        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+    }
+
+    /// DYNAMIC-EXTENT ARANGE: a symbolic iota total previously collapsed
+    /// silently to shape/coordinate literals of 0 (the
+    /// `to_usize().unwrap_or(0)` hole); the shape now renders as IntVar
+    /// and the dyn pin delivers the extent at binding time.
+    #[test]
+    fn differential_dynamic_arange() {
+        let mut cx = Graph::new();
+        cx.set_dim('a', 5);
+        let out = cx
+            .arange(crate::shape::Expression::from('a'))
+            .cast(crate::dtype::DType::F32)
+            .output();
+
+        let expected = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        let ours = run_ssa(&cx, &[]);
+        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+    }
+
+    /// A symbolic var inside the iota EXPRESSION (not just the shape)
+    /// records as IntVar and resolves at binding time (the R3 fix,
+    /// 2026-08-06 — previously any dyn var in an iota expression
+    /// poisoned; this is the paged-attention `z + prev_seq` shape).
+    #[test]
+    fn differential_dynamic_offset_iota() {
+        let mut cx = Graph::new();
+        cx.set_dim('a', 10);
+        let out = cx
+            .iota(crate::shape::Expression::from('z') + 'a', 3)
+            .cast(crate::dtype::DType::F32)
+            .output();
+
+        let expected = vec![10.0, 11.0, 12.0];
+        let ours = run_ssa(&cx, &[]);
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
     }
 

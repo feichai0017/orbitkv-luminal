@@ -143,29 +143,6 @@ impl Expression {
             .unwrap_or(0)
     }
 
-    pub fn is_dynamic(&self) -> bool {
-        self.terms.read().iter().any(|i| {
-            if let Term::Var(v) = i {
-                *v != 'z'
-            } else {
-                false
-            }
-        })
-    }
-
-    pub fn dyn_vars(&self) -> Vec<char> {
-        self.terms
-            .read()
-            .iter()
-            .filter_map(|i| {
-                if let Term::Var(v) = i {
-                    if *v != 'z' { Some(*v) } else { None }
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
 }
 
 impl Hash for Expression {
@@ -361,48 +338,6 @@ impl Expression {
         symbols.pop().unwrap_or_default()
     }
 
-    pub fn to_kernel(&self) -> String {
-        let mut symbols = vec![];
-        for term in self.terms.read().iter() {
-            let new_symbol = match term {
-                Term::Num(n) => n.to_string(),
-                Term::Var(c) => format!("const_{c}"),
-                Term::Max => format!(
-                    "max((int){}, (int){})",
-                    symbols.pop().unwrap(),
-                    symbols.pop().unwrap()
-                ),
-                Term::Min => format!(
-                    "min((int){}, (int){})",
-                    symbols.pop().unwrap(),
-                    symbols.pop().unwrap()
-                ),
-                Term::Lt => format!(
-                    "(int)({} < {})",
-                    symbols.pop().unwrap(),
-                    symbols.pop().unwrap()
-                ),
-                Term::Gte => format!(
-                    "(int)({} >= {})",
-                    symbols.pop().unwrap(),
-                    symbols.pop().unwrap()
-                ),
-                Term::CeilDiv => {
-                    let a = symbols.pop().unwrap();
-                    let b = symbols.pop().unwrap();
-                    format!("(({a} + {b} - 1) / {b})")
-                }
-                Term::Div => format!("({} / {})", symbols.pop().unwrap(), symbols.pop().unwrap()),
-                _ => format!(
-                    "({}{term:?}{})",
-                    symbols.pop().unwrap(),
-                    symbols.pop().unwrap()
-                ),
-            };
-            symbols.push(new_symbol);
-        }
-        symbols.pop().unwrap_or_default()
-    }
     /// Simplify the expression to its minimal terms
     #[tracing::instrument(skip_all)]
     pub fn simplify(self) -> Self {
@@ -1234,7 +1169,7 @@ fn egglog_simplify_with_intervals(e: Expression, intervals: &DynDimIntervals) ->
 
     let expr = e.to_egglog();
     let interval_facts =
-        egglog_utils::base::interval_facts_egglog(intervals, e.dyn_vars().into_iter());
+        egglog_utils::base::interval_facts_egglog(intervals, e.to_symbols().into_iter());
     let mut program = String::new();
     program.push_str(&egglog_utils::base::base_expression_egglog_with_intervals());
     program.push('\n');

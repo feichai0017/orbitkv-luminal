@@ -146,44 +146,14 @@ impl OpMatcher for IndexMapApplyMaterializeMatcher {
 /// extraction never fails.
 fn parse_map_entries(site: &ExtractionSite<'_>) -> Option<Vec<super::iota::IotaExpr>> {
     let map_class = site.child_class(1);
+    // Owner-shape guard: map entries are functions of the op's OUT
+    // coordinates (shape metadata at child 2) — see parse_int_expr.
+    let out_shape = site.child_class(2);
     let mut memo = std::collections::HashMap::new();
     for map_node in site.nodes_in_class_value(&map_class, "IndexMapLit") {
         let Some(head) = site.class_of_child(map_node, 0) else { continue };
-        if let Some(entries) = parse_entry_list(site, &head, 64, &mut memo) {
+        if let Some(entries) = parse_entry_list(site, &head, 64, &out_shape, &mut memo) {
             return Some(entries);
-        }
-    }
-    // RRX_MAP_PARSE=1: name what the parser refused — per unparseable
-    // entry class, the constructor inventory (the loud-bail diagnosis aid).
-    if std::env::var("RRX_MAP_PARSE").is_ok() {
-        eprintln!("RRX_MAP_PARSE: map class {map_class} has no parseable spelling");
-        for map_node in site.nodes_in_class_value(&map_class, "IndexMapLit") {
-            let Some(mut spine) = site.class_of_child(map_node, 0) else { continue };
-            let mut entry_index = 0usize;
-            for _ in 0..64 {
-                if site.nodes_in_class_value(&spine, "IntExprNil").next().is_some() {
-                    break;
-                }
-                let Some(cons) = site.nodes_in_class_value(&spine, "IntExprCons").next() else {
-                    eprintln!("  spine class {spine}: no cons/nil spelling");
-                    break;
-                };
-                if let Some(element) = site.class_of_child(cons, 0) {
-                    if super::iota::parse_int_expr(site, &element, 64).is_none() {
-                        let ops: Vec<&str> = site
-                            .egraph
-                            .nodes
-                            .values()
-                            .filter(|node| node.eclass == element)
-                            .map(|node| node.op.as_str())
-                            .collect();
-                        eprintln!("  entry {entry_index} class {element} UNPARSED; constructors: {ops:?}");
-                    }
-                }
-                let Some(tail) = site.class_of_child(cons, 1) else { break };
-                spine = tail;
-                entry_index += 1;
-            }
         }
     }
     None
@@ -193,6 +163,7 @@ fn parse_entry_list(
     site: &ExtractionSite<'_>,
     class: &egraph_serialize::ClassId,
     depth: usize,
+    out_shape: &egraph_serialize::ClassId,
     memo: &mut std::collections::HashMap<egraph_serialize::ClassId, super::iota::ParseMemo>,
 ) -> Option<Vec<super::iota::IotaExpr>> {
     if depth == 0 {
@@ -204,8 +175,8 @@ fn parse_entry_list(
     for cons in site.nodes_in_class_value(class, "IntExprCons") {
         let Some(element) = site.class_of_child(cons, 0) else { continue };
         let Some(tail) = site.class_of_child(cons, 1) else { continue };
-        let Some(expr) = super::iota::parse_int_expr_memo(site, &element, 64, memo) else { continue };
-        if let Some(mut rest) = parse_entry_list(site, &tail, depth - 1, memo) {
+        let Some(expr) = super::iota::parse_int_expr_memo(site, &element, 64, Some(out_shape), memo) else { continue };
+        if let Some(mut rest) = parse_entry_list(site, &tail, depth - 1, out_shape, memo) {
             rest.insert(0, expr);
             return Some(rest);
         }

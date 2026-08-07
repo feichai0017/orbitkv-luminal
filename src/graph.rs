@@ -599,6 +599,96 @@ impl LogicalGraph {
 
     /// Record a pad-mask indicator iota (see the pad seam): per padded
     /// axis, (before <= p) · (p < before + dim) as bool-bridge casts.
+    /// Record a LogicalIota: the value expression is authored over the
+    /// FLAT index (the frontend's `'z'`) and rewritten here into a true
+    /// COORDINATE FUNCTION over the declared shape —
+    /// `z := Σ CoordVar(shape, axis) · row-major-stride` — so the
+    /// recorded model is per-coordinate at ANY rank (Design A, ruling
+    /// 2026-08-06: the rank-1-plus-recorded-splits detour and its silent
+    /// symbolic-total collapse are gone; symbolic dims render as IntVar
+    /// through `shape_term`). Extent-1 axes contribute no summand (their
+    /// coordinate is identically 0); a fully degenerate shape records
+    /// `(IntLit 0)`. The authoring-contract bounds check pair rides
+    /// every iota.
+    pub fn record_iota(
+        &mut self,
+        at: usize,
+        expr: &Expression,
+        dims: &[Expression],
+    ) -> Option<ValueId> {
+        if self.poisoned.is_some() {
+            return None;
+        }
+        let shape = match Self::shape_term(dims) {
+            Ok(term) => term,
+            Err(reason) => {
+                self.poison(format!("iota at t{at}: {reason}"));
+                return None;
+            }
+        };
+        let rank = dims.len();
+        let mut summands: Vec<String> = Vec::new();
+        for k in 0..rank {
+            if dims[k] == Expression::from(1) {
+                continue;
+            }
+            let coord = format!("(CoordVar {shape} {})", rank - 1 - k);
+            let mut stride: Option<String> = None;
+            for dim in &dims[k + 1..] {
+                if *dim == Expression::from(1) {
+                    continue;
+                }
+                let term = match Self::dim_term(dim) {
+                    Ok(term) => term,
+                    Err(reason) => {
+                        self.poison(format!("iota at t{at}: {reason}"));
+                        return None;
+                    }
+                };
+                stride = Some(match stride {
+                    None => term,
+                    Some(acc) => format!("(IntMul {acc} {term})"),
+                });
+            }
+            summands.push(match stride {
+                None => coord,
+                Some(stride) => format!("(IntMul {coord} {stride})"),
+            });
+        }
+        let coord_term = match summands.pop() {
+            None => "(IntLit 0)".to_string(),
+            Some(mut acc) => {
+                for summand in summands.into_iter().rev() {
+                    acc = format!("(IntAdd {summand} {acc})");
+                }
+                acc
+            }
+        };
+        let value_expr = match int_expr_term(
+            expr,
+            &coord_term,
+            &format!("recorder iota t{at}"),
+        ) {
+            Ok(text) => text,
+            Err(err) => {
+                self.poison(format!("iota at t{at}: {err}"));
+                return None;
+            }
+        };
+        let logical = self.source_op(
+            at,
+            "LogicalIota",
+            &format!("{value_expr} {shape}"),
+            dims.to_vec(),
+            DType::Int,
+        );
+        self.post_check(&format!(
+            "(check (= ?reclo{at} (lower-bound-of {value_expr})))\n\
+             (check (= ?rechi{at} (upper-bound-of {value_expr})))\n"
+        ));
+        logical
+    }
+
     pub fn record_mask_iota(
         &mut self,
         at: usize,
@@ -664,7 +754,16 @@ impl LogicalGraph {
                 return None;
             }
         };
-        self.source_op(at, "LogicalIota", &format!("{expr} {shape}"), out_dims, DType::Int)
+        let logical =
+            self.source_op(at, "LogicalIota", &format!("{expr} {shape}"), out_dims, DType::Int);
+        // The authoring-contract bounds pair — uniform with record_iota
+        // (Design A fold-in, 2026-08-06): every recorded iota's value
+        // expression must have derivable bounds, or the fixpoint refuses.
+        self.post_check(&format!(
+            "(check (= ?reclo{at} (lower-bound-of {expr})))\n\
+             (check (= ?rechi{at} (upper-bound-of {expr})))\n"
+        ));
+        logical
     }
 
     /// Record a coordinate-form gather.
@@ -1216,7 +1315,6 @@ pub struct LogicalProgram {
 pub(crate) fn int_expr_term(
     expr: &Expression,
     coord_term: &str,
-    dyn_map: &FxHashMap<char, usize>,
     at: &str,
 ) -> AnyResult<String> {
     let mut stack: Vec<String> = Vec::new();
@@ -1224,12 +1322,11 @@ pub(crate) fn int_expr_term(
         match term {
             Term::Num(n) => stack.push(format!("(IntLit {n})")),
             Term::Var('z') => stack.push(coord_term.to_string()),
-            Term::Var(c) => {
-                let value = dyn_map.get(c).ok_or_else(|| {
-                    anyhow!("hlir_to_logical: unpinned var '{c}' in index expression at {at}")
-                })?;
-                stack.push(format!("(IntLit {value})"));
-            }
+            // Symbolic vars stay IntVar in the model — pins are
+            // BINDING-side bounds seeds, never model content (same rule
+            // as dim_term; the R3 fix, 2026-08-06: a dynamic dim inside
+            // an iota expression records instead of poisoning).
+            Term::Var(c) => stack.push(format!("(IntVar \"{c}\")")),
             Term::Add | Term::Mul | Term::Sub | Term::Div | Term::Mod | Term::Min
             | Term::Max | Term::Gte | Term::Lt => {
                 // Their builders emit RHS terms first, so the stack TOP is

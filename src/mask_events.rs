@@ -7,7 +7,7 @@
 //! nonzero counts are the legality burn-down list.
 //!
 //! Counters are always on (relaxed atomics — nanoseconds on cold rejection
-//! paths). Per-event details are printed when `LUMINAL_MASK_LOG=1`. A summary
+//! paths). Per-event details are printed when `set_detail_log(true)`. A summary
 //! of nonzero counters is printed at the end of every search.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,7 +29,7 @@ impl MaskEvent {
         self.count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record and, under `LUMINAL_MASK_LOG=1`, print the event detail.
+    /// Record and, when detail logging is enabled, print the event detail.
     pub fn record_with(&self, detail: impl FnOnce() -> String) {
         self.record();
         if mask_log_enabled() {
@@ -46,9 +46,16 @@ impl MaskEvent {
     }
 }
 
+static DETAIL_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn per-event detail printing on or off — the PROGRAMMATIC switch
+/// (no env vars in the design, ruling 2026-08-06). Off by default.
+pub fn set_detail_log(enabled: bool) {
+    DETAIL_LOG.store(enabled, Ordering::Relaxed);
+}
+
 fn mask_log_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("LUMINAL_MASK_LOG").is_some())
+    DETAIL_LOG.load(Ordering::Relaxed)
 }
 
 /// Semantic rejections — must become zero for the corresponding check to be
