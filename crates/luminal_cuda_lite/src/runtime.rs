@@ -481,6 +481,29 @@ impl CudaRuntime {
             .collect()
     }
 
+    /// Names of selected reportable operations, including specialized HostOps
+    /// absorbed into a [`CudaGraphOp`].
+    ///
+    /// Once kernel-to-host lowering captures FlashInfer inside a CUDA graph,
+    /// walking only the outer executable graph reports `CudaGraph` and hides
+    /// the selected attention implementation. Keep the outer name and append
+    /// one entry per captured FlashInfer operation so benchmark diagnostics can
+    /// verify full-model rewrite coverage.
+    pub fn selected_host_op_names(&self) -> Vec<&'static str> {
+        let mut names = self
+            .host_ops()
+            .into_iter()
+            .filter_map(|op| op.stats_name())
+            .collect::<Vec<_>>();
+        for summary in self.debug_cuda_graph_summaries() {
+            names.extend(std::iter::repeat_n(
+                "FlashInferAttention",
+                summary.n_flashinfer,
+            ));
+        }
+        names
+    }
+
     /// Order Luminal's CUDA stream after work submitted by an external
     /// producer stream (for example PyTorch's current stream).
     ///

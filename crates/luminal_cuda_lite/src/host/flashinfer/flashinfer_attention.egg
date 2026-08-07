@@ -1325,10 +1325,65 @@
 ; models that mutation is usually coupled to unrelated invalid choices, so the
 ; valid FlashInfer implementation may never even be profiled.
 ;
-; Subsume every other Op spelling in the proven output e-class. This is the
-; same egglog-side commitment used by other fused HostOps: the compiler still
-; searches everywhere else, but extraction cannot throw away a matched
-; FlashInfer attention implementation.
+; Only these concrete compute implementations are replaceable. In particular,
+; do not subsume LoopInput / LoopOutput and other structural Op spellings that
+; can share an e-class while a rolled model is being represented.
+(relation fi_replaceable_attention_kind (OpKind))
+
+(rule
+    ((= ?kind (Sum ?shape ?iters ?strides ?iter_stride ?out_strides)))
+    ((fi_replaceable_attention_kind ?kind))
+    :ruleset kernel_commit_mark
+    :name "FlashInfer replaceable Sum kind"
+)
+
+; `Sum` is lowered to `KernelSum` before the final FlashInfer rule runs. Both
+; spellings can remain in the attention-output e-class, depending on whether
+; the output belongs to a rolled loop body or its peeled boundary iteration.
+; If KernelSum is not committed away, extraction can independently choose the
+; generic reduction for one spelling and FlashInfer for the other, yielding a
+; 1/47 split in a 48-layer model.
+(rule
+    ((= ?kind (KernelSum
+        ?shape ?iters ?strides ?iter_stride ?out_strides ?dtype)))
+    ((fi_replaceable_attention_kind ?kind))
+    :ruleset kernel_commit_mark
+    :name "FlashInfer replaceable KernelSum kind"
+)
+
+(rule
+    ((= ?kind (GenericMatmul
+        ?out_shape ?mul_shape ?k ?lhs_strides ?rhs_strides
+        ?sum_input_strides ?sum_iter_stride ?out_strides ?dtype)))
+    ((fi_replaceable_attention_kind ?kind))
+    :ruleset kernel_commit_mark
+    :name "FlashInfer replaceable GenericMatmul kind"
+)
+
+(rule
+    ((= ?kind (cublaslt
+        ?m ?n ?k ?a_layout ?b_layout ?a_order ?b_order ?c_order ?d_order
+        ?lda ?ldb ?ldc ?ldd ?batch_count ?stride_a ?stride_b ?stride_c ?stride_d
+        ?a_dtype ?b_dtype ?c_dtype ?d_dtype ?compute_type ?scale_dtype
+        ?alpha ?beta ?epilogue)))
+    ((fi_replaceable_attention_kind ?kind))
+    :ruleset kernel_commit_mark
+    :name "FlashInfer replaceable cuBLASLt kind"
+)
+
+(rule
+    ((= ?kind (cublaslt_scaled
+        ?m ?n ?k ?a_layout ?b_layout ?a_order ?b_order ?c_order ?d_order
+        ?lda ?ldb ?ldc ?ldd ?batch_count ?stride_a ?stride_b ?stride_c ?stride_d
+        ?a_dtype ?b_dtype ?c_dtype ?d_dtype ?compute_type ?scale_dtype
+        ?alpha ?beta ?epilogue)))
+    ((fi_replaceable_attention_kind ?kind))
+    :ruleset kernel_commit_mark
+    :name "FlashInfer replaceable scaled cuBLASLt kind"
+)
+
+; A matched FlashInfer op is now committed over only the decomposed compute
+; alternatives above. Compiler loop markers remain available to the unroller.
 (rule
     (
         (= ?fi (Op
@@ -1337,9 +1392,7 @@
             ?fi_inputs))
         (= ?alternative (Op ?alternative_kind ?alternative_inputs))
         (= ?alternative ?fi)
-        (!= ?alternative_kind
-            (FlashInferAttention
-                ?nheads ?nkvheads ?hdim ?batch ?sequence ?context ?dt ?scale ?window_left))
+        (fi_replaceable_attention_kind ?alternative_kind)
     )
     (
         (subsume (Op ?alternative_kind ?alternative_inputs))

@@ -16,6 +16,48 @@ fn qwen_node_count(program: &str, root: &str) -> usize {
         .count()
 }
 
+fn qwen_competing_kernel_sum_count(program: &str, root: &str) -> usize {
+    let mut ops = <CudaRuntime as Runtime>::Ops::into_vec();
+    ops.extend(<luminal::hlir::HLIROps as IntoEgglogOp>::into_vec());
+    let egraph = run_egglog(program, root, &ops, true).expect("egglog saturation failed");
+
+    let qwen_kind_classes = egraph
+        .eclasses
+        .iter()
+        .filter_map(|(class, (_, nodes))| {
+            nodes
+                .iter()
+                .any(|node| egraph.enodes[node].0 == "Qwen3Moe")
+                .then_some(class)
+        })
+        .collect::<std::collections::HashSet<_>>();
+
+    egraph
+        .eclasses
+        .values()
+        .filter(|(_, ir_nodes)| {
+            let contains_qwen = ir_nodes.iter().any(|node| {
+                let (label, children) = &egraph.enodes[node];
+                label == "Op"
+                    && children
+                        .first()
+                        .is_some_and(|kind| qwen_kind_classes.contains(kind))
+            });
+            let contains_kernel_sum = ir_nodes.iter().any(|node| {
+                let (label, children) = &egraph.enodes[node];
+                label == "Op"
+                    && children.first().is_some_and(|kind| {
+                        egraph.eclasses[kind]
+                            .1
+                            .iter()
+                            .any(|kind_node| egraph.enodes[kind_node].0 == "KernelSum")
+                    })
+            });
+            contains_qwen && contains_kernel_sum
+        })
+        .count()
+}
+
 fn rewritten_dtype(program: &str, fused_output: &str) -> String {
     // A top-level `(let probe (dtype output))` performs the table lookup while
     // parsing, before the rewrite schedule has populated `dtype(output)`. Use
@@ -65,6 +107,26 @@ fn qwen3_moe_rule_fires_on_huggingface_pt2_graph() {
         1,
         "expected exactly one fused Qwen3Moe alternative for one HF sparse-MoE block"
     );
+}
+
+#[test]
+fn qwen3_moe_commits_lowered_expert_reduction() {
+    for (program, root) in [
+        (
+            include_str!("fixtures/qwen3_moe_torch_compile_bf16_dynamic.egg"),
+            include_str!("fixtures/qwen3_moe_torch_compile_bf16_dynamic.root").trim(),
+        ),
+        (
+            include_str!("fixtures/qwen3_moe_torch_compile_f16_dynamic.egg"),
+            include_str!("fixtures/qwen3_moe_torch_compile_f16_dynamic.root").trim(),
+        ),
+    ] {
+        assert_eq!(
+            qwen_competing_kernel_sum_count(program, root),
+            0,
+            "Qwen3Moe output retained a selectable lowered KernelSum fallback"
+        );
+    }
 }
 
 /// Full-model compilation can elide the isolated block's trailing zero-add

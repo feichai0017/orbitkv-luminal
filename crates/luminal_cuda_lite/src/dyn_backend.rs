@@ -51,11 +51,7 @@ impl DynBackend for CudaLiteDynBackend {
         self.runtime.execute(dyn_map);
     }
     fn selected_host_op_names(&self) -> Vec<&'static str> {
-        self.runtime
-            .host_ops()
-            .into_iter()
-            .filter_map(|op| op.stats_name())
-            .collect()
+        self.runtime.selected_host_op_names()
     }
 
     fn supports_device_ptrs(&self) -> bool {

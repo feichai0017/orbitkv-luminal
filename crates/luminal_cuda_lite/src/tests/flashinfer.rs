@@ -1221,11 +1221,69 @@ fn flashinfer_hf_min_fill_commits_specialized_output() {
         !flashinfer_nodes.is_empty(),
         "HF min-fill attention did not produce FlashInferAttention"
     );
-    let competing = flashinfer_competing_ir_alternatives(egraph, &flashinfer_nodes);
+    let competing = flashinfer_competing_compute_alternatives(egraph, &flashinfer_nodes);
     assert!(
         competing.is_empty(),
         "HF min-fill FlashInfer output retained selectable decomposed alternatives: {competing:#?}"
     );
+}
+
+#[test]
+fn flashinfer_hf_min_fill_commits_raw_and_rolled_outputs() {
+    if !crate::tests::utilities::gpu_supports_flashinfer() {
+        return;
+    }
+
+    // Full transformer graphs contain two attention spellings after automatic
+    // rolling: the repeated body reads LoopInput cache state, while the peeled
+    // boundary layer reads its original graph Inputs. Both spellings lower the
+    // final reduction to KernelSum before the late FlashInfer rule runs. Prove
+    // that neither output e-class can retain that generic compute fallback.
+    let cases = [
+        (
+            "raw boundary",
+            TestCacheProvenance::Raw,
+            TestCacheProvenance::Raw,
+        ),
+        (
+            "rolled body",
+            TestCacheProvenance::LoopInput {
+                loop_id: 7,
+                stream_id: 0,
+            },
+            TestCacheProvenance::LoopInput {
+                loop_id: 7,
+                stream_id: 1,
+            },
+        ),
+    ];
+
+    for (case_name, k_provenance, v_provenance) in cases {
+        let (mut cx, _) = build_paged_attention_graph_with_mask_and_cache_provenance(
+            N_HEADS,
+            N_KV_HEADS,
+            HEAD_DIM,
+            TestMaskKind::HfMinFill,
+            k_provenance,
+            v_provenance,
+            true,
+        );
+        cx.set_dim('a', 16usize);
+        cx.set_dim('r', 2usize);
+        cx.build_search_space::<CudaRuntime>(CompileOptions::default());
+
+        let egraph = cx.egraph().expect("search space should have an e-graph");
+        let flashinfer_nodes = flashinfer_ir_nodes(egraph);
+        assert!(
+            !flashinfer_nodes.is_empty(),
+            "{case_name} did not produce FlashInferAttention"
+        );
+        let competing = flashinfer_competing_compute_alternatives(egraph, &flashinfer_nodes);
+        assert!(
+            competing.is_empty(),
+            "{case_name} retained selectable decomposed attention outputs: {competing:#?}"
+        );
+    }
 }
 
 #[test]
@@ -1325,6 +1383,14 @@ fn cuda_graph_captures_flashinfer_decode_island() {
         .filter(|op| op.stats_name() == Some("FlashInferAttention"))
         .count();
     assert_eq!(standalone_flashinfer, 0);
+    assert_eq!(
+        rt.selected_host_op_names()
+            .into_iter()
+            .filter(|name| *name == "FlashInferAttention")
+            .count(),
+        1,
+        "selected-op diagnostics must expose FlashInfer absorbed by CudaGraphOp"
+    );
 
     let context_len_2 = 3;
     cx.set_dim('c', context_len_2);
@@ -1529,7 +1595,7 @@ fn flashinfer_ir_nodes(egraph: &luminal::egglog_utils::SerializedEGraph) -> Vec<
         .collect()
 }
 
-fn flashinfer_competing_ir_alternatives(
+fn flashinfer_competing_compute_alternatives(
     egraph: &luminal::egglog_utils::SerializedEGraph,
     flashinfer_nodes: &[&ENodeId],
 ) -> Vec<String> {
@@ -1551,7 +1617,6 @@ fn flashinfer_competing_ir_alternatives(
                 continue;
             };
             if ir_label != "Op" {
-                alternatives.push(format!("{class:?}: {ir_label}"));
                 continue;
             }
             let kinds = ir_children
@@ -1565,7 +1630,15 @@ fn flashinfer_competing_ir_alternatives(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            alternatives.push(format!("{class:?}: {kinds:?}"));
+            let replaceable = kinds.iter().any(|kind| {
+                matches!(
+                    *kind,
+                    "Sum" | "KernelSum" | "GenericMatmul" | "cublaslt" | "cublaslt_scaled"
+                )
+            });
+            if replaceable {
+                alternatives.push(format!("{class:?}: {kinds:?}"));
+            }
         }
     }
 
@@ -1660,7 +1733,7 @@ fn extract_forced_flashinfer_llir(cx: &mut Graph, case_name: &str) -> LLIRGraph 
         flashinfer_provenance_facts(egraph),
         flashinfer_gather_inputs(egraph)
     );
-    let competing = flashinfer_competing_ir_alternatives(egraph, &flashinfer_nodes);
+    let competing = flashinfer_competing_compute_alternatives(egraph, &flashinfer_nodes);
     assert!(
         competing.is_empty(),
         "FlashInfer matched for {case_name}, but extraction can still select competing IR spellings from its output e-class: {competing:#?}"

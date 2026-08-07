@@ -202,6 +202,33 @@ impl EgglogOp for Qwen3Moe {
 )
 "#,
             ),
+            // The generated PT2 rewrite subsumes the semantic HLIR Sum that
+            // Qwen3Moe replaces. CUDA lowering subsequently introduces a
+            // KernelSum spelling in the same output e-class, including one
+            // spelling for a rolled transformer body and one for its peeled
+            // boundary layer. Commit only that lowered reduction after all
+            // specialized HostOps have been produced; retaining it makes
+            // extraction randomly choose 1 or 47 fused MoE blocks.
+            Rule::raw(
+                r#"
+(rule
+    (
+        (= ?qwen3_moe (Op (Qwen3Moe ?tokens ?storage_dtype) ?qwen_inputs))
+        (= ?kernel_sum (Op
+            (KernelSum ?shape ?iters ?strides ?iter_stride ?out_strides ?sum_dtype)
+            ?sum_inputs))
+        (= ?kernel_sum ?qwen3_moe)
+    )
+    (
+        (subsume (Op
+            (KernelSum ?shape ?iters ?strides ?iter_stride ?out_strides ?sum_dtype)
+            ?sum_inputs))
+    )
+    :name "Qwen3-MoE commit lowered expert reduction"
+    :ruleset kernel_commit
+)
+"#,
+            ),
             Rule::raw(include_str!("qwen3_moe_rewrite.egg")),
         ]
     }

@@ -91,6 +91,7 @@ const EGGLOG_RULESETS: &[&str] = &[
     // Commit rules consume specialized HostOps produced by late2 and subsume
     // decomposed alternatives when the specialized rule's full contract has
     // been proved.
+    "kernel_commit_mark",
     "kernel_commit",
 ];
 
@@ -366,7 +367,7 @@ fn egglog_final_phases(use_interval_analysis: bool) -> Vec<EgglogSchedulePhase> 
             // consumes those new e-class alternatives (for example,
             // subsuming a decomposition once FlashInfer has proved that it
             // implements the whole attention expression).
-            schedule: "(seq kernel_fuse_late_pre kernel_fuse_late kernel_fuse_late kernel_fuse_late kernel_fuse_late2 kernel_commit)"
+            schedule: "(seq kernel_fuse_late_pre kernel_fuse_late kernel_fuse_late kernel_fuse_late kernel_fuse_late2 kernel_commit_mark kernel_commit)"
                 .to_string(),
         },
         EgglogSchedulePhase {
