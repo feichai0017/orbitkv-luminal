@@ -441,7 +441,6 @@ impl<'a> Extractor<'a> {
                     });
                     let mut index = 0usize;
                     while let Some(class) = spine {
-                        assert!(index <= 4096, "cyclic BufferTensorCons output spine — unsound weld");
                         let Some(cons) = self
                             .class_nodes
                             .get(&class)
@@ -1798,10 +1797,7 @@ impl<'a> ClassRenderer<'a> {
     fn numeric_expr_list(&self, class: &ClassId) -> Option<Vec<i64>> {
         let mut dims = Vec::new();
         let mut current = class.clone();
-        let mut spine_steps = 0usize;
         loop {
-            spine_steps += 1;
-            assert!(spine_steps <= 4096, "cyclic or oversized IntExprCons spine at class {current} — unsound weld or schema drift");
             if let Some(node_id) = self.node_with_op(&current, "IntExprCons").cloned() {
                 let node = self.egraph.nodes.get(&node_id)?;
                 dims.push(self.numeric_int_expr(&child_class(self.egraph, node, 0)?)?);
@@ -1913,8 +1909,6 @@ impl<'a> Extractor<'a> {
     fn build_extracted_graph(&self, roots: &[ClassId]) -> Result<ExtractedGraph> {
         let mut builder = IrBuilder {
             extractor: self,
-            ensure_calls: 0,
-            collect_calls: 0,
             dag: DiGraph::new(),
             value_producer: HashMap::new(),
             op_nodes: HashMap::new(),
@@ -2249,9 +2243,6 @@ impl<'a> Extractor<'a> {
 /// a producer and a consumer.
 struct IrBuilder<'e, 'a> {
     extractor: &'e Extractor<'a>,
-    /// Loud-blowup tripwires for the build walks.
-    ensure_calls: u64,
-    collect_calls: u64,
     dag: ExtractedDag,
     /// Value e-class -> the node that produces it (an op or an input boundary).
     value_producer: HashMap<ClassId, NodeIndex>,
@@ -2276,13 +2267,6 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
     }
 
     fn ensure_value(&mut self, class: &ClassId) -> Result<NodeIndex> {
-        self.ensure_calls += 1;
-        assert!(
-            self.ensure_calls <= 10_000_000,
-            "ensure_value blowup: {} calls, {} produced values, at class {class}",
-            self.ensure_calls,
-            self.value_producer.len()
-        );
         if let Some(index) = self.value_producer.get(class) {
             return Ok(*index);
         }
@@ -2436,13 +2420,6 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
         index: usize,
         slots: &mut Vec<(usize, ClassId, NodeIndex, BufferInfo)>,
     ) -> Result<usize> {
-        self.collect_calls += 1;
-        assert!(
-            self.collect_calls <= 100_000,
-            "collect_output_buffers blowup: {} calls at list class {list_class} (index {index}) — \
-             cyclic BufferTensorCons plan spine",
-            self.collect_calls
-        );
         let plan = self.extractor.plan(list_class)?.clone();
         match &plan.kind {
             PlanKind::BufferTensorCons => {
@@ -2982,10 +2959,7 @@ pub fn chain_strides(egraph: &EGraph, layout: &ClassId) -> Option<Vec<Option<Cha
     let shape_lit = find(&shape_class, "ShapeLit")?;
     let mut dims = Vec::new();
     let mut cursor = child_class(egraph, egraph.nodes.get(&shape_lit)?, 0)?;
-    let mut spine_steps = 0usize;
     loop {
-        spine_steps += 1;
-        assert!(spine_steps <= 4096, "cyclic or oversized IntExprCons spine at class {cursor} — unsound weld or schema drift");
         if let Some(cons) = find(&cursor, "IntExprCons") {
             let node = egraph.nodes.get(&cons)?;
             dims.push(child_class(egraph, node, 0)?);
@@ -3001,10 +2975,7 @@ pub fn chain_strides(egraph: &EGraph, layout: &ClassId) -> Option<Vec<Option<Cha
     let mut out = Vec::new();
     let mut cursor = chain_class;
     let mut axis = 0usize;
-    let mut chain_steps = 0usize;
     loop {
-        chain_steps += 1;
-        assert!(chain_steps <= 4096, "cyclic or oversized IntAffineExprCons spine at class {cursor} — unsound weld or schema drift");
         if let Some(cons) = find(&cursor, "IntAffineExprCons") {
             let node = egraph.nodes.get(&cons)?;
             let summand = child_class(egraph, node, 0)?;

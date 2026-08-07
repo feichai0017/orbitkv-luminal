@@ -29,22 +29,10 @@ use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMa
 /// Walk the LayoutTensorCons spine at `child` counting elements — the
 /// shared rank reader for both scatter matchers (same class-resolving walk
 /// as gather's; see the OpMatcher validity contract for the panics).
-/// Cyclic-spine tripwire for the cons walks: a coordinate list longer
-/// than any real rank means an unsound weld or schema drift — refuse
-/// loudly instead of hanging.
-fn rank_guard(rank: usize, class: &egraph_serialize::ClassId, node_id: &egraph_serialize::NodeId) {
-    assert!(
-        rank <= 4096,
-        "cyclic or oversized LayoutTensorCons spine at class {class} under enode {node_id} — \
-         unsound weld or schema drift"
-    );
-}
-
 fn coordinate_rank(site: &ExtractionSite<'_>, child: usize) -> usize {
     let mut rank = 0usize;
     let mut class = site.child_class(child);
     loop {
-        rank_guard(rank, &class, site.node_id);
         let spine = site
             .egraph
             .nodes

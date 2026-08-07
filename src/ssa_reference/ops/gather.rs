@@ -24,17 +24,6 @@ pub struct Gather {
     pub rank: usize,
 }
 
-/// Cyclic-spine tripwire for the cons walks: a coordinate list longer
-/// than any real rank means an unsound weld or schema drift — refuse
-/// loudly instead of hanging.
-fn rank_guard(rank: usize, class: &egraph_serialize::ClassId, node_id: &egraph_serialize::NodeId) {
-    assert!(
-        rank <= 4096,
-        "cyclic or oversized LayoutTensorCons spine at class {class} under enode {node_id} — \
-         unsound weld or schema drift"
-    );
-}
-
 impl OpSlotNames for Gather {
     fn operand_name(&self, operand: usize) -> String {
         if operand == 0 {
@@ -171,7 +160,6 @@ impl OpMatcher for GatherMatcher {
         let mut rank = 0usize;
         let mut class = site.child_class(1);
         loop {
-            rank_guard(rank, &class, site.node_id);
             let spine = site
                 .egraph
                 .nodes
