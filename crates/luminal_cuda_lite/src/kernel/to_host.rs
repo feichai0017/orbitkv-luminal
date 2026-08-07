@@ -1776,6 +1776,27 @@ impl CudaGraphOp {
                     let needs_recapture = explicit_indptr
                         || state.flashinfer_ops[idx].signature != Some(signature.clone());
                     if needs_recapture {
+                        if std::env::var_os("LUMINAL_CUDA_DEBUG_FLASHINFER_RECAPTURE").is_some() {
+                            match state.flashinfer_ops[idx].signature.as_ref() {
+                                Some(old_signature) => {
+                                    eprintln!(
+                                        "FLASHINFER_RECAPTURE idx={idx} node={} explicit_indptr={explicit_indptr} spec_changed={} ptr_fields={:?} old_spec={:?} new_spec={:?}",
+                                        state.flashinfer_ops[idx].node.index(),
+                                        old_signature.spec != signature.spec,
+                                        old_signature.ptrs.changed_fields(signature.ptrs),
+                                        old_signature.spec,
+                                        signature.spec,
+                                    );
+                                }
+                                None => {
+                                    eprintln!(
+                                        "FLASHINFER_RECAPTURE idx={idx} node={} initial_capture=true explicit_indptr={explicit_indptr} new_spec={:?}",
+                                        state.flashinfer_ops[idx].node.index(),
+                                        signature.spec,
+                                    );
+                                }
+                            }
+                        }
                         let needs_prepare = state.flashinfer_ops[idx]
                             .signature
                             .as_ref()

@@ -67,6 +67,8 @@ def test_luminal_paged_cache_append_matches_dense_cache_semantics():
     )
     first_keys = _coordinate_states(0, 3, heads=2, dim=4)
     first_values = first_keys + 50_000
+    key_ptr = cache.layers[0].keys.data_ptr()
+    value_ptr = cache.layers[0].values.data_ptr()
     cache.update(
         first_keys,
         first_values,
@@ -89,6 +91,53 @@ def test_luminal_paged_cache_append_matches_dense_cache_semantics():
     )
     assert cache.get_seq_length() == 5
     assert cache.get_mask_sizes(2, 0) == (7, 0)
+    assert cache.layers[0].keys.data_ptr() == key_ptr
+    assert cache.layers[0].values.data_ptr() == value_ptr
+
+
+def test_luminal_paged_cache_reset_reuses_backing_pools():
+    cache = LuminalPagedCache(
+        _config(num_layers=1),
+        max_cache_len=8,
+        dtype=torch.float32,
+        device="cpu",
+    )
+    layer = cache.layers[0]
+    first_keys = _coordinate_states(0, 3, heads=2, dim=4)
+    first_values = first_keys + 50_000
+    cache.update(
+        first_keys,
+        first_values,
+        0,
+        {"cache_position": torch.arange(3)},
+    )
+    key_ptr = layer.keys.data_ptr()
+    value_ptr = layer.values.data_ptr()
+    old_keys = layer.keys.clone()
+    old_values = layer.values.clone()
+
+    cache.reset()
+
+    assert cache.get_seq_length() == 0
+    assert layer.keys.data_ptr() == key_ptr
+    assert layer.values.data_ptr() == value_ptr
+    # Resetting logical state must not spend time clearing the large pools.
+    torch.testing.assert_close(layer.keys, old_keys)
+    torch.testing.assert_close(layer.values, old_values)
+
+    replacement_keys = _coordinate_states(20, 2, heads=2, dim=4)
+    replacement_values = replacement_keys + 70_000
+    actual_keys, actual_values = cache.update(
+        replacement_keys,
+        replacement_values,
+        0,
+        {"cache_position": torch.arange(2)},
+    )
+
+    torch.testing.assert_close(actual_keys, replacement_keys)
+    torch.testing.assert_close(actual_values, replacement_values)
+    assert layer.keys.data_ptr() == key_ptr
+    assert layer.values.data_ptr() == value_ptr
 
 
 def test_luminal_paged_cache_pytree_roundtrip_preserves_state():
@@ -255,20 +304,29 @@ def test_tiny_hf_qwen_export_exposes_paged_cache_boundary(tmp_path):
         },
         strict=False,
     )
-    targets = [str(node.target) for node in exported.graph_module.graph.nodes]
-
-    assert targets.count("aten.index_put.default") == 2
+    decomposed = exported.run_decompositions(_decomp_table())
+    targets = [str(node.target) for node in decomposed.graph_module.graph.nodes]
     assert targets.count("aten.index_select.default") == 2
-    assert targets.count("aten.to.dtype") >= 2
+    # Depending on the PyTorch version/decomposition table, an explicit dtype
+    # conversion is represented as either aten.to.dtype or aten._to_copy.
+    assert sum(
+        target in ("aten.to.dtype", "aten._to_copy.default") for target in targets
+    ) >= 2
     assert (
         sum(
             output.kind.name == "USER_OUTPUT"
-            for output in exported.graph_signature.output_specs
+            for output in decomposed.graph_signature.output_specs
         )
         == 4
     )
+    assert (
+        sum(
+            output.kind.name == "USER_INPUT_MUTATION"
+            for output in decomposed.graph_signature.output_specs
+        )
+        == 2
+    )
 
-    decomposed = exported.run_decompositions(_decomp_table())
     decomposed._example_inputs = None
     pt2_path = tmp_path / "qwen_paged_cache.pt2"
     torch.export.save(decomposed, pt2_path)

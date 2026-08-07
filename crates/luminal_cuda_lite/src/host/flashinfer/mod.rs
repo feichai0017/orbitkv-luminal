@@ -96,6 +96,37 @@ pub(crate) struct FlashInferDecodePointers {
     pub(crate) explicit_kv_indptr: Option<u64>,
 }
 
+impl FlashInferDecodePointers {
+    /// Return the captured kernel argument pointers that differ between two
+    /// executions. FlashInfer library calls are captured into CUDA graph nodes,
+    /// so any such change currently requires rebuilding that captured island.
+    pub(crate) fn changed_fields(self, other: Self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        if self.q != other.q {
+            changed.push("q");
+        }
+        if self.k_cache != other.k_cache {
+            changed.push("k_cache");
+        }
+        if self.v_cache != other.v_cache {
+            changed.push("v_cache");
+        }
+        if self.gather_idx != other.gather_idx {
+            changed.push("gather_idx");
+        }
+        if self.output != other.output {
+            changed.push("output");
+        }
+        if self.explicit_qo_indptr != other.explicit_qo_indptr {
+            changed.push("explicit_qo_indptr");
+        }
+        if self.explicit_kv_indptr != other.explicit_kv_indptr {
+            changed.push("explicit_kv_indptr");
+        }
+        changed
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FlashInferDecodeCaptureSignature {
     pub(crate) spec: FlashInferDecodeSpec,

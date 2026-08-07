@@ -129,6 +129,7 @@ class CompiledModel:
         # For CUDA inputs, keep references alive so the caching allocator doesn't
         # recycle GPU memory before run() reads the pointers.
         _input_refs = []
+        bound_cuda_inputs = {}
         for name, tensor, expected_dtype in zip(
             self._input_names, user_inputs, self._input_dtypes
         ):
@@ -148,6 +149,7 @@ class CompiledModel:
                 n_bytes = t.numel() * t.element_size()
                 self._graph.set_input_device_ptr(name, t.data_ptr(), n_bytes)
                 _input_refs.append(t)
+                bound_cuda_inputs[name] = t
             else:
                 t = tensor.detach().cpu().contiguous()
                 n_bytes = t.numel() * t.element_size()
@@ -260,13 +262,54 @@ class CompiledModel:
         # device buffer to register against.
         _use_zero_copy = self._supports_device_ptrs
         output_tensors = []
+        direct_writeback_positions = {}
+        direct_writeback_by_name = {}
+        direct_state_output_positions = set()
+        if _use_zero_copy:
+            for position, input_name in self._writeback_by_pos.items():
+                name = self._output_names[position]
+                target = user_inputs[self._input_names.index(input_name)]
+                bound_target = bound_cuda_inputs.get(input_name)
+                if (
+                    bound_target is not None
+                    and bound_target.dtype == output_torch_dtypes[position]
+                    and tuple(bound_target.shape) == tuple(output_shapes[position])
+                ):
+                    direct_writeback_by_name[name] = (target, bound_target)
         if _use_zero_copy:
             for i, (name, shape) in enumerate(zip(self._output_names, output_shapes)):
                 out_dtype = output_torch_dtypes[i]
                 if i in self._writeback_by_pos:
-                    # Write-backs land in the caller's input tensor below, not
-                    # in a fresh output buffer.
+                    # Bind CUDA mutation outputs directly to the caller's
+                    # original input allocation. If the selected LLIR output
+                    # aliases that input (for example KernelScatterNoCopy), the
+                    # runtime performs no copy. A materializing candidate still
+                    # honors the registration with a device-to-device epilogue.
+                    # Either way the persistent state's data_ptr stays stable.
+                    state = direct_writeback_by_name.get(name)
+                    if state is not None:
+                        target, bound_target = state
+                        self._graph.set_output_device_ptr(
+                            name,
+                            bound_target.data_ptr(),
+                            bound_target.numel() * bound_target.element_size(),
+                        )
+                        direct_writeback_positions[i] = (target, bound_target)
                     output_tensors.append(None)
+                    continue
+                if name in direct_writeback_by_name:
+                    # Export may expose the same mutated tensor again as a user
+                    # output. Keep that duplicate on the state allocation too;
+                    # registering a fresh output here would overwrite the
+                    # write-back registration (registrations are keyed by name).
+                    target, bound_target = direct_writeback_by_name[name]
+                    self._graph.set_output_device_ptr(
+                        name,
+                        bound_target.data_ptr(),
+                        bound_target.numel() * bound_target.element_size(),
+                    )
+                    output_tensors.append(target)
+                    direct_state_output_positions.add(i)
                     continue
                 out = torch.empty(shape, dtype=out_dtype, device=input_device)
                 if out_dtype in _zero_copy_native_floats:
@@ -284,11 +327,20 @@ class CompiledModel:
                 # In-place input mutation: copy the computed state back into
                 # the caller's tensor (the same object the model would have
                 # mutated eagerly); it is not part of the returned tuple.
+                # CUDA mutations registered directly on that tensor before
+                # run() are already complete and require no readback or copy.
+                if i in direct_writeback_positions:
+                    target, bound_target = direct_writeback_positions[i]
+                    if target.data_ptr() != bound_target.data_ptr():
+                        target.copy_(bound_target)
+                    continue
                 input_name = self._writeback_by_pos[i]
                 target = user_inputs[self._input_names.index(input_name)]
                 target.copy_(_read_typed_output(name, shape, out_dtype))
                 continue
-            if _use_zero_copy and out_dtype in _zero_copy_native_floats:
+            if i in direct_state_output_positions:
+                out = output_tensors[i]
+            elif _use_zero_copy and out_dtype in _zero_copy_native_floats:
                 out = output_tensors[i]
                 if not self._graph.output_is_zero_copy(name):
                     self._graph.copy_output_to_device_ptr(

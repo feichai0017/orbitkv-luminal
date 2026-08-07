@@ -155,8 +155,14 @@ class LuminalPagedLayer(CacheLayerMixin):
         new_keys = key_states.permute(0, 2, 1, 3).reshape(-1, kv_dim)
         new_values = value_states.permute(0, 2, 1, 3).reshape(-1, kv_dim)
         write_positions = cache_position.to(dtype=torch.int64)
-        self.keys = torch.index_put(self.keys, (write_positions,), new_keys)
-        self.values = torch.index_put(self.values, (write_positions,), new_values)
+        # These pools are persistent decoding state. Express their updates as
+        # real input mutations so torch.export records USER_INPUT_MUTATION
+        # write-backs instead of ordinary functional outputs. The Luminal CUDA
+        # boundary can then bind each write-back to the original pool pointer,
+        # preserving the stable K/V addresses required by captured library
+        # kernels such as FlashInfer.
+        self.keys.index_put_((write_positions,), new_keys)
+        self.values.index_put_((write_positions,), new_values)
         self.positions = torch.cat((self.positions, cache_position))
 
         # Read only active pages.  Returning a strided BHND view preserves the
@@ -191,8 +197,11 @@ class LuminalPagedLayer(CacheLayerMixin):
             )
 
     def reset(self) -> None:
-        self.keys.zero_()
-        self.values.zero_()
+        # Reset only the logical extent. Every slot made active by a later
+        # request is overwritten before it is read, so clearing the backing
+        # pools is unnecessary. Keeping the pools untouched also preserves
+        # their addresses across requests, which is required for reusing CUDA
+        # graphs that capture the FlashInfer K/V pointers.
         self.positions = self.positions[:0]
 
 

@@ -7,6 +7,7 @@ applies them back to the caller's tensors and returns only the user outputs,
 matching eager semantics and torch.compile's calling contract.
 """
 
+import pytest
 import torch
 from luminal import luminal_backend
 
@@ -76,6 +77,44 @@ def test_static_cache_prefill_smoke(device):
     for ref_layer, lum_layer in zip(ref_cache.layers, lum_cache.layers):
         assert torch.allclose(lum_layer.keys, ref_layer.keys, atol=1e-4)
         assert torch.allclose(lum_layer.values, ref_layer.values, atol=1e-4)
+
+
+def test_cuda_writeback_preserves_input_allocation(device):
+    """A CUDA input mutation writes directly into its original allocation.
+
+    Persistent state must not be read through the CPU or replaced by a fresh
+    output tensor between invocations; captured library kernels rely on the
+    input pointer remaining stable.
+    """
+    if device.type != "cuda":
+        pytest.skip("direct device-pointer writeback is CUDA-only")
+
+    class UpdateState(torch.nn.Module):
+        def forward(self, state, positions, values):
+            state.index_put_((positions,), values)
+            # Returning the mutated tensor creates both a mutation output and
+            # a user output with the same exported tensor name. Both must stay
+            # bound to the original persistent-state allocation.
+            return state, state.sum()
+
+    compiled = torch.compile(
+        UpdateState().to(device), backend=luminal_backend, fullgraph=True
+    )
+    state = torch.zeros(8, 4, device=device)
+    original_ptr = state.data_ptr()
+
+    with torch.inference_mode():
+        for position in (1, 5):
+            positions = torch.tensor([position], dtype=torch.int64, device=device)
+            values = torch.full((1, 4), float(position), device=device)
+            expected = state.clone()
+            expected.index_put_((positions,), values)
+            actual_state, actual_sum = compiled(state, positions, values)
+            torch.testing.assert_close(actual_sum, expected.sum())
+            torch.testing.assert_close(actual_state, expected)
+            torch.testing.assert_close(state, expected)
+            assert actual_state.data_ptr() == original_ptr
+            assert state.data_ptr() == original_ptr
 
 
 def test_writeback_metadata_exposed(device):
