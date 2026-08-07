@@ -169,6 +169,9 @@ pub fn expr_to_term(expr: &shape::Expression) -> Term {
         let t = match term {
             shape::Term::Num(n) => num(i64(*n)),
             shape::Term::Var(c) => mvar(str(&c.to_string())),
+            // Coordinate atoms ride the String M-var namespace as "#k" —
+            // single-char Var names can never collide (P1, 2026-08-07).
+            shape::Term::Coord(k) => mvar(str(&format!("#{k}"))),
             op => {
                 let a = stack.pop().unwrap();
                 let b = stack.pop().unwrap();
@@ -643,7 +646,7 @@ fn base_expression_egglog_impl(use_interval_analysis: bool) -> String {
     // typically `mul`s of stride/shape factors, so the new tree matches the
     // same `div-cancel-factor` pattern again. Combined with `mul-comm` (4
     // orderings of a*b/c*d) it drives a combinatorial blow-up on the deep
-    // `flatten_strides` index expressions produced by stacked unfold-based
+    // flat-index expressions produced by stacked unfold-based (flatten_strides is DELETED, P1 2026-08-07; comment kept for rule history)
     // convolutions. At 7 backbone YOLO v11 layers it accounts for ~66k
     // matches in a single early-stage saturate. Productive simplifications
     // (`div-self`, `mod-mul-self`, `div-const`, `merge-dims`) cover the
@@ -985,7 +988,7 @@ fn base_expression_egglog_impl(use_interval_analysis: bool) -> String {
     // `div-div`, restricted to nested constant divisors only. The original
     // unconstrained form `(a/b)/c → a/(b*c)` produces a new `div` whose
     // denominator matches the same rule again as soon as `a` is itself a
-    // `div`, and `flatten_strides` produces 4-deep div chains for every
+    // `div`, and the old flatten_strides (DELETED, P1 2026-08-07) produced 4-deep div chains for every
     // conv. Under `(saturate expr)` the unrestricted version is the single
     // biggest match generator on YOLO v11 (~200k matches at 7 layers,
     // growing super-linearly). Restricting both divisors to numeric

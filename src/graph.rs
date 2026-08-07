@@ -163,7 +163,7 @@ impl Graph {
 
 
 use crate::shape::{Expression, Term};
-use anyhow::{anyhow, bail, Result as AnyResult};
+use anyhow::{bail, Result as AnyResult};
 
 /// Handle to a tracker-level view value. Lives on `GraphTensor` (`Copy`);
 /// `None` means "my logical value is the recorder's value for my node id".
@@ -610,6 +610,17 @@ impl LogicalGraph {
     /// coordinate is identically 0); a fully degenerate shape records
     /// `(IntLit 0)`. The authoring-contract bounds check pair rides
     /// every iota.
+    /// Record a LogicalIota from a COORDINATE-FUNCTION expression (P1
+    /// ruling 2026-08-07): the value expression is authored over
+    /// `Term::Coord(k)` atoms — one per output axis, minted by
+    /// `Graph::iota`'s closure — and lowers per-axis: coords become
+    /// `(CoordVar shape axis)`, named symbols become `(IntVar "c")`.
+    /// There is no flat-'z' form anymore ('z' in an iota expression is an
+    /// ordinary named symbol; flat-index authoring is a rank-1 iota plus
+    /// recorded reshapes). Extent-1 axes substitute `(IntLit 0)` (their
+    /// coordinate is identically zero); a `Coord(k)` with `k >= rank` is
+    /// a leaked atom and poisons loudly. The authoring-contract bounds
+    /// pair rides every iota.
     pub fn record_iota(
         &mut self,
         at: usize,
@@ -627,46 +638,18 @@ impl LogicalGraph {
             }
         };
         let rank = dims.len();
-        let mut summands: Vec<String> = Vec::new();
-        for k in 0..rank {
-            if dims[k] == Expression::from(1) {
-                continue;
-            }
-            let coord = format!("(CoordVar {shape} {})", rank - 1 - k);
-            let mut stride: Option<String> = None;
-            for dim in &dims[k + 1..] {
-                if *dim == Expression::from(1) {
-                    continue;
+        let coord_terms: Vec<String> = (0..rank)
+            .map(|k| {
+                if dims[k] == Expression::from(1) {
+                    "(IntLit 0)".to_string()
+                } else {
+                    format!("(CoordVar {shape} {})", rank - 1 - k)
                 }
-                let term = match Self::dim_term(dim) {
-                    Ok(term) => term,
-                    Err(reason) => {
-                        self.poison(format!("iota at t{at}: {reason}"));
-                        return None;
-                    }
-                };
-                stride = Some(match stride {
-                    None => term,
-                    Some(acc) => format!("(IntMul {acc} {term})"),
-                });
-            }
-            summands.push(match stride {
-                None => coord,
-                Some(stride) => format!("(IntMul {coord} {stride})"),
-            });
-        }
-        let coord_term = match summands.pop() {
-            None => "(IntLit 0)".to_string(),
-            Some(mut acc) => {
-                for summand in summands.into_iter().rev() {
-                    acc = format!("(IntAdd {summand} {acc})");
-                }
-                acc
-            }
-        };
+            })
+            .collect();
         let value_expr = match int_expr_term(
             expr,
-            &coord_term,
+            &coord_terms,
             &format!("recorder iota t{at}"),
         ) {
             Ok(text) => text,
@@ -1314,19 +1297,29 @@ pub struct LogicalProgram {
 /// bails loudly.
 pub(crate) fn int_expr_term(
     expr: &Expression,
-    coord_term: &str,
+    coord_terms: &[String],
     at: &str,
 ) -> AnyResult<String> {
     let mut stack: Vec<String> = Vec::new();
     for term in expr.terms.read().iter() {
         match term {
             Term::Num(n) => stack.push(format!("(IntLit {n})")),
-            Term::Var('z') => stack.push(coord_term.to_string()),
             // Symbolic vars stay IntVar in the model — pins are
             // BINDING-side bounds seeds, never model content (same rule
-            // as dim_term; the R3 fix, 2026-08-06: a dynamic dim inside
-            // an iota expression records instead of poisoning).
+            // as dim_term; the R3 fix, 2026-08-06). No character is
+            // special: 'z' is an ordinary named symbol (P1, 2026-08-07).
             Term::Var(c) => stack.push(format!("(IntVar \"{c}\")")),
+            // Coordinate atoms substitute their axis's CoordVar term; an
+            // out-of-range axis is a coord Expression that leaked out of
+            // its own iota — refuse loudly.
+            Term::Coord(k) => match coord_terms.get(*k as usize) {
+                Some(term) => stack.push(term.clone()),
+                None => bail!(
+                    "coordinate atom c{k} at {at}: out of range for rank {} — a \
+                     coordinate Expression escaped its iota's value function",
+                    coord_terms.len()
+                ),
+            },
             Term::Add | Term::Mul | Term::Sub | Term::Div | Term::Mod | Term::Min
             | Term::Max | Term::Gte | Term::Lt => {
                 // Their builders emit RHS terms first, so the stack TOP is

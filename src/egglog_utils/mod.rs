@@ -221,6 +221,15 @@ pub fn extract_expr<'a>(
                 let name = op.replace("Boxed(\"", "").replace("\")", "");
                 Expression::from(name.chars().next().unwrap())
             }
+            op if op.starts_with("\"#") => {
+                // The coordinate atom's M-var spelling (see expr_to_term).
+                let axis: u8 = op
+                    .trim_matches('"')
+                    .trim_start_matches('#')
+                    .parse()
+                    .unwrap_or_else(|_| panic!("malformed coord M-var '{op}'"));
+                Expression::new(vec![crate::shape::Term::Coord(axis)])
+            }
             op => op
                 .parse::<i64>()
                 .map(Expression::from)

@@ -24,9 +24,21 @@ impl MoE {
         // 3. Gather top-k routing values: [batch.., k]
         //    flat_idx = batch_row * E + expert_idx
         //    iota(z / k * E) gives batch_row * E at each position in [batch.., k]
-        let row_offsets = activations
-            .graph()
-            .iota(Expression::from('z') / k_expr * e_dim, top_k_indices.dims());
+        // Batch-row offset · E as a coordinate function: leading batch
+        // axes carry their row-major strides scaled by E; the trailing k
+        // axis contributes 0 (P1, 2026-08-07 — the old flat form recorded
+        // a TruncDiv chain here).
+        let idx_dims = top_k_indices.dims();
+        let row_offsets = activations.graph().iota(idx_dims.clone(), |c| {
+            let n = idx_dims.len();
+            let mut stride = e_dim;
+            let mut acc = Expression::from(0);
+            for i in (0..n - 1).rev() {
+                acc = acc + c[i] * stride;
+                stride = (stride * idx_dims[i]).simplify();
+            }
+            acc
+        });
         let routing_flat_idx =
             (row_offsets.cast(DType::F32) + top_k_indices.cast(DType::F32)).cast(DType::Int);
         let top_k_values = routing_weights.gather1d(routing_flat_idx); // [batch.., k]
@@ -36,7 +48,7 @@ impl MoE {
         let base = (top_k_indices * io).cast(DType::F32); // [batch.., k]
         let within = activations
             .graph()
-            .iota(Expression::from('z'), (in_size, out_size))
+            .iota((in_size, out_size), |c| c[0] * out_size + c[1])
             .cast(DType::F32); // [in, out] values 0..in*out-1
 
         // Expand base to [batch.., k, in, out]

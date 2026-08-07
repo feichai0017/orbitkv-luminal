@@ -163,19 +163,25 @@ impl SsaReferenceRuntime {
             program.text
         );
         let mut egraph = crate::egglog_snippet::new_egraph();
+        let saturation_start = std::time::Instant::now();
         egraph
             .parse_and_run_program(None, &full)
             .map_err(|err| anyhow!("native saturation failed: {err}"))?;
+        let saturation_nanos = saturation_start.elapsed().as_nanos();
+        let serialize_start = std::time::Instant::now();
         let serialized = egraph
             .serialize(egglog::SerializeConfig::default())
             .egraph;
-        let outcome = crate::implementation_search::search_implementations_with_ops(
+        let serialize_nanos = serialize_start.elapsed().as_nanos();
+        let mut outcome = crate::implementation_search::search_implementations_with_ops(
             &serialized,
             &program,
             input_data,
             options,
             spec.ops,
         )?;
+        outcome.timings.saturation_nanos = saturation_nanos;
+        outcome.timings.serialize_nanos = serialize_nanos;
         self.stage_slots(&program.input_slots, &program.output_slots);
         self.load_plan(outcome.best_plan.clone());
         Ok(outcome)
@@ -868,9 +874,9 @@ mod tests {
     #[test]
     fn differential_rank2_iota_records_natively() {
         let mut cx = Graph::new();
-        // out[r, c] = flat·2 = (r·3 + c)·2 over (2, 3), cast to observe.
+        // out[r, c] = (r·3 + c)·2 over (2, 3), cast to observe.
         let out = cx
-            .iota(crate::shape::Expression::from('z') * 2, (2, 3))
+            .iota((2, 3), |c| (c[0] * 3 + c[1]) * 2)
             .cast(crate::dtype::DType::F32)
             .output();
 
@@ -917,7 +923,7 @@ mod tests {
         let mut cx = Graph::new();
         cx.set_dim('a', 10);
         let out = cx
-            .iota(crate::shape::Expression::from('z') + 'a', 3)
+            .iota(3, |c| c[0] + 'a')
             .cast(crate::dtype::DType::F32)
             .output();
 

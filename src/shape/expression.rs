@@ -162,6 +162,18 @@ impl Default for Expression {
 pub enum Term {
     Num(i64),
     Var(char),
+    /// A structural per-axis COORDINATE atom (P1 ruling 2026-08-07):
+    /// `Coord(k)` is "coordinate of axis k of the iota being recorded" —
+    /// positional, de-Bruijn-style, so an Expression holding coords means
+    /// exactly what it says wherever it is used as an iota value function.
+    /// Only `Graph::iota`'s closure mints these (via `Expression::coord`);
+    /// they are structurally disjoint from named symbols (`Var`), so no
+    /// character is ever reserved and no collision is possible. Coords
+    /// lower to `CoordVar` in the recorded model; named symbols lower to
+    /// `IntVar`. A coord leaking anywhere outside an iota value fails
+    /// loudly (dim positions reject compound terms; the recorder bails on
+    /// out-of-range axes).
+    Coord(u8),
     Add,
     Sub,
     Mul,
@@ -181,6 +193,7 @@ impl std::fmt::Debug for Term {
         match self {
             Term::Num(n) => write!(f, "{n}"),
             Term::Var(c) => write!(f, "{c}"),
+            Term::Coord(k) => write!(f, "c{k}"),
             Term::Add => write!(f, "+"),
             Term::Sub => write!(f, "-"),
             Term::Mul => write!(f, "*"),
@@ -281,6 +294,7 @@ impl Debug for Expression {
             let new_symbol = match term {
                 Term::Num(n) => n.to_string(),
                 Term::Var(c) => c.to_string(),
+                Term::Coord(k) => format!("c{k}"),
                 Term::Max => format!(
                     "max({}, {})",
                     symbols.pop().unwrap(),
@@ -310,12 +324,28 @@ impl std::fmt::Display for Expression {
 }
 
 impl Expression {
+    /// Mint the coordinate atom for axis `k` — only `Graph::iota`'s
+    /// closure hands these out (P1 ruling 2026-08-07). Positional: the
+    /// atom means "axis k of whichever iota value function it appears
+    /// in" — an expression holding coords behaves exactly as written
+    /// wherever it is used.
+    pub(crate) fn coord(axis: usize) -> Self {
+        assert!(axis < 256, "iota rank is capped at 256 axes");
+        Expression::new(vec![Term::Coord(axis as u8)])
+    }
+
+    /// Does this expression contain any coordinate atoms?
+    pub fn contains_coords(&self) -> bool {
+        self.terms.read().iter().any(|term| matches!(term, Term::Coord(_)))
+    }
+
     pub fn to_egglog(&self) -> String {
         let mut symbols = vec![];
         for term in self.terms.read().iter() {
             let new_symbol = match term {
                 Term::Num(n) => format!("(MNum {n})"),
                 Term::Var(c) => format!("(MVar \"{c}\")"),
+                Term::Coord(k) => format!("(MVar \"#{k}\")"),
                 Term::Max => format!(
                     "(MMax {} {})",
                     symbols.pop().unwrap(),
@@ -849,7 +879,7 @@ fn leading_num_is_top_add_operand(body: &[Term]) -> bool {
     let mut bare: Vec<bool> = Vec::with_capacity(body.len());
     for (i, term) in body.iter().enumerate() {
         match term {
-            Term::Num(_) | Term::Var(_) => bare.push(i == 0),
+            Term::Num(_) | Term::Var(_) | Term::Coord(_) => bare.push(i == 0),
             _ => {
                 // Binary operator: consumes the top two operands.
                 if bare.len() < 2 {

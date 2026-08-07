@@ -16,7 +16,7 @@ fn scatter_ranks_to_sort_indices(
 
     // Values: [0, 1, ..., ax_size-1] along axis, expanded to full shape
     let mut values = g.arange(ax_size);
-    let mut zeros = g.iota(Expression::from(0usize), ax_size);
+    let mut zeros = g.iota(ax_size, |_| Expression::from(0usize));
     for (i, &dim) in dims.iter().enumerate() {
         if i != axis {
             values = values.expand_dim(i, dim);
@@ -37,28 +37,14 @@ fn scatter_ranks_to_sort_indices(
     let axis_stride = strides[axis];
     let ranks_scaled = ranks * axis_stride;
 
-    let mut base_offset: Option<GraphTensor> = None;
-    for d in 0..ndim {
-        if d == axis {
-            continue;
-        }
-        let expr = Expression::from('z') * strides[d];
-        let mut component = g.iota(expr, dims[d]);
-        for (i, &dim) in dims.iter().enumerate() {
-            if i != d {
-                component = component.expand_dim(i, dim);
-            }
-        }
-        base_offset = Some(match base_offset {
-            None => component,
-            Some(acc) => acc + component,
-        });
-    }
-
-    let adjusted = match base_offset {
-        None => ranks_scaled,
-        Some(base) => base + ranks_scaled,
-    };
+    // One coordinate-function iota replaces the per-dim iota +
+    // expand_dim scaffolding (P1, 2026-08-07).
+    let base_offset = g.iota(dims.to_vec(), |c| {
+        (0..ndim)
+            .filter(|d| *d != axis)
+            .fold(Expression::from(0), |acc, d| acc + c[d] * strides[d])
+    });
+    let adjusted = base_offset + ranks_scaled;
 
     values.scatter1d(adjusted, zeros)
 }

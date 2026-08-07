@@ -60,6 +60,47 @@ pub struct SearchOutcome {
     pub plans_profiled: usize,
     /// Candidates answered from the fingerprint cache without re-profiling.
     pub fingerprint_hits: usize,
+    /// Wall-clock attribution across the pipeline stages — the
+    /// programmatic answer to "what is the search time actually spent
+    /// on" (no env vars; read it from the outcome).
+    pub timings: SearchTimings,
+}
+
+/// Stage wall-clock totals for one search, in nanoseconds. Saturation
+/// and serialization happen in the runtime's `search` wrapper and are
+/// stamped there; the rest accumulate inside the selection loop.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchTimings {
+    /// egglog parse + saturation to fixpoint (one per search).
+    pub saturation_nanos: u128,
+    /// e-graph serialization (one per search).
+    pub serialize_nanos: u128,
+    /// ExtractionSession::new + producer index + viability fixpoint.
+    pub analysis_nanos: u128,
+    /// All genome extractions (extract_with_genome, cumulative).
+    pub extract_nanos: u128,
+    /// All DPS rewrites + bufferizations (cumulative).
+    pub plan_build_nanos: u128,
+    /// All candidate executions: warmup + timed trials (cumulative) —
+    /// the part that shrinks with a faster runtime.
+    pub profile_nanos: u128,
+}
+
+impl SearchTimings {
+    /// A compact human-readable ms breakdown for test logs.
+    pub fn summary(&self) -> String {
+        let ms = |n: u128| n as f64 / 1e6;
+        format!(
+            "saturation {:.0}ms, serialize {:.0}ms, analysis {:.0}ms, extract {:.0}ms, \
+             plan-build {:.0}ms, profile-exec {:.0}ms",
+            ms(self.saturation_nanos),
+            ms(self.serialize_nanos),
+            ms(self.analysis_nanos),
+            ms(self.extract_nanos),
+            ms(self.plan_build_nanos),
+            ms(self.profile_nanos)
+        )
+    }
 }
 
 /// Search the saturated e-graph for the fastest executable plan, profiling
@@ -97,8 +138,11 @@ pub fn search_implementations_with_ops(
         .collect();
     let input_data = &buffer_data;
     let allow = allow_override.unwrap_or_else(crate::ssa_reference::reference_allow_list);
+    let mut timings = SearchTimings::default();
+    let analysis_start = Instant::now();
     let mut session = extractor::ExtractionSession::new(egraph, Some(&allow));
     let index = extractor::producer_index_with_ops(egraph, Some(&allow));
+    timings.analysis_nanos = analysis_start.elapsed().as_nanos();
     // An empty index is NOT an error: a graph with no searchable producer
     // classes (pure identity — every output is an input value) has a
     // one-point genome space, the empty genome. The search still profiles
@@ -173,7 +217,10 @@ pub fn search_implementations_with_ops(
         for genome in candidates {
             // Extraction failure = invalid genome (cycle, contract breach):
             // discard; the next generation's fresh mutations are the repair.
-            let graph = match session.extract_with_genome(&genome) {
+            let extract_start = Instant::now();
+            let extracted = session.extract_with_genome(&genome);
+            timings.extract_nanos += extract_start.elapsed().as_nanos();
+            let graph = match extracted {
                 Ok(Some(graph)) => graph,
                 Ok(None) => {
                     if refusals.len() < 8 {
@@ -195,7 +242,10 @@ pub fn search_implementations_with_ops(
                     *nanos
                 }
                 None => {
-                    let plan = match crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph)) {
+                    let build_start = Instant::now();
+                    let built = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph));
+                    timings.plan_build_nanos += build_start.elapsed().as_nanos();
+                    let plan = match built {
                         Ok(plan) => plan,
                         Err(err) => {
                             if refusals.len() < 8 {
@@ -204,7 +254,10 @@ pub fn search_implementations_with_ops(
                             continue;
                         }
                     };
-                    let nanos = match profile_plan(&plan, options.trials) {
+                    let profile_start = Instant::now();
+                    let profiled = profile_plan(&plan, options.trials);
+                    timings.profile_nanos += profile_start.elapsed().as_nanos();
+                    let nanos = match profiled {
                         Ok(nanos) => nanos,
                         Err(err) => {
                             if refusals.len() < 8 {
@@ -222,8 +275,10 @@ pub fn search_implementations_with_ops(
                 }
             };
             if best.as_ref().is_none_or(|(best_nanos, _, _)| nanos < *best_nanos) {
-                let Ok(plan) = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph))
-                else {
+                let build_start = Instant::now();
+                let built = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph));
+                timings.plan_build_nanos += build_start.elapsed().as_nanos();
+                let Ok(plan) = built else {
                     continue;
                 };
                 best = Some((nanos, genome.clone(), plan));
@@ -246,6 +301,7 @@ pub fn search_implementations_with_ops(
         best_nanos,
         plans_profiled,
         fingerprint_hits,
+        timings,
     })
 }
 

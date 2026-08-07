@@ -2653,6 +2653,46 @@ pub fn harness_search_options() -> crate::implementation_search::ImplementationS
     }
 }
 
+/// DIAGNOSIS-ONLY (test-extractor exemption): does the plain no-genome
+/// extraction produce an executable plan for this graph? Separates "no
+/// plan exists" (structural gap) from "random genomes cannot find one"
+/// (genome-space density). Never used by the main path — everything real
+/// runs the genetic search.
+pub fn plain_plan_exists(cx: &crate::graph::Graph) -> anyhow::Result<()> {
+    let program = cx
+        .logical
+        .native_program()
+        .map_err(|reason| anyhow::anyhow!("recorder: {reason}"))?;
+    let text = format!(
+        "{}\n\n{}",
+        crate::egglog_snippet::assembled_program(),
+        program.text
+    );
+    let mut egraph = crate::egglog_snippet::new_egraph();
+    let start = std::time::Instant::now();
+    egraph
+        .parse_and_run_program(None, &text)
+        .map_err(|err| anyhow::anyhow!("saturation: {err}"))?;
+    eprintln!("[plain-plan] saturation {:?}", start.elapsed());
+    let start = std::time::Instant::now();
+    let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
+    eprintln!(
+        "[plain-plan] serialize {:?} ({} nodes, {} classes)",
+        start.elapsed(),
+        serialized.nodes.len(),
+        serialized.classes().len()
+    );
+    let allow = crate::ssa_reference::reference_allow_list();
+    let start = std::time::Instant::now();
+    let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))?
+        .ok_or_else(|| anyhow::anyhow!("no output boundary reached"))?;
+    eprintln!("[plain-plan] extract {:?}", start.elapsed());
+    let start = std::time::Instant::now();
+    crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))?;
+    eprintln!("[plain-plan] dps+bufferize {:?}", start.elapsed());
+    Ok(())
+}
+
 /// M3 Step 4b: the NATIVE test harness — recorder model + reference
 /// binding + dyn pins as tight [n,n] bounds seeds, saturated, then the
 /// GENETIC IMPLEMENTATION SEARCH picks the winning plan (executing every

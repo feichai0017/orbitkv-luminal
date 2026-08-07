@@ -127,8 +127,7 @@ pub fn paged_attention(
     // Build causal mask: query at position prev_seq+i can attend to context j iff j <= prev_seq+i.
     // row_vals[i] = prev_seq + i, col_vals[j] = j
     // mask[i,j] = -1e9 where row_vals[i] < col_vals[j], else 0
-    let z = Expression::from('z');
-    let row_vals = cx.iota(z + prev_seq, s).expand_dim(1, ctx); // (s, ctx)
+    let row_vals = cx.iota(s, |c| c[0] + prev_seq).expand_dim(1, ctx); // (s, ctx)
     let col_vals = cx.arange(ctx).expand_dim(0, s); // (s, ctx)
     let mask = row_vals
         .cast(DType::F32)

@@ -24,14 +24,26 @@ impl Graph {
         tensor.with_logical(logical)
     }
 
-    /// Iota expression, authored over the FLAT coordinate of `shape`
-    /// (the `'z'` surface syntax). The recorder rewrites it into a true
-    /// per-coordinate function over the declared shape at ANY rank —
-    /// `z := Σ CoordVar(shape, axis)·stride` — so multi-dim iotas record
-    /// natively, with no view detour (Design A, ruling 2026-08-06).
-    pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
+    /// Iota as a TRUE COORDINATE FUNCTION (P1 ruling 2026-08-07): the
+    /// closure receives one coordinate Expression per output axis
+    /// (`c[k]` ranges over `0..shape[k]`) and returns the value
+    /// expression. Coordinates lower to `CoordVar`; named symbols (any
+    /// char — nothing is reserved, `'z'` included) lower to `IntVar` and
+    /// resolve at binding time. The old flat-'z' interface is DELETED —
+    /// flat-index authoring is a rank-1 iota plus recorded reshapes.
+    /// Coordinate Expressions are positional: one that escapes into
+    /// another iota's closure means that iota's same-numbered axis —
+    /// defined behavior, the expression does what it says; escaping
+    /// anywhere else refuses loudly (dim positions reject compound
+    /// terms, out-of-range axes poison the recorder).
+    pub fn iota(
+        &mut self,
+        shape: impl ToShape,
+        f: impl FnOnce(&[Expression]) -> Expression,
+    ) -> GraphTensor {
         let sh = shape.to_shape();
-        let expr = i.into().simplify();
+        let coords: Vec<Expression> = (0..sh.len()).map(Expression::coord).collect();
+        let expr = f(&coords).simplify();
         let id = self.mint_id();
         let tensor = GraphTensor::from_id(id, sh.clone(), self, DType::Int);
         let logical = self.logical.record_iota(id.index(), &expr, &sh);
@@ -40,7 +52,7 @@ impl Graph {
 
     /// ARange from 0 to N
     pub fn arange(&mut self, to: impl Into<Expression>) -> GraphTensor {
-        self.iota('z', to)
+        self.iota(to, |c| c[0])
     }
 
     /// ARange from beginning to end
@@ -51,7 +63,7 @@ impl Graph {
         step: impl Into<Expression>,
     ) -> GraphTensor {
         let (start, end, step) = (start.into(), end.into(), step.into());
-        self.iota((Expression::from('z') * step) + start, (end - start) / step)
+        self.iota((end - start) / step, move |c| c[0] * step + start)
     }
 
     /// Lower left-hand triangle of 1s. Currently required to be square

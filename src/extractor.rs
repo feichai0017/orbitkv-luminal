@@ -31,6 +31,13 @@ struct Extractor<'a> {
     /// `None` = the deterministic fixture extractor (min-cost tooling).
     genome: Option<Genome>,
     memo: HashMap<ClassId, Option<Plan>>,
+    /// GENOME-INDEPENDENT op-instance cache: matcher `extract()` parses
+    /// only enode METADATA (index maps, iota expressions, coordinate
+    /// ranks — the deep backtracking walks over saturated classes), which
+    /// never depends on the genome. Filled once per session, NEVER
+    /// cleared by `extract_with_genome` — measured 2026-08-06: re-parsing
+    /// per genome was 98% of a 378s MLP search (5.8s × 64 genomes).
+    op_cache: std::cell::RefCell<HashMap<NodeId, Box<dyn LayoutIrOp>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -343,6 +350,7 @@ impl<'a> Extractor<'a> {
             input_terminals,
             genome: genome.cloned(),
             memo: HashMap::new(),
+            op_cache: Default::default(),
         }
     }
 
@@ -417,112 +425,251 @@ impl<'a> Extractor<'a> {
             return Ok(None);
         }
 
-                for root in &roots {
-            if self.best_plan(root, &mut HashSet::new()).is_none() {
-                bail!("failed to extract LayoutIR graph from BufferOutputLit eclass {root}");
+        self.relax_to_fixpoint(&roots);
+        for root in &roots {
+            if self.memo.get(root).cloned().flatten().is_none() {
+                // Refusal accounting: the output list is ONE class — walk
+                // its cons spine and test each element so the refusal
+                // names WHICH outputs (binding order) have no plan.
+                let mut failing: Vec<usize> = Vec::new();
+                let spine_nodes = self.class_nodes.get(root).cloned().unwrap_or_default();
+                if let Some(list_node) = spine_nodes.iter().find_map(|id| {
+                    self.egraph.nodes.get(id).filter(|n| n.op == "BufferOutputLit")
+                }) {
+                    let mut spine = list_node.children.first().and_then(|c| {
+                        self.egraph.nodes.get(c).map(|n| n.eclass.clone())
+                    });
+                    let mut index = 0usize;
+                    while let Some(class) = spine {
+                        assert!(index <= 4096, "cyclic BufferTensorCons output spine — unsound weld");
+                        let Some(cons) = self
+                            .class_nodes
+                            .get(&class)
+                            .into_iter()
+                            .flatten()
+                            .find_map(|id| {
+                                self.egraph
+                                    .nodes
+                                    .get(id)
+                                    .filter(|n| n.op == "BufferTensorCons")
+                            })
+                        else {
+                            break;
+                        };
+                        if let Some(element) = cons.children.first().and_then(|c| {
+                            self.egraph.nodes.get(c).map(|n| n.eclass.clone())
+                        }) {
+                            if self.memo.get(&element).cloned().flatten().is_none() {
+                                failing.push(index);
+                            }
+                        }
+                        index += 1;
+                        spine = cons.children.get(1).and_then(|c| {
+                            self.egraph.nodes.get(c).map(|n| n.eclass.clone())
+                        });
+                    }
+                }
+                bail!(
+                    "failed to extract LayoutIR graph from BufferOutputLit eclass {root}; \
+                     outputs with no plan (binding order): {failing:?}"
+                );
             }
         }
 
         Ok(Some(self.build_extracted_graph(&roots)?))
     }
 
-    fn best_plan(&mut self, class: &ClassId, visiting: &mut HashSet<ClassId>) -> Option<Plan> {
-        if let Some(plan) = self.memo.get(class) {
-            return plan.clone();
-        }
-        if !visiting.insert(class.clone()) {
-            return None;
-        }
-
-        let mut best = self.input_terminals.get(class).map(|input| Plan {
-            cost: 0,
-            copies: 0,
-            source_eclass: None,
-            source_enode: None,
-            selected_output_index: None,
-            input_list: Vec::new(),
-            output_list: Vec::new(),
-            kind: PlanKind::Input(input.clone()),
-            children: Vec::new(),
-            metadata: Vec::new(),
+    /// The candidate set for one class under the current genome (or the
+    /// full enumeration on the plain path). Pure construction — no
+    /// recursion, no planning.
+    ///
+    /// GENOME AUTHORITY (the selection adapter): when a genome drives the
+    /// walk, a class with producers is produced by EXACTLY its chosen
+    /// enode/slot — never by cost, never by first-emission claiming. A
+    /// produced class missing from the genome violates the total-genome
+    /// contract: candidates empty out and extraction fails loudly at the
+    /// root (fail-open, no silent substitution). The choice DIRECTS
+    /// construction (2026-08-06): candidates are built for the chosen
+    /// enode only, never built-then-discarded per spelling.
+    fn candidates_for_class(&self, class: &ClassId) -> Vec<Candidate> {
+        let genome_choice = self.genome.as_ref().and_then(|genome| {
+            self.producer_index
+                .contains_key(class)
+                .then(|| genome.choices.get(class))
         });
-
         let mut candidates = Vec::new();
-        let node_ids = self.class_nodes.get(class).cloned().unwrap_or_default();
-        for node_id in node_ids {
-            let Some(node) = self.egraph.nodes.get(&node_id) else {
-                continue;
-            };
-            if let Some(candidate) = self.candidate_for_node(&node_id, node) {
-                candidates.push(candidate);
+        match genome_choice {
+            Some(Some(choice)) => {
+                if let Some(node) = self.egraph.nodes.get(&choice.enode) {
+                    let node_id = choice.enode.clone();
+                    if let Some(candidate) = self.candidate_for_node(&node_id, node) {
+                        candidates.push(candidate);
+                    }
+                }
+                candidates.extend(self.producer_candidates_for_output(class));
+                candidates.retain(|candidate| {
+                    candidate.source_enode.as_ref() == Some(&choice.enode)
+                        && candidate.selected_output_index == Some(choice.output_index)
+                });
+            }
+            Some(None) => {} // total-genome contract violated: no candidates
+            None => {
+                let node_ids = self.class_nodes.get(class).cloned().unwrap_or_default();
+                for node_id in node_ids {
+                    let Some(node) = self.egraph.nodes.get(&node_id) else {
+                        continue;
+                    };
+                    if let Some(candidate) = self.candidate_for_node(&node_id, node) {
+                        candidates.push(candidate);
+                    }
+                }
+                candidates.extend(self.producer_candidates_for_output(class));
             }
         }
-        candidates.extend(self.producer_candidates_for_output(class));
+        candidates
+    }
 
-        // GENOME AUTHORITY (the selection adapter): when a genome drives the
-        // walk, a class with producers is produced by EXACTLY its chosen
-        // enode/slot — never by cost, never by first-emission claiming. A
-        // produced class missing from the genome violates the total-genome
-        // contract: candidates empty out and extraction fails loudly at the
-        // root (fail-open, no silent substitution).
-        if let Some(genome) = self.genome.as_ref() {
-            // The viability-filtered index IS the genome contract: every
-            // indexed class has an entry in every genome; unindexed
-            // classes are not decision points.
-            if self.producer_index.contains_key(class) {
-                match genome.choices.get(class) {
-                    Some(choice) => candidates.retain(|candidate| {
-                        candidate.source_enode.as_ref() == Some(&choice.enode)
-                            && candidate.selected_output_index == Some(choice.output_index)
-                    }),
-                    None => candidates.clear(),
+    /// BOTTOM-UP FIXPOINT RELAXATION (2026-08-07) — replaces the
+    /// recursive walk. The DFS's cycle guard made `None` contextual:
+    /// not caching it re-explored whole subtrees exponentially on
+    /// cycle-rich e-graphs (the 2-layer decoder hang — 15k nodes,
+    /// >150s), and caching it produced wrong refusals. Relaxation has
+    /// neither problem: a class's plan materializes the pass after all
+    /// of some candidate's children have plans, costs only improve
+    /// monotonically, and cycles simply never enable — no guard, no
+    /// taint, polynomial by construction. The memo fills exactly as the
+    /// walk would have filled it; `build_extracted_graph` reads it
+    /// unchanged.
+    fn relax_to_fixpoint(&mut self, roots: &[ClassId]) {
+        // Discover the class universe reachable through candidates.
+        // Progress reporting is PATHOLOGY-GATED: healthy extractions say
+        // nothing; anything slow narrates itself every few seconds.
+        let discovery_start = std::time::Instant::now();
+        let mut last_report = discovery_start;
+        let mut discovered: HashSet<ClassId> = HashSet::new();
+        let mut universe: Vec<ClassId> = Vec::new();
+        let mut candidate_lists: Vec<Vec<Candidate>> = Vec::new();
+        let mut queue: std::collections::VecDeque<ClassId> = roots.iter().cloned().collect();
+        while let Some(class) = queue.pop_front() {
+            if !discovered.insert(class.clone()) {
+                continue;
+            }
+            let candidates = self.candidates_for_class(&class);
+            for candidate in &candidates {
+                for child in &candidate.children {
+                    if !discovered.contains(&child.class) {
+                        queue.push_back(child.class.clone());
+                    }
                 }
             }
+            if last_report.elapsed().as_secs() >= 5 {
+                last_report = std::time::Instant::now();
+                eprintln!(
+                    "[extract] SLOW DISCOVERY {:?}: {} classes so far, {} queued, last class {}",
+                    discovery_start.elapsed(),
+                    universe.len(),
+                    queue.len(),
+                    class
+                );
+            }
+            universe.push(class);
+            candidate_lists.push(candidates);
+        }
+        let total_candidates: usize = candidate_lists.iter().map(Vec::len).sum();
+        if discovery_start.elapsed().as_secs() >= 2 {
+            eprintln!(
+                "[extract] discovery {:?}: {} classes, {} candidates",
+                discovery_start.elapsed(),
+                universe.len(),
+                total_candidates
+            );
         }
 
-        for candidate in candidates {
-            let mut cost = candidate.base_cost();
-            let mut copies = candidate.copy_count();
-            let mut child_plans = Vec::with_capacity(candidate.children.len());
-
-            for child in &candidate.children {
-                let Some(child_plan) = self.best_plan(&child.class, visiting) else {
-                    child_plans.clear();
-                    break;
+        let mut passes = 0usize;
+        let relax_start = std::time::Instant::now();
+        let mut last_report = relax_start;
+        loop {
+            passes += 1;
+            assert!(
+                passes <= 100_000,
+                "extraction fixpoint did not converge after {passes} passes over {} classes",
+                universe.len()
+            );
+            if last_report.elapsed().as_secs() >= 5 {
+                last_report = std::time::Instant::now();
+                let planned = self.memo.values().filter(|plan| plan.is_some()).count();
+                eprintln!(
+                    "[extract] SLOW RELAX {:?}: pass {passes}, {} planned / {} classes",
+                    relax_start.elapsed(),
+                    planned,
+                    universe.len()
+                );
+            }
+            let mut changed = false;
+            for (class, candidates) in universe.iter().zip(&candidate_lists) {
+                let mut best = self.input_terminals.get(class).map(|input| Plan {
+                    cost: 0,
+                    copies: 0,
+                    source_eclass: None,
+                    source_enode: None,
+                    selected_output_index: None,
+                    input_list: Vec::new(),
+                    output_list: Vec::new(),
+                    kind: PlanKind::Input(input.clone()),
+                    children: Vec::new(),
+                    metadata: Vec::new(),
+                });
+                'candidates: for candidate in candidates {
+                    let mut cost = candidate.base_cost();
+                    let mut copies = candidate.copy_count();
+                    let mut child_plans = Vec::with_capacity(candidate.children.len());
+                    for child in &candidate.children {
+                        let Some(Some(child_plan)) = self.memo.get(&child.class) else {
+                            continue 'candidates;
+                        };
+                        cost += child_plan.cost;
+                        copies += child_plan.copies;
+                        child_plans.push(child.clone());
+                    }
+                    let plan = Plan {
+                        cost,
+                        copies,
+                        source_eclass: candidate
+                            .source_eclass
+                            .clone()
+                            .or_else(|| Some(class.clone())),
+                        source_enode: candidate.source_enode.clone(),
+                        selected_output_index: candidate.selected_output_index,
+                        input_list: candidate.input_list.clone(),
+                        output_list: candidate.output_list.clone(),
+                        kind: candidate.kind.clone(),
+                        children: child_plans,
+                        metadata: candidate.metadata.clone(),
+                    };
+                    if self.is_better(&plan, best.as_ref()) {
+                        best = Some(plan);
+                    }
+                }
+                let current = self.memo.get(class).cloned().flatten();
+                let improved = match (&best, &current) {
+                    (Some(new), Some(old)) => self.is_better(new, Some(old)),
+                    (Some(_), None) => true,
+                    (None, _) => false,
                 };
-                cost += child_plan.cost;
-                copies += child_plan.copies;
-                child_plans.push(child.clone());
+                if improved {
+                    self.memo.insert(class.clone(), best);
+                    changed = true;
+                }
             }
-
-            if child_plans.len() != candidate.children.len() {
-                continue;
-            }
-
-            let plan = Plan {
-                cost,
-                copies,
-                source_eclass: candidate
-                    .source_eclass
-                    .clone()
-                    .or_else(|| Some(class.clone())),
-                source_enode: candidate.source_enode,
-                selected_output_index: candidate.selected_output_index,
-                input_list: candidate.input_list,
-                output_list: candidate.output_list,
-                kind: candidate.kind,
-                children: child_plans,
-                metadata: candidate.metadata,
-            };
-
-            if self.is_better(&plan, best.as_ref()) {
-                best = Some(plan);
+            if !changed {
+                break;
             }
         }
-
-        visiting.remove(class);
-        self.memo.insert(class.clone(), best.clone());
-        best
+        // Classes that never planned: record the definitive None so the
+        // failure diagnostics (and build-side plan()) read a settled memo.
+        for class in &universe {
+            self.memo.entry(class.clone()).or_insert(None);
+        }
     }
 
     fn candidate_for_node(&self, node_id: &NodeId, node: &Node) -> Option<Candidate> {
@@ -628,11 +775,17 @@ impl<'a> Extractor<'a> {
                 matcher.metadata_slots(),
             )
         });
-        let op: Box<dyn LayoutIrOp> = matcher.extract(&ExtractionSite {
-            egraph: self.egraph,
-            node_id,
-            node,
-        });
+        let op: Box<dyn LayoutIrOp> = if let Some(cached) = self.op_cache.borrow().get(node_id) {
+            cached.clone()
+        } else {
+            let op = matcher.extract(&ExtractionSite {
+                egraph: self.egraph,
+                node_id,
+                node,
+            });
+            self.op_cache.borrow_mut().insert(node_id.clone(), op.clone());
+            op
+        };
 
         let children = self.op_children(&spec.inputs, op.as_ref());
         Some(Candidate::layout_ir(
@@ -904,12 +1057,21 @@ struct ClassRenderer<'a> {
 struct LogicalRenderCtx<'r, 'a, 'v> {
     renderer: &'r ClassRenderer<'a>,
     visiting: &'v mut HashSet<ClassId>,
+    /// Remaining expansion depth — the logical value graph is a
+    /// CONVERGENT DAG (residual connections reuse values), so unbounded
+    /// readable-expression expansion is exponential (2026-08-07: the
+    /// 2-layer decoder build hang). Past the cap, children render as
+    /// short labels.
+    depth: usize,
 }
 
 impl LogicalRender for LogicalRenderCtx<'_, '_, '_> {
     fn child_expr(&mut self, node: &Node, index: usize) -> String {
         child_class(self.renderer.egraph, node, index)
-            .map(|class| self.renderer.readable_logical_expr(&class, self.visiting))
+            .map(|class| {
+                self.renderer
+                    .readable_logical_expr_depth(&class, self.visiting, self.depth)
+            })
             .unwrap_or_else(|| "?".to_string())
     }
 
@@ -1107,7 +1269,7 @@ impl<'a> ClassRenderer<'a> {
             match logical_op_for(node.op.as_str()) {
                 Some(op) => op.display_label(
                     node,
-                    &mut LogicalRenderCtx { renderer: self, visiting: &mut HashSet::new() },
+                    &mut LogicalRenderCtx { renderer: self, visiting: &mut HashSet::new(), depth: 8 },
                 ),
                 None => self.render_node(node_id, 8),
             }
@@ -1175,8 +1337,22 @@ impl<'a> ClassRenderer<'a> {
         choose_render_node(self.egraph, node_ids, None)
     }
 
+    /// ONE LEVEL OF INDIRECTION (Austin's ruling 2026-08-07): a logical
+    /// value renders as its op over its CHILDREN'S LABELS (let-names or
+    /// stable e-class ids) — "id-123 = sqrt(id-122)" — never the nested
+    /// tree. The logical value graph is a convergent DAG; full-tree
+    /// expansion was exponential (the 2-layer decoder build hang).
     fn readable_logical_expr(&self, class: &ClassId, visiting: &mut HashSet<ClassId>) -> String {
-        if !visiting.insert(class.clone()) {
+        self.readable_logical_expr_depth(class, visiting, 1)
+    }
+
+    fn readable_logical_expr_depth(
+        &self,
+        class: &ClassId,
+        visiting: &mut HashSet<ClassId>,
+        depth: usize,
+    ) -> String {
+        if depth == 0 || !visiting.insert(class.clone()) {
             return self.logical_label(class);
         }
 
@@ -1185,9 +1361,10 @@ impl<'a> ClassRenderer<'a> {
             .and_then(|node_id| {
                 let node = self.egraph.nodes.get(node_id)?;
                 Some(match logical_op_for(node.op.as_str()) {
-                    Some(op) => {
-                        op.readable_expr(node, &mut LogicalRenderCtx { renderer: self, visiting })
-                    }
+                    Some(op) => op.readable_expr(
+                        node,
+                        &mut LogicalRenderCtx { renderer: self, visiting, depth: depth - 1 },
+                    ),
                     None => self.render_node(node_id, 16),
                 })
             })
@@ -1621,7 +1798,10 @@ impl<'a> ClassRenderer<'a> {
     fn numeric_expr_list(&self, class: &ClassId) -> Option<Vec<i64>> {
         let mut dims = Vec::new();
         let mut current = class.clone();
+        let mut spine_steps = 0usize;
         loop {
+            spine_steps += 1;
+            assert!(spine_steps <= 4096, "cyclic or oversized IntExprCons spine at class {current} — unsound weld or schema drift");
             if let Some(node_id) = self.node_with_op(&current, "IntExprCons").cloned() {
                 let node = self.egraph.nodes.get(&node_id)?;
                 dims.push(self.numeric_int_expr(&child_class(self.egraph, node, 0)?)?);
@@ -1733,6 +1913,8 @@ impl<'a> Extractor<'a> {
     fn build_extracted_graph(&self, roots: &[ClassId]) -> Result<ExtractedGraph> {
         let mut builder = IrBuilder {
             extractor: self,
+            ensure_calls: 0,
+            collect_calls: 0,
             dag: DiGraph::new(),
             value_producer: HashMap::new(),
             op_nodes: HashMap::new(),
@@ -1760,7 +1942,7 @@ impl<'a> Extractor<'a> {
 
         let (logical, layout) = match self.layout_tensor_parts(class) {
             Some((logical_class, layout_class)) => (
-                self.logical_info(&logical_class, &mut HashSet::new()),
+                self.logical_info(&logical_class, &mut HashSet::new(), 4),
                 self.layout_info(&layout_class),
             ),
             None => (
@@ -1803,14 +1985,27 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    fn logical_info(&self, class: &ClassId, visiting: &mut HashSet<ClassId>) -> LogicalInfo {
+    /// DEPTH-CAPPED (2026-08-07): this is RENDERING data (labels +
+    /// tooltips), and the logical value graph is a convergent DAG —
+    /// residual connections reuse values, so eager full-ancestry TREE
+    /// expansion is exponential in depth (the 2-layer decoder build hang:
+    /// every op output re-expanded the whole model history). Local
+    /// context is what a tooltip needs; the cap bounds the walk.
+    fn logical_info(
+        &self,
+        class: &ClassId,
+        visiting: &mut HashSet<ClassId>,
+        depth: usize,
+    ) -> LogicalInfo {
         let label = self.logical_label(class);
         let tooltip = self.logical_tooltip(class);
-        let children = if visiting.insert(class.clone()) {
+        let children = if depth > 0 && visiting.insert(class.clone()) {
             let children = self
                 .logical_children(class)
                 .into_iter()
-                .map(|(port, child)| (port.to_string(), self.logical_info(&child, visiting)))
+                .map(|(port, child)| {
+                    (port.to_string(), self.logical_info(&child, visiting, depth - 1))
+                })
                 .collect();
             visiting.remove(class);
             children
@@ -2054,6 +2249,9 @@ impl<'a> Extractor<'a> {
 /// a producer and a consumer.
 struct IrBuilder<'e, 'a> {
     extractor: &'e Extractor<'a>,
+    /// Loud-blowup tripwires for the build walks.
+    ensure_calls: u64,
+    collect_calls: u64,
     dag: ExtractedDag,
     /// Value e-class -> the node that produces it (an op or an input boundary).
     value_producer: HashMap<ClassId, NodeIndex>,
@@ -2078,6 +2276,13 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
     }
 
     fn ensure_value(&mut self, class: &ClassId) -> Result<NodeIndex> {
+        self.ensure_calls += 1;
+        assert!(
+            self.ensure_calls <= 10_000_000,
+            "ensure_value blowup: {} calls, {} produced values, at class {class}",
+            self.ensure_calls,
+            self.value_producer.len()
+        );
         if let Some(index) = self.value_producer.get(class) {
             return Ok(*index);
         }
@@ -2231,6 +2436,13 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
         index: usize,
         slots: &mut Vec<(usize, ClassId, NodeIndex, BufferInfo)>,
     ) -> Result<usize> {
+        self.collect_calls += 1;
+        assert!(
+            self.collect_calls <= 100_000,
+            "collect_output_buffers blowup: {} calls at list class {list_class} (index {index}) — \
+             cyclic BufferTensorCons plan spine",
+            self.collect_calls
+        );
         let plan = self.extractor.plan(list_class)?.clone();
         match &plan.kind {
             PlanKind::BufferTensorCons => {
@@ -2770,7 +2982,10 @@ pub fn chain_strides(egraph: &EGraph, layout: &ClassId) -> Option<Vec<Option<Cha
     let shape_lit = find(&shape_class, "ShapeLit")?;
     let mut dims = Vec::new();
     let mut cursor = child_class(egraph, egraph.nodes.get(&shape_lit)?, 0)?;
+    let mut spine_steps = 0usize;
     loop {
+        spine_steps += 1;
+        assert!(spine_steps <= 4096, "cyclic or oversized IntExprCons spine at class {cursor} — unsound weld or schema drift");
         if let Some(cons) = find(&cursor, "IntExprCons") {
             let node = egraph.nodes.get(&cons)?;
             dims.push(child_class(egraph, node, 0)?);
@@ -2786,7 +3001,10 @@ pub fn chain_strides(egraph: &EGraph, layout: &ClassId) -> Option<Vec<Option<Cha
     let mut out = Vec::new();
     let mut cursor = chain_class;
     let mut axis = 0usize;
+    let mut chain_steps = 0usize;
     loop {
+        chain_steps += 1;
+        assert!(chain_steps <= 4096, "cyclic or oversized IntAffineExprCons spine at class {cursor} — unsound weld or schema drift");
         if let Some(cons) = find(&cursor, "IntAffineExprCons") {
             let node = egraph.nodes.get(&cons)?;
             let summand = child_class(egraph, node, 0)?;

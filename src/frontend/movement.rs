@@ -253,21 +253,13 @@ impl GraphTensor {
         let is_neg = idx_f32.lt(zero).cast(DType::F32);
         let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
 
-        // Non-axis flat index via iota + flatten_strides
-        let axis_exprs: Vec<Expression> = (0..rank)
-            .map(|d| {
-                if d == axis {
-                    Expression::from(0)
-                } else {
-                    Expression::from('z') * strides[d]
-                }
-            })
-            .collect();
-        let out_shape_expr: Vec<Expression> =
-            out_shape.iter().map(|&s| Expression::from(s)).collect();
-        let non_axis_flat = self
-            .graph()
-            .iota(flatten_strides(&out_shape_expr, &axis_exprs), out_shape);
+        // Non-axis flat contribution as a coordinate function — no
+        // flat-index div/mod chain ever enters the model (P1, 2026-08-07).
+        let non_axis_flat = self.graph().iota(out_shape, |c| {
+            (0..rank)
+                .filter(|d| *d != axis)
+                .fold(Expression::from(0), |acc, d| acc + c[d] * strides[d])
+        });
 
         // Axis contribution from the runtime index values
         let stride_tensor = self
@@ -327,22 +319,12 @@ impl GraphTensor {
         let is_neg = idx_f32.lt(zero).cast(DType::F32);
         let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
 
-        // Non-axis flat index via iota + flatten_strides
-        let axis_exprs: Vec<Expression> = (0..rank)
-            .map(|d| {
-                if d == axis {
-                    Expression::from(0)
-                } else {
-                    Expression::from('z') * strides[d]
-                }
-            })
-            .collect();
-        let idx_shape_expr: Vec<Expression> =
-            idx_shape.iter().map(|&s| Expression::from(s)).collect();
-        let non_axis_flat = self.graph().iota(
-            flatten_strides(&idx_shape_expr, &axis_exprs),
-            idx_shape.clone(),
-        );
+        // Non-axis flat contribution as a coordinate function (P1).
+        let non_axis_flat = self.graph().iota(idx_shape.clone(), |c| {
+            (0..rank)
+                .filter(|d| *d != axis)
+                .fold(Expression::from(0), |acc, d| acc + c[d] * strides[d])
+        });
 
         // Axis contribution from the runtime index values
         let stride_tensor = self
