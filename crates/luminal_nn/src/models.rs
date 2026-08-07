@@ -523,6 +523,114 @@ mod tests {
         }
     }
 
+    /// DIAGNOSTIC (run by name): draw random genomes on the 2-layer
+    /// llama graph until one refuses, then dump the cyclic pairs'
+    /// (logical, layout) anatomy — the "what ARE the Copy⟷Copy welds"
+    /// question, answered from a live specimen.
+    #[test]
+    #[ignore = "diagnostic — run explicitly by name (release)"]
+    fn probe_deadlock_anatomy() {
+        let mut cx = Graph::new();
+        let blocks: Vec<LlamaBlock> =
+            (0..2).map(|_| LlamaBlock::new(8, 12, 4, 2, &mut cx)).collect();
+        let x = cx.tensor((1, 8));
+        let caches: Vec<_> = (0..2)
+            .map(|_| (cx.tensor((4, 4)), cx.tensor((4, 4))))
+            .collect();
+        let gather_idx = cx.tensor_dtyped(2, DType::Int);
+        let scatter_idx = cx.tensor_dtyped(1, DType::Int);
+        let mut h = x;
+        for (layer, block) in blocks.iter().enumerate() {
+            let (next, kc, vc) = block.forward(
+                h,
+                caches[layer].0,
+                caches[layer].1,
+                gather_idx,
+                scatter_idx,
+                Expression::from(1usize),
+            );
+            h = next;
+            kc.output();
+            vc.output();
+        }
+        h.output();
+
+        // Assemble + saturate once, then draw single-genome searches
+        // until a refusal is recorded (tiny budgets, varying seed).
+        let mut pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
+            (x.id, weights(8, 90)),
+            (gather_idx.id, vec![0.0, 1.0]),
+            (scatter_idx.id, vec![1.0]),
+        ];
+        for (layer, block) in blocks.iter().enumerate() {
+            pairs.push((block.wq.weight.id, weights(64, 91 + layer)));
+            pairs.push((block.wk.weight.id, weights(32, 92 + layer)));
+            pairs.push((block.wv.weight.id, weights(32, 93 + layer)));
+            pairs.push((block.wo.weight.id, weights(64, 94 + layer)));
+            pairs.push((block.gate.weight.id, weights(96, 95 + layer)));
+            pairs.push((block.up.weight.id, weights(96, 96 + layer)));
+            pairs.push((block.down.weight.id, weights(96, 97 + layer)));
+            pairs.push((caches[layer].0.id, weights(16, 98 + layer)));
+            pairs.push((caches[layer].1.id, weights(16, 99 + layer)));
+        }
+        let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
+        for seed in 0..16 {
+            let mut rt =
+                luminal::ssa_reference::SsaReferenceRuntime::load(&cx).expect("native load");
+            let outcome = rt.search(
+                &data,
+                &luminal::implementation_search::ImplementationSearchOptions {
+                    generations: 1,
+                    generation_size: 1,
+                    mutations: 0,
+                    trials: 1,
+                    seed,
+                },
+            );
+            match outcome {
+                Err(_) => {
+                    eprintln!("[anatomy] seed {seed} refused; last failure dissected by the search's own session (see exemplars above); re-deriving:");
+                    // Re-run the same single genome through a session we
+                    // control so the blockage record is inspectable.
+                    // (search consumed the runtime; rebuild the pipeline)
+                    let program = cx.logical.native_program().expect("clean");
+                    let text = format!(
+                        "{}\n\n{}",
+                        luminal::egglog_snippet::assembled_program(),
+                        program.text
+                    );
+                    let mut egraph = luminal::egglog_snippet::new_egraph();
+                    egraph.parse_and_run_program(None, &text).expect("runs");
+                    let serialized =
+                        egraph.serialize(egglog::SerializeConfig::default()).egraph;
+                    let allow = luminal::ssa_reference::reference_allow_list();
+                    let mut session = luminal::extractor::ExtractionSession::new(
+                        &serialized,
+                        Some(&allow),
+                    );
+                    let index = luminal::extractor::producer_index_with_ops(
+                        &serialized,
+                        Some(&allow),
+                    );
+                    use rand::{Rng, SeedableRng};
+                    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+                    let mut genome = luminal::extractor::Genome::default();
+                    for (class, candidates) in &index {
+                        let pick = &candidates[rng.random_range(0..candidates.len())];
+                        genome.choices.insert(class.clone(), pick.1.clone());
+                    }
+                    if session.extract_with_genome(&genome).is_err() {
+                        eprintln!("{}", session.blockage_anatomy());
+                        return;
+                    }
+                    eprintln!("[anatomy] re-derived genome extracted (serialization nondeterminism) — trying next seed");
+                }
+                Ok(_) => continue,
+            }
+        }
+        eprintln!("[anatomy] no refusal in 16 single-genome draws");
+    }
+
     // ── shared scalar-reference pieces (single query row, s = 1) ──
 
 

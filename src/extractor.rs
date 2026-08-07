@@ -221,6 +221,90 @@ impl<'a> ExtractionSession<'a> {
         (!cycles.is_empty(), !dead_ends.is_empty(), summary)
     }
 
+    /// Deep anatomy of the last failure's cyclic SCCs, for the
+    /// semantics question "what ARE these welded pairs": per member, the
+    /// LayoutTensorLit children (logical class, layout class) and every
+    /// candidate with its input classes' own (logical, layout) pairs —
+    /// so same-logical/different-layout structure is visible directly.
+    pub fn blockage_anatomy(&self) -> String {
+        use std::fmt::Write as _;
+        let ex = &self.extractor;
+        let lit_children = |class: &ClassId| -> Option<(ClassId, ClassId)> {
+            let node_id = ex
+                .class_nodes
+                .get(class)?
+                .iter()
+                .find(|id| {
+                    ex.egraph
+                        .nodes
+                        .get(*id)
+                        .is_some_and(|n| n.op == "LayoutTensorLit")
+                })?;
+            let node = ex.egraph.nodes.get(node_id)?;
+            let logical = ex.egraph.nodes.get(node.children.first()?)?.eclass.clone();
+            let layout = ex.egraph.nodes.get(node.children.get(1)?)?.eclass.clone();
+            Some((logical, layout))
+        };
+        let mut out = String::new();
+        let mut graph = petgraph::graph::DiGraph::<ClassId, ()>::new();
+        let mut nodes: HashMap<ClassId, petgraph::graph::NodeIndex> = HashMap::new();
+        for class in ex.blocked.keys() {
+            nodes.insert(class.clone(), graph.add_node(class.clone()));
+        }
+        for (class, blockers) in &ex.blocked {
+            for blocker in blockers {
+                if let (Some(&a), Some(&b)) = (nodes.get(class), nodes.get(blocker)) {
+                    graph.add_edge(a, b, ());
+                }
+            }
+        }
+        let mut dumped = 0;
+        for scc in petgraph::algo::tarjan_scc(&graph) {
+            let cyclic = scc.len() > 1 || (scc.len() == 1 && graph.contains_edge(scc[0], scc[0]));
+            if !cyclic || dumped >= 3 {
+                continue;
+            }
+            dumped += 1;
+            let _ = writeln!(out, "SCC (size {}):", scc.len());
+            for index in &scc {
+                let class = &graph[*index];
+                let children = lit_children(class);
+                let _ = writeln!(
+                    out,
+                    "  member {class}: logical={:?} layout={:?}",
+                    children.as_ref().map(|(l, _)| l.to_string()),
+                    children.as_ref().map(|(_, layout)| layout.to_string())
+                );
+                for candidate in self.extractor.candidates_for_class(class) {
+                    let op = candidate
+                        .source_enode
+                        .as_ref()
+                        .and_then(|id| ex.egraph.nodes.get(id))
+                        .map(|n| n.op.clone())
+                        .unwrap_or_else(|| "?".to_string());
+                    let inputs: Vec<String> = candidate
+                        .children
+                        .iter()
+                        .map(|child| {
+                            let pair = lit_children(&child.class);
+                            format!(
+                                "{} (logical={:?} layout={:?})",
+                                child.class,
+                                pair.as_ref().map(|(l, _)| l.to_string()),
+                                pair.as_ref().map(|(_, layout)| layout.to_string())
+                            )
+                        })
+                        .collect();
+                    let _ = writeln!(out, "    candidate {op}: inputs {inputs:?}");
+                }
+            }
+        }
+        if out.is_empty() {
+            out.push_str("no cyclic SCCs recorded");
+        }
+        out
+    }
+
     pub fn extract_with_genome(
         &mut self,
         genome: &Genome,
