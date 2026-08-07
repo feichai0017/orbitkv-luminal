@@ -33,6 +33,18 @@ fn normalize_concat_dims(
 }
 
 impl<'a> Translator<'a> {
+    /// Return an index operand in Luminal's native Int representation.
+    fn get_native_int_index(&self, node: &Node, input_index: usize) -> Result<GraphTensor> {
+        let name = node
+            .inputs
+            .get(input_index)
+            .context("index operation is missing its index operand")?
+            .arg
+            .as_tensor_name()
+            .context("index operand is not a tensor")?;
+        Ok(self.get_tensor(name)?.cast(DType::Int))
+    }
+
     pub(crate) fn translate_reshape(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
 
@@ -550,6 +562,36 @@ impl<'a> Translator<'a> {
         }
     }
 
+    /// Translate the row-selection form used by paged KV caches.
+    ///
+    /// Lowering this through `pt2_gather_elements` deliberately produces the
+    /// same `indices * row_width + arange(row_width)` flat-index expression as
+    /// Luminal's native `gather_rows`.  FlashInfer's egglog rule can therefore
+    /// prove the logical gather and recover the compact slot-id tensor without
+    /// introducing a Python-frontend-specific backend operation.
+    pub(crate) fn translate_index_select(&mut self, node: &Node) -> Result<GraphTensor> {
+        let source = self.get_input_tensor(node, 0)?;
+        let dim = normalize_dim(self.get_int_arg(node, 1)?, source.shape.len());
+        let indices = self.get_native_int_index(node, 2)?;
+        if dim != 0 {
+            bail!("index_select: only dim=0 is currently supported, got dim={dim}");
+        }
+        if indices.shape.len() != 1 {
+            bail!(
+                "index_select: expected one-dimensional indices, got rank {}",
+                indices.shape.len()
+            );
+        }
+
+        let mut expanded = indices;
+        for &size in source.shape.dims.iter().skip(1) {
+            expanded = expanded.expand_dim(expanded.shape.len(), size);
+        }
+        Ok(super::movement_dynamic::pt2_gather_elements(
+            source, expanded, dim,
+        ))
+    }
+
     pub(crate) fn translate_gather(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let dim = self.get_int_arg(node, 1)?;
@@ -650,6 +692,8 @@ impl<'a> Translator<'a> {
                 );
             };
             let values = self.get_input_tensor(node, 2)?;
+            // index_put stores its tensor index inside OptionalTensors, so use
+            // the name-based form of the same direct-widen cancellation.
             let idx = self.get_tensor(&idx_name)?.cast(DType::Int);
             if idx.shape.len() != 1 {
                 bail!(

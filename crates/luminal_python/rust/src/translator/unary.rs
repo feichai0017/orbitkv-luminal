@@ -21,6 +21,79 @@ const DIV_MODE_INPUT_ARG: usize = 0;
 const DIV_MODE_OTHER_ARG: usize = 1;
 
 impl<'a> Translator<'a> {
+    /// Whether an Int -> I64 cast exists only to satisfy PyTorch's indexing
+    /// API. Luminal index primitives consume Int directly, so retaining this
+    /// widening would create a dead Int -> I64 component and a later narrowing
+    /// that obscures functional cache indices from backend rewrites.
+    fn int_widen_only_feeds_native_indices(&self, node: &Node) -> bool {
+        let Some(output_name) = node
+            .outputs
+            .first()
+            .and_then(|output| output.as_tensor.as_ref().map(|tensor| tensor.name.as_str()))
+        else {
+            return false;
+        };
+        if self
+            .parsed
+            .output_names()
+            .iter()
+            .any(|name| name == output_name)
+        {
+            return false;
+        }
+
+        let mut saw_index_consumer = false;
+        for consumer in &self.parsed.program.graph_module.graph.nodes {
+            let references_output = consumer.inputs.iter().any(|input| {
+                input.arg.as_tensor_name() == Some(output_name)
+                    || input.arg.as_tensors().is_some_and(|tensors| {
+                        tensors.iter().any(|tensor| tensor.name == output_name)
+                    })
+                    || input.arg.as_optional_tensors().is_some_and(|entries| {
+                        entries.iter().any(|entry| {
+                            matches!(
+                                entry,
+                                OptionalTensorEntry::Tensor(tensor)
+                                    if tensor.as_tensor.name == output_name
+                            )
+                        })
+                    })
+            });
+            if !references_output {
+                continue;
+            }
+
+            let is_native_index = match consumer.target.as_str() {
+                "torch.ops.aten.index_select.default" => {
+                    consumer
+                        .inputs
+                        .get(2)
+                        .and_then(|input| input.arg.as_tensor_name())
+                        == Some(output_name)
+                }
+                "torch.ops.aten.index_put.default" | "torch.ops.aten.index_put_.default" => {
+                    consumer.inputs.get(1).is_some_and(|input| {
+                        input.arg.as_optional_tensors().is_some_and(|entries| {
+                            entries.iter().any(|entry| {
+                                matches!(
+                                    entry,
+                                    OptionalTensorEntry::Tensor(tensor)
+                                        if tensor.as_tensor.name == output_name
+                                )
+                            })
+                        })
+                    })
+                }
+                _ => false,
+            };
+            if !is_native_index {
+                return false;
+            }
+            saw_index_consumer = true;
+        }
+        saw_index_consumer
+    }
+
     pub(crate) fn translate_argsort(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, ARGSORT_INPUT_ARG)?;
         let dim = if node.inputs.len() > ARGSORT_DIM_ARG {
@@ -90,6 +163,12 @@ impl<'a> Translator<'a> {
                     .or_else(|| input.arg.as_scalar_type());
                 if let Some(d) = dtype_int {
                     let dtype = torch_dtype_int_to_luminal(d);
+                    if a.dtype == DType::Int
+                        && dtype == DType::I64
+                        && self.int_widen_only_feeds_native_indices(node)
+                    {
+                        return Ok(a);
+                    }
                     // Skip emitting a Cast op when the dtype already matches —
                     // PT2 graphs frequently emit `_to_copy` purely as a clone hint
                     // (e.g. dtype=float32 on a tensor that is already F32), and

@@ -88,6 +88,10 @@ const EGGLOG_RULESETS: &[&str] = &[
     // Expensive one-shot rules that consume facts produced by the earlier
     // fuse-late runs; scheduled exactly once at the end of the phase.
     "kernel_fuse_late2",
+    // Commit rules consume specialized HostOps produced by late2 and subsume
+    // decomposed alternatives when the specialized rule's full contract has
+    // been proved.
+    "kernel_commit",
 ];
 
 fn parse_log_flag(value: &str) -> bool {
@@ -358,7 +362,11 @@ fn egglog_final_phases(use_interval_analysis: bool) -> Vec<EgglogSchedulePhase> 
             // makes it a cheap delta join.
             // Depth = the longest relation cascade: invf(pre) → angles →
             // rotation → concat each consume the previous run's facts.
-            schedule: "(seq kernel_fuse_late_pre kernel_fuse_late kernel_fuse_late kernel_fuse_late kernel_fuse_late2)"
+            // late2 creates final specialized HostOps; kernel_commit then
+            // consumes those new e-class alternatives (for example,
+            // subsuming a decomposition once FlashInfer has proved that it
+            // implements the whole attention expression).
+            schedule: "(seq kernel_fuse_late_pre kernel_fuse_late kernel_fuse_late kernel_fuse_late kernel_fuse_late2 kernel_commit)"
                 .to_string(),
         },
         EgglogSchedulePhase {

@@ -150,4 +150,27 @@ mod tests {
         assert_eq!(rhs_simplified, Expression::from('a'));
         assert!(same_expr_with_ranges(lhs, rhs, &sym_ranges));
     }
+
+    #[test]
+    fn canonicalizes_symbolic_cache_growth_dimensions() {
+        let old_len = Expression::from('a');
+        let next_len = old_len + 1;
+        let appended = next_len - old_len;
+        let reconstructed_next_len = old_len + appended;
+        let sym_ranges = FxHashMap::default();
+
+        assert!(same_expr_with_ranges(
+            next_len,
+            reconstructed_next_len,
+            &sym_ranges
+        ));
+        let canonical = canonical_equal_expr(next_len, reconstructed_next_len, &sym_ranges)
+            .expect("equivalent cache-growth dimensions should have a shared canonical form");
+        assert!(same_expr_with_ranges(canonical, next_len, &sym_ranges));
+        assert!(same_expr_with_ranges(
+            canonical,
+            reconstructed_next_len,
+            &sym_ranges
+        ));
+    }
 }

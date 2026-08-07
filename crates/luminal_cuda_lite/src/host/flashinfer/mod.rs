@@ -44,6 +44,7 @@ pub struct FlashInferAttention {
     pub head_dim: usize,
     pub page_size: usize,
     pub batch_dim: Expression,
+    pub context_dim: Expression,
     pub dtype: DType,
     /// Softmax scale; 0.0 = default `1/sqrt(head_dim)`.
     pub sm_scale: f64,
@@ -332,6 +333,7 @@ impl Default for FlashInferAttention {
             head_dim: 0,
             page_size: 0,
             batch_dim: Expression::default(),
+            context_dim: Expression::default(),
             dtype: DType::F32,
             sm_scale: 0.0,
             window_left: -1,
@@ -351,6 +353,7 @@ impl EgglogOp for FlashInferAttention {
                 ("head_dim", EXPRESSION),
                 ("page_size", EXPRESSION),
                 ("batch_dim", EXPRESSION),
+                ("context_dim", EXPRESSION),
                 ("dtype", DTYPE),
                 ("sm_scale", F64),
                 ("window_left", F64),
@@ -404,13 +407,14 @@ impl EgglogOp for FlashInferAttention {
             .exec(&FxHashMap::default())
             .unwrap();
         let batch_dim = extract_expr(egraph, kind_children[4], expr_cache).unwrap();
-        let dtype = extract_dtype(egraph, kind_children[5]);
-        let sm_scale: f64 = egraph.enodes[kind_children[6]]
+        let context_dim = extract_expr(egraph, kind_children[5], expr_cache).unwrap();
+        let dtype = extract_dtype(egraph, kind_children[6]);
+        let sm_scale: f64 = egraph.enodes[kind_children[7]]
             .0
             .replace('"', "")
             .parse()
             .unwrap();
-        let window_left = egraph.enodes[kind_children[7]]
+        let window_left = egraph.enodes[kind_children[8]]
             .0
             .replace('"', "")
             .parse::<f64>()
@@ -427,6 +431,7 @@ impl EgglogOp for FlashInferAttention {
             head_dim,
             page_size,
             batch_dim,
+            context_dim,
             dtype,
             sm_scale,
             window_left,
@@ -479,9 +484,9 @@ impl FlashInferAttention {
                 .ok_or(ResourceViolation::UnresolvedExpression {
                     resource: "FlashInfer total query tokens",
                 })?;
-        let c = dyn_map
-            .get(&'c')
-            .copied()
+        let c = self
+            .context_dim
+            .exec(dyn_map)
             .ok_or(ResourceViolation::UnresolvedExpression {
                 resource: "FlashInfer context length",
             })?;
@@ -581,9 +586,10 @@ impl FlashInferAttention {
             .batch_dim
             .exec(dyn_map)
             .ok_or_else(|| anyhow::anyhow!("FlashInferAttention batch_dim is unresolved"))?;
-        let c = *dyn_map
-            .get(&'c')
-            .ok_or_else(|| anyhow::anyhow!("FlashInferAttention requires dynamic dim 'c'"))?;
+        let c = self
+            .context_dim
+            .exec(dyn_map)
+            .ok_or_else(|| anyhow::anyhow!("FlashInferAttention context_dim is unresolved"))?;
         if inputs.len() != 4 && inputs.len() != 6 {
             anyhow::bail!(
                 "FlashInferAttention expects 4 inputs (derived causal decode) or 6 inputs (explicit indptrs), got {}",
@@ -1184,6 +1190,7 @@ mod resource_tests {
             head_dim: 64,
             page_size: 1,
             batch_dim: 1.into(),
+            context_dim: Expression::from('c'),
             dtype: DType::F16,
             sm_scale: 0.0,
             window_left: -1,
@@ -1217,20 +1224,24 @@ mod resource_tests {
     }
 
     #[test]
-    fn device_resource_spec_uses_context_for_uninstalled_cache_sentinels() {
+    fn device_resource_spec_uses_captured_context_for_uninstalled_cache_sentinels() {
         let attention = FlashInferAttention {
             num_qo_heads: 4,
             num_kv_heads: 2,
             head_dim: 64,
             page_size: 1,
             batch_dim: 1.into(),
+            // The PT2 frontend is free to canonicalize cache growth to any
+            // symbolic expression; FlashInfer must not assume a dimension
+            // literally named `c`.
+            context_dim: Expression::from('a') + 1,
             dtype: DType::F16,
             sm_scale: 0.0,
             window_left: -1,
             plan_info: Mutex::new(Vec::new()),
         };
         let inputs = (0..4).map(NodeIndex::new).collect_vec();
-        let dyn_map = FxHashMap::from_iter([('c', 100)]);
+        let dyn_map = FxHashMap::from_iter([('a', 99)]);
         let uninstalled_lengths = FxHashMap::from_iter([(inputs[1], 0), (inputs[2], 0)]);
 
         let spec = attention
@@ -1258,6 +1269,7 @@ mod resource_tests {
             head_dim: 64,
             page_size: 1,
             batch_dim: 2.into(),
+            context_dim: Expression::from('c'),
             dtype: DType::F16,
             sm_scale: 0.0,
             window_left: -1,

@@ -152,6 +152,7 @@ fn run_flashinfer(
         head_dim: HEAD_DIM,
         page_size: 1,
         batch_dim: Expression::from('s'),
+        context_dim: Expression::from('c'),
         dtype: luminal::dtype::DType::F32,
         sm_scale: 0.0,
         window_left: -1,
@@ -226,6 +227,7 @@ fn run_flashinfer_with_compact_decode_indices(
         head_dim: HEAD_DIM,
         page_size: 1,
         batch_dim: Expression::from('s'),
+        context_dim: Expression::from('c'),
         dtype: luminal::dtype::DType::F32,
         sm_scale: 0.0,
         window_left: -1,
@@ -281,6 +283,7 @@ fn resolve_flashinfer_decode_for_signature_test(
         head_dim: HEAD_DIM,
         page_size: 1,
         batch_dim: Expression::from('s'),
+        context_dim: Expression::from('c'),
         dtype: luminal::dtype::DType::F32,
         sm_scale: 0.0,
         window_left: -1,
@@ -612,6 +615,38 @@ fn test_compute_direct_causal_mask(
     q_pos.lt(col).cast(luminal::dtype::DType::F32) * -1e10
 }
 
+fn test_compute_hf_min_fill_causal_mask(
+    graph: &mut Graph,
+    q_pos: GraphTensor,
+    c: Expression,
+) -> GraphTensor {
+    let s = q_pos.dims1();
+    // Reproduce the four-dimensional arithmetic emitted by the real HF Qwen
+    // PT2 graph for `torch.where(causal, 0, torch.finfo(dtype).min)`.
+    let q_pos = q_pos.expand_dim(1, c).expand_dim(0, 1).expand_dim(0, 1);
+    let col = graph
+        .arange(c)
+        .expand_dim(0, s)
+        .expand_dim(0, 1)
+        .expand_dim(0, 1);
+    let blocked_f32 = q_pos.lt(col).cast(luminal::dtype::DType::F32);
+    let allowed_f32 = (blocked_f32 * -1.0 + 1.0)
+        .cast(luminal::dtype::DType::Bool)
+        .cast(luminal::dtype::DType::F32);
+    let mut baseline = graph
+        .named_tensor("hf_mask_baseline", 1)
+        .as_dtype(luminal::dtype::DType::Bf16)
+        .cast(luminal::dtype::DType::F32);
+    // Binary GraphTensor ops do not implicitly broadcast. The PT2 translator
+    // has already given this scalar a zero-stride [1, 1, s, c] view in the
+    // real HF graph, so reproduce that view explicitly.
+    baseline.shape.expand((1, 1, s, c));
+    let mask_min = graph
+        .constant_float(-3.389_531_4e38_f32)
+        .expand_rhs((1, 1, s, c));
+    mask_min + allowed_f32 * (baseline + mask_min * -1.0)
+}
+
 fn gather_rows(data: GraphTensor, indices: GraphTensor, d: usize) -> GraphTensor {
     let n = indices.dims1();
     let base = (indices * d).expand_dim(1, d);
@@ -653,6 +688,7 @@ enum TestMaskKind {
     Indptr,
     TriuGather,
     DirectCausal,
+    HfMinFill,
 }
 
 #[derive(Clone, Copy)]
@@ -710,6 +746,7 @@ fn build_paged_attention_graph_with_mask(
         mask_kind,
         TestCacheProvenance::Raw,
         TestCacheProvenance::Raw,
+        false,
     )
 }
 
@@ -720,26 +757,60 @@ fn build_paged_attention_graph_with_mask_and_cache_provenance(
     mask_kind: TestMaskKind,
     k_provenance: TestCacheProvenance,
     v_provenance: TestCacheProvenance,
+    functional_pt2_indices: bool,
 ) -> (Graph, PagedAttnHandles) {
     let kv_groups = n_heads / n_kv_heads;
     let kv_dim = n_kv_heads * head_dim;
     let hidden = n_heads * head_dim;
+    let hf_16bit_topology = matches!(mask_kind, TestMaskKind::HfMinFill);
+    // Real HF export uses one symbol (`a`) for the prefill token and context
+    // extents. Other synthetic cases retain the conventional s/c names.
+    let sequence_dim: Expression = if hf_16bit_topology { 'a' } else { 's' }.into();
+    let context_dim: Expression = if hf_16bit_topology { 'a' } else { 'c' }.into();
 
     let mut cx = Graph::default();
 
-    let q_rope = cx.named_tensor("q_rope", ('s', hidden));
-    let k_rope = cx.named_tensor("k_rope", ('s', kv_dim));
-    let v_new = cx.named_tensor("v_new", ('s', kv_dim));
-    let k_cache = cx.named_tensor("k_cache", (2048, kv_dim)).persist();
-    let v_cache = cx.named_tensor("v_cache", (2048, kv_dim)).persist();
-    let scatter_idx = cx
-        .named_tensor("scatter_idx", 's')
+    let mut q_rope = cx.named_tensor("q_rope", (sequence_dim, hidden));
+    let mut k_rope = cx.named_tensor("k_rope", (sequence_dim, kv_dim));
+    let mut v_new = cx.named_tensor("v_new", (sequence_dim, kv_dim));
+    let mut k_cache = cx.named_tensor("k_cache", (2048, kv_dim)).persist();
+    let mut v_cache = cx.named_tensor("v_cache", (2048, kv_dim)).persist();
+    if hf_16bit_topology {
+        // The PT2 graph presents these as native BF16 Inputs, rather than F32
+        // Inputs followed by Casts. Set the synthetic Input ABI the same way.
+        for tensor in [
+            &mut q_rope,
+            &mut k_rope,
+            &mut v_new,
+            &mut k_cache,
+            &mut v_cache,
+        ] {
+            cx.get_op_mut::<luminal::hlir::Input>(tensor.id).dtype = luminal::dtype::DType::Bf16;
+            tensor.dtype = luminal::dtype::DType::Bf16;
+        }
+    }
+    let scatter_idx_state = cx
+        .named_tensor("scatter_idx", sequence_dim)
         .as_dtype(luminal::dtype::DType::Int);
-    let gather_idx = cx
-        .named_tensor("gather_idx", 'c')
+    let gather_idx_state = cx
+        .named_tensor("gather_idx", context_dim)
         .as_dtype(luminal::dtype::DType::Int);
+    // A functional PT2 cache can produce its compact active slots from prior
+    // state plus the current update. Model that as a genuine Int intermediate
+    // so extraction cannot regress to requiring compact ids to be Inputs.
+    // PyTorch's API-only Int -> I64 widening is cancelled by the PT2 translator
+    // before this point and therefore does not belong in the backend graph.
+    let scatter_idx = scatter_idx_state;
+    let gather_idx = if functional_pt2_indices {
+        let update = cx
+            .named_tensor("gather_idx_update", context_dim)
+            .as_dtype(luminal::dtype::DType::Int);
+        gather_idx_state + update
+    } else {
+        gather_idx_state
+    };
     let q_pos = cx
-        .named_tensor("q_pos", 's')
+        .named_tensor("q_pos", sequence_dim)
         .as_dtype(luminal::dtype::DType::Int);
     let qo_indptr = cx
         .named_tensor("qo_indptr", 'r')
@@ -757,11 +828,12 @@ fn build_paged_attention_graph_with_mask_and_cache_provenance(
     let k = gather_rows(k_cache_out, gather_idx, kv_dim);
     let v_ctx = gather_rows(v_cache_out, gather_idx, kv_dim);
 
-    let c: Expression = 'c'.into();
+    let c = context_dim;
     let attn_mask = match mask_kind {
         TestMaskKind::Indptr => test_compute_attn_mask(&mut cx, q_pos, qo_indptr, kv_indptr, c),
         TestMaskKind::TriuGather => test_compute_triu_gather_mask(&mut cx, q_pos, c),
         TestMaskKind::DirectCausal => test_compute_direct_causal_mask(&mut cx, q_pos, c),
+        TestMaskKind::HfMinFill => test_compute_hf_min_fill_causal_mask(&mut cx, q_pos, c),
     };
 
     let q = (q_rope * 1.0).split_dims(1, head_dim).transpose(0, 1);
@@ -771,10 +843,29 @@ fn build_paged_attention_graph_with_mask_and_cache_provenance(
     let v_ctx = v_ctx.expand_dim(1, kv_groups).merge_dims(0, 1) * 1.0;
 
     let scores = q.matmul(k) / (head_dim as f32).sqrt();
-    let mask = attn_mask.expand_dim(0, n_heads);
-    let masked_scores = scores + mask;
-    let weights = masked_scores.softmax(2);
-    let out = weights.matmul(v_ctx);
+    let (masked_scores, softmax_dim) = if hf_16bit_topology {
+        // Match the real HF graph: [1, H, S, C] mask, F32 softmax, then a
+        // cast back to model dtype before multiplying V.
+        let mut broadcast_mask = attn_mask;
+        broadcast_mask
+            .shape
+            .expand((1, n_heads, sequence_dim, context_dim));
+        (
+            scores.expand_dim(0, 1).cast(luminal::dtype::DType::F32) + broadcast_mask,
+            3,
+        )
+    } else {
+        (scores + attn_mask.expand_dim(0, n_heads), 2)
+    };
+    let mut weights = masked_scores.softmax(softmax_dim);
+    if hf_16bit_topology {
+        weights = weights.cast(luminal::dtype::DType::Bf16);
+    }
+    let out = if hf_16bit_topology {
+        weights.matmul(v_ctx.expand_dim(0, 1)).merge_dims(0, 1)
+    } else {
+        weights.matmul(v_ctx)
+    };
     let attn_out = out.transpose(0, 1).merge_dims(1, 2);
 
     let attn_out = attn_out.output();
@@ -993,6 +1084,7 @@ fn flashinfer_rule_rejects_mixed_cache_provenance() {
             stream_id: 0,
         },
         TestCacheProvenance::Raw,
+        false,
     );
     let (has_flashinfer, _) = saturate_and_has_flashinfer_with_decode_interval(&cx);
     assert!(
@@ -1034,6 +1126,7 @@ fn flashinfer_rule_fires_on_same_rolled_cache_provenance() {
             loop_id: 7,
             stream_id: 1,
         },
+        false,
     );
     let (has_flashinfer, op_kinds) = saturate_and_has_flashinfer_with_decode_interval(&cx);
     assert!(
@@ -1078,6 +1171,60 @@ fn flashinfer_rule_fires_on_direct_causal_mask() {
         has_flashinfer,
         "FlashInferAttention was NOT found for direct q_pos/arange causal mask. \
          OpKinds present: {op_kinds:?}"
+    );
+}
+
+#[test]
+fn flashinfer_rule_fires_on_hf_min_fill_causal_mask() {
+    if !crate::tests::utilities::gpu_supports_flashinfer() {
+        return;
+    }
+    let (cx, _) = build_paged_attention_graph_with_mask(
+        N_HEADS,
+        N_KV_HEADS,
+        HEAD_DIM,
+        TestMaskKind::HfMinFill,
+    );
+    let (program, _) = hlir_to_egglog(&cx);
+    let less_than_terms = program
+        .lines()
+        .filter(|line| line.contains("(Op (LessThan "))
+        .collect::<Vec<_>>();
+    let (has_flashinfer, op_kinds) = saturate_and_has_flashinfer_with_decode_interval(&cx);
+    assert!(
+        has_flashinfer,
+        "FlashInferAttention was NOT found for the HF min-fill causal mask. \
+         OpKinds present: {op_kinds:?}\nLessThan terms:\n{}",
+        less_than_terms.join("\n")
+    );
+}
+
+#[test]
+fn flashinfer_hf_min_fill_commits_specialized_output() {
+    if !crate::tests::utilities::gpu_supports_flashinfer() {
+        return;
+    }
+    let (mut cx, _) = build_paged_attention_graph_with_mask(
+        N_HEADS,
+        N_KV_HEADS,
+        HEAD_DIM,
+        TestMaskKind::HfMinFill,
+    );
+    cx.set_dim('s', 1usize);
+    cx.set_dim('c', 16usize);
+    cx.set_dim('r', 2usize);
+    cx.build_search_space::<CudaRuntime>(CompileOptions::default());
+
+    let egraph = cx.egraph().expect("search space should have an e-graph");
+    let flashinfer_nodes = flashinfer_ir_nodes(egraph);
+    assert!(
+        !flashinfer_nodes.is_empty(),
+        "HF min-fill attention did not produce FlashInferAttention"
+    );
+    let competing = flashinfer_competing_ir_alternatives(egraph, &flashinfer_nodes);
+    assert!(
+        competing.is_empty(),
+        "HF min-fill FlashInfer output retained selectable decomposed alternatives: {competing:#?}"
     );
 }
 
@@ -1306,6 +1453,61 @@ fn flashinfer_extraction_reachable_from_search_space() {
     );
 }
 
+#[test]
+fn flashinfer_rule_fires_on_functional_pt2_cache_indices() {
+    if !crate::tests::utilities::gpu_supports_flashinfer() {
+        return;
+    }
+    let (cx, _) = build_paged_attention_graph_with_mask_and_cache_provenance(
+        N_HEADS,
+        N_KV_HEADS,
+        HEAD_DIM,
+        // Keep this regression focused on computed cache indices. The F32
+        // triu-gather variant independently requires a decode interval proof;
+        // dedicated mask tests cover that contract.
+        TestMaskKind::Indptr,
+        TestCacheProvenance::Raw,
+        TestCacheProvenance::Raw,
+        true,
+    );
+    let (has_flashinfer, op_kinds) = saturate_and_has_flashinfer(&cx);
+    assert!(
+        has_flashinfer,
+        "FlashInferAttention was NOT found for functional PT2 cache indices. \
+         OpKinds present: {op_kinds:?}"
+    );
+}
+
+#[test]
+fn flashinfer_extracts_functional_pt2_cache_indices() {
+    if !crate::tests::utilities::gpu_supports_flashinfer() {
+        return;
+    }
+    let (mut cx, _) = build_paged_attention_graph_with_mask_and_cache_provenance(
+        N_HEADS,
+        N_KV_HEADS,
+        HEAD_DIM,
+        // Index extraction is orthogonal to the causal-mask spelling. Using
+        // the indptr spelling avoids accidentally testing the F32 triu rule's
+        // separate `s == 1` interval precondition here.
+        TestMaskKind::Indptr,
+        TestCacheProvenance::Raw,
+        TestCacheProvenance::Raw,
+        true,
+    );
+    cx.set_dim('s', 1usize);
+    cx.set_dim('c', 16usize);
+    cx.set_dim('r', 2usize);
+
+    let llir = extract_forced_flashinfer_llir(&mut cx, "functional PT2 cache indices");
+    assert!(llir.node_indices().any(|node| {
+        llir[node]
+            .to_dialect::<dyn HostOp>()
+            .and_then(|op| op.stats_name())
+            == Some("FlashInferAttention")
+    }));
+}
+
 fn flashinfer_ir_nodes(egraph: &luminal::egglog_utils::SerializedEGraph) -> Vec<&ENodeId> {
     let op_kind_classes = egraph
         .enodes
@@ -1327,6 +1529,119 @@ fn flashinfer_ir_nodes(egraph: &luminal::egglog_utils::SerializedEGraph) -> Vec<
         .collect()
 }
 
+fn flashinfer_competing_ir_alternatives(
+    egraph: &luminal::egglog_utils::SerializedEGraph,
+    flashinfer_nodes: &[&ENodeId],
+) -> Vec<String> {
+    let flashinfer_classes = flashinfer_nodes
+        .iter()
+        .map(|node| &egraph.node_to_class[*node])
+        .collect::<FxHashSet<_>>();
+    let mut alternatives = Vec::new();
+
+    for class in flashinfer_classes {
+        let Some((_, ir_nodes)) = egraph.eclasses.get(class) else {
+            continue;
+        };
+        for ir_node in ir_nodes {
+            if flashinfer_nodes.contains(&ir_node) {
+                continue;
+            }
+            let Some((ir_label, ir_children)) = egraph.enodes.get(ir_node) else {
+                continue;
+            };
+            if ir_label != "Op" {
+                alternatives.push(format!("{class:?}: {ir_label}"));
+                continue;
+            }
+            let kinds = ir_children
+                .first()
+                .and_then(|kind_class| egraph.eclasses.get(kind_class))
+                .map(|(_, kind_nodes)| {
+                    kind_nodes
+                        .iter()
+                        .filter_map(|kind_node| egraph.enodes.get(kind_node))
+                        .map(|(kind_label, _)| kind_label.as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            alternatives.push(format!("{class:?}: {kinds:?}"));
+        }
+    }
+
+    alternatives.sort();
+    alternatives
+}
+
+fn flashinfer_provenance_counts(
+    egraph: &luminal::egglog_utils::SerializedEGraph,
+) -> Vec<(&'static str, usize)> {
+    [
+        "fi_compact_row_ids",
+        "fi_row_index_base",
+        "fi_flat_row_index",
+        "fi_same_row_indices",
+        "flashinfer_cache_pair",
+    ]
+    .into_iter()
+    .map(|relation| {
+        let count = egraph
+            .enodes
+            .values()
+            .filter(|(label, _)| label == relation)
+            .count();
+        (relation, count)
+    })
+    .collect()
+}
+
+fn flashinfer_provenance_facts(egraph: &luminal::egglog_utils::SerializedEGraph) -> Vec<String> {
+    let relation_names = [
+        "fi_compact_row_ids",
+        "fi_row_index_base",
+        "fi_flat_row_index",
+        "fi_same_row_indices",
+        "flashinfer_cache_pair",
+    ];
+    let mut facts = egraph
+        .enodes
+        .values()
+        .filter(|(label, _)| relation_names.contains(&label.as_str()))
+        .map(|(label, children)| format!("{label}{children:?}"))
+        .collect::<Vec<_>>();
+    facts.sort();
+    facts
+}
+
+fn flashinfer_gather_inputs(egraph: &luminal::egglog_utils::SerializedEGraph) -> Vec<String> {
+    let mut gathers = Vec::new();
+    for op_node in crate::tests::utilities::op_ir_nodes(egraph, "Gather") {
+        let Some((_, op_children)) = egraph.enodes.get(op_node) else {
+            continue;
+        };
+        let Some(inputs_class) = op_children.get(1) else {
+            continue;
+        };
+        let Some((_, input_nodes)) = egraph.eclasses.get(inputs_class) else {
+            continue;
+        };
+        for input_node in input_nodes {
+            let Some((label, input_children)) = egraph.enodes.get(input_node) else {
+                continue;
+            };
+            if label == "ICons" && input_children.len() == 2 {
+                gathers.push(format!(
+                    "Gather op={op_node:?} index_class={:?} tail_class={:?}",
+                    input_children[0], input_children[1]
+                ));
+            }
+        }
+    }
+    gathers.sort();
+    gathers.dedup();
+    gathers
+}
+
 fn extract_forced_flashinfer_llir(cx: &mut Graph, case_name: &str) -> LLIRGraph {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -1340,7 +1655,15 @@ fn extract_forced_flashinfer_llir(cx: &mut Graph, case_name: &str) -> LLIRGraph 
     let flashinfer_nodes = flashinfer_ir_nodes(egraph);
     assert!(
         !flashinfer_nodes.is_empty(),
-        "expected a FlashInferAttention rewrite candidate for {case_name}"
+        "expected a FlashInferAttention rewrite candidate for {case_name}; staged relation counts: {:?}; facts: {:#?}; gathers: {:#?}",
+        flashinfer_provenance_counts(egraph),
+        flashinfer_provenance_facts(egraph),
+        flashinfer_gather_inputs(egraph)
+    );
+    let competing = flashinfer_competing_ir_alternatives(egraph, &flashinfer_nodes);
+    assert!(
+        competing.is_empty(),
+        "FlashInfer matched for {case_name}, but extraction can still select competing IR spellings from its output e-class: {competing:#?}"
     );
 
     let mut last_error = None;
@@ -1438,6 +1761,7 @@ fn run_flashinfer_bf16(
         head_dim: HEAD_DIM,
         page_size: 1,
         batch_dim: Expression::from('s'),
+        context_dim: Expression::from('c'),
         dtype: luminal::dtype::DType::Bf16,
         sm_scale: 0.0,
         window_left: -1,

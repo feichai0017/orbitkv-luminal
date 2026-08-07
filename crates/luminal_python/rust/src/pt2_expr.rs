@@ -442,6 +442,22 @@ fn simplify_sub(
     if same_expr_with_ranges(lhs.expr, rhs.expr, sym_ranges) {
         return exact_expr(0);
     }
+    // Cache-growth graphs commonly spell the number of appended rows as
+    // `(old_len + delta) - old_len`. Preserve that algebraic identity even
+    // when `old_len` is symbolic. Without this cancellation, equivalent
+    // tensor dimensions such as `old_len + 1` and
+    // `old_len + ((old_len + 1) - old_len)` remain syntactically different
+    // and the HLIR binary-op boundary rejects them.
+    if let Some((delta, base)) = split_add_const(lhs.expr)
+        && same_expr_with_ranges(base, rhs.expr, sym_ranges)
+    {
+        return exact_expr(delta);
+    }
+    if let Some((delta, base)) = split_add_const(rhs.expr)
+        && same_expr_with_ranges(lhs.expr, base, sym_ranges)
+    {
+        return exact_expr(-delta);
+    }
     let expr = match exact_value(rhs) {
         Some(0) => lhs.expr,
         Some(rhs_const) => {

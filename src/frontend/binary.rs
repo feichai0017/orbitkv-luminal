@@ -7,11 +7,50 @@ use std::ops::RemAssign;
 use std::ops::SubAssign;
 use std::ops::{Add, Div, Mul, Rem, Sub};
 
+/// Canonicalize dimensions that are symbolically equal before constructing an
+/// elementwise op. Frontends may derive the same dynamic extent through
+/// different, equivalent expressions (for example cache growth can produce
+/// both `a + 1` and `a + ((a + 1) - a)`). Requiring byte-for-byte identical
+/// expression syntax here makes otherwise valid frontend graphs panic.
+///
+/// This deliberately does not implement broadcasting: unequal dimensions are
+/// still rejected unless the expression e-graph proves them equivalent.
+fn normalize_matching_dims(
+    lhs: &mut GraphTensor,
+    rhs: &mut GraphTensor,
+    mismatch_message: &'static str,
+) {
+    assert_eq!(lhs.shape.len(), rhs.shape.len(), "{mismatch_message}");
+    for axis in 0..lhs.shape.len() {
+        let lhs_dim = lhs.shape.dims[axis];
+        let rhs_dim = rhs.shape.dims[axis];
+        if lhs_dim == rhs_dim {
+            continue;
+        }
+
+        let lhs_simplified = lhs_dim.simplify();
+        let rhs_simplified = rhs_dim.simplify();
+        assert!(
+            lhs_simplified == rhs_simplified || lhs_simplified.egglog_equal(rhs_simplified),
+            "{mismatch_message}\n  left: {:?}\n right: {:?}",
+            lhs.dims(),
+            rhs.dims()
+        );
+        let canonical = if lhs_simplified.len() <= rhs_simplified.len() {
+            lhs_simplified
+        } else {
+            rhs_simplified
+        };
+        lhs.shape.dims[axis] = canonical;
+        rhs.shape.dims[axis] = canonical;
+    }
+}
+
 impl Add for GraphTensor {
     type Output = GraphTensor;
 
-    fn add(self, rhs: GraphTensor) -> Self::Output {
-        assert_eq!(self.dims(), rhs.dims(), "Dims must match to add tensors.");
+    fn add(mut self, mut rhs: GraphTensor) -> Self::Output {
+        normalize_matching_dims(&mut self, &mut rhs, "Dims must match to add tensors.");
         assert_eq!(
             self.dtype, rhs.dtype,
             "Dtypes must match to add tensors. Got {:?} and {:?}",
@@ -73,12 +112,8 @@ where
 impl Mul for GraphTensor {
     type Output = GraphTensor;
 
-    fn mul(self, rhs: GraphTensor) -> Self::Output {
-        assert_eq!(
-            self.dims(),
-            rhs.dims(),
-            "Dims must match to multiply tensors."
-        );
+    fn mul(mut self, mut rhs: GraphTensor) -> Self::Output {
+        normalize_matching_dims(&mut self, &mut rhs, "Dims must match to multiply tensors.");
         assert_eq!(
             self.dtype, rhs.dtype,
             "Dtypes must match to multiply tensors. Got {:?} and {:?}",
@@ -142,8 +177,8 @@ where
 impl Rem<GraphTensor> for GraphTensor {
     type Output = GraphTensor;
 
-    fn rem(self, rhs: GraphTensor) -> Self::Output {
-        assert_eq!(self.dims(), rhs.dims(), "Dims must match to mod tensors.");
+    fn rem(mut self, mut rhs: GraphTensor) -> Self::Output {
+        normalize_matching_dims(&mut self, &mut rhs, "Dims must match to mod tensors.");
         assert_eq!(
             self.dtype, rhs.dtype,
             "Dtypes must match to mod tensors. Got {:?} and {:?}",
@@ -293,8 +328,8 @@ impl<S: Into<Expression>> Rem<S> for GraphTensor {
 // Comparisons, all redurn bools (based on https://github.com/tinygrad/tinygrad/blob/3e0c2d256fe9f4f5f85cd3e4d8733a51d7b4a984/tinygrad/tensor.py#L653)
 impl GraphTensor {
     /// Less than comparison
-    pub fn lt(self, rhs: GraphTensor) -> GraphTensor {
-        assert_eq!(self.dims(), rhs.dims(), "Dims must match to lt tensors.");
+    pub fn lt(mut self, mut rhs: GraphTensor) -> GraphTensor {
+        normalize_matching_dims(&mut self, &mut rhs, "Dims must match to lt tensors.");
         assert_eq!(
             self.dtype, rhs.dtype,
             "Dtypes must match to compare tensors. Got {:?} and {:?}",
@@ -517,6 +552,19 @@ pub(super) mod tests {
         let a = cx.tensor((2, 3));
         let b = cx.tensor((1, 3));
         let _ = a.lt(b);
+    }
+
+    #[test]
+    fn test_binary_accepts_equivalent_symbolic_cache_growth_dims() {
+        let mut cx = Graph::new();
+        let old_len = Expression::from('a');
+        let next_len = old_len + 1;
+        let reconstructed_next_len = old_len + (next_len - old_len);
+        let lhs = cx.tensor((next_len,));
+        let rhs = cx.tensor((reconstructed_next_len,));
+
+        let product = lhs * rhs;
+        assert!(product.dims()[0].egglog_equal(next_len));
     }
 
     proptest! {

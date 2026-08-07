@@ -17,8 +17,8 @@ pub fn try_find_compact_gather_idx<'a>(
             continue;
         };
         for mul_input in mul_inputs {
-            if let Some(input_node) = resolve_input_node(egraph, mul_input) {
-                return Some(input_node);
+            if let Some(compact_node) = resolve_compact_index_node(egraph, mul_input) {
+                return Some(compact_node);
             }
         }
     }
@@ -63,12 +63,37 @@ fn resolve_first_ir_node<'a>(egraph: &'a SerializedEGraph, eclass: &ClassId) -> 
     &nodes[0]
 }
 
-fn resolve_input_node<'a>(egraph: &'a SerializedEGraph, node: &'a NodeId) -> Option<&'a NodeId> {
+/// Resolve the compact row ids from one side of the row-offset multiply.
+///
+/// Native Luminal cache graphs historically supplied those ids as an Input.
+/// A PT2 cache is functional: appending slot ids produces an ordinary IR node
+/// (typically Cast/Cat) which is then consumed by index_select.  HostOps may
+/// take intermediate LLIR values, so requiring an Input here was needlessly
+/// restrictive.  Generated basis terms (Iota/constants) are excluded because
+/// the other multiply operand is the row width, not the compact page table.
+fn resolve_compact_index_node<'a>(
+    egraph: &'a SerializedEGraph,
+    node: &'a NodeId,
+) -> Option<&'a NodeId> {
     let class = egraph.node_to_class.get(node)?;
-    egraph.eclasses[class]
-        .1
-        .iter()
-        .find(|candidate| egraph.enodes[*candidate].0 == "Input")
+    for candidate in &egraph.eclasses[class].1 {
+        let (label, children) = &egraph.enodes[candidate];
+        if label == "Input" {
+            return Some(candidate);
+        }
+        if label != "Op" || children.is_empty() {
+            continue;
+        }
+        let kind = resolve_first_node(egraph, &children[0]);
+        let kind_label = &egraph.enodes[kind].0;
+        if !kind_label.contains("Iota")
+            && !kind_label.contains("Constant")
+            && !kind_label.contains("Arange")
+        {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn resolve_op_with_kind<'a>(

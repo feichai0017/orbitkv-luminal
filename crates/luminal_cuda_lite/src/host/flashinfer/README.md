@@ -54,7 +54,7 @@ When the rule fires, it unions `FlashInferAttention` with the original attention
 
 ### 2. Extraction: Dropping Proof-Only Inputs
 
-During `extract()` (called when egglog selects the FlashInferAttention e-node), the mask remains a structural proof that the original attention is causal, but it is not kept as a runtime input. `find_indptrs.rs` walks the lowered `gather_rows` index expression and recovers the compact slot index tensor from `indices * KV_DIM + arange(KV_DIM)`.
+During `extract()` (called when egglog selects the FlashInferAttention e-node), the mask remains a structural proof that the original attention is causal, but it is not kept as a runtime input. `find_indptrs.rs` walks the lowered `gather_rows` index expression and recovers the compact slot index tensor from `indices * KV_DIM + arange(KV_DIM)`. The compact tensor may be either a graph input or an intermediate produced by a functional PT2 cache update (for example, a `Cast`/`Cat` chain); HostOps can consume either form.
 
 The runtime FlashInfer inputs are only `Q`, `K_cache`, `V_cache`, and compact `gather_idx` for the causal decode path. Optional explicit `qo_indptr` and `kv_indptr` inputs are still accepted for direct host-op tests and multi-sequence callers.
 

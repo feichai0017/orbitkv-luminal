@@ -2,6 +2,39 @@
 
 PyTorch `torch.compile` integration for Luminal.
 
+## Hugging Face paged KV cache
+
+`luminal.transformers_cache.LuminalPagedCache` is a Transformers `Cache`
+implementation for Luminal's page-size-one FlashInfer path. It keeps each
+layer's K/V allocation in physical `[max_tokens, kv_heads * head_dim]` NHD
+storage while returning the normal `[batch, kv_heads, context, head_dim]`
+logical tensors to Hugging Face attention code. PT2 therefore sees ordinary,
+semantic `index_put` and `index_select` operations; the CUDA egglog rules can
+replace the resulting attention island with `FlashInferAttention`.
+
+The current contract is deliberately narrow: batch size one, append-only full
+attention, no beam reordering, and no sliding-window layers. Construct it
+before calling the compiled model:
+
+```python
+from luminal.transformers_cache import LuminalPagedCache
+
+cache = LuminalPagedCache(
+    model.config,
+    max_cache_len=prompt_tokens + max_new_tokens,
+    dtype=torch.bfloat16,
+    device="cuda",
+)
+outputs = compiled_model(
+    input_ids=input_ids,
+    past_key_values=cache,
+    use_cache=True,
+)
+```
+
+The cache's compact slot state is `int32`, matching FlashInfer's page-table
+ABI. Explicit `int64` casts exist only around PyTorch indexed operations.
+
 ## CUDA Tests
 
 The Python CUDA CI job builds the Rust extension with the CUDA feature and runs

@@ -79,10 +79,15 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.bitwise_not.default" => self.translate_bitwise_not(node)?,
 
             // Cast
-            "torch.ops.aten._to_copy.default" => self.translate_to_copy(node)?,
+            "torch.ops.aten._to_copy.default" | "torch.ops.aten.to.dtype" => {
+                self.translate_to_copy(node)?
+            }
 
             // No-op
-            "torch.ops.aten.alias.default" => self.get_input_tensor(node, 0)?,
+            "torch.ops.aten.alias.default"
+            | "torch.ops.aten.detach.default"
+            | "torch.ops.aten.detach_.default"
+            | "torch.ops.aten.lift_fresh_copy.default" => self.get_input_tensor(node, 0)?,
 
             // Shape ops
             "torch.ops.aten.view.default" => self.translate_reshape(node)?,
@@ -154,6 +159,7 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.select.int" => self.translate_select(node)?,
             "torch.ops.aten.cat.default" => self.translate_cat(node)?,
             "torch.ops.aten.index.Tensor" => self.translate_index_tensor(node)?,
+            "torch.ops.aten.index_select.default" => self.translate_index_select(node)?,
 
             // Embedding
             "torch.ops.aten.embedding.default" => self.translate_embedding(node)?,
@@ -198,7 +204,9 @@ impl<'a> Translator<'a> {
             }
 
             // Creation ops
-            "torch.ops.aten.arange.start_step" => self.translate_arange(node)?,
+            "torch.ops.aten.arange.default" | "torch.ops.aten.arange.start_step" => {
+                self.translate_arange(node)?
+            }
             "torch.ops.aten.full.default" => self.translate_full(node)?,
             "torch.ops.aten.full_like.default" => self.translate_full_like(node)?,
             // `empty` and `empty_permuted` allocate uninitialised tensors of
