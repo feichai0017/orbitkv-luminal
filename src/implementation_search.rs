@@ -64,6 +64,40 @@ pub struct SearchOutcome {
     /// programmatic answer to "what is the search time actually spent
     /// on" (no env vars; read it from the outcome).
     pub timings: SearchTimings,
+    /// What rejected genomes were rejected FOR (diagnosis ruling
+    /// 2026-08-07: understand the breakdown, no auto-repair).
+    pub refusal_breakdown: RefusalBreakdown,
+}
+
+/// Aggregated classification of rejected genomes across one search.
+#[derive(Debug, Clone, Default)]
+pub struct RefusalBreakdown {
+    /// Genomes whose extraction produced no plan for some output.
+    pub extract_refusals: usize,
+    /// ...of those, how many involved a CHOICE-CYCLE (the genome's
+    /// chosen producers block on each other).
+    pub with_choice_cycles: usize,
+    /// ...and how many involved a DEAD-END (an unplanned class with no
+    /// candidate at all).
+    pub with_dead_ends: usize,
+    /// Genomes that extracted but failed bufferize / execute.
+    pub plan_build_refusals: usize,
+    pub execute_refusals: usize,
+    /// First few classified summaries, verbatim.
+    pub exemplars: Vec<String>,
+}
+
+impl RefusalBreakdown {
+    pub fn summary(&self) -> String {
+        format!(
+            "extract refusals {} (choice-cycles {}, dead-ends {}), bufferize {}, execute {}",
+            self.extract_refusals,
+            self.with_choice_cycles,
+            self.with_dead_ends,
+            self.plan_build_refusals,
+            self.execute_refusals
+        )
+    }
 }
 
 /// Stage wall-clock totals for one search, in nanoseconds. Saturation
@@ -180,6 +214,7 @@ pub fn search_implementations_with_ops(
     // first few refusal reasons so a fully-refused search names its
     // causes instead of shrugging.
     let mut refusals: Vec<String> = Vec::new();
+    let mut breakdown = RefusalBreakdown::default();
     let mut best: Option<(u128, Genome, BufferIrGraph)> = None;
 
     let profile_plan = |plan: &BufferIrGraph, trials: usize| -> Result<u128> {
@@ -223,12 +258,24 @@ pub fn search_implementations_with_ops(
             let graph = match extracted {
                 Ok(Some(graph)) => graph,
                 Ok(None) => {
+                    breakdown.extract_refusals += 1;
                     if refusals.len() < 8 {
                         refusals.push("extract: no boundary reached".to_string());
                     }
                     continue;
                 }
                 Err(err) => {
+                    breakdown.extract_refusals += 1;
+                    let (cycle, dead_end, summary) = session.failure_breakdown();
+                    if cycle {
+                        breakdown.with_choice_cycles += 1;
+                    }
+                    if dead_end {
+                        breakdown.with_dead_ends += 1;
+                    }
+                    if breakdown.exemplars.len() < 4 {
+                        breakdown.exemplars.push(summary);
+                    }
                     if refusals.len() < 8 {
                         refusals.push(format!("extract: {err:#}"));
                     }
@@ -248,6 +295,7 @@ pub fn search_implementations_with_ops(
                     let plan = match built {
                         Ok(plan) => plan,
                         Err(err) => {
+                            breakdown.plan_build_refusals += 1;
                             if refusals.len() < 8 {
                                 refusals.push(format!("bufferize: {err:#}"));
                             }
@@ -260,6 +308,7 @@ pub fn search_implementations_with_ops(
                     let nanos = match profiled {
                         Ok(nanos) => nanos,
                         Err(err) => {
+                            breakdown.execute_refusals += 1;
                             if refusals.len() < 8 {
                                 refusals.push(format!("execute: {err:#}"));
                             }
@@ -302,6 +351,7 @@ pub fn search_implementations_with_ops(
         plans_profiled,
         fingerprint_hits,
         timings,
+        refusal_breakdown: breakdown,
     })
 }
 

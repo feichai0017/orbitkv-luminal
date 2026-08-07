@@ -144,9 +144,83 @@ impl TinyDecoder {
     }
 }
 
+
+/// RUNG 5 (2026-08-07): real llama anatomy minus rope (ruling: rope/cos
+/// deferred for the initial reference runtime) — pre-RMSNorms, GQA
+/// attention over the paged KV cache (n_kv_heads < n_heads), SwiGLU FFN,
+/// residuals around both sublayers.
+pub struct LlamaBlock {
+    pub attn_norm: crate::LayerNorm, // RMS: mean_norm = false
+    pub wq: Linear,                  // d → n_heads·head_dim
+    pub wk: Linear,                  // d → n_kv_heads·head_dim
+    pub wv: Linear,
+    pub wo: Linear,
+    pub ffn_norm: crate::LayerNorm,
+    pub gate: Linear, // d → ff
+    pub up: Linear,   // d → ff
+    pub down: Linear, // ff → d
+    pub n_heads: usize,
+    pub n_kv_heads: usize,
+    pub head_dim: usize,
+}
+
+impl LlamaBlock {
+    pub fn new(d: usize, ff: usize, n_heads: usize, n_kv_heads: usize, cx: &mut Graph) -> Self {
+        let head_dim = d / n_heads;
+        let kv_dim = n_kv_heads * head_dim;
+        Self {
+            attn_norm: crate::LayerNorm::new(d, None, None, false, 1e-5, cx),
+            wq: Linear::new(d, d, false, cx),
+            wk: Linear::new(d, kv_dim, false, cx),
+            wv: Linear::new(d, kv_dim, false, cx),
+            wo: Linear::new(d, d, false, cx),
+            ffn_norm: crate::LayerNorm::new(d, None, None, false, 1e-5, cx),
+            gate: Linear::new(d, ff, false, cx),
+            up: Linear::new(d, ff, false, cx),
+            down: Linear::new(ff, d, false, cx),
+            n_heads,
+            n_kv_heads,
+            head_dim,
+        }
+    }
+
+    /// x (s, d) + cache slots (slots, kv_dim) → (x', k_cache', v_cache').
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward(
+        &self,
+        x: GraphTensor,
+        k_cache: GraphTensor,
+        v_cache: GraphTensor,
+        gather_idx: GraphTensor,
+        scatter_idx: GraphTensor,
+        prev_seq: Expression,
+    ) -> (GraphTensor, GraphTensor, GraphTensor) {
+        let normed = self.attn_norm.forward(x);
+        let (attn, k_cache, v_cache) = paged_attention(
+            self.wq.forward(normed),
+            self.wk.forward(normed),
+            self.wv.forward(normed),
+            k_cache,
+            v_cache,
+            gather_idx,
+            scatter_idx,
+            prev_seq,
+            self.n_heads,
+            self.n_kv_heads,
+            self.head_dim,
+        );
+        let x = x + self.wo.forward(attn);
+        let ff_in = self.ffn_norm.forward(x);
+        let ff = self
+            .down
+            .forward(self.gate.forward(ff_in).silu() * self.up.forward(ff_in));
+        (x + ff, k_cache, v_cache)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DecoderBlock, FeedForward, Mlp, TinyDecoder};
+    use super::{DecoderBlock, FeedForward, LlamaBlock, Mlp, TinyDecoder};
     use crate::{Embedding, Linear, MoE};
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
@@ -243,6 +317,257 @@ mod tests {
 
 
 
+
+    /// GQA paged-attention reference, one new token: query head h reads
+    /// KV head h / (n_heads / n_kv_heads).
+    #[allow(clippy::too_many_arguments)]
+    fn ref_paged_step_gqa(
+        q: &[f32],
+        k_new: &[f32],
+        v_new: &[f32],
+        k_cache: &mut [f32],
+        v_cache: &mut [f32],
+        gather: &[usize],
+        scatter_slot: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+    ) -> Vec<f32> {
+        let kv_dim = n_kv_heads * head_dim;
+        let kv_groups = n_heads / n_kv_heads;
+        k_cache[scatter_slot * kv_dim..(scatter_slot + 1) * kv_dim].copy_from_slice(k_new);
+        v_cache[scatter_slot * kv_dim..(scatter_slot + 1) * kv_dim].copy_from_slice(v_new);
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mut out = vec![0f32; n_heads * head_dim];
+        for h in 0..n_heads {
+            let kv_head = h / kv_groups;
+            let q_h = &q[h * head_dim..(h + 1) * head_dim];
+            let scores: Vec<f32> = gather
+                .iter()
+                .map(|slot| {
+                    let k_row = &k_cache[slot * kv_dim + kv_head * head_dim..][..head_dim];
+                    q_h.iter().zip(k_row).map(|(a, b)| a * b).sum::<f32>() * scale
+                })
+                .collect();
+            let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+            let denom: f32 = exps.iter().sum();
+            for (j, slot) in gather.iter().enumerate() {
+                let v_row = &v_cache[slot * kv_dim + kv_head * head_dim..][..head_dim];
+                for (dim, v) in v_row.iter().enumerate() {
+                    out[h * head_dim + dim] += exps[j] / denom * v;
+                }
+            }
+        }
+        out
+    }
+
+    /// RMSNorm: x / sqrt(mean(x²) + eps) — no mean subtraction.
+    fn ref_rms_norm(x: &[f32], epsilon: f32) -> Vec<f32> {
+        let ms: f32 = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
+        let inv = 1.0 / (ms + epsilon).sqrt();
+        x.iter().map(|v| v * inv).collect()
+    }
+
+    fn ref_silu(x: &[f32]) -> Vec<f32> {
+        x.iter().map(|v| v / (1.0 + (-v).exp())).collect()
+    }
+
+    /// RUNG 5: the llama-anatomy block (RMSNorm + GQA kv_groups=2 +
+    /// SwiGLU, no rope) — one decode step through the DEFAULT ladder vs
+    /// a scalar reference; prints attribution + refusal breakdown.
+    #[test]
+    fn llama_block_matches_scalar_reference() {
+        const D5: usize = 8; // n_heads 4 × head_dim 2
+        const N_H: usize = 4;
+        const N_KV: usize = 2; // kv_groups = 2 — the untested GQA path
+        const HD: usize = 2;
+        const KV_DIM: usize = N_KV * HD;
+        const FF5: usize = 12;
+        const SLOTS5: usize = 4;
+        const CTX5: usize = 2;
+        const EPS: f32 = 1e-5;
+
+        let mut cx = Graph::new();
+        let block = LlamaBlock::new(D5, FF5, N_H, N_KV, &mut cx);
+        let x = cx.tensor((1, D5));
+        let k_cache = cx.tensor((SLOTS5, KV_DIM));
+        let v_cache = cx.tensor((SLOTS5, KV_DIM));
+        let gather_idx = cx.tensor_dtyped(CTX5, DType::Int);
+        let scatter_idx = cx.tensor_dtyped(1, DType::Int);
+        let (out, kc, vc) = block.forward(
+            x,
+            k_cache,
+            v_cache,
+            gather_idx,
+            scatter_idx,
+            Expression::from(1usize),
+        );
+        let out = out.output();
+        let kc = kc.output();
+        let vc = vc.output();
+
+        let x_vals = weights(D5, 70);
+        let pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
+            (x.id, x_vals.clone()),
+            (block.wq.weight.id, weights(D5 * D5, 71)),
+            (block.wk.weight.id, weights(D5 * KV_DIM, 72)),
+            (block.wv.weight.id, weights(D5 * KV_DIM, 73)),
+            (block.wo.weight.id, weights(D5 * D5, 74)),
+            (block.gate.weight.id, weights(D5 * FF5, 75)),
+            (block.up.weight.id, weights(D5 * FF5, 76)),
+            (block.down.weight.id, weights(FF5 * D5, 77)),
+            (k_cache.id, weights(SLOTS5 * KV_DIM, 78)),
+            (v_cache.id, weights(SLOTS5 * KV_DIM, 79)),
+            (gather_idx.id, vec![0.0, 1.0]),
+            (scatter_idx.id, vec![1.0]),
+        ];
+
+        // Scalar reference.
+        let get = |seed: usize, n: usize| weights(n, seed);
+        let normed = ref_rms_norm(&x_vals, EPS);
+        let q = ref_matmul(&normed, &get(71, D5 * D5), D5, D5);
+        let k_new = ref_matmul(&normed, &get(72, D5 * KV_DIM), D5, KV_DIM);
+        let v_new = ref_matmul(&normed, &get(73, D5 * KV_DIM), D5, KV_DIM);
+        let mut ref_kc = get(78, SLOTS5 * KV_DIM);
+        let mut ref_vc = get(79, SLOTS5 * KV_DIM);
+        let attn = ref_paged_step_gqa(
+            &q, &k_new, &v_new, &mut ref_kc, &mut ref_vc, &[0, 1], 1, N_H, N_KV, HD,
+        );
+        let attn_proj = ref_matmul(&attn, &get(74, D5 * D5), D5, D5);
+        let x1: Vec<f32> = x_vals.iter().zip(&attn_proj).map(|(a, b)| a + b).collect();
+        let ff_in = ref_rms_norm(&x1, EPS);
+        let gate = ref_silu(&ref_matmul(&ff_in, &get(75, D5 * FF5), D5, FF5));
+        let up = ref_matmul(&ff_in, &get(76, D5 * FF5), D5, FF5);
+        let hidden: Vec<f32> = gate.iter().zip(&up).map(|(a, b)| a * b).collect();
+        let ff = ref_matmul(&hidden, &get(77, FF5 * D5), FF5, D5);
+        let expected: Vec<f32> = x1.iter().zip(&ff).map(|(a, b)| a + b).collect();
+
+        let data: FxHashMap<_, _> = pairs.iter().cloned().collect();
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let outcome = rt
+            .search(&data, &ImplementationSearchOptions::default())
+            .expect("search finds a plan");
+        eprintln!(
+            "[llama-block] attribution: {} | refusals: {}",
+            outcome.timings.summary(),
+            outcome.refusal_breakdown.summary()
+        );
+        for exemplar in &outcome.refusal_breakdown.exemplars {
+            eprintln!("[llama-block] refusal exemplar: {exemplar}");
+        }
+        for (id, values) in &pairs {
+            rt.set_data(*id, values.clone());
+        }
+        rt.execute().expect("winner executes");
+        assert_close(rt.get_f32(out.id).expect("out"), &expected);
+        assert_close(rt.get_f32(kc.id).expect("k cache"), &ref_kc);
+        assert_close(rt.get_f32(vc.id).expect("v cache"), &ref_vc);
+    }
+
+    /// RUNG 6: scaling measurement — the llama block at 1/2/4/8 layers
+    /// (d=8) and widths d=8/16/32 (1 layer), one decode step each,
+    /// fixed 8-genome budget for comparability (+ the rung-5 default-
+    /// budget point as reference). Prints one row per config. Run
+    /// explicitly by name: `cargo test --release measure_scaling -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement harness — run explicitly by name (release)"]
+    fn measure_scaling_curves() {
+        let budget = ImplementationSearchOptions {
+            generations: 2,
+            generation_size: 4,
+            mutations: 2,
+            trials: 1,
+            seed: 0,
+        };
+        eprintln!("config | wall | saturation | extract | exec(best) | genomes refused (cycles/dead-ends)");
+        // (layers, d, use_default_budget): the fixed 8-genome budget gives
+        // comparable refusal RATES; depth ≥ 2 needs the default budget to
+        // complete at all (the choice-cycle cliff — see the report).
+        for (layers, d, default_budget) in [
+            (1usize, 8usize, false),
+            (1, 16, false),
+            (1, 32, false),
+            (2, 8, true),
+            (4, 8, true),
+            (8, 8, true),
+        ] {
+            let n_heads = 4;
+            let n_kv = 2;
+            let ff = d + d / 2;
+            let kv_dim = n_kv * (d / n_heads);
+            const SLOTS6: usize = 4;
+            const CTX6: usize = 2;
+
+            let start = std::time::Instant::now();
+            let mut cx = Graph::new();
+            let blocks: Vec<LlamaBlock> =
+                (0..layers).map(|_| LlamaBlock::new(d, ff, n_heads, n_kv, &mut cx)).collect();
+            let x = cx.tensor((1, d));
+            let caches: Vec<_> = (0..layers)
+                .map(|_| (cx.tensor((SLOTS6, kv_dim)), cx.tensor((SLOTS6, kv_dim))))
+                .collect();
+            let gather_idx = cx.tensor_dtyped(CTX6, DType::Int);
+            let scatter_idx = cx.tensor_dtyped(1, DType::Int);
+            let mut h = x;
+            let mut outs = Vec::new();
+            for (layer, block) in blocks.iter().enumerate() {
+                let (next, kc, vc) = block.forward(
+                    h,
+                    caches[layer].0,
+                    caches[layer].1,
+                    gather_idx,
+                    scatter_idx,
+                    Expression::from(1usize),
+                );
+                h = next;
+                outs.push((kc.output(), vc.output()));
+            }
+            let _ = h.output();
+
+            let mut pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
+                (x.id, weights(d, 90)),
+                (gather_idx.id, vec![0.0, 1.0]),
+                (scatter_idx.id, vec![1.0]),
+            ];
+            for (layer, block) in blocks.iter().enumerate() {
+                pairs.push((block.wq.weight.id, weights(d * d, 91 + layer)));
+                pairs.push((block.wk.weight.id, weights(d * kv_dim, 92 + layer)));
+                pairs.push((block.wv.weight.id, weights(d * kv_dim, 93 + layer)));
+                pairs.push((block.wo.weight.id, weights(d * d, 94 + layer)));
+                pairs.push((block.gate.weight.id, weights(d * ff, 95 + layer)));
+                pairs.push((block.up.weight.id, weights(d * ff, 96 + layer)));
+                pairs.push((block.down.weight.id, weights(ff * d, 97 + layer)));
+                pairs.push((caches[layer].0.id, weights(SLOTS6 * kv_dim, 98 + layer)));
+                pairs.push((caches[layer].1.id, weights(SLOTS6 * kv_dim, 99 + layer)));
+            }
+            let data: FxHashMap<_, _> = pairs.iter().cloned().collect();
+            let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+            let chosen = if default_budget {
+                ImplementationSearchOptions::default()
+            } else {
+                budget.clone()
+            };
+            match rt.search(&data, &chosen) {
+                Ok(outcome) => {
+                    eprintln!(
+                        "L{layers} d{d} | {:.1}s | {:.1}s | {:.1}s | {:.3}ms | {}",
+                        start.elapsed().as_secs_f64(),
+                        outcome.timings.saturation_nanos as f64 / 1e9,
+                        outcome.timings.extract_nanos as f64 / 1e9,
+                        outcome.best_nanos as f64 / 1e6,
+                        outcome.refusal_breakdown.summary(),
+                    );
+                }
+                Err(err) => {
+                    eprintln!(
+                        "L{layers} d{d} | {:.1}s | SEARCH REFUSED: {err:#}",
+                        start.elapsed().as_secs_f64()
+                    );
+                }
+            }
+        }
+    }
 
     // ── shared scalar-reference pieces (single query row, s = 1) ──
 

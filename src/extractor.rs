@@ -31,6 +31,12 @@ struct Extractor<'a> {
     /// `None` = the deterministic fixture extractor (min-cost tooling).
     genome: Option<Genome>,
     memo: HashMap<ClassId, Option<Plan>>,
+    /// Post-relaxation blockage record (diagnosis, ruling 2026-08-07:
+    /// UNDERSTAND refusals, no auto-repair): unplanned class → its
+    /// candidates' unplanned children, plus the unplanned classes with
+    /// no candidates at all. Cleared per extraction.
+    blocked: HashMap<ClassId, Vec<ClassId>>,
+    no_candidates: Vec<ClassId>,
     /// GENOME-INDEPENDENT op-instance cache: matcher `extract()` parses
     /// only enode METADATA (index maps, iota expressions, coordinate
     /// ranks — the deep backtracking walks over saturated classes), which
@@ -137,12 +143,92 @@ impl<'a> ExtractionSession<'a> {
         Self { extractor }
     }
 
+    /// Classify the last failed extraction's blockage (diagnosis ruling
+    /// 2026-08-07: understand refusals, never auto-repair). Returns
+    /// (has_choice_cycle, has_dead_end, summary): choice-cycles are
+    /// strongly-connected components among unplanned classes whose chosen
+    /// producers block on each other; dead-ends are unplanned classes
+    /// with no candidate at all (a genome naming a producer whose route
+    /// left the viable set, or a contract violation).
+    pub fn failure_breakdown(&self) -> (bool, bool, String) {
+        let extractor = &self.extractor;
+        if extractor.blocked.is_empty() && extractor.no_candidates.is_empty() {
+            return (false, false, "no blockage recorded".to_string());
+        }
+        let class_label = |class: &ClassId| -> String {
+            extractor
+                .class_nodes
+                .get(class)
+                .into_iter()
+                .flatten()
+                .filter_map(|id| extractor.egraph.nodes.get(id))
+                .map(|node| node.op.as_str())
+                .find(|op| op.starts_with("LayoutTensorOp"))
+                .or_else(|| {
+                    extractor
+                        .class_nodes
+                        .get(class)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| extractor.egraph.nodes.get(id))
+                        .map(|node| node.op.as_str())
+                        .next()
+                })
+                .unwrap_or("?")
+                .to_string()
+        };
+        // Tarjan over the blocked graph via petgraph.
+        let mut graph = petgraph::graph::DiGraph::<ClassId, ()>::new();
+        let mut nodes: HashMap<ClassId, petgraph::graph::NodeIndex> = HashMap::new();
+        for class in extractor.blocked.keys() {
+            let index = graph.add_node(class.clone());
+            nodes.insert(class.clone(), index);
+        }
+        for (class, blockers) in &extractor.blocked {
+            for blocker in blockers {
+                if let (Some(&a), Some(&b)) = (nodes.get(class), nodes.get(blocker)) {
+                    graph.add_edge(a, b, ());
+                }
+            }
+        }
+        let mut cycles: Vec<Vec<String>> = Vec::new();
+        for scc in petgraph::algo::tarjan_scc(&graph) {
+            let is_cycle = scc.len() > 1
+                || (scc.len() == 1 && graph.contains_edge(scc[0], scc[0]));
+            if is_cycle {
+                let mut labels: Vec<String> = scc
+                    .iter()
+                    .map(|index| class_label(&graph[*index]))
+                    .collect();
+                labels.sort();
+                labels.dedup();
+                cycles.push(labels);
+            }
+        }
+        let dead_ends: Vec<String> = extractor
+            .no_candidates
+            .iter()
+            .map(|class| format!("{} ({class})", class_label(class)))
+            .collect();
+        let summary = format!(
+            "{} unplanned classes; choice-cycles: {} {:?}; dead-ends: {} {:?}",
+            extractor.blocked.len() + extractor.no_candidates.len(),
+            cycles.len(),
+            cycles.iter().take(3).collect::<Vec<_>>(),
+            dead_ends.len(),
+            dead_ends.iter().take(5).collect::<Vec<_>>()
+        );
+        (!cycles.is_empty(), !dead_ends.is_empty(), summary)
+    }
+
     pub fn extract_with_genome(
         &mut self,
         genome: &Genome,
     ) -> Result<Option<ExtractedGraph>> {
         self.extractor.genome = Some(genome.clone());
         self.extractor.memo.clear();
+        self.extractor.blocked.clear();
+        self.extractor.no_candidates.clear();
         self.extractor.extract()
     }
 }
@@ -350,6 +436,8 @@ impl<'a> Extractor<'a> {
             input_terminals,
             genome: genome.cloned(),
             memo: HashMap::new(),
+            blocked: HashMap::new(),
+            no_candidates: Vec::new(),
             op_cache: Default::default(),
         }
     }
@@ -668,6 +756,24 @@ impl<'a> Extractor<'a> {
         // failure diagnostics (and build-side plan()) read a settled memo.
         for class in &universe {
             self.memo.entry(class.clone()).or_insert(None);
+        }
+        // Blockage record for the refusal breakdown: for each unplanned
+        // class, which of its candidates' children are also unplanned
+        // (the enablement blockers), and which have no candidates at all.
+        for (class, candidates) in universe.iter().zip(&candidate_lists) {
+            if self.memo.get(class).cloned().flatten().is_some() {
+                continue;
+            }
+            if candidates.is_empty() {
+                self.no_candidates.push(class.clone());
+                continue;
+            }
+            let blockers: Vec<ClassId> = candidates
+                .iter()
+                .flat_map(|candidate| candidate.children.iter().map(|child| child.class.clone()))
+                .filter(|child| self.memo.get(child).cloned().flatten().is_none())
+                .collect();
+            self.blocked.insert(class.clone(), blockers);
         }
     }
 
