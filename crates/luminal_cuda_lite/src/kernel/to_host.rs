@@ -54,6 +54,15 @@ use crate::{
 };
 
 const REBUILD_GRAPH_EACH_RUN_ENV: &str = "LUMINAL_CUDA_REBUILD_GRAPH_EACH_RUN";
+/// Diagnostic escape hatch: keep the fused Qwen3Moe HostOp selected, but do
+/// not absorb it into a surrounding CudaGraphOp. This deliberately splits the
+/// graph at each MoE boundary and is useful for distinguishing a kernel bug
+/// from a captured-graph replay/update bug.
+const DISABLE_QWEN3_MOE_GRAPH_CAPTURE_ENV: &str = "LUMINAL_CUDA_DISABLE_QWEN3_MOE_GRAPH_CAPTURE";
+/// Diagnostic counterpart to `DISABLE_QWEN3_MOE_GRAPH_CAPTURE_ENV`: retain
+/// FlashInferAttention as the selected HostOp while forcing CUDA-graph
+/// packaging to split at each attention boundary.
+const DISABLE_FLASHINFER_GRAPH_CAPTURE_ENV: &str = "LUMINAL_CUDA_DISABLE_FLASHINFER_GRAPH_CAPTURE";
 const DEBUG_KERNEL_BINDINGS_ENV: &str = "LUMINAL_CUDA_DEBUG_KERNEL_BINDINGS";
 
 #[derive(Debug, Clone)]
@@ -3096,13 +3105,15 @@ pub fn kernel_to_host(
                             .is_some_and(|flashinfer| {
                                 let incoming =
                                     llir_graph.edges_directed(*n, Direction::Incoming).count();
-                                incoming == flashinfer.graph_inputs() || incoming == 6
+                                std::env::var_os(DISABLE_FLASHINFER_GRAPH_CAPTURE_ENV).is_none()
+                                    && (incoming == flashinfer.graph_inputs() || incoming == 6)
                             })
                         || host
                             .as_any()
                             .downcast_ref::<Qwen3Moe>()
                             .is_some_and(|qwen3_moe| {
-                                qwen3_moe.has_static_graph_signature()
+                                std::env::var_os(DISABLE_QWEN3_MOE_GRAPH_CAPTURE_ENV).is_none()
+                                    && qwen3_moe.has_static_graph_signature()
                                     && llir_graph.edges_directed(*n, Direction::Incoming).count()
                                         == 4
                             })

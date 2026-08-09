@@ -1,5 +1,7 @@
 """CompiledModel wrapper for the Rust CompiledGraph."""
 
+import os
+
 from typing import List
 
 import torch
@@ -358,5 +360,17 @@ class CompiledModel:
             else:
                 out = _read_typed_output(name, shape, out_dtype)
             outputs.append(out)
+
+            if (
+                os.getenv("LUMINAL_DEBUG_CACHE_POSITIONS")
+                and out_dtype == torch.int32
+                and out.ndim == 1
+            ):
+                print(
+                    "LUMINAL_CACHE_POSITIONS"
+                    f" name={name} shape={tuple(out.shape)}"
+                    f" values={out.detach().cpu().tolist()}",
+                    flush=True,
+                )
 
         return tuple(outputs)

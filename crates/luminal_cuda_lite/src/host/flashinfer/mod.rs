@@ -401,16 +401,18 @@ impl EgglogOp for FlashInferAttention {
 
     fn rewrites(&self) -> Vec<Rule> {
         // FlashInfer requires Ampere+ (sm_80; the kernels use cp.async /
-        // async-copy). On older arches — e.g. a T4 (sm_75) — emit no rules so
-        // the search never selects FlashInfer and attention stays on the HLIR
-        // chain. Without this the rule fires, the search picks it, and the
-        // JIT'd kernel's symbol is absent on launch (CUDA_ERROR_NOT_FOUND).
-        // All of this egg's relations (const_like, fi_*, flashinfer_*) are
-        // self-contained, so dropping it leaves no dangling references.
-        if crate::device_compute_major() < 8 {
-            return vec![];
+        // async-copy). Always load the egg program because its helper
+        // declarations (notably const_like) are shared with other backend
+        // rewrites. Enable only the six rules that produce a
+        // FlashInferAttention op when the device supports it and the
+        // diagnostic disable switch is absent.
+        let mut program = include_str!["flashinfer_attention.egg"].to_string();
+        if crate::device_compute_major() >= 8
+            && std::env::var_os("LUMINAL_DISABLE_FLASHINFER").is_none()
+        {
+            program.push_str("\n(flashinfer_enabled)\n");
         }
-        vec![Rule::raw(include_str!["flashinfer_attention.egg"])]
+        vec![Rule::raw(program)]
     }
 
     fn extract<'a>(
@@ -475,9 +477,11 @@ impl EgglogOp for FlashInferAttention {
         // the candidate's measured runtime and make the GA reject FlashInfer.
         let _ = jit::ensure_compiled(head_dim, window_left >= 0);
 
-        let flat_idx_node = input_enodes[3];
-        let gather_idx = find_indptrs::try_find_compact_gather_idx(egraph, flat_idx_node)
-            .expect("FlashInferAttention matched a gather without recoverable compact gather_idx");
+        // The egglog proof carries the exact compact row-id tensor that built
+        // both expanded K/V gather indices. Do not rediscover it by scanning a
+        // saturated e-class: that can select a different, merely
+        // shape-compatible term and feed FlashInfer corrupt page ids.
+        let gather_idx = input_enodes[3];
         let final_inputs = vec![
             input_enodes[0],
             input_enodes[1],
@@ -555,8 +559,13 @@ impl FlashInferAttention {
         let max_kv_pages = k_bytes
             .checked_div(kv_bytes)
             .zip(v_bytes.checked_div(kv_bytes))
-            .map(|(k_pages, v_pages)| k_pages.min(v_pages).max(c))
+            .map(|(k_pages, v_pages)| k_pages.min(v_pages))
             .unwrap_or(c);
+        if c > max_kv_pages {
+            return Err(ResourceViolation::HostResourcePlanning {
+                name: "FlashInfer context exceeds K/V cache capacity",
+            });
+        }
         let explicit_indptr = inputs.len() == 6;
         let batch_size = if explicit_indptr {
             dyn_map
@@ -652,8 +661,25 @@ impl FlashInferAttention {
             .len()
             .checked_div(kv_bytes)
             .zip(v_buf.len().checked_div(kv_bytes))
-            .map(|(k_pages, v_pages)| k_pages.min(v_pages).max(c))
-            .unwrap_or(c);
+            .map(|(k_pages, v_pages)| k_pages.min(v_pages))
+            .ok_or_else(|| anyhow::anyhow!("FlashInfer KV row byte size is invalid"))?;
+        if c > max_kv_pages {
+            anyhow::bail!(
+                "FlashInfer context length {c} exceeds cache capacity {max_kv_pages} pages: K={} bytes, V={} bytes, row={} bytes",
+                k_buf.len(),
+                v_buf.len(),
+                kv_bytes,
+            );
+        }
+        let gather_bytes = c
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| anyhow::anyhow!("FlashInfer gather_idx byte size overflow"))?;
+        if gather_idx_buf.len() < gather_bytes {
+            anyhow::bail!(
+                "FlashInfer gather_idx is too small for context length {c}: buffer={} bytes, required={gather_bytes} bytes",
+                gather_idx_buf.len(),
+            );
+        }
         let (kv_indptr_host, batch_size, explicit_qo_indptr, explicit_kv_indptr) =
             if inputs.len() >= 6 {
                 let r = *dyn_map.get(&'r').ok_or_else(|| {
@@ -1111,7 +1137,67 @@ impl HostOp for FlashInferAttention {
         buffers: &FxHashMap<NodeIndex, DeviceBuffer>,
         dyn_map: &FxHashMap<char, usize>,
     ) -> anyhow::Result<()> {
+        let debug_sync = std::env::var_os("LUMINAL_FLASHINFER_DEBUG_SYNC").is_some();
+        if debug_sync {
+            eprintln!(
+                "FLASHINFER_DEBUG begin node={} stream={:?}",
+                self_node.index(),
+                stream.cu_stream()
+            );
+            stream.synchronize().map_err(|error| {
+                anyhow::anyhow!(
+                    "FlashInfer pre-launch synchronization failed at node={}: {error:?}",
+                    self_node.index()
+                )
+            })?;
+            eprintln!(
+                "FLASHINFER_DEBUG pre-launch sync passed node={}",
+                self_node.index()
+            );
+        }
+
         let resolved = self.resolve_for_graph(self_node, inputs, buffers, dyn_map)?;
+        if debug_sync && resolved.ptrs.explicit_kv_indptr.is_none() {
+            let c = resolved.spec.c;
+            let mut host_bytes = vec![0u8; c * std::mem::size_of::<i32>()];
+            unsafe {
+                result::memcpy_dtoh_async(
+                    &mut host_bytes,
+                    resolved.ptrs.gather_idx,
+                    stream.cu_stream(),
+                )?;
+            }
+            stream.synchronize()?;
+            let gather_idx = bytes_to_i32_vec(host_bytes);
+            if let Some((position, value)) = gather_idx
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|(_, value)| *value < 0 || *value as usize >= resolved.spec.max_kv_pages)
+            {
+                anyhow::bail!(
+                    "FlashInfer gather_idx out of bounds at node={}: position={position}, value={value}, cache_capacity={}, context_length={c}",
+                    self_node.index(),
+                    resolved.spec.max_kv_pages,
+                );
+            }
+            eprintln!(
+                "FLASHINFER_DEBUG resolved node={} q=0x{:x} k=0x{:x} v=0x{:x} gather=0x{:x} output=0x{:x} context={} cache_capacity={} gather_range={:?}",
+                self_node.index(),
+                resolved.ptrs.q,
+                resolved.ptrs.k_cache,
+                resolved.ptrs.v_cache,
+                resolved.ptrs.gather_idx,
+                resolved.ptrs.output,
+                c,
+                resolved.spec.max_kv_pages,
+                gather_idx
+                    .iter()
+                    .copied()
+                    .min()
+                    .zip(gather_idx.iter().copied().max()),
+            );
+        }
         let ptrs = resolved.ptrs;
         let prepared = self.prepare_resolved_for_graph(stream, resolved, false)?;
 
@@ -1125,7 +1211,21 @@ impl HostOp for FlashInferAttention {
             self.head_dim,
         )
         .entered();
-        prepared.enqueue(stream, ptrs, true)
+        prepared.enqueue(stream, ptrs, true)?;
+
+        if debug_sync {
+            stream.synchronize().map_err(|error| {
+                anyhow::anyhow!(
+                    "FlashInfer post-launch synchronization failed at node={}: {error:?}",
+                    self_node.index()
+                )
+            })?;
+            eprintln!(
+                "FLASHINFER_DEBUG post-launch sync passed node={}",
+                self_node.index()
+            );
+        }
+        Ok(())
     }
 
     fn output_size(&self) -> Expression {

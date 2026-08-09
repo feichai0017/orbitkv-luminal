@@ -1080,6 +1080,29 @@ impl CudaRuntime {
                 continue;
             }
 
+            // Distinct HLIR outputs can collapse to the same LLIR data node
+            // during equality saturation/CSE. Only one external pointer can
+            // back that node while kernels execute. Keep the first registered
+            // pointer as the primary destination and fan the value out to
+            // every additional registered output in the epilogue. Replacing
+            // the map entry here would leave all but one caller-owned tensor
+            // uninitialized while output_is_zero_copy() incorrectly reported
+            // success for every alias.
+            if let Some((primary_ptr, primary_len)) = self
+                .external_output_buffers
+                .get(&data_node)
+                .map(|buffer| (buffer.device_ptr(&self.cuda_stream).0, buffer.len()))
+            {
+                if primary_ptr != device_ptr {
+                    self.pending_output_copies.push((
+                        primary_ptr,
+                        device_ptr,
+                        n_bytes.min(primary_len),
+                    ));
+                }
+                continue;
+            }
+
             // Create non-owning CudaSlice view of PyTorch's buffer
             let slice = unsafe {
                 self.cuda_stream
@@ -4696,6 +4719,60 @@ fn intersects(a: &FixedBitSet, b: &FixedBitSet) -> bool {
 #[cfg(test)]
 mod arena_plan_tests {
     use super::*;
+    use crate::tests::utilities::get_cuda_stream;
+    use rand::{SeedableRng, rngs::SmallRng};
+
+    #[test]
+    fn cse_aliased_outputs_fan_out_to_every_registered_device_pointer() {
+        let Some(stream) = get_cuda_stream() else {
+            return;
+        };
+
+        let mut graph = Graph::default();
+        let input = graph.tensor(4);
+        // These are distinct HLIR outputs with the same value. Equality
+        // saturation is expected to collapse them to one LLIR producer.
+        let output_a = (input + input).output();
+        let output_b = (input + input).output();
+        assert_ne!(output_a.id, output_b.id);
+
+        graph.build_search_space::<CudaRuntime>(CompileOptions::default());
+        let mut runtime = CudaRuntime::initialize(stream.clone());
+        runtime.set_data(input.id, vec![1.0f32, 2.0, 3.0, 4.0]);
+        runtime = graph.search_with_rng(
+            runtime,
+            CompileOptions::default().search_graph_limit(5),
+            &mut SmallRng::seed_from_u64(0),
+        );
+
+        assert_eq!(
+            runtime.find_producer_node(output_a.id),
+            runtime.find_producer_node(output_b.id),
+            "test requires CSE to map both HLIR outputs to one LLIR producer"
+        );
+
+        let output_len = 4 * std::mem::size_of::<f32>();
+        let output_a_device = stream.alloc_zeros::<f32>(4).unwrap();
+        let output_b_device = stream.alloc_zeros::<f32>(4).unwrap();
+        unsafe {
+            runtime.set_output_device_ptr(
+                output_a.id,
+                output_a_device.device_ptr(&stream).0,
+                output_len,
+            );
+            runtime.set_output_device_ptr(
+                output_b.id,
+                output_b_device.device_ptr(&stream).0,
+                output_len,
+            );
+        }
+
+        runtime.execute(&graph.dyn_map);
+
+        let expected = vec![2.0f32, 4.0, 6.0, 8.0];
+        assert_eq!(stream.clone_dtoh(&output_a_device).unwrap(), expected);
+        assert_eq!(stream.clone_dtoh(&output_b_device).unwrap(), expected);
+    }
 
     #[test]
     fn arena_release_plan_retains_and_deduplicates_allocation_pools() {

@@ -19,6 +19,7 @@
 ; Shape dimensions are egglog variables, not pinned constants.
 ; Dynamic dims "s" (batch/seq) and "c" (context) stay pinned as MVar.
 
+(relation flashinfer_enabled ())
 (relation flashinfer_cache_pair (IR IR))
 
 ; Functional PT2 caches can independently lower the K and V row-index
@@ -29,7 +30,7 @@
 (relation fi_compact_row_ids (IR))
 (relation fi_row_index_base (IR IR))
 (relation fi_flat_row_index (IR IR))
-(relation fi_same_row_indices (IR IR))
+(relation fi_same_row_indices (IR IR IR))
 
 (rule
     ((= ?ids (Input ?node ?label (Int))))
@@ -100,7 +101,7 @@
         (fi_flat_row_index ?k_flat ?ids)
         (fi_flat_row_index ?v_flat ?ids)
     )
-    ((fi_same_row_indices ?k_flat ?v_flat))
+    ((fi_same_row_indices ?k_flat ?v_flat ?ids))
     :ruleset matmul_backend
     :name "FlashInfer shared compact row indices"
 )
@@ -427,13 +428,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
-        (fi_same_row_indices ?k_idx ?v_idx)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
             ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) ?sequence ?context ?dt ?sq_scale_val -1.0)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (INil))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
@@ -559,13 +561,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
-        (fi_same_row_indices ?k_idx ?v_idx)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
             ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) (MVar "s") (MVar "c") ?dt ?sq_scale_val -1.0)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (INil))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
@@ -697,13 +700,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
-        (fi_same_row_indices ?k_idx ?v_idx)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
             ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) (MVar "s") (MVar "c") ?dt ?sq_scale_val -1.0)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (INil))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
@@ -820,13 +824,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
-        (fi_same_row_indices ?k_idx ?v_idx)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
             ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) ?sequence ?context ?dt ?sq_scale_val -1.0)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (INil))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
@@ -1183,13 +1188,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
-        (fi_same_row_indices ?k_idx ?v_idx)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok_16bit ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
             ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) (MVar "s") (MVar "c") ?dt 1.0 -1.0)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (INil))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
@@ -1302,13 +1308,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
-        (fi_same_row_indices ?k_idx ?v_idx)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok_16bit ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
             ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) (MVar "s") (MVar "c") ?dt 1.0 ?window_left)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (INil))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
