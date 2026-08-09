@@ -38,6 +38,7 @@ use crate::{
             FlashInferAttention, FlashInferDecodeCaptureSignature, FlashInferDecodePointers,
             FlashInferPrepareKey, PreparedFlashInferDecode,
         },
+        qwen3_moe::{PreparedQwen3Moe, Qwen3Moe, Qwen3MoeCaptureSignature},
     },
     kernel::{
         CudaFunctionExt, CudaGraphExecHandle, CudaGraphHandle, KernelOp, create_cuda_event,
@@ -60,9 +61,11 @@ pub struct CudaGraphDebugSummary {
     pub n_kernels: usize,
     pub n_cublaslt: usize,
     pub n_flashinfer: usize,
+    pub n_qwen3_moe: usize,
     pub n_cublaslt_prepared: usize,
     pub flashinfer_recapture_counts: Vec<usize>,
     pub flashinfer_input_counts: Vec<usize>,
+    pub qwen3_moe_input_counts: Vec<usize>,
     pub n_steps: usize,
     pub absorbed_host_nodes: Vec<NodeIndex>,
     pub step_dependency_counts: Vec<usize>,
@@ -163,6 +166,41 @@ impl CompiledFlashInferDecode {
 struct PendingFlashInferDecodeRecapture {
     prepared: Option<Rc<PreparedFlashInferDecode>>,
     signature: FlashInferDecodeCaptureSignature,
+}
+
+struct CompiledQwen3Moe {
+    node: NodeIndex,
+    inputs: Vec<NodeIndex>,
+    host_op: Arc<Box<dyn HostOp>>,
+    entry_node: Option<CUgraphNode>,
+    exit_node: Option<CUgraphNode>,
+    captured_nodes: Vec<CUgraphNode>,
+    prepared: Option<Rc<PreparedQwen3Moe>>,
+    signature: Option<Qwen3MoeCaptureSignature>,
+}
+
+impl CompiledQwen3Moe {
+    fn new(node: NodeIndex, inputs: Vec<NodeIndex>, host_op: Arc<Box<dyn HostOp>>) -> Self {
+        Self {
+            node,
+            inputs,
+            host_op,
+            entry_node: None,
+            exit_node: None,
+            captured_nodes: Vec::new(),
+            prepared: None,
+            signature: None,
+        }
+    }
+
+    fn qwen3_moe(&self) -> &Qwen3Moe {
+        self.host_op
+            .as_ref()
+            .as_ref()
+            .as_any()
+            .downcast_ref::<Qwen3Moe>()
+            .expect("CompiledQwen3Moe only stores Qwen3Moe host ops")
+    }
 }
 
 /// Prepared FlashInfer plan and the dependency-ordered steps that use it.
@@ -339,6 +377,7 @@ enum CompiledStep {
     Kernel(usize),
     CuBlasLt(usize),
     FlashInferDecode(usize),
+    Qwen3Moe(usize),
 }
 
 impl CompiledKernel {
@@ -420,6 +459,8 @@ struct CudaGraphOpState {
     cublaslt_ops: Vec<CompiledCuBlasLt>,
     /// Capturable FlashInfer decode host ops absorbed into this CUDA graph.
     flashinfer_ops: Vec<CompiledFlashInferDecode>,
+    /// Capturable fused Qwen3-MoE host ops absorbed into this CUDA graph.
+    qwen3_moe_ops: Vec<CompiledQwen3Moe>,
     /// Mixed execution steps in topological order.
     steps: Vec<CompiledStep>,
     /// Per-cuBLASLt op index into `steps`.
@@ -456,16 +497,23 @@ impl CudaGraphOpState {
         kernels: Vec<CompiledKernel>,
         cublaslt_ops: Vec<CompiledCuBlasLt>,
         flashinfer_ops: Vec<CompiledFlashInferDecode>,
+        qwen3_moe_ops: Vec<CompiledQwen3Moe>,
         steps: Vec<CompiledStep>,
     ) -> Self {
         let cublaslt_step_indices = cublaslt_step_indices(&steps, cublaslt_ops.len());
         let flashinfer_step_indices = flashinfer_step_indices(&steps, flashinfer_ops.len());
-        let step_reachability =
-            build_step_reachability(&steps, &kernels, &cublaslt_ops, &flashinfer_ops);
+        let step_reachability = build_step_reachability(
+            &steps,
+            &kernels,
+            &cublaslt_ops,
+            &flashinfer_ops,
+            &qwen3_moe_ops,
+        );
         Self {
             kernels,
             cublaslt_ops,
             flashinfer_ops,
+            qwen3_moe_ops,
             steps,
             cublaslt_step_indices,
             flashinfer_step_indices,
@@ -483,6 +531,23 @@ impl CudaGraphOpState {
             timing_events: Vec::new(),
         }
     }
+
+    /// Retire one complete mutable/executable CUDA-graph generation.
+    ///
+    /// `cuGraphExecKernelNodeSetParams` requires a node handle belonging to
+    /// the source graph generation associated with the executable. If we
+    /// rebuild the mutable graph but retain its old executable, the freshly
+    /// populated `node_to_graph_node` map contains handles from the new graph;
+    /// using one of those handles to patch the old executable is invalid.
+    /// Always discard the executable first, then its source graph and every
+    /// handle/parameter table derived from that pair.
+    fn invalidate_graph_generation(&mut self) {
+        self.cuda_graph_exec = None;
+        self.cuda_graph = None;
+        self.node_to_graph_node.clear();
+        self.producer_to_graph_node.clear();
+        self.kernel_params.clear();
+    }
 }
 
 /// A CUDA graph operation that implements HostOp.
@@ -498,7 +563,7 @@ pub struct CudaGraphOp {
     dyn_dims_order: Vec<char>,
     /// The CUDA stream (needed for operations)
     stream: Arc<CudaStream>,
-    /// Nonblocking stream used only for narrow cuBLASLt graph captures.
+    /// Nonblocking stream used for narrow library-backed graph captures.
     capture_stream: RefCell<Option<Arc<CudaStream>>>,
     /// Mutable state wrapped in RefCell for interior mutability
     state: RefCell<CudaGraphOpState>,
@@ -704,6 +769,15 @@ impl CudaGraphOp {
             }
         }
 
+        for op in &state.qwen3_moe_ops {
+            let workspace_bytes = op.qwen3_moe().workspace_bytes_for_resources(dyn_map)?;
+            persistent_bytes = persistent_bytes.checked_add(workspace_bytes).ok_or(
+                ResourceViolation::ArithmeticOverflow {
+                    resource: "Qwen3Moe prepared device memory",
+                },
+            )?;
+        }
+
         Ok(HostDeviceMemoryPlan {
             persistent_bytes,
             shared_allocations: (!state.flashinfer_ops.is_empty())
@@ -721,6 +795,7 @@ impl CudaGraphOp {
             .iter()
             .map(|op| op.node)
             .chain(state.flashinfer_ops.iter().map(|op| op.node))
+            .chain(state.qwen3_moe_ops.iter().map(|op| op.node))
             .collect()
     }
 
@@ -740,6 +815,7 @@ impl CudaGraphOp {
                             CompiledStep::FlashInferDecode(idx) => {
                                 state.flashinfer_ops[*idx].entry_node
                             }
+                            CompiledStep::Qwen3Moe(idx) => state.qwen3_moe_ops[*idx].entry_node,
                         };
                         node.and_then(|node| graph.dependencies(node).ok())
                             .map(|deps| deps.len())
@@ -753,6 +829,7 @@ impl CudaGraphOp {
             n_kernels: state.kernels.len(),
             n_cublaslt: state.cublaslt_ops.len(),
             n_flashinfer: state.flashinfer_ops.len(),
+            n_qwen3_moe: state.qwen3_moe_ops.len(),
             n_cublaslt_prepared: state.cublaslt_prepare_cache.len(),
             flashinfer_recapture_counts: state
                 .flashinfer_ops
@@ -764,12 +841,18 @@ impl CudaGraphOp {
                 .iter()
                 .map(|op| op.inputs.len())
                 .collect(),
+            qwen3_moe_input_counts: state
+                .qwen3_moe_ops
+                .iter()
+                .map(|op| op.inputs.len())
+                .collect(),
             n_steps: state.steps.len(),
             absorbed_host_nodes: state
                 .cublaslt_ops
                 .iter()
                 .map(|op| op.node)
                 .chain(state.flashinfer_ops.iter().map(|op| op.node))
+                .chain(state.qwen3_moe_ops.iter().map(|op| op.node))
                 .collect(),
             step_dependency_counts,
         }
@@ -783,6 +866,7 @@ impl std::fmt::Debug for CudaGraphOp {
             .field("n_kernels", &state.kernels.len())
             .field("n_cublaslt", &state.cublaslt_ops.len())
             .field("n_flashinfer", &state.flashinfer_ops.len())
+            .field("n_qwen3_moe", &state.qwen3_moe_ops.len())
             .field("n_buffer_nodes", &self.buffer_nodes.len())
             .finish()
     }
@@ -899,6 +983,13 @@ impl HostOp for CudaGraphOp {
                     }
                     touch(op.node, step);
                 }
+                CompiledStep::Qwen3Moe(idx) => {
+                    let op = &state.qwen3_moe_ops[*idx];
+                    for &input in &op.inputs {
+                        touch(input, step);
+                    }
+                    touch(op.node, step);
+                }
             }
         }
 
@@ -937,6 +1028,10 @@ impl HostOp for CudaGraphOp {
                 }
                 CompiledStep::FlashInferDecode(idx) => {
                     let op = &state.flashinfer_ops[*idx];
+                    (op.node, op.inputs.clone())
+                }
+                CompiledStep::Qwen3Moe(idx) => {
+                    let op = &state.qwen3_moe_ops[*idx];
                     (op.node, op.inputs.clone())
                 }
             };
@@ -1066,6 +1161,7 @@ fn build_step_reachability(
     kernels: &[CompiledKernel],
     cublaslt_ops: &[CompiledCuBlasLt],
     flashinfer_ops: &[CompiledFlashInferDecode],
+    qwen3_moe_ops: &[CompiledQwen3Moe],
 ) -> Vec<FixedBitSet> {
     let n_steps = steps.len();
     let mut producer_step: FxHashMap<NodeIndex, usize> = FxHashMap::default();
@@ -1083,6 +1179,10 @@ fn build_step_reachability(
             }
             CompiledStep::FlashInferDecode(idx) => {
                 let op = &flashinfer_ops[*idx];
+                (op.node, op.inputs.clone())
+            }
+            CompiledStep::Qwen3Moe(idx) => {
+                let op = &qwen3_moe_ops[*idx];
                 (op.node, op.inputs.clone())
             }
         };
@@ -1326,16 +1426,13 @@ impl CudaGraphOp {
         // library island from the current pointers and dynamic dimensions.
         if std::env::var_os(REBUILD_GRAPH_EACH_RUN_ENV).is_some() {
             eprintln!(
-                "CUDA_GRAPH_DEBUG rebuilding graph from scratch kernels={} cublaslt={} flashinfer={} dyn={dyn_map:?} ({REBUILD_GRAPH_EACH_RUN_ENV} is set)",
+                "CUDA_GRAPH_DEBUG rebuilding graph from scratch kernels={} cublaslt={} flashinfer={} qwen3_moe={} dyn={dyn_map:?} ({REBUILD_GRAPH_EACH_RUN_ENV} is set)",
                 state.kernels.len(),
                 state.cublaslt_ops.len(),
                 state.flashinfer_ops.len(),
+                state.qwen3_moe_ops.len(),
             );
-            state.cuda_graph = None;
-            state.cuda_graph_exec = None;
-            state.node_to_graph_node.clear();
-            state.producer_to_graph_node.clear();
-            state.kernel_params.clear();
+            state.invalidate_graph_generation();
         }
 
         // Check if dyn_map changed
@@ -1377,10 +1474,7 @@ impl CudaGraphOp {
         // Dim-only changes (e.g. position offset `p` incrementing each decode step) are
         // handled by updating the dyn_dims device buffer + kernel node params in-place.
         if needs_internal_realloc {
-            state.cuda_graph = None;
-            state.cuda_graph_exec = None;
-            state.node_to_graph_node.clear();
-            state.kernel_params.clear();
+            state.invalidate_graph_generation();
         }
 
         // Allocate dyn_dims_buffer if needed
@@ -1404,6 +1498,45 @@ impl CudaGraphOp {
                 stream.memcpy_htod(&values, buf)?;
             }
             profile.dyn_dim_upload += timer.elapsed();
+        }
+
+        // The generated Qwen3-MoE ABI intentionally exposes an enqueue-only
+        // capture path, but the captured nodes still bake in tensor pointers,
+        // token count, dtype, and the standard/persistent dispatch choice.
+        // Rebuild the containing source graph when any of those values change.
+        // Decode uses stable token=1 graphs and stable arena pointers, so this
+        // is a correctness fallback rather than a per-token cost.
+        if state.cuda_graph.is_some() {
+            let mut qwen_signature_changed = false;
+            for op in &state.qwen3_moe_ops {
+                let resolved = op
+                    .qwen3_moe()
+                    .resolve_for_graph(op.node, &op.inputs, buffers, dyn_map)?;
+                let signature = resolved.signature();
+                if op.signature != Some(signature) {
+                    if std::env::var_os("LUMINAL_CUDA_DEBUG_QWEN3_MOE_RECAPTURE").is_some() {
+                        match op.signature {
+                            Some(old) => eprintln!(
+                                "QWEN3_MOE_RECAPTURE node={} tokens_changed={} dtype_changed={} mode_changed={} ptr_fields={:?}",
+                                op.node.index(),
+                                old.tokens != signature.tokens,
+                                old.dtype != signature.dtype,
+                                old.prefill_mode != signature.prefill_mode,
+                                old.ptrs.changed_fields(signature.ptrs),
+                            ),
+                            None => eprintln!(
+                                "QWEN3_MOE_RECAPTURE node={} initial_capture=true",
+                                op.node.index(),
+                            ),
+                        }
+                    }
+                    qwen_signature_changed = true;
+                    break;
+                }
+            }
+            if qwen_signature_changed {
+                state.invalidate_graph_generation();
+            }
         }
 
         // Build CUDA graph if needed
@@ -1434,10 +1567,11 @@ impl CudaGraphOp {
 
         if std::env::var_os(DEBUG_KERNEL_BINDINGS_ENV).is_some() {
             eprintln!(
-                "CUDA_KERNEL_BINDINGS begin kernels={} cublaslt={} flashinfer={} dyn={dyn_map:?}",
+                "CUDA_KERNEL_BINDINGS begin kernels={} cublaslt={} flashinfer={} qwen3_moe={} dyn={dyn_map:?}",
                 state.kernels.len(),
                 state.cublaslt_ops.len(),
                 state.flashinfer_ops.len(),
+                state.qwen3_moe_ops.len(),
             );
             for kernel in &state.kernels {
                 let grid = (
@@ -1893,15 +2027,43 @@ impl CudaGraphOp {
                             );
                         }
                         let timer = Instant::now();
-                        state.cuda_graph_exec =
-                            Some(state.cuda_graph.as_ref().unwrap().instantiate()?);
+                        state.cuda_graph_exec = Some(
+                            state
+                                .cuda_graph
+                                .as_ref()
+                                .unwrap()
+                                .instantiate()
+                                .map_err(|error| {
+                                    anyhow::anyhow!(
+                                        "CUDA graph re-instantiation after executable update rejection failed: {error:?} (kernels={}, cublaslt={}, flashinfer={}, qwen3_moe={}, dyn={dyn_map:?})",
+                                        state.kernels.len(),
+                                        state.cublaslt_ops.len(),
+                                        state.flashinfer_ops.len(),
+                                        state.qwen3_moe_ops.len(),
+                                    )
+                                })?,
+                        );
                         profile.exec_instantiate += timer.elapsed();
                         profile.instantiate_count += 1;
                     }
                     None => {
                         let timer = Instant::now();
-                        state.cuda_graph_exec =
-                            Some(state.cuda_graph.as_ref().unwrap().instantiate()?);
+                        state.cuda_graph_exec = Some(
+                            state
+                                .cuda_graph
+                                .as_ref()
+                                .unwrap()
+                                .instantiate()
+                                .map_err(|error| {
+                                    anyhow::anyhow!(
+                                        "CUDA graph instantiation after library-island recapture failed: {error:?} (kernels={}, cublaslt={}, flashinfer={}, qwen3_moe={}, dyn={dyn_map:?})",
+                                        state.kernels.len(),
+                                        state.cublaslt_ops.len(),
+                                        state.flashinfer_ops.len(),
+                                        state.qwen3_moe_ops.len(),
+                                    )
+                                })?,
+                        );
                         profile.exec_instantiate += timer.elapsed();
                         profile.instantiate_count += 1;
                     }
@@ -1914,7 +2076,12 @@ impl CudaGraphOp {
                     .as_ref()
                     .unwrap()
                     .ctx
-                    .bind_to_thread()?;
+                    .bind_to_thread()
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "CUDA graph executable context bind failed before kernel-node updates: {error:?}"
+                        )
+                    })?;
 
                 let timer = Instant::now();
                 for (idx, dirty) in kernel_dirty.iter().enumerate().take(num_kernels) {
@@ -1949,12 +2116,21 @@ impl CudaGraphOp {
                     }
                     let shared_mem = kernel.shared_mem.exec(dyn_map).unwrap() as u32;
                     let cu_func = unsafe { kernel.function.raw_function() };
+                    let kernel_name = kernel.kernel_name;
+                    let kernel_node_index = kernel.node.index();
                     let params_ptr = state.kernel_params[idx].as_cuda_params();
                     let exec = state.cuda_graph_exec.as_mut().unwrap();
                     unsafe {
                         exec.update_kernel_node(
                             graph_node, cu_func, grid_dim, block_dim, shared_mem, params_ptr,
-                        )?;
+                        )
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "CUDA graph executable kernel-node update failed for kernel {} at LLIR node {} (compiled_index={idx}, graph_node={graph_node:?}, grid={grid_dim:?}, block={block_dim:?}, shared_mem={shared_mem}, dyn={dyn_map:?}): {error:?}",
+                                kernel_name,
+                                kernel_node_index,
+                            )
+                        })?;
                     }
                 }
                 profile.exec_kernel_node_update += timer.elapsed();
@@ -2162,6 +2338,46 @@ impl CudaGraphOp {
         if let Some(profile) = profile {
             profile.capture_exit_node += timer.elapsed();
         }
+        Ok((captured_nodes, exit_node))
+    }
+
+    fn capture_qwen3_moe_island(
+        graph: &mut CudaGraphHandle,
+        stream: &Arc<CudaStream>,
+        capture_stream: &Arc<CudaStream>,
+        entry_node: CUgraphNode,
+        prepared: &PreparedQwen3Moe,
+        signature: Qwen3MoeCaptureSignature,
+    ) -> anyhow::Result<(Vec<CUgraphNode>, CUgraphNode)> {
+        capture_stream
+            .join(stream)
+            .map_err(|err| anyhow::anyhow!("Qwen3Moe capture stream join failed: {err:?}"))?;
+        graph
+            .begin_capture_to_graph(capture_stream, &[entry_node])
+            .map_err(|err| anyhow::anyhow!("Qwen3Moe begin capture to graph failed: {err:?}"))?;
+        let enqueue_result = prepared.enqueue(capture_stream, signature);
+        let end_result = graph.end_capture(capture_stream);
+        enqueue_result
+            .map_err(|err| anyhow::anyhow!("Qwen3Moe enqueue during capture failed: {err:?}"))?;
+        end_result.map_err(|err| anyhow::anyhow!("Qwen3Moe end capture failed: {err:?}"))?;
+
+        let mut captured_nodes = Self::collect_cublaslt_island_nodes(graph, entry_node)?;
+        captured_nodes.sort_by_key(|node| *node as usize);
+        let captured_set: FxHashSet<_> = captured_nodes.iter().copied().collect();
+        let mut exit_deps = captured_nodes
+            .iter()
+            .copied()
+            .filter(|node| {
+                graph
+                    .dependent_nodes(*node)
+                    .map(|deps| !deps.iter().any(|dep| captured_set.contains(dep)))
+                    .unwrap_or(true)
+            })
+            .collect_vec();
+        if exit_deps.is_empty() {
+            exit_deps.push(entry_node);
+        }
+        let exit_node = graph.add_empty_node(&exit_deps)?;
         Ok((captured_nodes, exit_node))
     }
 
@@ -2401,7 +2617,7 @@ impl CudaGraphOp {
         Ok(())
     }
 
-    /// Build the CUDA graph from compiled kernels and captured cuBLASLt islands.
+    /// Build the CUDA graph from compiled kernels and captured library islands.
     fn build_graph(
         &self,
         state: &mut std::cell::RefMut<'_, CudaGraphOpState>,
@@ -2421,15 +2637,17 @@ impl CudaGraphOp {
 
         let tracing_enabled = enabled!(Level::TRACE)
             && state.cublaslt_ops.is_empty()
-            && state.flashinfer_ops.is_empty();
+            && state.flashinfer_ops.is_empty()
+            && state.qwen3_moe_ops.is_empty();
         if tracing_enabled {
             let needed_events = num_kernels + 1;
             while state.timing_events.len() < needed_events {
                 state.timing_events.push(create_cuda_event(&ctx)?);
             }
         }
-        let serialize_internal_steps =
-            state.cublaslt_ops.is_empty() && state.flashinfer_ops.is_empty();
+        let serialize_internal_steps = state.cublaslt_ops.is_empty()
+            && state.flashinfer_ops.is_empty()
+            && state.qwen3_moe_ops.is_empty();
         let mut previous_graph_node = None;
         let mut previous_flashinfer_graph_node = None;
         let mut prepared_cache_plan = Vec::new();
@@ -2727,16 +2945,79 @@ impl CudaGraphOp {
                         previous_graph_node = Some(exit_node);
                     }
                 }
+                CompiledStep::Qwen3Moe(idx) => {
+                    let mut deps = Self::graph_deps_for_inputs(
+                        &state.producer_to_graph_node,
+                        &state.qwen3_moe_ops[idx].inputs,
+                    );
+                    if serialize_internal_steps
+                        && let Some(prev) = previous_graph_node
+                        && !deps.contains(&prev)
+                    {
+                        deps.push(prev);
+                    }
+                    let entry_node = graph.add_empty_node(&deps)?;
+                    let resolved = {
+                        let op = &state.qwen3_moe_ops[idx];
+                        op.qwen3_moe()
+                            .resolve_for_graph(op.node, &op.inputs, buffers, dyn_map)?
+                    };
+                    let signature = resolved.signature();
+                    // Module loading, generated-kernel preparation and device
+                    // allocation all happen before stream capture.
+                    let prepared = Rc::new(
+                        state.qwen3_moe_ops[idx]
+                            .qwen3_moe()
+                            .prepare_resolved_for_graph(stream, &resolved)?,
+                    );
+                    let capture_stream = self.capture_stream()?;
+                    let (captured_nodes, exit_node) = Self::capture_qwen3_moe_island(
+                        &mut graph,
+                        stream,
+                        &capture_stream,
+                        entry_node,
+                        &prepared,
+                        signature,
+                    )?;
+
+                    let op = &mut state.qwen3_moe_ops[idx];
+                    let op_node = op.node;
+                    op.entry_node = Some(entry_node);
+                    op.exit_node = Some(exit_node);
+                    op.captured_nodes = captured_nodes;
+                    op.prepared = Some(prepared);
+                    op.signature = Some(signature);
+                    state.producer_to_graph_node.insert(op_node, exit_node);
+                    if serialize_internal_steps {
+                        previous_graph_node = Some(exit_node);
+                    }
+                }
             }
         }
 
         let exec = if let Some(mut exec) = old_exec {
             match exec.update_from_graph(&graph) {
                 Ok(()) => exec,
-                Err(_) => graph.instantiate()?,
+                Err(update_error) => graph.instantiate().map_err(|instantiate_error| {
+                    anyhow::anyhow!(
+                        "CUDA graph update failed with {update_error:?}; replacement graph instantiation also failed with {instantiate_error:?} (kernels={}, cublaslt={}, flashinfer={}, qwen3_moe={})",
+                        state.kernels.len(),
+                        state.cublaslt_ops.len(),
+                        state.flashinfer_ops.len(),
+                        state.qwen3_moe_ops.len(),
+                    )
+                })?,
             }
         } else {
-            graph.instantiate()?
+            graph.instantiate().map_err(|error| {
+                anyhow::anyhow!(
+                    "initial CUDA graph instantiation failed with {error:?} (kernels={}, cublaslt={}, flashinfer={}, qwen3_moe={})",
+                    state.kernels.len(),
+                    state.cublaslt_ops.len(),
+                    state.flashinfer_ops.len(),
+                    state.qwen3_moe_ops.len(),
+                )
+            })?
         };
 
         state.cuda_graph = Some(graph);
@@ -2816,6 +3097,14 @@ pub fn kernel_to_host(
                                 let incoming =
                                     llir_graph.edges_directed(*n, Direction::Incoming).count();
                                 incoming == flashinfer.graph_inputs() || incoming == 6
+                            })
+                        || host
+                            .as_any()
+                            .downcast_ref::<Qwen3Moe>()
+                            .is_some_and(|qwen3_moe| {
+                                qwen3_moe.has_static_graph_signature()
+                                    && llir_graph.edges_directed(*n, Direction::Incoming).count()
+                                        == 4
                             })
                 })
         })
@@ -3063,6 +3352,8 @@ pub fn kernel_to_host(
         let mut cublaslt_step_by_node: FxHashMap<NodeIndex, usize> = FxHashMap::default();
         let mut flashinfer_ops = Vec::new();
         let mut flashinfer_step_by_node: FxHashMap<NodeIndex, usize> = FxHashMap::default();
+        let mut qwen3_moe_ops = Vec::new();
+        let mut qwen3_moe_step_by_node: FxHashMap<NodeIndex, usize> = FxHashMap::default();
         for node in &topo_order {
             let Some(host_op) = llir_graph[*node].to_dialect::<dyn HostOp>() else {
                 continue;
@@ -3133,6 +3424,46 @@ pub fn kernel_to_host(
                     Arc::clone(host_op),
                 ));
                 flashinfer_step_by_node.insert(*node, idx);
+                continue;
+            }
+
+            if host_op
+                .as_ref()
+                .as_ref()
+                .as_any()
+                .downcast_ref::<Qwen3Moe>()
+                .is_some()
+            {
+                let inputs: Vec<NodeIndex> = llir_graph
+                    .edges_directed(*node, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .map(|e| e.source())
+                    .map(|input| resolve_transparent_input(llir_graph, input))
+                    .collect_vec();
+                assert_eq!(
+                    inputs.len(),
+                    4,
+                    "invalid input arity for Qwen3Moe at LLIR node {:?}",
+                    node,
+                );
+                let qwen3_moe = host_op
+                    .as_ref()
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<Qwen3Moe>()
+                    .unwrap();
+                all_buffer_nodes.insert(*node);
+                all_buffer_sizes.insert(*node, qwen3_moe.output_size());
+                all_buffer_nodes.extend(inputs.iter().copied());
+                external_inputs.extend(
+                    inputs
+                        .iter()
+                        .copied()
+                        .filter(|input| !subgraph.contains(input)),
+                );
+                let idx = qwen3_moe_ops.len();
+                qwen3_moe_ops.push(CompiledQwen3Moe::new(*node, inputs, Arc::clone(host_op)));
+                qwen3_moe_step_by_node.insert(*node, idx);
             }
         }
 
@@ -3146,6 +3477,9 @@ pub fn kernel_to_host(
             }
             if let Some(&idx) = flashinfer_step_by_node.get(node) {
                 steps.push(CompiledStep::FlashInferDecode(idx));
+            }
+            if let Some(&idx) = qwen3_moe_step_by_node.get(node) {
+                steps.push(CompiledStep::Qwen3Moe(idx));
             }
         }
 
@@ -3165,7 +3499,8 @@ pub fn kernel_to_host(
 
         let buffer_nodes: Vec<NodeIndex> = all_buffer_nodes.into_iter().collect();
 
-        let state = CudaGraphOpState::new(kernels, cublaslt_ops, flashinfer_ops, steps);
+        let state =
+            CudaGraphOpState::new(kernels, cublaslt_ops, flashinfer_ops, qwen3_moe_ops, steps);
 
         let cuda_graph_op = CudaGraphOp::new(
             buffer_nodes,
@@ -3282,6 +3617,34 @@ pub fn kernel_to_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires CUDA"]
+    fn invalidating_a_graph_generation_drops_exec_before_reusing_node_handles() {
+        let Ok(ctx) = cudarc::driver::CudaContext::new(0) else {
+            return;
+        };
+        let mut graph = CudaGraphHandle::new(ctx).expect("test graph creation failed");
+        let graph_node = graph.add_empty_node(&[]).expect("test graph node failed");
+        let exec = graph.instantiate().expect("test graph instantiate failed");
+        let llir_node = NodeIndex::new(7);
+
+        let mut state =
+            CudaGraphOpState::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), vec![]);
+        state.cuda_graph = Some(graph);
+        state.cuda_graph_exec = Some(exec);
+        state.node_to_graph_node.insert(llir_node, graph_node);
+        state.producer_to_graph_node.insert(llir_node, graph_node);
+        state.kernel_params.push(UnifiedKernelParams::new(vec![0]));
+
+        state.invalidate_graph_generation();
+
+        assert!(state.cuda_graph_exec.is_none());
+        assert!(state.cuda_graph.is_none());
+        assert!(state.node_to_graph_node.is_empty());
+        assert!(state.producer_to_graph_node.is_empty());
+        assert!(state.kernel_params.is_empty());
+    }
 
     #[test]
     fn graph_deps_for_inputs_uses_only_real_data_producers() {

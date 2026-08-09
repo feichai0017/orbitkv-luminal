@@ -117,6 +117,62 @@ def test_cuda_writeback_preserves_input_allocation(device):
             assert state.data_ptr() == original_ptr
 
 
+def test_cuda_int32_output_never_reads_back_through_host(device):
+    """Native-width integer outputs use the same direct CUDA path as floats.
+
+    LuminalPagedCache exposes one growing int32 positions output per layer. A
+    call to get_output_i32() here would synchronize the stream, copy to CPU,
+    construct a CPU tensor, and copy it back to CUDA. Trap that getter so this
+    test proves correctness without allowing the old round-trip fallback.
+    """
+    if device.type != "cuda":
+        pytest.skip("direct device-pointer outputs are CUDA-only")
+
+    class IncrementPositions(torch.nn.Module):
+        def forward(self, positions):
+            return positions + 1
+
+    class NoInt32HostReadback:
+        def __init__(self, graph):
+            self._graph = graph
+
+        def __getattr__(self, name):
+            return getattr(self._graph, name)
+
+        def get_output_i32(self, name):
+            raise AssertionError(
+                f"int32 CUDA output {name!r} was copied through the host"
+            )
+
+        def copy_output_to_device_ptr(self, name, device_ptr, n_bytes):
+            raise AssertionError(
+                f"int32 CUDA output {name!r} was not written directly"
+            )
+
+    artifacts = []
+
+    def trapping_backend(gm, example_inputs, options=None):
+        artifact = luminal_backend(gm, example_inputs, options=options)
+        # This graph is static, so the backend returns CompiledModel directly
+        # rather than the lazy dynamic-shape wrapper.
+        artifact._graph = NoInt32HostReadback(artifact._graph)
+        artifacts.append(artifact)
+        return artifact
+
+    compiled = torch.compile(
+        IncrementPositions().to(device), backend=trapping_backend, fullgraph=True
+    )
+    positions = torch.arange(7, dtype=torch.int32, device=device)
+
+    with torch.inference_mode():
+        actual = compiled(positions)
+
+    assert artifacts
+    assert actual.device.type == "cuda"
+    assert actual.dtype == torch.int32
+    torch.testing.assert_close(actual, positions + 1)
+
+
 def test_writeback_metadata_exposed(device):
     """The compiled artifact names its write-back outputs and their inputs."""
     config, model = tiny_llama()

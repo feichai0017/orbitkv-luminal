@@ -484,11 +484,11 @@ impl CudaRuntime {
     /// Names of selected reportable operations, including specialized HostOps
     /// absorbed into a [`CudaGraphOp`].
     ///
-    /// Once kernel-to-host lowering captures FlashInfer inside a CUDA graph,
-    /// walking only the outer executable graph reports `CudaGraph` and hides
-    /// the selected attention implementation. Keep the outer name and append
-    /// one entry per captured FlashInfer operation so benchmark diagnostics can
-    /// verify full-model rewrite coverage.
+    /// Once kernel-to-host lowering captures a library-backed HostOp inside a
+    /// CUDA graph, walking only the outer executable graph reports `CudaGraph`
+    /// and hides the selected implementation. Keep the outer name and append
+    /// one entry per captured specialized operation so benchmark diagnostics
+    /// can verify full-model rewrite coverage.
     pub fn selected_host_op_names(&self) -> Vec<&'static str> {
         let mut names = self
             .host_ops()
@@ -500,6 +500,7 @@ impl CudaRuntime {
                 "FlashInferAttention",
                 summary.n_flashinfer,
             ));
+            names.extend(std::iter::repeat_n("Qwen3Moe", summary.n_qwen3_moe));
         }
         names
     }
@@ -2525,7 +2526,14 @@ impl CudaRuntime {
             else {
                 continue;
             };
-            cuda_graph.materialize(&exec_op.stream, &buffer_map, dyn_map)?;
+            cuda_graph
+                .materialize(&exec_op.stream, &buffer_map, dyn_map)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "CUDA graph exec node {} materialization failed for dyn_map={dyn_map:?}: {error:#}",
+                        exec_node.index(),
+                    )
+                })?;
         }
         Ok(())
     }

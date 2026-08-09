@@ -202,7 +202,18 @@ class CompiledModel:
         # `pt2_util::torch_dtype_int_to_luminal`,
         # `typed_data::from_pytorch_bytes`), so a graph can never
         # declare a narrow-int output that reaches this dispatch.
-        _zero_copy_native_floats = (torch.float32, torch.float16, torch.bfloat16)
+        # Output registration is byte-oriented in the CUDA runtime, so native
+        # integer tensors can be written directly just like floating-point
+        # tensors. In particular, LuminalPagedCache returns one int32 positions
+        # tensor per layer. Routing those outputs through get_output_i32() would
+        # otherwise force a DtoH sync followed by an HtoD copy on every layer
+        # and every decode step.
+        _zero_copy_cuda_dtypes = (
+            torch.float32,
+            torch.float16,
+            torch.bfloat16,
+            torch.int32,
+        )
         _output_readers = {
             torch.float32: ("get_output", torch.float32),
             torch.float64: ("get_output_f64", torch.float64),
@@ -254,12 +265,10 @@ class CompiledModel:
         # Pre-allocation is GPU-only: the CUDA kernel needs the
         # output's device pointer registered *before* `_graph.run()`
         # so the final kernel writes directly into PyTorch's buffer.
-        # Only the float dtypes luminal natively writes
-        # (`_zero_copy_native_floats`) take the zero-copy path; other
-        # dtypes (int*, bool, f64) read back via `_read_typed_output`
-        # after `run()` and so don't need a pre-allocated tensor at
-        # this layer. CPU never zero-copies — there's no separate
-        # device buffer to register against.
+        # Dtypes in `_zero_copy_cuda_dtypes` take the direct-output path;
+        # remaining dtypes read back via `_read_typed_output` after `run()`.
+        # CPU never zero-copies — there is no separate device buffer to
+        # register against.
         _use_zero_copy = self._supports_device_ptrs
         output_tensors = []
         direct_writeback_positions = {}
@@ -312,7 +321,7 @@ class CompiledModel:
                     direct_state_output_positions.add(i)
                     continue
                 out = torch.empty(shape, dtype=out_dtype, device=input_device)
-                if out_dtype in _zero_copy_native_floats:
+                if out_dtype in _zero_copy_cuda_dtypes:
                     self._graph.set_output_device_ptr(
                         name, out.data_ptr(), out.numel() * out.element_size()
                     )
@@ -340,7 +349,7 @@ class CompiledModel:
                 continue
             if i in direct_state_output_positions:
                 out = output_tensors[i]
-            elif _use_zero_copy and out_dtype in _zero_copy_native_floats:
+            elif _use_zero_copy and out_dtype in _zero_copy_cuda_dtypes:
                 out = output_tensors[i]
                 if not self._graph.output_is_zero_copy(name):
                     self._graph.copy_output_to_device_ptr(

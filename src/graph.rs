@@ -662,6 +662,16 @@ fn panic_initial_filter_limit(filter_fails: usize, last_rejection: Option<&str>)
     panic!("Failed to find a viable initial genome after {filter_fails} runtime filter failures");
 }
 
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 /// A Luminal compute graph.
 ///
 /// All computation is represented as a directed acyclic graph.
@@ -2389,6 +2399,7 @@ impl Graph {
             let mut last_filter_rejection: Option<String> = None;
             // Breakdown of why profiled candidates were invalid, for the give-up message.
             let (mut n_timed_out, mut n_nan, mut n_invalid_profile, mut n_panicked) = (0, 0, 0, 0);
+            let mut last_candidate_panic: Option<String> = None;
             let max_invalid_attempts = 100usize;
             let max_filter_fails = options
                 .limit
@@ -2524,15 +2535,29 @@ impl Graph {
                         }
                         invalid_attempts += 1;
                     }
-                    Err(_) => {
+                    Err(payload) => {
                         n_panicked += 1;
                         invalid_attempts += 1;
+                        let message = panic_payload_message(payload.as_ref());
+                        if std::env::var_os("LUMINAL_DEBUG_CANDIDATE_PANICS").is_some()
+                            && (n_panicked <= 5 || n_panicked % 25 == 0)
+                        {
+                            eprintln!(
+                                "   Search  candidate profile panic #{n_panicked}: {message}"
+                            );
+                        }
+                        if std::env::var_os("LUMINAL_FAIL_FAST_CANDIDATE_PANICS").is_some() {
+                            panic!("candidate profile panic #{n_panicked}: {message}");
+                        }
+                        last_candidate_panic = Some(message);
                     }
                 }
                 if invalid_attempts > max_invalid_attempts {
                     panic!(
                         "Failed to find a viable initial genome after {max_invalid_attempts} invalid attempts \
-                         (candidate_timed_out={n_timed_out} nan={n_nan} invalid_profile={n_invalid_profile} panicked={n_panicked})"
+                         (candidate_timed_out={n_timed_out} nan={n_nan} invalid_profile={n_invalid_profile} panicked={n_panicked}); \
+                         last candidate panic: {}",
+                        last_candidate_panic.as_deref().unwrap_or("(none recorded)")
                     );
                 }
             }
