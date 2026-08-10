@@ -19,7 +19,186 @@
 ; Shape dimensions are egglog variables, not pinned constants.
 ; Dynamic dims "s" (batch/seq) and "c" (context) stay pinned as MVar.
 
+(relation flashinfer_enabled ())
 (relation flashinfer_cache_pair (IR IR))
+
+; Functional PT2 caches can independently lower the K and V row-index
+; expansion even when both originate from the same compact slot tensor. Keep
+; that semantic provenance as a staged fact instead of requiring the expanded
+; `slots * row_width + arange(row_width)` expressions to remain one e-class
+; after elementwise fusion.
+(relation fi_compact_row_ids (IR))
+(relation fi_row_index_base (IR IR))
+(relation fi_flat_row_index (IR IR))
+(relation fi_same_row_indices (IR IR IR))
+(relation fi_row_index_base_count (IR IR Expression))
+(relation fi_flat_row_index_count (IR IR Expression))
+(relation fi_same_row_indices_count (IR IR IR Expression))
+(relation fi_append_positions (IR IR))
+(relation fi_decode_context_mode (IR IR Expression IR Expression))
+
+(rule
+    ((= ?ids (Input ?node ?label (Int))))
+    ((fi_compact_row_ids ?ids))
+    :ruleset matmul_backend
+    :name "FlashInfer compact row ids input"
+)
+(rule
+    ((= ?ids (Op (Cast ?n (Int)) (ICons ?source (INil)))))
+    ((fi_compact_row_ids ?ids))
+    :ruleset matmul_backend
+    :name "FlashInfer compact row ids cast"
+)
+(rule
+    (
+        (= ?ids (Op (Add ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?a (ICons ?b (INil)))))
+        (fi_compact_row_ids ?a)
+        (fi_compact_row_ids ?b)
+    )
+    ((fi_compact_row_ids ?ids))
+    :ruleset matmul_backend
+    :name "FlashInfer compact row ids functional add"
+)
+
+(rule
+    (
+        (= ?base (Op (Mul ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?ids (ICons ?row_width (INil)))))
+        (fi_compact_row_ids ?ids)
+    )
+    ((fi_row_index_base ?base ?ids))
+    :ruleset matmul_backend
+    :name "FlashInfer row index base lhs"
+)
+(rule
+    (
+        (= ?base (Op (Mul ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?row_width (ICons ?ids (INil)))))
+        (fi_compact_row_ids ?ids)
+    )
+    ((fi_row_index_base ?base ?ids))
+    :ruleset matmul_backend
+    :name "FlashInfer row index base rhs"
+)
+(rule
+    (
+        (= ?flat (Op (Add ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?base (ICons ?columns (INil)))))
+        (fi_row_index_base ?base ?ids)
+    )
+    ((fi_flat_row_index ?flat ?ids))
+    :ruleset matmul_backend
+    :name "FlashInfer flat row index lhs"
+)
+(rule
+    (
+        (= ?flat (Op (Add ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?columns (ICons ?base (INil)))))
+        (fi_row_index_base ?base ?ids)
+    )
+    ((fi_flat_row_index ?flat ?ids))
+    :ruleset matmul_backend
+    :name "FlashInfer flat row index rhs"
+)
+(rule
+    (
+        (fi_flat_row_index ?k_flat ?ids)
+        (fi_flat_row_index ?v_flat ?ids)
+    )
+    ((fi_same_row_indices ?k_flat ?v_flat ?ids))
+    :ruleset matmul_backend
+    :name "FlashInfer shared compact row indices"
+)
+
+; Preserve the compact row count as well as its identity. For a dense cache
+; this count equals the token capacity. For a true paged cache it is the number
+; of block-table entries; the runtime can therefore infer page size from fixed
+; allocation capacities without making live sequence length structural.
+(rule
+    (
+        (= ?base (Op (Mul
+            (ECons ?row_count ?rest_shape)
+            ?a_strides ?b_strides ?out_strides)
+            (ICons ?ids (ICons ?row_width (INil)))))
+        (fi_compact_row_ids ?ids)
+    )
+    ((fi_row_index_base_count ?base ?ids ?row_count))
+    :ruleset matmul_backend
+    :name "FlashInfer row index count lhs"
+)
+(rule
+    (
+        (= ?base (Op (Mul
+            (ECons ?row_count ?rest_shape)
+            ?a_strides ?b_strides ?out_strides)
+            (ICons ?row_width (ICons ?ids (INil)))))
+        (fi_compact_row_ids ?ids)
+    )
+    ((fi_row_index_base_count ?base ?ids ?row_count))
+    :ruleset matmul_backend
+    :name "FlashInfer row index count rhs"
+)
+(rule
+    (
+        (= ?flat (Op (Add ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?base (ICons ?columns (INil)))))
+        (fi_row_index_base_count ?base ?ids ?row_count)
+    )
+    ((fi_flat_row_index_count ?flat ?ids ?row_count))
+    :ruleset matmul_backend
+    :name "FlashInfer flat row index count lhs"
+)
+(rule
+    (
+        (= ?flat (Op (Add ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?columns (ICons ?base (INil)))))
+        (fi_row_index_base_count ?base ?ids ?row_count)
+    )
+    ((fi_flat_row_index_count ?flat ?ids ?row_count))
+    :ruleset matmul_backend
+    :name "FlashInfer flat row index count rhs"
+)
+(rule
+    (
+        (fi_flat_row_index_count ?k_flat ?ids ?row_count)
+        (fi_flat_row_index_count ?v_flat ?ids ?row_count)
+    )
+    ((fi_same_row_indices_count ?k_flat ?v_flat ?ids ?row_count))
+    :ruleset matmul_backend
+    :name "FlashInfer shared compact row count"
+)
+
+; The narrow paged cache is append-only. HF forms query/cache positions as
+; `arange(new_tokens) + prior_sequence_length`; retain the stable device scalar
+; so the metadata kernel can derive the post-append context without a host
+; readback or a structural dynamic dimension.
+(rule
+    (
+        (= ?positions (Op (Add
+            (ECons ?sequence (ENil))
+            ?a_strides ?b_strides ?out_strides)
+            (ICons ?steps (ICons ?prior_context (INil)))))
+        (= ?steps (Op (Iota (MIter) ?sequence) (INil)))
+        (= ?prior_context (Input ?node ?label (Int)))
+    )
+    ((fi_append_positions ?positions ?prior_context))
+    :ruleset matmul_backend
+    :name "FlashInfer append positions lhs"
+)
+(rule
+    (
+        (= ?positions (Op (Add
+            (ECons ?sequence (ENil))
+            ?a_strides ?b_strides ?out_strides)
+            (ICons ?prior_context (ICons ?steps (INil)))))
+        (= ?steps (Op (Iota (MIter) ?sequence) (INil)))
+        (= ?prior_context (Input ?node ?label (Int)))
+    )
+    ((fi_append_positions ?positions ?prior_context))
+    :ruleset matmul_backend
+    :name "FlashInfer append positions rhs"
+)
 
 ; Head dims the JIT-compiled FlashInfer kernels support (jit.rs asserts the
 ; same set). Rules must not capture islands for other dims (e.g. gemma-4's
@@ -37,14 +216,56 @@
 (flashinfer_head_dim_ok_16bit (MNum 512))
 
 ; Mask-chain facts staged for the attention island rules. Every island rule
-; anchors at one of these tiny relations instead of inlining its mask atoms:
-; the mask-fact joins are small and run once in kernel_fuse_late_pre, and the
-; island joins stay narrow on rolled bodies with many distinct attention
-; instances (inlined, the gemma body ground for 35+ minutes in fuse-late).
+; anchors at one of these tiny relations instead of inlining its mask atoms.
+; Direct producers run in kernel_fuse_late_pre; dependent facts advance across
+; the repeated kernel_fuse_late passes before islands consume them in
+; kernel_fuse_late2. This keeps joins narrow on rolled multi-layer bodies.
 (relation fi_triu_mask (IR IR))
 (relation fi_window_term (IR IR f64))
 (relation fi_scaled_offset_mask (IR))
 (relation fi_direct_causal_mask (IR IR))
+(relation fi_causal_columns (IR Expression))
+(relation fi_gqa_view (IR IR))
+(relation fi_scaled_qk_value (IR IR f64))
+(relation fi_softmax_value (IR IR))
+(relation fi_hf_blocked_f32 (IR IR))
+(relation fi_hf_allowed_f32 (IR IR))
+(relation fi_hf_mask_delta (IR IR))
+
+; Every proven causal mask retains the legacy page-size-one alternative. When
+; its row position is append-derived, also expose the persistent paged-cache
+; alternative: page_size=0 asks the runtime to infer it from fixed allocation
+; capacities, and mode=1 makes the stable prior-length scalar a runtime input.
+(rule
+    ((fi_direct_causal_mask ?mask ?q_pos))
+    ((fi_decode_context_mode ?mask ?q_pos (MNum 1) ?q_pos (MNum 0)))
+    :ruleset kernel_fuse_late
+    :name "FlashInfer legacy direct context"
+)
+(rule
+    ((fi_triu_mask ?mask ?q_pos))
+    ((fi_decode_context_mode ?mask ?q_pos (MNum 1) ?q_pos (MNum 0)))
+    :ruleset kernel_fuse_late
+    :name "FlashInfer legacy triu context"
+)
+(rule
+    (
+        (fi_direct_causal_mask ?mask ?q_pos)
+        (fi_append_positions ?q_pos ?prior_context)
+    )
+    ((fi_decode_context_mode ?mask ?q_pos (MNum 0) ?prior_context (MNum 1)))
+    :ruleset kernel_fuse_late
+    :name "FlashInfer paged direct context"
+)
+(rule
+    (
+        (fi_triu_mask ?mask ?q_pos)
+        (fi_append_positions ?q_pos ?prior_context)
+    )
+    ((fi_decode_context_mode ?mask ?q_pos (MNum 0) ?prior_context (MNum 1)))
+    :ruleset kernel_fuse_late
+    :name "FlashInfer paged triu context"
+)
 
 ; A constant-valued eclass regardless of dtype: either a plain HLIR Constant
 ; (f32 graphs) or a folded dtype-typed KernelConstant (the frontend emits
@@ -60,6 +281,114 @@
     ((const_like ?e ?v))
     :ruleset matmul_backend
     :name "FlashInfer const-like kernel"
+)
+
+; Column positions appear either as a bare arange or, in HF dynamic-cache
+; exports, as arange plus a zero-length/start iota introduced by SymInt
+; canonicalization. Stage both spellings into one small fact.
+(rule
+    ((= ?columns (Op (Iota (MIter) ?context) (INil))))
+    ((fi_causal_columns ?columns ?context))
+    :ruleset matmul_backend
+    :name "FlashInfer causal columns iota"
+)
+(rule
+    (
+        (= ?columns (Op (Add
+            (ECons ?context (ENil))
+            (ECons (MIter) (ENil))
+            (ECons (MNum 0) (ENil))
+            (ECons (MIter) (ENil)))
+            (ICons ?col_iota (ICons ?col_zero (INil)))))
+        (= ?col_iota (Op (Iota (MIter) ?context) (INil)))
+        (= ?col_zero (Op (Iota (MNum 0) (MNum 1)) (INil)))
+    )
+    ((fi_causal_columns ?columns ?context))
+    :ruleset matmul_backend
+    :name "FlashInfer causal columns functional add"
+)
+
+; View materialization in PT2 is commonly represented as adding a typed zero.
+; Keep the underlying gathered cache tensor recoverable through any number of
+; those view-only nodes. The older frontend spelling uses multiplication by a
+; typed one and is staged into the same relation.
+(rule
+    (
+        (= ?view (Op (Add ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?source (ICons ?zero (INil)))))
+        (const_like ?zero 0.0)
+    )
+    ((fi_gqa_view ?view ?source))
+    :ruleset kernel_fuse_late_pre
+    :name "FlashInfer GQA zero-add view"
+)
+(rule
+    (
+        (= ?view (Op (Mul ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?source (ICons ?one (INil)))))
+        (const_like ?one 1.0)
+    )
+    ((fi_gqa_view ?view ?source))
+    :ruleset kernel_fuse_late_pre
+    :name "FlashInfer GQA one-mul view"
+)
+(rule
+    (
+        (fi_gqa_view ?outer ?middle)
+        (fi_gqa_view ?middle ?source)
+    )
+    ((fi_gqa_view ?outer ?source))
+    :ruleset kernel_fuse_late
+    :name "FlashInfer GQA view transitive"
+)
+
+; HF computes QK and the scale in model dtype, then casts the scaled scores to
+; F32 for masking/softmax. Other frontends already present the scaled value in
+; F32. Preserve both spellings behind one connected fact.
+(rule
+    (
+        (= ?scaled (Op (Mul ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?qk (ICons ?scale (INil)))))
+        (const_like ?scale ?scale_val)
+    )
+    ((fi_scaled_qk_value ?scaled ?qk ?scale_val))
+    :ruleset kernel_fuse_late_pre
+    :name "FlashInfer scaled QK direct"
+)
+(rule
+    (
+        (= ?scaled_f32 (Op (Cast ?cast_size (F32)) (ICons ?scaled (INil))))
+        (fi_scaled_qk_value ?scaled ?qk ?scale_val)
+    )
+    ((fi_scaled_qk_value ?scaled_f32 ?qk ?scale_val))
+    :ruleset kernel_fuse_late
+    :name "FlashInfer scaled QK F32 cast"
+)
+
+; The F32 softmax result is cast back to model dtype before the V matmul in
+; real f16/bf16 HF graphs. Stage the cast while retaining the raw softmax node
+; needed to prove the complete normalization chain.
+(rule
+    (
+        (= ?soft (Op (Mul ?shape ?a_strides ?b_strides ?out_strides)
+            (ICons ?exp (ICons ?recip (INil)))))
+        (= ?recip (Op (Recip ?recip_shape ?recip_in ?recip_out)
+            (ICons ?sum (INil))))
+        (= ?sum (Op (Sum ?sum_shape ?sum_dim ?sum_in ?sum_iter ?sum_out)
+            (ICons ?exp (INil))))
+    )
+    ((fi_softmax_value ?soft ?soft))
+    :ruleset kernel_fuse_late_pre
+    :name "FlashInfer softmax value direct"
+)
+(rule
+    (
+        (= ?cast_soft (Op (Cast ?cast_size ?cast_dt) (ICons ?soft (INil))))
+        (fi_softmax_value ?soft ?raw_soft)
+    )
+    ((fi_softmax_value ?cast_soft ?raw_soft))
+    :ruleset kernel_fuse_late
+    :name "FlashInfer softmax value cast"
 )
 
 ; Dtypes with a tensor-core prefill runtime (16-bit only).
@@ -107,7 +436,7 @@
         ; softmax internals connect the mask chain to the second matmul —
         ; without this the two halves join as a cross-product across the
         ; distinct layer instances of rolled multi-layer bodies.
-        (= ?smax (Op (Max ?smax_shape (MVar "c") ?smax_in ?smax_iter ?smax_out)
+        (= ?smax (Op (Max ?smax_shape ?context ?smax_in ?smax_iter ?smax_out)
             (ICons ?masked (INil))))
         (= ?negmax (Op (Mul ?nm_shape ?nm_a ?nm_b ?nm_o)
             (ICons ?smax (ICons ?nm_negone (INil)))))
@@ -117,14 +446,14 @@
             (ICons ?shifted (ICons ?sc_log2e (INil)))))
         (const_like ?sc_log2e 1.442695)
         (= ?sexp (Op (Exp2 ?se_shape ?se_in ?se_out) (ICons ?sc (INil))))
-        (= ?sexpsum (Op (Sum ?ss_shape (MVar "c") ?ss_in ?ss_iter ?ss_out)
+        (= ?sexpsum (Op (Sum ?ss_shape ?context ?ss_in ?ss_iter ?ss_out)
             (ICons ?sexp (INil))))
         (= ?srecip (Op (Recip ?sr_shape ?sr_in ?sr_out) (ICons ?sexpsum (INil))))
         (= ?soft (Op (Mul ?sf_shape ?sf_a ?sf_b ?sf_o)
             (ICons ?sexp (ICons ?srecip (INil)))))
 
         (= ?mul2 (Op (Mul
-            (ECons ?nheads (ECons (MVar "s") (ECons ?hdim (ECons (MVar "c") (ENil)))))
+            (ECons ?nheads (ECons ?sequence (ECons ?hdim (ECons ?context (ENil)))))
             ?mul2_a_strides
             ?mul2_b_strides
             ?mul2_out_strides)
@@ -133,8 +462,8 @@
         ; ── Second matmul: Sum (reduction over c) → output ──
         ; Shape: (nheads, s, hdim) — reduces c
         (= ?output (Op (Sum
-            (ECons ?nheads2 (ECons (MVar "s") (ECons ?hdim2 (ENil))))
-            (MVar "c")
+            (ECons ?nheads2 (ECons ?sequence (ECons ?hdim2 (ENil))))
+            ?context
             ?out_in_strides
             (MIter)
             ?out_out_strides)
@@ -153,16 +482,16 @@
         ; ── V Gather: rows from V_cache (2D) ──
         ; Shape: (c, kvdim), Source: (num_slots, kvdim)
         (= ?v_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim (ENil)))
+            (ECons ?v_gather_rows (ECons ?v_gather_width (ENil)))
             ?v_gather_strides
-            (ECons ?num_slots_v (ECons ?kvdim2 (ENil)))
+            (ECons ?num_slots_v (ECons ?kvdim4 (ENil)))
             ?v_src_strides)
-            (ICons ?k_idx (ICons ?v_cache (INil)))))
+            (ICons ?v_idx (ICons ?v_cache (INil)))))
 
         ; ── First matmul: Mul(Q, K_gqa) ──
         ; Shape: (nheads, s, c, hdim) — 4D
         (= ?mul1 (Op (Mul
-            (ECons ?nheads4 (ECons (MVar "s") (ECons (MVar "c") (ECons ?hdim4 (ENil)))))
+            (ECons ?nheads4 (ECons ?sequence (ECons ?context (ECons ?hdim4 (ENil)))))
             ?mul1_a_strides
             ?mul1_b_strides
             ?mul1_out_strides)
@@ -171,7 +500,7 @@
         ; ── First matmul: Sum (reduction over hdim) → QK scores ──
         ; Shape: (nheads, s, c) — reduces hdim
         (= ?qk (Op (Sum
-            (ECons ?nheads5 (ECons (MVar "s") (ECons (MVar "c") (ENil))))
+            (ECons ?nheads5 (ECons ?sequence (ECons ?context (ENil))))
             ?hdim5
             ?qk_in_strides
             (MIter)
@@ -217,7 +546,7 @@
         ; ── K Gather: rows from K_cache (2D) ──
         ; Shape: (c, kvdim), Source: (num_slots, kvdim)
         (= ?k_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim3 (ENil)))
+            (ECons ?k_gather_rows (ECons ?k_gather_width (ENil)))
             ?k_gather_strides
             (ECons ?num_slots_k (ECons ?kvdim4 (ENil)))
             ?k_src_strides)
@@ -228,12 +557,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
-            ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) (MVar "s") ?dt ?sq_scale_val -1.0)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            ?nheads (MDiv ?kvdim4 ?hdim) ?hdim (MNum 1) ?sequence ?context ?dt ?sq_scale_val -1.0 (MNum 0))
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (ICons ?mask (INil)))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
@@ -298,21 +629,21 @@
             (ICons ?v_gathered (ICons ?v_gqa_const (INil)))))
 
         (= ?v_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim (ENil)))
+            (ECons ?v_gather_rows (ECons ?v_gather_width (ENil)))
             ?v_gather_strides
-            (ECons ?num_slots_v (ECons ?kvdim2 (ENil)))
+            (ECons ?num_slots_v (ECons ?kvdim4 (ENil)))
             ?v_src_strides)
-            (ICons ?k_idx (ICons ?v_cache (INil)))))
+            (ICons ?v_idx (ICons ?v_cache (INil)))))
 
         (= ?mul1 (Op (Mul
-            (ECons ?nheads4 (ECons (MVar "s") (ECons (MVar "c") (ECons ?hdim4 (ENil)))))
+            (ECons ?nheads4 (ECons ?sequence (ECons ?context (ECons ?hdim4 (ENil)))))
             ?mul1_a_strides
             ?mul1_b_strides
             ?mul1_out_strides)
             (ICons ?q (ICons ?k_gqa (INil)))))
 
         (= ?qk (Op (Sum
-            (ECons ?nheads5 (ECons (MVar "s") (ECons (MVar "c") (ENil))))
+            (ECons ?nheads5 (ECons ?sequence (ECons ?context (ENil))))
             ?hdim5
             ?qk_in_strides
             (MIter)
@@ -336,9 +667,10 @@
             (ICons ?qk (ICons ?sq_scale (INil)))))
         (const_like ?sq_scale ?sq_scale_val)
 
-        ; Mask spelling staged as a fact — see "FlashInfer direct causal mask
-        ; fact".
-        (fi_direct_causal_mask ?mask ?q_pos)
+        ; The staged context mode preserves the legacy dense-cache spelling
+        ; and adds a device-length paged-cache candidate for append-derived
+        ; Hugging Face cache positions.
+        (fi_decode_context_mode ?mask ?q_pos ?page_size ?current_context ?context_mode)
 
         (const_like ?k_gqa_const 1.000000)
         (= ?k_gqa (Op (Mul
@@ -349,7 +681,7 @@
             (ICons ?k_gathered (ICons ?k_gqa_const (INil)))))
 
         (= ?k_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim3 (ENil)))
+            (ECons ?k_gather_rows (ECons ?k_gather_width (ENil)))
             ?k_gather_strides
             (ECons ?num_slots_k (ECons ?kvdim4 (ENil)))
             ?k_src_strides)
@@ -359,12 +691,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
-            ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) (MVar "s") ?dt ?sq_scale_val -1.0)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            ?nheads (MDiv ?kvdim4 ?hdim) ?hdim ?page_size (MVar "s") (MVar "c") ?dt ?sq_scale_val -1.0 ?context_mode)
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (ICons ?current_context (INil)))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
@@ -431,11 +765,11 @@
             (ICons ?v_gathered (ICons ?v_gqa_const (INil)))))
 
         (= ?v_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim (ENil)))
+            (ECons ?v_gather_rows (ECons ?v_gather_width (ENil)))
             ?v_gather_strides
-            (ECons ?num_slots_v (ECons ?kvdim2 (ENil)))
+            (ECons ?num_slots_v (ECons ?kvdim4 (ENil)))
             ?v_src_strides)
-            (ICons ?k_idx (ICons ?v_cache (INil)))))
+            (ICons ?v_idx (ICons ?v_cache (INil)))))
 
         (= ?mul1 (Op (Mul
             (ECons ?nheads4 (ECons (MVar "s") (ECons (MVar "c") (ECons ?hdim4 (ENil)))))
@@ -475,7 +809,7 @@
         ; tiny fact relation instead of inlining the ~20 mask atoms keeps
         ; the join narrow on rolled bodies with many distinct attention
         ; instances (gemma: 35+ min / OOM as a single inlined join).
-        (fi_triu_mask ?mask ?q_pos)
+        (fi_decode_context_mode ?mask ?q_pos ?page_size ?current_context ?context_mode)
 
         (const_like ?k_gqa_const 1.000000)
         (= ?k_gqa (Op (Mul
@@ -486,7 +820,7 @@
             (ICons ?k_gathered (ICons ?k_gqa_const (INil)))))
 
         (= ?k_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim3 (ENil)))
+            (ECons ?k_gather_rows (ECons ?k_gather_width (ENil)))
             ?k_gather_strides
             (ECons ?num_slots_k (ECons ?kvdim4 (ENil)))
             ?k_src_strides)
@@ -496,12 +830,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
-            ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) (MVar "s") ?dt ?sq_scale_val -1.0)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            ?nheads (MDiv ?kvdim4 ?hdim) ?hdim ?page_size (MVar "s") (MVar "c") ?dt ?sq_scale_val -1.0 ?context_mode)
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (ICons ?current_context (INil)))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
@@ -526,7 +862,7 @@
         ; softmax internals connect the mask chain to the second matmul —
         ; without this the two halves join as a cross-product across the
         ; distinct layer instances of rolled multi-layer bodies.
-        (= ?smax (Op (Max ?smax_shape (MVar "c") ?smax_in ?smax_iter ?smax_out)
+        (= ?smax (Op (Max ?smax_shape ?context ?smax_in ?smax_iter ?smax_out)
             (ICons ?masked (INil))))
         (= ?negmax (Op (Mul ?nm_shape ?nm_a ?nm_b ?nm_o)
             (ICons ?smax (ICons ?nm_negone (INil)))))
@@ -536,51 +872,46 @@
             (ICons ?shifted (ICons ?sc_log2e (INil)))))
         (const_like ?sc_log2e 1.442695)
         (= ?sexp (Op (Exp2 ?se_shape ?se_in ?se_out) (ICons ?sc (INil))))
-        (= ?sexpsum (Op (Sum ?ss_shape (MVar "c") ?ss_in ?ss_iter ?ss_out)
+        (= ?sexpsum (Op (Sum ?ss_shape ?context ?ss_in ?ss_iter ?ss_out)
             (ICons ?sexp (INil))))
         (= ?srecip (Op (Recip ?sr_shape ?sr_in ?sr_out) (ICons ?sexpsum (INil))))
         (= ?soft (Op (Mul ?sf_shape ?sf_a ?sf_b ?sf_o)
             (ICons ?sexp (ICons ?srecip (INil)))))
+        (fi_softmax_value ?soft_for_v ?soft)
 
         (= ?mul2 (Op (Mul
-            (ECons ?nheads (ECons (MVar "s") (ECons ?hdim (ECons (MVar "c") (ENil)))))
+            (ECons ?nheads (ECons ?sequence (ECons ?hdim (ECons ?context (ENil)))))
             ?mul2_a_strides
             ?mul2_b_strides
             ?mul2_out_strides)
-            (ICons ?soft (ICons ?v_gqa (INil)))))
+            (ICons ?soft_for_v (ICons ?v_gqa (INil)))))
 
         (= ?output (Op (Sum
-            (ECons ?nheads2 (ECons (MVar "s") (ECons ?hdim2 (ENil))))
-            (MVar "c")
+            (ECons ?nheads2 (ECons ?sequence (ECons ?hdim2 (ENil))))
+            ?context
             ?out_in_strides
             (MIter)
             ?out_out_strides)
             (ICons ?mul2 (INil))))
 
-        (const_like ?v_gqa_const 1.000000)
-        (= ?v_gqa (Op (Mul
-            (ECons ?nheads3 (ECons (MVar "c") (ECons ?hdim3 (ENil))))
-            ?v_gqa_a_strides
-            (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
-            ?v_gqa_out_strides)
-            (ICons ?v_gathered (ICons ?v_gqa_const (INil)))))
+        (fi_gqa_view ?v_gqa ?v_gathered)
 
         (= ?v_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim (ENil)))
+            (ECons ?v_gather_rows (ECons ?v_gather_width (ENil)))
             ?v_gather_strides
-            (ECons ?num_slots_v (ECons ?kvdim2 (ENil)))
+            (ECons ?num_slots_v (ECons ?kvdim4 (ENil)))
             ?v_src_strides)
-            (ICons ?k_idx (ICons ?v_cache (INil)))))
+            (ICons ?v_idx (ICons ?v_cache (INil)))))
 
         (= ?mul1 (Op (Mul
-            (ECons ?nheads4 (ECons (MVar "s") (ECons (MVar "c") (ECons ?hdim4 (ENil)))))
+            (ECons ?nheads4 (ECons ?sequence (ECons ?context (ECons ?hdim4 (ENil)))))
             ?mul1_a_strides
             ?mul1_b_strides
             ?mul1_out_strides)
             (ICons ?q (ICons ?k_gqa (INil)))))
 
         (= ?qk (Op (Sum
-            (ECons ?nheads5 (ECons (MVar "s") (ECons (MVar "c") (ENil))))
+            (ECons ?nheads5 (ECons ?sequence (ECons ?context (ENil))))
             ?hdim5
             ?qk_in_strides
             (MIter)
@@ -588,11 +919,11 @@
             (ICons ?mul1 (INil))))
 
         (= ?masked (Op (Add
-            (ECons ?nheads8 (ECons (MVar "s") (ECons (MVar "c") (ENil))))
+            ?masked_shape
             ?mask_add_a_strides
-            (ECons (MNum 0) ?mask_rest_strides)
+            ?mask_add_b_strides
             ?mask_add_out_strides)
-            (ICons ?scaled_qk (ICons ?mask (INil)))))
+            (ICons ?scaled_for_mask (ICons ?mask (INil)))))
         ; The mask-add's first operand is the QK score scaled by a broadcast
         ; constant (1/sqrt(head_dim) — the frontend lowers `scores / s` to
         ; `Mul(scores, const(1/s))`). This atom CONNECTS the Q/K/QK component
@@ -600,9 +931,7 @@
         ; has two disconnected halves whose join cross-products across the
         ; distinct layer instances of rolled multi-layer bodies (the gemma
         ; 530GB egglog OOM), and Q could pair with another instance's mask.
-        (= ?scaled_qk (Op (Mul ?sq_shape ?sq_a ?sq_b ?sq_o)
-            (ICons ?qk (ICons ?sq_scale (INil)))))
-        (const_like ?sq_scale ?sq_scale_val)
+        (fi_scaled_qk_value ?scaled_for_mask ?qk ?sq_scale_val)
 
         ; Mask indices are row-aligned triangular-mask rows plus arange(c).
         ; Triu-gather causal mask, staged as a fact in kernel_fuse_late_pre
@@ -610,18 +939,12 @@
         ; tiny fact relation instead of inlining the ~20 mask atoms keeps
         ; the join narrow on rolled bodies with many distinct attention
         ; instances (gemma: 35+ min / OOM as a single inlined join).
-        (fi_triu_mask ?mask ?q_pos)
+        (fi_decode_context_mode ?mask ?q_pos ?page_size ?current_context ?context_mode)
 
-        (const_like ?k_gqa_const 1.000000)
-        (= ?k_gqa (Op (Mul
-            (ECons ?nheads6 (ECons ?hdim6 (ECons (MVar "c") (ENil))))
-            ?k_gqa_a_strides
-            (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
-            ?k_gqa_out_strides)
-            (ICons ?k_gathered (ICons ?k_gqa_const (INil)))))
+        (fi_gqa_view ?k_gqa ?k_gathered)
 
         (= ?k_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim3 (ENil)))
+            (ECons ?k_gather_rows (ECons ?k_gather_width (ENil)))
             ?k_gather_strides
             (ECons ?num_slots_k (ECons ?kvdim4 (ENil)))
             ?k_src_strides)
@@ -631,12 +954,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
-            ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) (MVar "s") ?dt ?sq_scale_val -1.0)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            ?nheads (MDiv ?kvdim4 ?hdim) ?hdim ?page_size ?sequence ?context ?dt ?sq_scale_val -1.0 ?context_mode)
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (ICons ?current_context (INil)))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
@@ -768,6 +1093,87 @@
     :name "FlashInfer direct causal mask fact"
 )
 
+; Hugging Face's Qwen eager-attention mask lowers `where(allowed, baseline,
+; finfo_min)` into arithmetic. Stage the chain in small connected pieces: this
+; avoids one expensive join and makes a missing frontend spelling observable.
+(rule
+    (
+        (= ?blocked_f32 (Op (Cast ?blocked_f32_size (F32))
+            (ICons ?blocked_bool (INil))))
+        (= ?blocked_bool (Op (LessThan
+            (ECons (MNum 1) (ECons (MNum 1) (ECons ?sequence (ECons ?context (ENil)))))
+            (ECons (MNum 0) (ECons (MNum 0) (ECons (MIter) (ECons (MNum 0) (ENil)))))
+            (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ECons (MIter) (ENil)))))
+            ?blocked_out_strides)
+            (ICons ?q_pos (ICons ?col_offsets (INil)))))
+        (fi_causal_columns ?col_offsets ?context)
+    )
+    ((fi_hf_blocked_f32 ?blocked_f32 ?q_pos))
+    :ruleset kernel_fuse_late_pre
+    :name "FlashInfer HF blocked positions"
+)
+
+(rule
+    (
+        (= ?allowed_f32 (Op (Cast ?allowed_f32_size (F32))
+            (ICons ?allowed_bool (INil))))
+        (= ?allowed_bool (Op (Cast ?allowed_bool_size (Bool))
+            (ICons ?allowed_numeric (INil))))
+        (= ?allowed_numeric (Op (Add ?allowed_shape
+            ?negative_blocked_strides ?one_strides ?allowed_numeric_out_strides)
+            (ICons ?negative_blocked (ICons ?one (INil)))))
+        (const_like ?one 1.0)
+        (= ?negative_blocked (Op (Mul ?negative_shape
+            ?blocked_f32_strides ?blocked_neg_one_strides ?negative_blocked_out_strides)
+            (ICons ?blocked_f32 (ICons ?blocked_neg_one (INil)))))
+        (const_like ?blocked_neg_one -1.0)
+        (fi_hf_blocked_f32 ?blocked_f32 ?q_pos)
+    )
+    ((fi_hf_allowed_f32 ?allowed_f32 ?q_pos))
+    :ruleset kernel_fuse_late
+    :name "FlashInfer HF allowed positions"
+)
+
+(rule
+    (
+        (= ?delta (Op (Add ?delta_shape
+            ?baseline_strides ?positive_limit_strides ?delta_out_strides)
+            (ICons ?baseline_f32 (ICons ?positive_limit (INil)))))
+        (= ?baseline_f32 (Op (Cast (MNum 1) (F32))
+            (ICons ?baseline (INil))))
+        (= ?positive_limit (Op (Mul ?positive_limit_shape
+            ?limit_strides ?limit_neg_one_strides ?positive_limit_out_strides)
+            (ICons ?mask_min (ICons ?limit_neg_one (INil)))))
+        (const_like ?limit_neg_one -1.0)
+        (const_like ?mask_min ?mask_min_val)
+        (< ?mask_min_val -1.0e30)
+    )
+    ((fi_hf_mask_delta ?delta ?mask_min))
+    :ruleset kernel_fuse_late_pre
+    :name "FlashInfer HF min-fill delta"
+)
+
+(rule
+    (
+        (= ?mask (Op (Add ?mask_shape
+            ?mask_min_strides ?selected_strides ?mask_out_strides)
+            (ICons ?mask_min (ICons ?selected (INil)))))
+        (= ?selected (Op (Mul ?selected_shape
+            ?allowed_strides ?delta_strides ?selected_out_strides)
+            (ICons ?allowed_f32 (ICons ?delta (INil)))))
+        (fi_hf_allowed_f32 ?allowed_f32 ?q_pos)
+        (fi_hf_mask_delta ?delta ?mask_min)
+    )
+    (
+        ; `fi_triu_mask` historically means "causal mask with recoverable row
+        ; positions", not exclusively a literal Triu op.
+        (fi_direct_causal_mask ?mask ?q_pos)
+        (fi_triu_mask ?mask ?q_pos)
+    )
+    :ruleset kernel_fuse_late
+    :name "FlashInfer HF min-fill causal mask fact"
+)
+
 (rule
     (
         ; window term: (col < q_pos - (W-1)) cast * -1e10; the constant W-1
@@ -873,11 +1279,11 @@
             (ICons ?v_gathered (ICons ?v_gqa_const (INil)))))
 
         (= ?v_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim (ENil)))
+            (ECons ?v_gather_rows (ECons ?v_gather_width (ENil)))
             ?v_gather_strides
-            (ECons ?num_slots_v (ECons ?kvdim2 (ENil)))
+            (ECons ?num_slots_v (ECons ?kvdim4 (ENil)))
             ?v_src_strides)
-            (ICons ?k_idx (ICons ?v_cache (INil)))))
+            (ICons ?v_idx (ICons ?v_cache (INil)))))
 
         ; SCALE-FREE: ?qk (the raw QK Sum) feeds the mask Add directly.
         (= ?qk (Op (Sum
@@ -902,7 +1308,7 @@
             (ICons ?k_gathered (ICons ?k_gqa_const (INil)))))
 
         (= ?k_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim3 (ENil)))
+            (ECons ?k_gather_rows (ECons ?k_gather_width (ENil)))
             ?k_gather_strides
             (ECons ?num_slots_k (ECons ?kvdim4 (ENil)))
             ?k_src_strides)
@@ -912,12 +1318,14 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok_16bit ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
-            ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) (MVar "s") ?dt 1.0 -1.0)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            ?nheads (MDiv ?kvdim4 ?hdim) ?hdim (MNum 1) (MVar "s") (MVar "c") ?dt 1.0 -1.0 (MNum 0))
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (ICons ?mask (INil)))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
@@ -991,11 +1399,11 @@
             (ICons ?v_gathered (ICons ?v_gqa_const (INil)))))
 
         (= ?v_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim (ENil)))
+            (ECons ?v_gather_rows (ECons ?v_gather_width (ENil)))
             ?v_gather_strides
-            (ECons ?num_slots_v (ECons ?kvdim2 (ENil)))
+            (ECons ?num_slots_v (ECons ?kvdim4 (ENil)))
             ?v_src_strides)
-            (ICons ?k_idx (ICons ?v_cache (INil)))))
+            (ICons ?v_idx (ICons ?v_cache (INil)))))
 
         ; SCALE-FREE: ?qk (the raw QK Sum) feeds the mask Add directly.
         (= ?qk (Op (Sum
@@ -1020,7 +1428,7 @@
             (ICons ?k_gathered (ICons ?k_gqa_const (INil)))))
 
         (= ?k_gathered (Op (Gather
-            (ECons (MVar "c") (ECons ?kvdim3 (ENil)))
+            (ECons ?k_gather_rows (ECons ?k_gather_width (ENil)))
             ?k_gather_strides
             (ECons ?num_slots_k (ECons ?kvdim4 (ENil)))
             ?k_src_strides)
@@ -1030,15 +1438,122 @@
         (= ?dt (dtype ?k_cache))
         (= ?dt (dtype ?v_cache))
         (flashinfer_cache_pair ?k_cache ?v_cache)
+        (fi_same_row_indices ?k_idx ?v_idx ?gather_idx)
         (flashinfer_head_dim_ok_16bit ?hdim)
+        (flashinfer_enabled)
     )
     (
         (let ?fi (Op (FlashInferAttention
-            ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) (MVar "s") ?dt 1.0 ?window_left)
-            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx (ICons ?mask (INil))))))))
+            ?nheads (MDiv ?kvdim4 ?hdim) ?hdim (MNum 1) (MVar "s") (MVar "c") ?dt 1.0 ?window_left (MNum 0))
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?gather_idx (ICons ?mask (ICons ?mask (INil)))))))))
         (union ?output ?fi)
         (set (dtype ?fi) ?dt)
     )
     :ruleset kernel_fuse_late2
     :name "FlashInfer gemma sliding triu-gather attention"
+)
+
+; A FlashInfer match is a proof that the complete attention decomposition is
+; supported by the specialized HostOp: cache provenance, causal-mask spelling,
+; dtype, head dimension, GQA layout, and score scaling were all checked by the
+; producing rule above. Once that proof exists, retaining the decomposed Sum,
+; GenericMatmul, and cuBLASLt spellings in the same IR e-class only turns
+; backend selection into a low-probability search mutation. On large rolled
+; models that mutation is usually coupled to unrelated invalid choices, so the
+; valid FlashInfer implementation may never even be profiled.
+;
+; Only these concrete compute implementations are replaceable. In particular,
+; do not subsume LoopInput / LoopOutput and other structural Op spellings that
+; can share an e-class while a rolled model is being represented.
+(relation fi_replaceable_attention_kind (OpKind))
+
+(rule
+    ((= ?kind (Sum ?shape ?iters ?strides ?iter_stride ?out_strides)))
+    ((fi_replaceable_attention_kind ?kind))
+    :ruleset kernel_commit_mark
+    :name "FlashInfer replaceable Sum kind"
+)
+
+; `Sum` is lowered to `KernelSum` before the final FlashInfer rule runs. Both
+; spellings can remain in the attention-output e-class, depending on whether
+; the output belongs to a rolled loop body or its peeled boundary iteration.
+; If KernelSum is not committed away, extraction can independently choose the
+; generic reduction for one spelling and FlashInfer for the other, yielding a
+; 1/47 split in a 48-layer model.
+(rule
+    ((= ?kind (KernelSum
+        ?shape ?iters ?strides ?iter_stride ?out_strides ?dtype)))
+    ((fi_replaceable_attention_kind ?kind))
+    :ruleset kernel_commit_mark
+    :name "FlashInfer replaceable KernelSum kind"
+)
+
+(rule
+    ((= ?kind (GenericMatmul
+        ?out_shape ?mul_shape ?k ?lhs_strides ?rhs_strides
+        ?sum_input_strides ?sum_iter_stride ?out_strides ?dtype)))
+    ((fi_replaceable_attention_kind ?kind))
+    :ruleset kernel_commit_mark
+    :name "FlashInfer replaceable GenericMatmul kind"
+)
+
+(rule
+    ((= ?kind (cublaslt
+        ?m ?n ?k ?a_layout ?b_layout ?a_order ?b_order ?c_order ?d_order
+        ?lda ?ldb ?ldc ?ldd ?batch_count ?stride_a ?stride_b ?stride_c ?stride_d
+        ?a_dtype ?b_dtype ?c_dtype ?d_dtype ?compute_type ?scale_dtype
+        ?alpha ?beta ?epilogue)))
+    ((fi_replaceable_attention_kind ?kind))
+    :ruleset kernel_commit_mark
+    :name "FlashInfer replaceable cuBLASLt kind"
+)
+
+(rule
+    ((= ?kind (cublaslt_scaled
+        ?m ?n ?k ?a_layout ?b_layout ?a_order ?b_order ?c_order ?d_order
+        ?lda ?ldb ?ldc ?ldd ?batch_count ?stride_a ?stride_b ?stride_c ?stride_d
+        ?a_dtype ?b_dtype ?c_dtype ?d_dtype ?compute_type ?scale_dtype
+        ?alpha ?beta ?epilogue)))
+    ((fi_replaceable_attention_kind ?kind))
+    :ruleset kernel_commit_mark
+    :name "FlashInfer replaceable scaled cuBLASLt kind"
+)
+
+; A matched FlashInfer op is now committed over only the decomposed compute
+; alternatives above. Compiler loop markers remain available to the unroller.
+(rule
+    (
+        (= ?paged (Op
+            (FlashInferAttention
+                ?nheads ?nkvheads ?hdim (MNum 0) ?batch ?context ?dt ?scale ?window_left (MNum 1))
+            ?paged_inputs))
+        (= ?legacy (Op
+            (FlashInferAttention
+                ?nheads ?nkvheads ?hdim (MNum 1) ?batch ?context ?dt ?scale ?window_left (MNum 0))
+            ?legacy_inputs))
+        (= ?paged ?legacy)
+    )
+    ((subsume (Op
+        (FlashInferAttention
+            ?nheads ?nkvheads ?hdim (MNum 1) ?batch ?context ?dt ?scale ?window_left (MNum 0))
+        ?legacy_inputs)))
+    :ruleset kernel_commit
+    :name "FlashInfer prefer persistent paged context"
+)
+
+(rule
+    (
+        (= ?fi (Op
+            (FlashInferAttention
+                ?nheads ?nkvheads ?hdim ?page_size ?batch ?context ?dt ?scale ?window_left ?context_from_device)
+            ?fi_inputs))
+        (= ?alternative (Op ?alternative_kind ?alternative_inputs))
+        (= ?alternative ?fi)
+        (fi_replaceable_attention_kind ?alternative_kind)
+    )
+    (
+        (subsume (Op ?alternative_kind ?alternative_inputs))
+    )
+    :ruleset kernel_commit
+    :name "FlashInfer commit proven attention HostOp"
 )

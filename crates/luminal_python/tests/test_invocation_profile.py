@@ -88,6 +88,39 @@ class _CudaBindingTestGraph:
         return [3]
 
 
+class _CudaDeviceCopyTestGraph:
+    has_dynamic_dims = False
+    device_type = "cuda"
+    supports_device_ptrs = True
+
+    def __init__(self, *, writeback=False):
+        self.input_names = ["state"]
+        self.output_names = ["updated" if writeback else "y"]
+        self.writeback_outputs = [(0, "state")] if writeback else []
+        self.output_shapes = [[4]]
+        self.input_dtypes = [torch_dtype_code(torch.float32)]
+        self.output_dtypes = [torch_dtype_code(torch.float32)]
+        self.input_pointer_calls = []
+        self.output_pointer_calls = []
+        self.output_copy_pointer_calls = []
+        self.copy_batches = []
+
+    def set_input_device_ptr(self, name, ptr, n_bytes):
+        self.input_pointer_calls.append((name, ptr, n_bytes))
+
+    def set_output_device_ptr(self, name, ptr, n_bytes):
+        self.output_pointer_calls.append((name, ptr, n_bytes))
+
+    def set_output_copy_device_ptr(self, name, ptr, n_bytes):
+        self.output_copy_pointer_calls.append((name, ptr, n_bytes))
+
+    def copy_outputs_to_device_ptrs(self, copies):
+        self.copy_batches.append(copies)
+
+    def run(self):
+        pass
+
+
 def test_cuda_input_binding_cache_tracks_resource_relevant_metadata():
     first = _FakeCudaTensor(0x1000)
     signature = _cuda_input_binding_signature(first, first.n_bytes)
@@ -131,6 +164,32 @@ def test_compiled_model_skips_unchanged_cuda_input_pointer_registration():
     replacement = tensor.clone()
     assert model(replacement)[0].item() == 3
     assert len(graph.input_pointer_calls) == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_user_output_uses_stable_graph_epilogue_copy_by_default(monkeypatch):
+    monkeypatch.delenv("LUMINAL_CUDA_DIRECT_OUTPUTS", raising=False)
+    graph = _CudaDeviceCopyTestGraph()
+    model = CompiledModel(graph)
+
+    (out,) = model(torch.ones(4, device="cuda"))
+
+    assert out.shape == (4,)
+    assert graph.output_pointer_calls == []
+    assert graph.output_copy_pointer_calls == [("y", out.data_ptr(), 16)]
+    assert graph.copy_batches == []
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_mutation_writebacks_are_batched_without_host_readback(monkeypatch):
+    monkeypatch.delenv("LUMINAL_CUDA_DIRECT_OUTPUTS", raising=False)
+    graph = _CudaDeviceCopyTestGraph(writeback=True)
+    model = CompiledModel(graph)
+    state = torch.zeros(4, device="cuda")
+
+    assert model(state) == []
+    assert graph.output_copy_pointer_calls == [("updated", state.data_ptr(), 16)]
+    assert graph.copy_batches == []
 
 
 def test_invocation_profile_is_opt_in_correlated_and_multi_graph_safe(

@@ -152,9 +152,11 @@ fn run_flashinfer(
         head_dim: HEAD_DIM,
         page_size: 1,
         batch_dim: Expression::from('s'),
+        context_dim: Expression::from('c'),
         dtype: luminal::dtype::DType::F32,
         sm_scale: 0.0,
         window_left: -1,
+        context_from_device: false,
         plan_info: Mutex::new(Vec::new()),
     };
 
@@ -226,9 +228,11 @@ fn run_flashinfer_with_compact_decode_indices(
         head_dim: HEAD_DIM,
         page_size: 1,
         batch_dim: Expression::from('s'),
+        context_dim: Expression::from('c'),
         dtype: luminal::dtype::DType::F32,
         sm_scale: 0.0,
         window_left: -1,
+        context_from_device: false,
         plan_info: Mutex::new(Vec::new()),
     };
 
@@ -281,9 +285,11 @@ fn resolve_flashinfer_decode_for_signature_test(
         head_dim: HEAD_DIM,
         page_size: 1,
         batch_dim: Expression::from('s'),
+        context_dim: Expression::from('c'),
         dtype: luminal::dtype::DType::F32,
         sm_scale: 0.0,
         window_left: -1,
+        context_from_device: false,
         plan_info: Mutex::new(Vec::new()),
     };
     let nodes: Vec<NodeIndex> = (0..5).map(NodeIndex::new).collect();
@@ -1438,9 +1444,11 @@ fn run_flashinfer_bf16(
         head_dim: HEAD_DIM,
         page_size: 1,
         batch_dim: Expression::from('s'),
+        context_dim: Expression::from('c'),
         dtype: luminal::dtype::DType::Bf16,
         sm_scale: 0.0,
         window_left: -1,
+        context_from_device: false,
         plan_info: Mutex::new(Vec::new()),
     };
 

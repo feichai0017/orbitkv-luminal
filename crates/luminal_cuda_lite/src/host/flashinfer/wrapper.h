@@ -59,8 +59,11 @@ void flashinfer_prepare_decode_metadata(
     const int32_t* slot_idx,
     int32_t* kv_indices,
     int32_t* kv_indptr,
+    int32_t* kv_last_page_len,
     int capacity_c,
     int kv_dim,
+    int page_size,
+    int appended_tokens,
     cudaStream_t stream);
 
 // Transpose output from (batch, heads, dim) to (heads, batch, dim).

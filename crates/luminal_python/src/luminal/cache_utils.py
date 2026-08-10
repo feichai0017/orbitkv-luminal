@@ -38,6 +38,43 @@ def flatten_with_keys_dynamic_cache(cache):
     return torch.utils._pytree._dict_flatten_with_keys(_get_cache_dict(cache))
 
 
+def _get_luminal_paged_cache_dict(cache):
+    return {
+        "key_pages": [layer.keys for layer in cache.layers],
+        "value_pages": [layer.values for layer in cache.layers],
+        "block_tables": [layer.block_table for layer in cache.layers],
+        "sequence_lengths": [layer.sequence_length for layer in cache.layers],
+    }
+
+
+def flatten_luminal_paged_cache(cache):
+    import torch
+
+    return torch.utils._pytree._dict_flatten(_get_luminal_paged_cache_dict(cache))
+
+
+def flatten_with_keys_luminal_paged_cache(cache):
+    import torch
+
+    return torch.utils._pytree._dict_flatten_with_keys(
+        _get_luminal_paged_cache_dict(cache)
+    )
+
+
+def unflatten_luminal_paged_cache(values, context):
+    import torch
+
+    from .transformers_cache import LuminalPagedCache
+
+    dictionary = torch.utils._pytree._dict_unflatten(values, context)
+    return LuminalPagedCache.from_tensors(
+        dictionary["key_pages"],
+        dictionary["value_pages"],
+        dictionary["block_tables"],
+        dictionary["sequence_lengths"],
+    )
+
+
 def _register_cache_serialization(verbose: int = 0):
     """Register DynamicCache as a pytree node for torch.compile."""
     import torch
@@ -64,5 +101,32 @@ def _register_cache_serialization(verbose: int = 0):
             DynamicCache,
             lambda cache, spec: torch.fx._pytree._dict_flatten_spec(
                 _get_cache_dict(cache), spec
+            ),
+        )
+
+    try:
+        from .transformers_cache import LuminalPagedCache
+    except ImportError:
+        LuminalPagedCache = None
+
+    if (
+        LuminalPagedCache is not None
+        and LuminalPagedCache not in torch.utils._pytree.SUPPORTED_NODES
+    ):
+        if verbose:
+            print("[luminal] register LuminalPagedCache pytree serialization")
+        torch.utils._pytree.register_pytree_node(
+            LuminalPagedCache,
+            flatten_luminal_paged_cache,
+            unflatten_luminal_paged_cache,
+            serialized_type_name=(
+                f"{LuminalPagedCache.__module__}.{LuminalPagedCache.__name__}"
+            ),
+            flatten_with_keys_fn=flatten_with_keys_luminal_paged_cache,
+        )
+        torch.fx._pytree.register_pytree_flatten_spec(
+            LuminalPagedCache,
+            lambda cache, spec: torch.fx._pytree._dict_flatten_spec(
+                _get_luminal_paged_cache_dict(cache), spec
             ),
         )

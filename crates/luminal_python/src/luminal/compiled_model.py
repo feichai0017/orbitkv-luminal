@@ -376,28 +376,65 @@ class CompiledModel:
         # after `run()` and so don't need a pre-allocated tensor at
         # this layer. CPU never zero-copies — there's no separate
         # device buffer to register against.
-        _use_zero_copy = self._supports_device_ptrs
+        _use_device_outputs = self._supports_device_ptrs
+        # A freshly allocated PyTorch output has a fresh pointer and therefore
+        # forces every CUDA-graph consumer/producer of that output to be
+        # reconsidered before launch. The default keeps the executable graph
+        # structurally static and pays one ordered D2D epilogue copy instead.
+        # Direct registration remains available for workloads whose output
+        # allocation itself is stable or whose output is large enough to make
+        # that tradeoff worthwhile.
+        _register_direct_outputs = _use_device_outputs and os.getenv(
+            "LUMINAL_CUDA_DIRECT_OUTPUTS", "0"
+        ) == "1"
         output_tensors = []
         output_allocations = 0
         output_registrations = 0
+        output_copy_registrations = 0
         stage = _start_profile_stage(
             profile_enabled, f"luminal.compiled_model.output_plan.{invocation_id}"
         )
-        if _use_zero_copy:
+        if _use_device_outputs:
             for i, (name, shape) in enumerate(zip(self._output_names, output_shapes)):
                 out_dtype = output_torch_dtypes[i]
                 if i in self._writeback_by_pos:
-                    # Write-backs land in the caller's input tensor below, not
-                    # in a fresh output buffer.
+                    # Fixed-state mutation: schedule the result directly into
+                    # the caller's allocation as a one-shot epilogue copy.
+                    # It runs before the runtime's existing terminal sync and
+                    # never changes CUDA graph node parameters.
+                    input_name = self._writeback_by_pos[i]
+                    target = user_inputs[self._input_names.index(input_name)]
+                    if target.dtype != out_dtype:
+                        raise RuntimeError(
+                            f"write-back output '{name}' has dtype {out_dtype}, "
+                            f"but mutated input '{input_name}' has dtype "
+                            f"{target.dtype}"
+                        )
+                    self._graph.set_output_copy_device_ptr(
+                        name,
+                        target.data_ptr(),
+                        target.numel() * target.element_size(),
+                    )
+                    output_copy_registrations += 1
                     output_tensors.append(None)
                     continue
                 out = torch.empty(shape, dtype=out_dtype, device=input_device)
                 output_allocations += 1
-                if out_dtype in _zero_copy_native_floats:
+                if (
+                    _register_direct_outputs
+                    and out_dtype in _zero_copy_native_floats
+                ):
                     self._graph.set_output_device_ptr(
                         name, out.data_ptr(), out.numel() * out.element_size()
                     )
                     output_registrations += 1
+                else:
+                    self._graph.set_output_copy_device_ptr(
+                        name,
+                        out.data_ptr(),
+                        out.numel() * out.element_size(),
+                    )
+                    output_copy_registrations += 1
                 output_tensors.append(out)
         _finish_profile_stage(stage, profile_timings, "output_plan")
 
@@ -416,6 +453,7 @@ class CompiledModel:
             profile_enabled, f"luminal.compiled_model.output_finalize.{invocation_id}"
         )
         outputs = []
+        direct_output_fallback_copies = []
         for i, (name, shape) in enumerate(zip(self._output_names, output_shapes)):
             out_dtype = output_torch_dtypes[i]
             if i in self._writeback_by_pos:
@@ -424,17 +462,32 @@ class CompiledModel:
                 # mutated eagerly); it is not part of the returned tuple.
                 input_name = self._writeback_by_pos[i]
                 target = user_inputs[self._input_names.index(input_name)]
-                target.copy_(_read_typed_output(name, shape, out_dtype))
+                if not _use_device_outputs:
+                    target.copy_(_read_typed_output(name, shape, out_dtype))
                 continue
-            if _use_zero_copy and out_dtype in _zero_copy_native_floats:
+            if _use_device_outputs:
                 out = output_tensors[i]
-                if not self._graph.output_is_zero_copy(name):
-                    self._graph.copy_output_to_device_ptr(
-                        name, out.data_ptr(), out.numel() * out.element_size()
-                    )
+                if (
+                    out_dtype not in _zero_copy_native_floats
+                    or not _register_direct_outputs
+                    or not self._graph.output_is_zero_copy(name)
+                ):
+                    # The normal stable-output path registered its epilogue
+                    # copy before run. This post-run fallback is needed only
+                    # when explicit direct registration was requested but an
+                    # aliased producer could not honor it zero-copy.
+                    if _register_direct_outputs:
+                        direct_output_fallback_copies.append(
+                            (name, out.data_ptr(), out.numel() * out.element_size())
+                        )
             else:
                 out = _read_typed_output(name, shape, out_dtype)
             outputs.append(out)
+
+        if direct_output_fallback_copies:
+            self._graph.copy_outputs_to_device_ptrs(
+                direct_output_fallback_copies
+            )
 
         _finish_profile_stage(stage, profile_timings, "output_finalize")
         if profile_enabled:
@@ -483,6 +536,7 @@ class CompiledModel:
                         "outputs": len(self._output_names),
                         "output_allocations": output_allocations,
                         "output_registrations": output_registrations,
+                        "output_copy_registrations": output_copy_registrations,
                         "writebacks": len(self._writeback_by_pos),
                     },
                 },

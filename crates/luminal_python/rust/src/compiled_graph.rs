@@ -445,6 +445,29 @@ impl CompiledGraph {
         Ok(())
     }
 
+    /// Register a one-shot DtoD copy performed after execution but before the
+    /// CUDA runtime's existing terminal stream synchronization.
+    fn set_output_copy_device_ptr(
+        &mut self,
+        name: &str,
+        device_ptr: u64,
+        n_bytes: usize,
+    ) -> PyResult<()> {
+        if !self.runtime.supports_device_ptrs() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "set_output_copy_device_ptr requires a GPU backend",
+            ));
+        }
+        let node_id = self.tensor_ids.get(name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Unknown output tensor: {name}"))
+        })?;
+        unsafe {
+            self.runtime
+                .set_output_copy_device_ptr(*node_id, device_ptr, n_bytes)
+        };
+        Ok(())
+    }
+
     /// Check whether an output tensor was zero-copied (written directly to the registered pointer).
     /// Returns false for aliased outputs that need a fallback DtoD copy, or if no GPU backend.
     /// Must be called after run().
@@ -617,6 +640,33 @@ impl CompiledGraph {
             self.runtime
                 .copy_output_to_device_ptr(*node_id, dest_ptr, n_bytes)
         };
+        Ok(())
+    }
+
+    /// Copy multiple outputs directly into caller-owned CUDA allocations.
+    /// Unlike repeated `copy_output_to_device_ptr` calls, the CUDA backend
+    /// enqueues the entire batch and synchronizes only once.
+    fn copy_outputs_to_device_ptrs(&self, copies: Vec<(String, u64, usize)>) -> PyResult<()> {
+        if !self.runtime.supports_device_ptrs() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "copy_outputs_to_device_ptrs requires a GPU backend",
+            ));
+        }
+        let mut resolved = Vec::with_capacity(copies.len());
+        for (name, dest_ptr, n_bytes) in copies {
+            if dest_ptr == 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "output '{name}' has a null destination pointer"
+                )));
+            }
+            let node_id = self.tensor_ids.get(&name).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                    "Unknown output tensor: {name}"
+                ))
+            })?;
+            resolved.push((*node_id, dest_ptr, n_bytes));
+        }
+        unsafe { self.runtime.copy_outputs_to_device_ptrs(&resolved) };
         Ok(())
     }
 }

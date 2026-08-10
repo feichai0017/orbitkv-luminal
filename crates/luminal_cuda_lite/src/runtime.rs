@@ -230,6 +230,16 @@ pub(crate) struct CompiledBucket {
     /// Keep intermediate offsets and base allocation stable across shape growth
     /// when captured library graph nodes embed intermediate pointers.
     stabilize_intermediate_pointers: bool,
+    /// Monotonic identity of the arena allocation. Logical length changes do
+    /// not advance it; replacing the base allocation does.
+    arena_generation: u64,
+    /// Materialization validity key. When all three fields still match, every
+    /// CUDA graph node already contains the correct pointers and launch
+    /// dimensions and execution can jump directly to graph launch.
+    cuda_graphs_materialized: bool,
+    materialized_arena_generation: u64,
+    materialized_binding_generation: u64,
+    materialized_dyn_map: FxHashMap<char, usize>,
 }
 
 impl CompiledBucket {
@@ -267,7 +277,30 @@ impl CompiledBucket {
             hlir_synced: false,
             preserve_intermediate_buffers_for_debug: false,
             stabilize_intermediate_pointers: false,
+            arena_generation: 0,
+            cuda_graphs_materialized: false,
+            materialized_arena_generation: 0,
+            materialized_binding_generation: 0,
+            materialized_dyn_map: FxHashMap::default(),
         }
+    }
+
+    fn materialization_is_current(
+        &self,
+        binding_generation: u64,
+        dyn_map: &FxHashMap<char, usize>,
+    ) -> bool {
+        self.cuda_graphs_materialized
+            && self.materialized_arena_generation == self.arena_generation
+            && self.materialized_binding_generation == binding_generation
+            && self.materialized_dyn_map == *dyn_map
+    }
+
+    fn mark_materialized(&mut self, binding_generation: u64, dyn_map: &FxHashMap<char, usize>) {
+        self.cuda_graphs_materialized = true;
+        self.materialized_arena_generation = self.arena_generation;
+        self.materialized_binding_generation = binding_generation;
+        self.materialized_dyn_map = dyn_map.clone();
     }
 }
 
@@ -364,6 +397,14 @@ pub struct CudaRuntime {
     /// Pending output pointer registrations: HLIR output id -> (device_ptr, n_bytes)
     /// Set by python before execute(), consumed at start of execute()
     output_ptr_registrations: FxHashMap<NodeIndex, (u64, usize)>,
+    /// One-shot destinations copied after graph/HostOp execution and before
+    /// the runtime's terminal stream synchronization. These pointers never
+    /// become CUDA graph node parameters.
+    output_copy_ptr_registrations: FxHashMap<NodeIndex, (u64, usize)>,
+    /// Advances only when an external input/output allocation identity or
+    /// byte extent changes. Tensor contents intentionally do not invalidate a
+    /// CUDA graph whose nodes already reference that allocation.
+    binding_generation: u64,
     /// (src_ptr, dst_ptr, bytes) device copies enqueued at the end of each
     /// execute: in-place-elected outputs whose registered buffer differs
     /// from the aliased input's (user-managed double buffering).
@@ -734,6 +775,7 @@ impl CudaRuntime {
         if let Some(CudaInput::Buffer { buf, len }) = self.hlir_buffers.get_mut(&id)
             && bytes.len() <= buf.len()
         {
+            let extent_changed = *len != bytes.len();
             if !bytes.is_empty() {
                 let mut view = buf.slice_mut(..bytes.len());
                 self.cuda_stream.memcpy_htod(&bytes, &mut view).unwrap();
@@ -741,6 +783,9 @@ impl CudaRuntime {
             *len = bytes.len();
             self.changed_hlir.insert(id);
             self.external_buffers.remove(&id);
+            if extent_changed {
+                self.binding_generation = self.binding_generation.wrapping_add(1);
+            }
             return;
         }
 
@@ -748,6 +793,7 @@ impl CudaRuntime {
         self.external_buffers.remove(&id);
         self.hlir_buffers.insert(id, cuda_input);
         self.changed_hlir.insert(id);
+        self.binding_generation = self.binding_generation.wrapping_add(1);
     }
 
     /// Allocate an owned input buffer with a caller-chosen capacity and initialize
@@ -774,6 +820,7 @@ impl CudaRuntime {
         self.external_buffers.remove(&id);
         self.hlir_buffers.insert(id, cuda_input);
         self.changed_hlir.insert(id);
+        self.binding_generation = self.binding_generation.wrapping_add(1);
     }
 
     /// Allocate a zeroed GPU buffer for the given node. This is more efficient than
@@ -789,6 +836,7 @@ impl CudaRuntime {
             },
         );
         self.changed_hlir.insert(id);
+        self.binding_generation = self.binding_generation.wrapping_add(1);
     }
 
     /// Set an external CUDA device pointer as input data. Zero-copy.
@@ -821,6 +869,7 @@ impl CudaRuntime {
             .insert(id, std::mem::ManuallyDrop::new(slice));
         self.hlir_buffers.insert(id, CudaInput::Ptr(device_ptr));
         self.changed_hlir.insert(id);
+        self.binding_generation = self.binding_generation.wrapping_add(1);
     }
 
     /// Register an external device pointer for an output tensor (zero-copy output).
@@ -836,7 +885,32 @@ impl CudaRuntime {
             device_ptr != 0,
             "set_output_device_ptr called with null pointer"
         );
+        let id = id.to_id();
+        if self.output_ptr_registrations.get(&id) == Some(&(device_ptr, n_bytes)) {
+            return;
+        }
         self.output_ptr_registrations
+            .insert(id, (device_ptr, n_bytes));
+        self.binding_generation = self.binding_generation.wrapping_add(1);
+    }
+
+    /// Register a one-execution output copy without changing captured graph
+    /// bindings. Intended for fresh framework-owned result tensors and
+    /// functionalized mutation writebacks.
+    ///
+    /// # Safety
+    /// The pointer must remain valid through the next `execute()` call.
+    pub unsafe fn set_output_copy_device_ptr(
+        &mut self,
+        id: impl ToId,
+        device_ptr: u64,
+        n_bytes: usize,
+    ) {
+        debug_assert!(
+            device_ptr != 0,
+            "set_output_copy_device_ptr called with null pointer"
+        );
+        self.output_copy_ptr_registrations
             .insert(id.to_id(), (device_ptr, n_bytes));
     }
 
@@ -1002,20 +1076,43 @@ impl CudaRuntime {
     /// # Safety
     /// The dest_ptr must be a valid CUDA device allocation with at least n_bytes available.
     pub unsafe fn copy_output_to_device_ptr(&self, id: impl ToId, dest_ptr: u64, n_bytes: usize) {
-        debug_assert!(
-            dest_ptr != 0,
-            "copy_output_to_device_ptr called with null pointer"
-        );
-        let src = self.resolve_output_buffer(id);
-        let copy_bytes = n_bytes.min(src.len());
         unsafe {
-            result::memcpy_dtod_async(
-                dest_ptr,
-                src.ptr(),
-                copy_bytes,
-                self.cuda_stream.cu_stream(),
-            )
-            .expect("cuMemcpyDtoDAsync failed");
+            self.copy_outputs_to_device_ptrs(&[(id.to_id(), dest_ptr, n_bytes)]);
+        }
+    }
+
+    /// Copy a set of runtime outputs into caller-owned CUDA allocations.
+    /// Transfers are ordered after the graph on the runtime stream and share
+    /// one terminal synchronization. This is the mutation-writeback path for
+    /// fixed-capacity state such as paged KV pools and device length scalars.
+    ///
+    /// # Safety
+    /// Each destination must be a live CUDA allocation spanning at least the
+    /// requested number of bytes and destinations must not overlap one
+    /// another unless their sources and ranges are identical.
+    pub unsafe fn copy_outputs_to_device_ptrs(&self, copies: &[(NodeIndex, u64, usize)]) {
+        if copies.is_empty() {
+            return;
+        }
+        for &(id, dest_ptr, n_bytes) in copies {
+            debug_assert!(
+                dest_ptr != 0,
+                "copy_output_to_device_ptr called with null pointer"
+            );
+            let src = self.resolve_output_buffer(id);
+            let copy_bytes = n_bytes.min(src.len());
+            if copy_bytes == 0 || src.ptr() == dest_ptr {
+                continue;
+            }
+            unsafe {
+                result::memcpy_dtod_async(
+                    dest_ptr,
+                    src.ptr(),
+                    copy_bytes,
+                    self.cuda_stream.cu_stream(),
+                )
+                .expect("cuMemcpyDtoDAsync failed");
+            }
         }
         self.cuda_stream.synchronize().unwrap();
     }
@@ -1039,9 +1136,6 @@ impl CudaRuntime {
         }
 
         self.pending_output_copies.clear();
-        if self.output_ptr_registrations.is_empty() {
-            return;
-        }
 
         // Registrations are durable: outputs are re-resolved against the
         // active bucket every execute (producers and alias structure differ
@@ -1105,6 +1199,21 @@ impl CudaRuntime {
             self.compiled_buckets[self.active_bucket]
                 .cached_device_buffers
                 .insert(data_node, DeviceBuffer::new(device_ptr, n_bytes));
+        }
+
+        // One-shot epilogue copies deliberately do not modify
+        // external_output_buffers or cached graph pointers.
+        let copy_registrations = std::mem::take(&mut self.output_copy_ptr_registrations);
+        for (hlir_id, (device_ptr, n_bytes)) in copy_registrations {
+            let Some(&_producer) = self.active().output_producers.get(&hlir_id) else {
+                continue;
+            };
+            let src = self.resolve_output_buffer(hlir_id);
+            let copy_bytes = n_bytes.min(src.len());
+            if copy_bytes > 0 && src.ptr() != device_ptr {
+                self.pending_output_copies
+                    .push((src.ptr(), device_ptr, copy_bytes));
+            }
         }
     }
 
@@ -1365,6 +1474,7 @@ impl CudaRuntime {
         let alloc_profile_start = std::time::Instant::now();
         let old_arena_len = bucket.arena.as_ref().map(|arena| arena.len()).unwrap_or(0);
         let old_arena_bytes = bucket.arena_bytes;
+        let old_logical_offsets = bucket.logical_buffer_offsets.clone();
         let mut sync_time = Duration::ZERO;
         let mut plan_time = Duration::ZERO;
         let mut refresh_time = Duration::ZERO;
@@ -1474,9 +1584,18 @@ impl CudaRuntime {
             };
             bucket.arena = Some(arena);
             bucket.arena_pool = arena_pool;
+            bucket.arena_generation = bucket.arena_generation.wrapping_add(1);
+            bucket.cuda_graphs_materialized = false;
             cuda_alloc_time += timer.elapsed();
             allocated_bytes = allocation_bytes;
             allocated_new_arena = true;
+        }
+
+        if !allocated_new_arena && bucket.logical_buffer_offsets != old_logical_offsets {
+            // Repacking within an existing allocation changes node addresses
+            // even though the arena base pointer itself stayed fixed.
+            bucket.arena_generation = bucket.arena_generation.wrapping_add(1);
+            bucket.cuda_graphs_materialized = false;
         }
 
         let timer = std::time::Instant::now();
@@ -3731,6 +3850,8 @@ impl Runtime for CudaRuntime {
             active_bucket: 0,
             dim_buckets: FxHashMap::default(),
             output_ptr_registrations: FxHashMap::default(),
+            output_copy_ptr_registrations: FxHashMap::default(),
+            binding_generation: 0,
             pending_output_copies: Vec::new(),
             external_output_buffers: FxHashMap::default(),
             external_buffers: FxHashMap::default(),
@@ -3938,29 +4059,48 @@ impl Runtime for CudaRuntime {
         self.apply_output_ptr_registrations();
         output_registration_time += timer.elapsed();
 
-        // Materialize CUDA graphs before timed execution. The first real launch
-        // should only patch an already-instantiated graph, not build it from scratch.
+        // Materialize CUDA graphs before timed execution. Stable-pointer
+        // decode reaches the O(1) validity check below and launches the
+        // existing executable graph without rebuilding buffer maps or walking
+        // its nodes. Content changes in persistent state are ordered by the
+        // stream and deliberately do not invalidate this key.
         let timer = std::time::Instant::now();
-        self.materialize_bucket_cuda_graphs(self.active_bucket, dyn_map, false)
-            .unwrap_or_else(|e| panic!("CUDA graph materialization failed: {e}"));
+        let active_materialization = &self.compiled_buckets[self.active_bucket];
+        let materialization_arena_changed = active_materialization.cuda_graphs_materialized
+            && active_materialization.materialized_arena_generation
+                != active_materialization.arena_generation;
+        let materialization_bindings_changed = active_materialization.cuda_graphs_materialized
+            && active_materialization.materialized_binding_generation != self.binding_generation;
+        let materialization_dyn_map_changed = active_materialization.cuda_graphs_materialized
+            && active_materialization.materialized_dyn_map != *dyn_map;
+        let materialization_is_current =
+            active_materialization.materialization_is_current(self.binding_generation, dyn_map);
+        if !materialization_is_current {
+            self.materialize_bucket_cuda_graphs(self.active_bucket, dyn_map, false)
+                .unwrap_or_else(|e| panic!("CUDA graph materialization failed: {e}"));
+            let binding_generation = self.binding_generation;
+            let bucket = &mut self.compiled_buckets[self.active_bucket];
+            bucket.mark_materialized(binding_generation, dyn_map);
+        }
         materialize_time += timer.elapsed();
-        let (graphs_visited, graph_nodes_inspected, graph_nodes_updated) = if structured_profile {
-            self.compiled_buckets[self.active_bucket]
-                .exec_graph
-                .node_weights()
-                .filter_map(|exec_op| {
-                    exec_op
-                        .internal
-                        .as_any()
-                        .downcast_ref::<CudaGraphOp>()
-                        .map(CudaGraphOp::last_materialize_counts)
-                })
-                .fold((0usize, 0usize, 0usize), |acc, (inspected, updated)| {
-                    (acc.0 + 1, acc.1 + inspected, acc.2 + updated)
-                })
-        } else {
-            (0, 0, 0)
-        };
+        let (graphs_visited, graph_nodes_inspected, graph_nodes_updated) =
+            if structured_profile && !materialization_is_current {
+                self.compiled_buckets[self.active_bucket]
+                    .exec_graph
+                    .node_weights()
+                    .filter_map(|exec_op| {
+                        exec_op
+                            .internal
+                            .as_any()
+                            .downcast_ref::<CudaGraphOp>()
+                            .map(CudaGraphOp::last_materialize_counts)
+                    })
+                    .fold((0usize, 0usize, 0usize), |acc, (inspected, updated)| {
+                        (acc.0 + 1, acc.1 + inspected, acc.2 + updated)
+                    })
+            } else {
+                (0, 0, 0)
+            };
 
         let total_start = std::time::Instant::now();
         let bucket = &self.compiled_buckets[self.active_bucket];
@@ -4037,14 +4177,10 @@ impl Runtime for CudaRuntime {
         if !self.pending_output_copies.is_empty() {
             let timer = std::time::Instant::now();
             for &(src, dst, bytes) in &self.pending_output_copies {
-                let src_slice = unsafe { self.cuda_stream.upgrade_device_ptr::<u8>(src, bytes) };
-                let mut dst_slice =
-                    unsafe { self.cuda_stream.upgrade_device_ptr::<u8>(dst, bytes) };
-                self.cuda_stream
-                    .memcpy_dtod(&src_slice, &mut dst_slice)
-                    .expect("output epilogue copy failed");
-                std::mem::forget(src_slice);
-                std::mem::forget(dst_slice);
+                unsafe {
+                    result::memcpy_dtod_async(dst, src, bytes, self.cuda_stream.cu_stream())
+                        .expect("output epilogue copy failed");
+                }
             }
             output_copy_time += timer.elapsed();
         }
@@ -4145,6 +4281,16 @@ impl Runtime for CudaRuntime {
                         "selected_host_ops": selected_host_ops,
                         "dynamic_dims": dyn_dims,
                         "bucket": self.active_bucket,
+                        "materialization_fast_path": materialization_is_current,
+                        "structural_generations": {
+                            "binding": self.binding_generation,
+                            "arena": self.compiled_buckets[self.active_bucket].arena_generation,
+                        },
+                        "materialization_invalidations": {
+                            "arena_changed": materialization_arena_changed,
+                            "bindings_changed": materialization_bindings_changed,
+                            "dynamic_map_changed": materialization_dyn_map_changed,
+                        },
                         "timings_us": {
                             "total": runtime_total.as_secs_f64() * 1e6,
                             "dispatch": bucket_dispatch_time.as_secs_f64() * 1e6,
@@ -4975,6 +5121,29 @@ fn intersects(a: &FixedBitSet, b: &FixedBitSet) -> bool {
 #[cfg(test)]
 mod arena_plan_tests {
     use super::*;
+
+    #[test]
+    fn cuda_graph_materialization_key_ignores_contents_but_tracks_resources() {
+        let mut bucket = CompiledBucket::new();
+        let mut dyn_map = FxHashMap::default();
+        dyn_map.insert('s', 1);
+
+        assert!(!bucket.materialization_is_current(7, &dyn_map));
+        bucket.mark_materialized(7, &dyn_map);
+        assert!(bucket.materialization_is_current(7, &dyn_map));
+
+        // Device-memory contents can change at stable addresses without
+        // invalidating captured launch parameters.
+        assert!(bucket.materialization_is_current(7, &dyn_map));
+
+        assert!(!bucket.materialization_is_current(8, &dyn_map));
+        let mut grown = dyn_map.clone();
+        grown.insert('s', 2);
+        assert!(!bucket.materialization_is_current(7, &grown));
+
+        bucket.arena_generation += 1;
+        assert!(!bucket.materialization_is_current(7, &dyn_map));
+    }
 
     #[test]
     fn arena_release_plan_retains_and_deduplicates_allocation_pools() {

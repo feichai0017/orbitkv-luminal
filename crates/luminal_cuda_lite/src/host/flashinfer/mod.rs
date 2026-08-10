@@ -44,12 +44,22 @@ pub struct FlashInferAttention {
     pub head_dim: usize,
     pub page_size: usize,
     pub batch_dim: Expression,
+    /// Fixed/planned logical token capacity visible to the decomposed PT2
+    /// attention. Unlike the device-resident live length, this is structural.
+    pub context_dim: Expression,
     pub dtype: DType,
     /// Softmax scale; 0.0 = default `1/sqrt(head_dim)`.
     pub sm_scale: f64,
     /// Sliding-window size in FlashInfer's `window_left` convention
     /// (number of previous kv positions visible); -1 = no window.
     pub window_left: i64,
+    /// The sixth structural egglog input is a device-resident current-context
+    /// scalar when true. When false it is a duplicate proof anchor and is
+    /// discarded during extraction for the legacy dynamic-shape path.
+    /// The fifth runtime input is the stable device-resident context length
+    /// before this append. The metadata kernel adds `total_q_tokens`, so live
+    /// cache progress never enters the structural dynamic map.
+    pub context_from_device: bool,
 
     pub plan_info: Mutex<Vec<i64>>,
 }
@@ -59,6 +69,9 @@ pub(crate) struct FlashInferDecodeSpec {
     total_q_tokens: usize,
     batch_size: usize,
     c: usize,
+    /// Logical KV token count. `c` is the corresponding number of active
+    /// pages (or the graph-plan page capacity after normalization).
+    context_tokens: usize,
     num_qo_heads: usize,
     num_kv_heads: usize,
     page_size: usize,
@@ -91,6 +104,7 @@ pub(crate) struct FlashInferDecodePointers {
     v_cache: u64,
     gather_idx: u64,
     output: u64,
+    current_c: Option<u64>,
     pub(crate) explicit_qo_indptr: Option<u64>,
     pub(crate) explicit_kv_indptr: Option<u64>,
 }
@@ -110,13 +124,15 @@ pub(crate) struct FlashInferDecodeCaptureSignature {
 pub(crate) struct FlashInferPrepareKey {
     spec: FlashInferDecodeSpec,
     gather_idx: NodeIndex,
+    current_c: Option<NodeIndex>,
 }
 
 impl FlashInferPrepareKey {
     pub(crate) fn for_inputs(spec: FlashInferDecodeSpec, inputs: &[NodeIndex]) -> Option<Self> {
-        (inputs.len() == 4).then(|| Self {
+        (inputs.len() == 4 || inputs.len() == 5).then(|| Self {
             spec,
             gather_idx: inputs[3],
+            current_c: inputs.get(4).copied(),
         })
     }
 }
@@ -209,7 +225,7 @@ impl FlashInferResolvedDecode {
     }
 
     pub(crate) fn current_c(&self) -> usize {
-        self.spec.c
+        self.spec.context_tokens
     }
 
     pub(crate) fn graph_plan_capacity(&self, existing_capacity: Option<usize>) -> usize {
@@ -232,6 +248,7 @@ impl FlashInferResolvedDecode {
         let ptrs = self.ptrs;
         if !self.has_explicit_indptr() && spec.total_q_tokens == 1 {
             spec.c = plan_c;
+            spec.context_tokens = plan_c.saturating_mul(spec.page_size);
             spec.kv_indptr_host = vec![0, plan_c as i32];
         }
         FlashInferDecodeCaptureSignature { spec, ptrs }
@@ -332,9 +349,11 @@ impl Default for FlashInferAttention {
             head_dim: 0,
             page_size: 0,
             batch_dim: Expression::default(),
+            context_dim: Expression::default(),
             dtype: DType::F32,
             sm_scale: 0.0,
             window_left: -1,
+            context_from_device: false,
             plan_info: Mutex::new(Vec::new()),
         }
     }
@@ -351,9 +370,11 @@ impl EgglogOp for FlashInferAttention {
                 ("head_dim", EXPRESSION),
                 ("page_size", EXPRESSION),
                 ("batch_dim", EXPRESSION),
+                ("context_dim", EXPRESSION),
                 ("dtype", DTYPE),
                 ("sm_scale", F64),
                 ("window_left", F64),
+                ("context_from_device", EXPRESSION),
             ],
         )
     }
@@ -362,21 +383,21 @@ impl EgglogOp for FlashInferAttention {
         // Q, K_pool, V_pool, compact gather_idx. The egglog rules still use
         // flat gather indices and masks as structural proof anchors, but
         // extract() returns only the runtime inputs FlashInfer actually uses.
-        5
+        6
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        // FlashInfer requires Ampere+ (sm_80; the kernels use cp.async /
-        // async-copy). On older arches — e.g. a T4 (sm_75) — emit no rules so
-        // the search never selects FlashInfer and attention stays on the HLIR
-        // chain. Without this the rule fires, the search picks it, and the
-        // JIT'd kernel's symbol is absent on launch (CUDA_ERROR_NOT_FOUND).
-        // All of this egg's relations (const_like, fi_*, flashinfer_*) are
-        // self-contained, so dropping it leaves no dangling references.
-        if crate::device_compute_major() < 8 {
-            return vec![];
+        // Helper relations in this file are also consumed by staged rules, so
+        // always register the program. Only assert `flashinfer_enabled` on an
+        // Ampere+ device and when the explicit diagnostic kill-switch is not
+        // set; without that fact none of the HostOp-producing rules can fire.
+        let mut program = include_str!["flashinfer_attention.egg"].to_string();
+        if crate::device_compute_major() >= 8
+            && std::env::var_os("LUMINAL_DISABLE_FLASHINFER").is_none()
+        {
+            program.push_str("\n(flashinfer_enabled)\n");
         }
-        vec![Rule::raw(include_str!["flashinfer_attention.egg"])]
+        vec![Rule::raw(program)]
     }
 
     fn extract<'a>(
@@ -404,18 +425,24 @@ impl EgglogOp for FlashInferAttention {
             .exec(&FxHashMap::default())
             .unwrap();
         let batch_dim = extract_expr(egraph, kind_children[4], expr_cache).unwrap();
-        let dtype = extract_dtype(egraph, kind_children[5]);
-        let sm_scale: f64 = egraph.enodes[kind_children[6]]
+        let context_dim = extract_expr(egraph, kind_children[5], expr_cache).unwrap();
+        let dtype = extract_dtype(egraph, kind_children[6]);
+        let sm_scale: f64 = egraph.enodes[kind_children[7]]
             .0
             .replace('"', "")
             .parse()
             .unwrap();
-        let window_left = egraph.enodes[kind_children[7]]
+        let window_left = egraph.enodes[kind_children[8]]
             .0
             .replace('"', "")
             .parse::<f64>()
             .unwrap()
             .round() as i64;
+        let context_from_device = extract_expr(egraph, kind_children[9], expr_cache)
+            .unwrap()
+            .exec(&FxHashMap::default())
+            .unwrap()
+            != 0;
         assert!(
             FlashInferDType::from_dtype(dtype).is_some(),
             "FlashInferAttention extracted with unsupported dtype {dtype:?}"
@@ -427,9 +454,11 @@ impl EgglogOp for FlashInferAttention {
             head_dim,
             page_size,
             batch_dim,
+            context_dim,
             dtype,
             sm_scale,
             window_left,
+            context_from_device,
             plan_info: Mutex::new(Vec::new()),
         };
 
@@ -439,15 +468,27 @@ impl EgglogOp for FlashInferAttention {
         // the candidate's measured runtime and make the GA reject FlashInfer.
         let _ = jit::ensure_compiled(head_dim, window_left >= 0);
 
-        let flat_idx_node = input_enodes[3];
-        let gather_idx = find_indptrs::try_find_compact_gather_idx(egraph, flat_idx_node)
-            .expect("FlashInferAttention matched a gather without recoverable compact gather_idx");
-        let final_inputs = vec![
+        // Legacy page-size-one rules carry the flattened dense gather index,
+        // from which we recover the compact row ids. A true paged-cache rule
+        // carries its compact block table directly: trying to peel another
+        // row-index expansion from it would turn page ids back into token ids
+        // and violate FlashInfer's paged KV ABI.
+        let gather_idx = if context_from_device {
+            input_enodes[3]
+        } else {
+            find_indptrs::try_find_compact_gather_idx(egraph, input_enodes[3]).expect(
+                "FlashInferAttention matched a gather without recoverable compact gather_idx",
+            )
+        };
+        let mut final_inputs = vec![
             input_enodes[0],
             input_enodes[1],
             input_enodes[2],
             gather_idx,
         ];
+        if context_from_device {
+            final_inputs.push(input_enodes[5]);
+        }
 
         let op = LLIROp::new::<dyn HostOp>(Box::new(extracted) as Box<dyn HostOp>);
         (op, final_inputs)
@@ -460,7 +501,49 @@ impl EgglogOp for FlashInferAttention {
 
 impl FlashInferAttention {
     pub(crate) fn graph_inputs(&self) -> usize {
-        4
+        4 + usize::from(self.context_from_device)
+    }
+
+    fn effective_kv_layout(
+        &self,
+        k_bytes: usize,
+        v_bytes: usize,
+        index_bytes: usize,
+        context_tokens: usize,
+        dtype: FlashInferDType,
+    ) -> Option<(usize, usize, usize)> {
+        if self.page_size != 0 {
+            let kv_dim = self.num_kv_heads.checked_mul(self.head_dim)?;
+            return Some((self.num_kv_heads, kv_dim, self.page_size));
+        }
+        // A page-size-zero constructor is the PT2 paged-cache sentinel. The
+        // source Gather sees one flattened physical page per row, so the KV
+        // head count encoded in the legacy egg constructor is deliberately
+        // ignored. Derive the complete layout from fixed structural storage:
+        // equal K/V pools, logical token capacity, block-table capacity,
+        // element width, and attention head dimension.
+        if k_bytes != v_bytes || context_tokens == 0 {
+            return None;
+        }
+        let element_bytes = dtype.size_of();
+        if !k_bytes.is_multiple_of(element_bytes) {
+            return None;
+        }
+        let pages = index_bytes.checked_div(std::mem::size_of::<i32>())?;
+        if pages == 0 || pages * std::mem::size_of::<i32>() != index_bytes {
+            return None;
+        }
+        let elements = k_bytes / element_bytes;
+        let kv_dim = elements.checked_div(context_tokens)?;
+        let page_size = context_tokens.checked_div(pages)?;
+        let num_kv_heads = kv_dim.checked_div(self.head_dim)?;
+        (kv_dim > 0
+            && page_size > 0
+            && num_kv_heads > 0
+            && kv_dim * context_tokens == elements
+            && page_size * pages == context_tokens
+            && num_kv_heads * self.head_dim == kv_dim)
+            .then_some((num_kv_heads, kv_dim, page_size))
     }
 
     /// Resolve only dimensions and allocation sizes. No pointer is fabricated
@@ -479,13 +562,13 @@ impl FlashInferAttention {
                 .ok_or(ResourceViolation::UnresolvedExpression {
                     resource: "FlashInfer total query tokens",
                 })?;
-        let c = dyn_map
-            .get(&'c')
-            .copied()
-            .ok_or(ResourceViolation::UnresolvedExpression {
-                resource: "FlashInfer context length",
-            })?;
-        if inputs.len() != 4 && inputs.len() != 6 {
+        let context_tokens =
+            self.context_dim
+                .exec(dyn_map)
+                .ok_or(ResourceViolation::UnresolvedExpression {
+                    resource: "FlashInfer context capacity",
+                })?;
+        if inputs.len() != 4 && inputs.len() != 5 && inputs.len() != 6 {
             return Err(ResourceViolation::HostResourcePlanning {
                 name: "FlashInferAttention input arity",
             });
@@ -495,17 +578,6 @@ impl FlashInferAttention {
                 name: "FlashInferAttention dtype",
             },
         )?;
-        let kv_dim = self.num_kv_heads.checked_mul(self.head_dim).ok_or(
-            ResourceViolation::ArithmeticOverflow {
-                resource: "FlashInfer KV width",
-            },
-        )?;
-        let kv_bytes =
-            kv_dim
-                .checked_mul(dtype.size_of())
-                .ok_or(ResourceViolation::ArithmeticOverflow {
-                    resource: "FlashInfer KV row bytes",
-                })?;
         let k_bytes = buffer_lengths.get(&inputs[1]).copied().ok_or(
             ResourceViolation::HostResourcePlanning {
                 name: "FlashInfer K-cache length",
@@ -516,9 +588,30 @@ impl FlashInferAttention {
                 name: "FlashInfer V-cache length",
             },
         )?;
+        let index_bytes = if self.page_size == 0 {
+            buffer_lengths.get(&inputs[3]).copied().ok_or(
+                ResourceViolation::HostResourcePlanning {
+                    name: "FlashInfer block-table length",
+                },
+            )?
+        } else {
+            0
+        };
+        let (num_kv_heads, kv_dim, page_size) = self
+            .effective_kv_layout(k_bytes, v_bytes, index_bytes, context_tokens, dtype)
+            .ok_or(ResourceViolation::HostResourcePlanning {
+                name: "FlashInfer paged-cache layout",
+            })?;
+        let kv_page_bytes = kv_dim
+            .checked_mul(page_size)
+            .and_then(|elements| elements.checked_mul(dtype.size_of()))
+            .ok_or(ResourceViolation::ArithmeticOverflow {
+                resource: "FlashInfer KV page bytes",
+            })?;
+        let c = context_tokens.div_ceil(page_size);
         let max_kv_pages = k_bytes
-            .checked_div(kv_bytes)
-            .zip(v_bytes.checked_div(kv_bytes))
+            .checked_div(kv_page_bytes)
+            .zip(v_bytes.checked_div(kv_page_bytes))
             .map(|(k_pages, v_pages)| k_pages.min(v_pages).max(c))
             .unwrap_or(c);
         let explicit_indptr = inputs.len() == 6;
@@ -544,9 +637,10 @@ impl FlashInferAttention {
             total_q_tokens,
             batch_size,
             c,
+            context_tokens,
             num_qo_heads: self.num_qo_heads,
-            num_kv_heads: self.num_kv_heads,
-            page_size: self.page_size,
+            num_kv_heads,
+            page_size,
             head_dim: self.head_dim,
             kv_dim,
             max_kv_pages,
@@ -559,6 +653,7 @@ impl FlashInferAttention {
         if enable_cuda_graph && !explicit_indptr && total_q_tokens == 1 {
             let plan_c = flashinfer_graph_plan_capacity(c, max_kv_pages);
             spec.c = plan_c;
+            spec.context_tokens = plan_c.saturating_mul(page_size);
             spec.kv_indptr_host = vec![0, plan_c as i32];
         }
         Ok(FlashInferDeviceResourceSpec {
@@ -581,12 +676,13 @@ impl FlashInferAttention {
             .batch_dim
             .exec(dyn_map)
             .ok_or_else(|| anyhow::anyhow!("FlashInferAttention batch_dim is unresolved"))?;
-        let c = *dyn_map
-            .get(&'c')
-            .ok_or_else(|| anyhow::anyhow!("FlashInferAttention requires dynamic dim 'c'"))?;
-        if inputs.len() != 4 && inputs.len() != 6 {
+        let context_tokens = self
+            .context_dim
+            .exec(dyn_map)
+            .ok_or_else(|| anyhow::anyhow!("FlashInferAttention context_dim is unresolved"))?;
+        if inputs.len() != 4 && inputs.len() != 5 && inputs.len() != 6 {
             anyhow::bail!(
-                "FlashInferAttention expects 4 inputs (derived causal decode) or 6 inputs (explicit indptrs), got {}",
+                "FlashInferAttention expects 4 inputs (host context), 5 inputs (device context), or 6 inputs (explicit indptrs), got {}",
                 inputs.len()
             );
         }
@@ -601,6 +697,11 @@ impl FlashInferAttention {
         let k_buf = get_buf("K_cache", inputs[1])?;
         let v_buf = get_buf("V_cache", inputs[2])?;
         let gather_idx_buf = get_buf("gather_idx", inputs[3])?;
+        let current_c = if inputs.len() == 5 {
+            Some(get_buf("current_c", inputs[4])?.ptr())
+        } else {
+            None
+        };
         let out_buf = get_buf("output", self_node)?;
 
         let dtype = FlashInferDType::from_dtype(self.dtype).ok_or_else(|| {
@@ -609,12 +710,21 @@ impl FlashInferAttention {
                 self.dtype
             )
         })?;
-        let kv_dim = self.num_kv_heads * self.head_dim;
-        let kv_bytes = kv_dim * dtype.size_of();
+        let (num_kv_heads, kv_dim, page_size) = self
+            .effective_kv_layout(
+                k_buf.len(),
+                v_buf.len(),
+                gather_idx_buf.len(),
+                context_tokens,
+                dtype,
+            )
+            .ok_or_else(|| anyhow::anyhow!("invalid FlashInfer paged-cache allocation layout"))?;
+        let kv_page_bytes = kv_dim * page_size * dtype.size_of();
+        let c = context_tokens.div_ceil(page_size);
         let max_kv_pages = k_buf
             .len()
-            .checked_div(kv_bytes)
-            .zip(v_buf.len().checked_div(kv_bytes))
+            .checked_div(kv_page_bytes)
+            .zip(v_buf.len().checked_div(kv_page_bytes))
             .map(|(k_pages, v_pages)| k_pages.min(v_pages).max(c))
             .unwrap_or(c);
         let (kv_indptr_host, batch_size, explicit_qo_indptr, explicit_kv_indptr) =
@@ -656,9 +766,10 @@ impl FlashInferAttention {
                 total_q_tokens,
                 batch_size,
                 c,
+                context_tokens,
                 num_qo_heads: self.num_qo_heads,
-                num_kv_heads: self.num_kv_heads,
-                page_size: self.page_size,
+                num_kv_heads,
+                page_size,
                 head_dim: self.head_dim,
                 kv_dim,
                 max_kv_pages,
@@ -674,6 +785,7 @@ impl FlashInferAttention {
                 v_cache: v_buf.ptr(),
                 gather_idx: gather_idx_buf.ptr(),
                 output: out_buf.ptr(),
+                current_c,
                 explicit_qo_indptr,
                 explicit_kv_indptr,
             },
@@ -690,6 +802,8 @@ impl FlashInferAttention {
         let cu_stream = stream.cu_stream() as *mut std::ffi::c_void;
         let spec = &mut resolved.spec;
         let is_prefill = spec.is_prefill();
+        let graph_compatible_decode =
+            enable_cuda_graph || (resolved.ptrs.current_c.is_some() && spec.total_q_tokens == 1);
         if is_prefill && !spec.dtype.supports_prefill() {
             anyhow::bail!(
                 "FlashInfer prefill requires f16/bf16 (tensor core MMA); got {:?} with s={} batch={}",
@@ -724,16 +838,24 @@ impl FlashInferAttention {
             let dev = stream.clone_htod(&spec.kv_indptr_host)?;
             let ptr = dev.device_ptr(stream).0;
             (Some(dev), Some(ptr))
-        } else if enable_cuda_graph && spec.total_q_tokens == 1 {
-            let actual_c = spec.c;
-            let plan_c = flashinfer_graph_plan_capacity(actual_c, spec.max_kv_pages);
+        } else if graph_compatible_decode && spec.total_q_tokens == 1 {
+            let actual_pages = spec.c;
+            let actual_tokens = spec.context_tokens;
+            let plan_c = flashinfer_graph_plan_capacity(actual_pages, spec.max_kv_pages);
             spec.c = plan_c;
             spec.kv_indptr_host = vec![0, plan_c as i32];
-            let dev = stream.clone_htod(&[0i32, actual_c as i32])?;
+            let dev = stream.clone_htod(&[0i32, actual_pages as i32])?;
             let ptr = dev.device_ptr(stream).0;
-            let current = stream.clone_htod(&[actual_c as i32])?;
-            current_c_ptr = Some(current.device_ptr(stream).0);
-            current_c = Some(Mutex::new(current));
+            if let Some(device_current_c) = resolved.ptrs.current_c {
+                // The paged-cache ABI owns this scalar. Its address is stable
+                // while its contents advance on device, so graph replay needs
+                // neither an H2D length upload nor a node-parameter update.
+                current_c_ptr = Some(device_current_c);
+            } else {
+                let current = stream.clone_htod(&[actual_tokens as i32])?;
+                current_c_ptr = Some(current.device_ptr(stream).0);
+                current_c = Some(Mutex::new(current));
+            }
             (Some(dev), Some(ptr))
         } else {
             if enable_cuda_graph {
@@ -780,7 +902,12 @@ impl FlashInferAttention {
 
         let indices = unsafe { stream.alloc::<i32>(spec.c.max(1))? };
         let indices_ptr = indices.device_ptr(stream).0;
-        let last_page_len_host = vec![1i32; spec.batch_size];
+        let last_page_len = if spec.context_tokens == 0 {
+            0
+        } else {
+            ((spec.context_tokens - 1) % spec.page_size + 1) as i32
+        };
+        let last_page_len_host = vec![last_page_len; spec.batch_size];
         let last_page_len = if last_page_len_host.is_empty() {
             unsafe { stream.alloc::<i32>(1)? }
         } else {
@@ -836,7 +963,7 @@ impl FlashInferAttention {
                     spec.page_size as i32,
                     spec.head_dim as i32,
                     spec.dtype as i32,
-                    enable_cuda_graph,
+                    graph_compatible_decode,
                     cu_stream,
                     plan_info_buf.as_mut_ptr(),
                     &mut plan_info_len,
@@ -926,8 +1053,11 @@ impl PreparedFlashInferDecode {
                     ptrs.gather_idx as *const i32,
                     self.indices_ptr as *mut i32,
                     kv_indptr_ptr as *mut i32,
+                    self.last_page_len_ptr as *mut i32,
                     self.spec.c as i32,
                     self.spec.kv_dim as i32,
+                    self.spec.page_size as i32,
+                    self.spec.total_q_tokens as i32,
                     cu_stream,
                 );
             }
@@ -1115,10 +1245,16 @@ impl HostOp for FlashInferAttention {
     }
 
     fn resource_buffer_nodes(&self, inputs: &[NodeIndex]) -> Vec<NodeIndex> {
-        // device_resource_spec derives max_kv_pages from the logical lengths
-        // of K and V. Q, gather indices, and explicit indptr contents do not
-        // alter the allocation plan.
-        inputs.get(1..3).unwrap_or_default().to_vec()
+        // K/V capacity always affects the plan. For a PT2 paged-cache sentinel
+        // the compact index is the fixed block table and its capacity is also
+        // structural because it determines the inferred page size.
+        let mut nodes = inputs.get(1..3).unwrap_or_default().to_vec();
+        if self.page_size == 0
+            && let Some(block_table) = inputs.get(3)
+        {
+            nodes.push(*block_table);
+        }
+        nodes
     }
 
     fn stats_name(&self) -> Option<&'static str> {
@@ -1190,7 +1326,7 @@ mod resource_tests {
 
         assert_eq!(
             attention.resource_buffer_nodes(&inputs),
-            vec![inputs[1], inputs[2]]
+            vec![inputs[1], inputs[2], inputs[3]]
         );
         assert!(attention.resource_buffer_nodes(&inputs[..2]).is_empty());
     }
@@ -1203,9 +1339,11 @@ mod resource_tests {
             head_dim: 64,
             page_size: 1,
             batch_dim: 1.into(),
+            context_dim: Expression::from('c'),
             dtype: DType::F16,
             sm_scale: 0.0,
             window_left: -1,
+            context_from_device: false,
             plan_info: Mutex::new(Vec::new()),
         };
         let inputs = (0..4).map(NodeIndex::new).collect_vec();
@@ -1236,6 +1374,81 @@ mod resource_tests {
     }
 
     #[test]
+    fn device_context_is_part_of_the_prepare_cache_identity() {
+        let attention = FlashInferAttention {
+            num_qo_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 64,
+            page_size: 16,
+            batch_dim: 1.into(),
+            context_dim: Expression::from('c'),
+            dtype: DType::Bf16,
+            sm_scale: 0.0,
+            window_left: -1,
+            context_from_device: true,
+            plan_info: Mutex::new(Vec::new()),
+        };
+        let inputs = (0..5).map(NodeIndex::new).collect_vec();
+        let kv_row_bytes = 2 * 64 * 2;
+        let lengths = FxHashMap::from_iter([
+            (inputs[1], 4096 * kv_row_bytes),
+            (inputs[2], 4096 * kv_row_bytes),
+        ]);
+        let dyn_map = FxHashMap::from_iter([('c', 4096)]);
+
+        let first = attention
+            .device_resource_spec(&inputs, &lengths, &dyn_map, true)
+            .unwrap();
+        let mut replacement_length = inputs.clone();
+        replacement_length[4] = NodeIndex::new(99);
+        let second = attention
+            .device_resource_spec(&replacement_length, &lengths, &dyn_map, true)
+            .unwrap();
+
+        assert!(first.cache_key.is_some());
+        assert_ne!(first.cache_key, second.cache_key);
+    }
+
+    #[test]
+    fn paged_pt2_sentinel_infers_page_size_from_fixed_allocations() {
+        let attention = FlashInferAttention {
+            num_qo_heads: 4,
+            // A paged Gather is flattened by physical page, so its egg-level
+            // row width does not directly encode the KV-head count. The
+            // sentinel path must derive the actual value from fixed storage.
+            num_kv_heads: 99,
+            head_dim: 64,
+            page_size: 0,
+            batch_dim: 1.into(),
+            context_dim: Expression::from('c'),
+            dtype: DType::Bf16,
+            sm_scale: 0.0,
+            window_left: -1,
+            context_from_device: true,
+            plan_info: Mutex::new(Vec::new()),
+        };
+        let inputs = (0..5).map(NodeIndex::new).collect_vec();
+        let pages = 128usize;
+        let page_size = 16usize;
+        let kv_row_bytes = 2 * 64 * 2;
+        let lengths = FxHashMap::from_iter([
+            (inputs[1], pages * page_size * kv_row_bytes),
+            (inputs[2], pages * page_size * kv_row_bytes),
+            (inputs[3], pages * std::mem::size_of::<i32>()),
+        ]);
+        let dyn_map = FxHashMap::from_iter([('c', pages * page_size)]);
+
+        let spec = attention
+            .device_resource_spec(&inputs, &lengths, &dyn_map, true)
+            .unwrap();
+
+        assert_eq!(spec.spec.page_size, page_size);
+        assert_eq!(spec.spec.num_kv_heads, 2);
+        assert_eq!(spec.spec.kv_dim, 2 * 64);
+        assert_eq!(spec.spec.max_kv_pages, pages);
+    }
+
+    #[test]
     fn device_resource_spec_uses_context_for_uninstalled_cache_sentinels() {
         let attention = FlashInferAttention {
             num_qo_heads: 4,
@@ -1243,9 +1456,11 @@ mod resource_tests {
             head_dim: 64,
             page_size: 1,
             batch_dim: 1.into(),
+            context_dim: Expression::from('c'),
             dtype: DType::F16,
             sm_scale: 0.0,
             window_left: -1,
+            context_from_device: false,
             plan_info: Mutex::new(Vec::new()),
         };
         let inputs = (0..4).map(NodeIndex::new).collect_vec();
@@ -1277,9 +1492,11 @@ mod resource_tests {
             head_dim: 64,
             page_size: 1,
             batch_dim: 2.into(),
+            context_dim: Expression::from('c'),
             dtype: DType::F16,
             sm_scale: 0.0,
             window_left: -1,
+            context_from_device: false,
             plan_info: Mutex::new(Vec::new()),
         };
         let inputs = (0..6).map(NodeIndex::new).collect_vec();

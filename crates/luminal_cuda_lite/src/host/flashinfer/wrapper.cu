@@ -137,15 +137,24 @@ __global__ void prepare_decode_metadata_kernel(
     const int32_t* slot_idx,
     int32_t* kv_indices,
     int32_t* kv_indptr,
+    int32_t* kv_last_page_len,
     int32_t* o_indptr,
     bool* block_valid_mask,
     const int32_t* kv_tile_indices,
     const int32_t* kv_chunk_size_ptr,
     int capacity_c,
     int kv_dim,
+    int page_size,
+    int appended_tokens,
     int padded_batch_size) {
     (void)kv_dim;
-    int current_c = current_c_ptr ? *current_c_ptr : capacity_c;
+    // The persistent cache length is read before this attention/cache-update
+    // invocation. Under the append-only contract the active context consumed
+    // by attention includes this invocation's query/KV rows.
+    int current_tokens = current_c_ptr
+        ? *current_c_ptr + appended_tokens
+        : capacity_c * page_size;
+    int current_c = current_tokens > 0 ? (current_tokens + page_size - 1) / page_size : 0;
     int chunk_size = kv_chunk_size_ptr ? *kv_chunk_size_ptr : capacity_c;
     chunk_size = max(chunk_size, 1);
     int planned_chunks = (capacity_c + chunk_size - 1) / chunk_size;
@@ -155,6 +164,11 @@ __global__ void prepare_decode_metadata_kernel(
     if (blockIdx.x == 0 && threadIdx.x == 0 && kv_indptr) {
         kv_indptr[0] = 0;
         kv_indptr[1] = current_c;
+    }
+    if (blockIdx.x == 0 && threadIdx.x == 0 && kv_last_page_len) {
+        kv_last_page_len[0] = current_tokens > 0
+            ? ((current_tokens - 1) % page_size) + 1
+            : 0;
     }
     if (blockIdx.x == 0 && threadIdx.x == 0 && o_indptr) {
         o_indptr[0] = 0;
@@ -517,8 +531,11 @@ void flashinfer_prepare_decode_metadata(
     const int32_t* slot_idx,
     int32_t* kv_indices,
     int32_t* kv_indptr,
+    int32_t* kv_last_page_len,
     int capacity_c,
     int kv_dim,
+    int page_size,
+    int appended_tokens,
     cudaStream_t stream)
 {
     DecodePlanInfo plan_info;
@@ -542,8 +559,9 @@ void flashinfer_prepare_decode_metadata(
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
     prepare_decode_metadata_kernel<<<blocks, threads, 0, stream>>>(
-        current_c, slot_idx, kv_indices, kv_indptr, o_indptr, block_valid_mask,
-        kv_tile_indices, kv_chunk_size_ptr, capacity_c, kv_dim, padded_batch_size);
+        current_c, slot_idx, kv_indices, kv_indptr, kv_last_page_len, o_indptr,
+        block_valid_mask, kv_tile_indices, kv_chunk_size_ptr, capacity_c, kv_dim,
+        page_size, appended_tokens, padded_batch_size);
 }
 
 // ═══════════════════════════════════════════════════════════

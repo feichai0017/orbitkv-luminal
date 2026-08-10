@@ -113,8 +113,11 @@ pub type PrepareDecodeMetadataFn = unsafe extern "C" fn(
     slot_idx: *const i32,
     kv_indices: *mut i32,
     kv_indptr: *mut i32,
+    kv_last_page_len: *mut i32,
     capacity_c: i32,
     kv_dim: i32,
+    page_size: i32,
+    appended_tokens: i32,
     stream: *mut c_void,
 );
 

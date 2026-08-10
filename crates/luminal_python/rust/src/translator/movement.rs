@@ -7,6 +7,7 @@ use crate::pt2_schema::*;
 use crate::pt2_util::*;
 
 use super::Translator;
+use crate::dim_arith::product_of_dims;
 
 const SCATTER_INPUT_ARG: usize = 0;
 const SCATTER_DIM_ARG: usize = 1;
@@ -33,6 +34,18 @@ fn normalize_concat_dims(
 }
 
 impl<'a> Translator<'a> {
+    /// Return an index operand in Luminal's native Int representation.
+    fn get_native_int_index(&self, node: &Node, input_index: usize) -> Result<GraphTensor> {
+        let name = node
+            .inputs
+            .get(input_index)
+            .context("index operation is missing its index operand")?
+            .arg
+            .as_tensor_name()
+            .context("index operand is not a tensor")?;
+        Ok(self.get_tensor(name)?.cast(DType::Int))
+    }
+
     pub(crate) fn translate_reshape(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
 
@@ -584,6 +597,51 @@ impl<'a> Translator<'a> {
         } else {
             result
         })
+    }
+
+    /// Translate row selection without inventing a paged-cache-specific IR op.
+    /// Expanding the compact row ids and using Luminal's gather-elements path
+    /// produces the canonical `ids * row_width + arange(row_width)` form that
+    /// backend egglog rules can recognize and recover.
+    pub(crate) fn translate_index_select(&mut self, node: &Node) -> Result<GraphTensor> {
+        let mut source = self.get_input_tensor(node, 0)?;
+        let dim = normalize_dim(self.get_int_arg(node, 1)?, source.shape.len());
+        let indices = self.get_native_int_index(node, 2)?;
+        if dim != 0 {
+            bail!("index_select: only dim=0 is currently supported, got dim={dim}");
+        }
+        if indices.shape.len() != 1 {
+            bail!(
+                "index_select: expected one-dimensional indices, got rank {}",
+                indices.shape.len()
+            );
+        }
+
+        let source_dims = source.shape.dims.to_vec();
+        if source_dims.len() > 2 {
+            // Canonicalize row selection to a two-dimensional Gather. Besides
+            // reducing index arithmetic, this keeps the page-table boundary
+            // recognizable after later view-only reshapes flatten
+            // [page_size, kv_heads, head_dim] into token rows.
+            if !source.shape.is_contiguous() {
+                source += 0.0;
+            }
+            let row_width = product_of_dims(source_dims[1..].iter().copied());
+            source.shape = ShapeTracker::new(vec![source_dims[0], row_width]);
+            let expanded = indices.expand_dim(1, row_width);
+            let mut selected = super::movement_dynamic::pt2_gather_elements(source, expanded, 0);
+            let mut output_dims = vec![indices.shape.dims[0]];
+            output_dims.extend_from_slice(&source_dims[1..]);
+            selected.shape = ShapeTracker::new(output_dims);
+            return Ok(selected);
+        }
+        let mut expanded = indices;
+        for &size in source.shape.dims.iter().skip(1) {
+            expanded = expanded.expand_dim(expanded.shape.len(), size);
+        }
+        Ok(super::movement_dynamic::pt2_gather_elements(
+            source, expanded, dim,
+        ))
     }
 
     pub(crate) fn translate_scatter_src(&mut self, node: &Node) -> Result<GraphTensor> {

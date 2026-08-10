@@ -9,6 +9,13 @@ from .compiled_model import CompiledModel
 from .luminal import CompiledGraph, process_pt2
 from .main import luminal_backend, register_backend
 
+try:
+    from .transformers_cache import LuminalPagedCache
+except ImportError:
+    # transformers is a development/integration dependency, not required to
+    # import the core Luminal Python package.
+    LuminalPagedCache = None
+
 _register_cache_serialization()
 
 # Re-export everything for clean package interface
@@ -18,4 +25,5 @@ __all__ = [
     "register_backend",
     "CompiledGraph",
     "process_pt2",
+    "LuminalPagedCache",
 ]

@@ -84,6 +84,18 @@ pub trait DynBackend {
     unsafe fn set_output_device_ptr(&mut self, _node: NodeIndex, _ptr: u64, _n_bytes: usize) {
         panic!("set_output_device_ptr not supported by '{}'", self.name());
     }
+    /// Register a one-shot output epilogue copy. Unlike
+    /// `set_output_device_ptr`, this destination is not embedded in CUDA graph
+    /// nodes and therefore does not invalidate materialization.
+    ///
+    /// # Safety
+    /// The destination must remain valid through the next execute call.
+    unsafe fn set_output_copy_device_ptr(&mut self, _node: NodeIndex, _ptr: u64, _n_bytes: usize) {
+        panic!(
+            "set_output_copy_device_ptr not supported by '{}'",
+            self.name()
+        );
+    }
     fn output_is_zero_copy(&self, _node: NodeIndex) -> bool {
         false
     }
@@ -94,6 +106,18 @@ pub trait DynBackend {
             "copy_output_to_device_ptr not supported by '{}'",
             self.name()
         );
+    }
+    /// Copy several outputs to external device allocations as one ordered
+    /// batch. GPU backends should override this so all transfers are enqueued
+    /// on one stream and paid for with a single synchronization.
+    ///
+    /// # Safety
+    /// Every destination pointer must remain valid for the requested byte
+    /// range until the batch completes.
+    unsafe fn copy_outputs_to_device_ptrs(&self, copies: &[(NodeIndex, u64, usize)]) {
+        for &(node, ptr, n_bytes) in copies {
+            unsafe { self.copy_output_to_device_ptr(node, ptr, n_bytes) };
+        }
     }
 }
 

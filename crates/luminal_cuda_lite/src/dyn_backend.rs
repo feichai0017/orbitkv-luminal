@@ -66,11 +66,17 @@ impl DynBackend for CudaLiteDynBackend {
     unsafe fn set_output_device_ptr(&mut self, node: NodeIndex, ptr: u64, n: usize) {
         unsafe { self.runtime.set_output_device_ptr(node, ptr, n) }
     }
+    unsafe fn set_output_copy_device_ptr(&mut self, node: NodeIndex, ptr: u64, n: usize) {
+        unsafe { self.runtime.set_output_copy_device_ptr(node, ptr, n) }
+    }
     fn output_is_zero_copy(&self, node: NodeIndex) -> bool {
         self.runtime.output_is_zero_copy(node)
     }
     unsafe fn copy_output_to_device_ptr(&self, node: NodeIndex, ptr: u64, n: usize) {
         unsafe { self.runtime.copy_output_to_device_ptr(node, ptr, n) }
+    }
+    unsafe fn copy_outputs_to_device_ptrs(&self, copies: &[(NodeIndex, u64, usize)]) {
+        unsafe { self.runtime.copy_outputs_to_device_ptrs(copies) }
     }
 }
 
