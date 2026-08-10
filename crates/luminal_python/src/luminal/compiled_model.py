@@ -1,7 +1,7 @@
 """CompiledModel wrapper for the Rust CompiledGraph."""
 
 import os
-
+import time
 from typing import List
 
 import torch
@@ -57,6 +57,7 @@ class CompiledModel:
         self._supports_device_ptrs = getattr(
             graph_result, "supports_device_ptrs", False
         )
+        self._profile_call_index = 0
         # Expected input dtypes from graph. Every declared input MUST
         # have a dtype code — refuse to silently default to float32 if
         # the Rust side returned a shorter list than `input_names`.
@@ -102,6 +103,9 @@ class CompiledModel:
         Returns:
             Tuple of PyTorch tensors containing the model outputs
         """
+        profile_boundary = os.getenv("LUMINAL_PROFILE_COMPILED_MODEL") == "1"
+        profile_t0 = time.perf_counter_ns() if profile_boundary else 0
+
         # Drop stripped SymInt args, if any.
         if self._user_indices is not None:
             user_inputs = [inputs[i] for i in self._user_indices]
@@ -125,6 +129,7 @@ class CompiledModel:
         if self._has_dynamic_dims:
             input_shapes = [list(t.shape) for t in user_inputs]
             self._graph.auto_set_dims_from_input_shapes(input_shapes)
+        profile_setup_end = time.perf_counter_ns() if profile_boundary else 0
 
         # Set user input data via pointer.
         # Convert to the graph's expected dtype so bytes match the Input node's dtype tag.
@@ -157,6 +162,7 @@ class CompiledModel:
                 n_bytes = t.numel() * t.element_size()
                 dtype_code = _torch_dtype_code(t.dtype)
                 self._graph.set_input_from_ptr(name, t.data_ptr(), n_bytes, dtype_code)
+        profile_input_bind_end = time.perf_counter_ns() if profile_boundary else 0
 
         # Raw CUDA pointers do not communicate PyTorch's producer-stream
         # dependency to Luminal. Record/wait at the backend boundary after all
@@ -165,6 +171,7 @@ class CompiledModel:
         if self._supports_device_ptrs and _input_refs:
             producer_stream = torch.cuda.current_stream(input_device)
             self._graph.wait_for_external_cuda_stream(producer_stream.cuda_stream)
+        profile_stream_handoff_end = time.perf_counter_ns() if profile_boundary else 0
 
         # Resolve output shapes before run() (needed for pre-allocation).
         if self._has_dynamic_dims:
@@ -184,6 +191,7 @@ class CompiledModel:
                 f"matching dtype."
             )
         output_torch_dtypes = [code_to_torch_dtype(c) for c in output_dtype_codes]
+        profile_output_metadata_end = time.perf_counter_ns() if profile_boundary else 0
 
         # Per-dtype dispatch table mapping `torch_dtype` → the typed
         # `_graph` getter for that dtype. Every supported dtype has an
@@ -276,6 +284,8 @@ class CompiledModel:
         direct_writeback_positions = {}
         direct_writeback_by_name = {}
         direct_state_output_positions = set()
+        output_pointer_registrations = 0
+        output_allocations = 0
         if _use_zero_copy:
             for position, input_name in self._writeback_by_pos.items():
                 name = self._output_names[position]
@@ -305,6 +315,7 @@ class CompiledModel:
                             bound_target.data_ptr(),
                             bound_target.numel() * bound_target.element_size(),
                         )
+                        output_pointer_registrations += 1
                         direct_writeback_positions[i] = (target, bound_target)
                     output_tensors.append(None)
                     continue
@@ -319,17 +330,22 @@ class CompiledModel:
                         bound_target.data_ptr(),
                         bound_target.numel() * bound_target.element_size(),
                     )
+                    output_pointer_registrations += 1
                     output_tensors.append(target)
                     direct_state_output_positions.add(i)
                     continue
                 out = torch.empty(shape, dtype=out_dtype, device=input_device)
+                output_allocations += 1
                 if out_dtype in _zero_copy_cuda_dtypes:
                     self._graph.set_output_device_ptr(
                         name, out.data_ptr(), out.numel() * out.element_size()
                     )
+                    output_pointer_registrations += 1
                 output_tensors.append(out)
 
+        profile_output_plan_end = time.perf_counter_ns() if profile_boundary else 0
         self._graph.run()
+        profile_graph_run_end = time.perf_counter_ns() if profile_boundary else 0
 
         outputs = []
         for i, (name, shape) in enumerate(zip(self._output_names, output_shapes)):
@@ -372,5 +388,33 @@ class CompiledModel:
                     f" values={out.detach().cpu().tolist()}",
                     flush=True,
                 )
+
+        if profile_boundary:
+            profile_end = time.perf_counter_ns()
+
+            def to_ms(duration_ns):
+                return duration_ns / 1_000_000.0
+
+            call_index = self._profile_call_index
+            self._profile_call_index += 1
+            print(
+                "LUMINAL_COMPILED_MODEL_PROFILE"
+                f" call={call_index}"
+                f" inputs={len(user_inputs)}"
+                f" cuda_inputs={len(_input_refs)}"
+                f" outputs={len(self._output_names)}"
+                f" output_allocations={output_allocations}"
+                f" output_registrations={output_pointer_registrations}"
+                f" writebacks={len(self._writeback_by_pos)}"
+                f" total_ms={to_ms(profile_end - profile_t0):.3f}"
+                f" setup_ms={to_ms(profile_setup_end - profile_t0):.3f}"
+                f" input_bind_ms={to_ms(profile_input_bind_end - profile_setup_end):.3f}"
+                f" stream_handoff_ms={to_ms(profile_stream_handoff_end - profile_input_bind_end):.3f}"
+                f" output_metadata_ms={to_ms(profile_output_metadata_end - profile_stream_handoff_end):.3f}"
+                f" output_plan_ms={to_ms(profile_output_plan_end - profile_output_metadata_end):.3f}"
+                f" graph_run_ms={to_ms(profile_graph_run_end - profile_output_plan_end):.3f}"
+                f" output_finalize_ms={to_ms(profile_end - profile_graph_run_end):.3f}",
+                flush=True,
+            )
 
         return tuple(outputs)
