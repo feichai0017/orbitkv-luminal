@@ -151,6 +151,7 @@ impl TinyDecoder {
 /// residuals around both sublayers.
 /// Gated-FFN activation family: llama/qwen use SwiGLU (silu gate),
 /// gemma uses GeGLU (tanh-approximated gelu gate).
+#[derive(Clone, Copy)]
 pub enum GatedFfn {
     SwiGlu,
     GeGlu,
@@ -163,6 +164,9 @@ pub struct LlamaBlock {
     pub wk: Linear,                  // d → n_kv_heads·head_dim
     pub wv: Linear,
     pub wo: Linear,
+    /// Qwen3-style per-head QK RMSNorm weights (q, k), each (head_dim,),
+    /// applied after projection and before the cache/attention path.
+    pub qk_norm: Option<(GraphTensor, GraphTensor)>,
     pub ffn_norm: crate::LayerNorm,
     pub gate: Linear, // d → ff
     pub up: Linear,   // d → ff
@@ -194,6 +198,7 @@ impl LlamaBlock {
             wk: Linear::new(d, kv_dim, false, cx),
             wv: Linear::new(d, kv_dim, false, cx),
             wo: Linear::new(d, d, false, cx),
+            qk_norm: None,
             ffn_norm: crate::LayerNorm::new(d, None, None, false, 1e-5, cx),
             gate: Linear::new(d, ff, false, cx),
             up: Linear::new(d, ff, false, cx),
@@ -202,6 +207,16 @@ impl LlamaBlock {
             n_kv_heads,
             head_dim,
         }
+    }
+
+    /// Mint the QK-norm weights (Qwen3 anatomy) — builder form so the
+    /// existing constructors stay unchanged.
+    pub fn with_qk_norm(mut self, cx: &mut Graph) -> Self {
+        self.qk_norm = Some((
+            cx.named_tensor("QNorm", self.head_dim),
+            cx.named_tensor("KNorm", self.head_dim),
+        ));
+        self
     }
 
     /// x (s, d) + cache slots (slots, kv_dim) → (x', k_cache', v_cache').
@@ -216,9 +231,15 @@ impl LlamaBlock {
         prev_seq: Expression,
     ) -> (GraphTensor, GraphTensor, GraphTensor) {
         let normed = self.attn_norm.forward(x);
+        let mut q = self.wq.forward(normed);
+        let mut k = self.wk.forward(normed);
+        if let Some((q_weight, k_weight)) = self.qk_norm {
+            q = crate::rms_norm_heads(q, self.head_dim, q_weight, 1e-6);
+            k = crate::rms_norm_heads(k, self.head_dim, k_weight, 1e-6);
+        }
         let (attn, k_cache, v_cache) = paged_attention(
-            self.wq.forward(normed),
-            self.wk.forward(normed),
+            q,
+            k,
             self.wv.forward(normed),
             k_cache,
             v_cache,
@@ -237,6 +258,142 @@ impl LlamaBlock {
         };
         let ff = self.down.forward(gated * self.up.forward(ff_in));
         (x + ff, k_cache, v_cache)
+    }
+}
+
+/// GemmaBlock — the FULL gemma-3 layer anatomy (ruling 2026-08-10: minis
+/// exercise every architectural construct of the big model, shrinking
+/// only shapes):
+///  * SANDWICH NORMS: four learned RMSNorms — pre-attention, post-
+///    attention applied to the sublayer output INSIDE the residual add,
+///    pre-feedforward, post-feedforward likewise inside the residual;
+///  * head_dim DECOUPLED from d / n_heads (q_dim = n_heads·head_dim may
+///    differ from d — gemma-3-4B: 2048 vs 2560);
+///  * per-head QK RMSNorm (learned (head_dim,) weights, before RoPE);
+///  * attention scale FOLDED INTO Q (the QK matmul itself is scale-free);
+///  * split-half RoPE computed in-graph from the position input, with
+///    the LAYER-ROLE theta: local layers θ=10k / no position scaling,
+///    global layers θ=1M with linear position scaling (pos · scale);
+///  * SLIDING-WINDOW attention on local layers (5-of-6 pattern in the
+///    real model; the alternation is the construct, the ratio a shape);
+///  * GeGLU feed-forward (tanh-approximated gelu gate).
+pub struct GemmaBlock {
+    pub input_norm: crate::LayerNorm,
+    pub post_attn_norm: crate::LayerNorm,
+    pub pre_ff_norm: crate::LayerNorm,
+    pub post_ff_norm: crate::LayerNorm,
+    pub wq: Linear, // d → n_heads·head_dim (decoupled)
+    pub wk: Linear, // d → n_kv_heads·head_dim
+    pub wv: Linear,
+    pub wo: Linear, // n_heads·head_dim → d
+    pub q_norm: GraphTensor,
+    pub k_norm: GraphTensor,
+    pub gate: Linear,
+    pub up: Linear,
+    pub down: Linear,
+    /// Local layers use the sliding window + local theta; globals use
+    /// full context + global theta + position scaling.
+    pub local: bool,
+    pub window: usize,
+    pub rope_theta: f32,
+    pub pos_scale: f32,
+    pub n_heads: usize,
+    pub n_kv_heads: usize,
+    pub head_dim: usize,
+}
+
+impl GemmaBlock {
+    /// `local` layers follow gemma's alternation rule (the caller picks
+    /// the pattern); theta and position scaling derive from the role.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        d: usize,
+        ff: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        local: bool,
+        window: usize,
+        cx: &mut Graph,
+    ) -> Self {
+        let q_dim = n_heads * head_dim;
+        let kv_dim = n_kv_heads * head_dim;
+        let rms = |cx: &mut Graph| crate::LayerNorm::new(d, Some("NormWeight"), None, false, 1e-6, cx);
+        Self {
+            input_norm: rms(cx),
+            post_attn_norm: rms(cx),
+            pre_ff_norm: rms(cx),
+            post_ff_norm: rms(cx),
+            wq: Linear::new(d, q_dim, false, cx),
+            wk: Linear::new(d, kv_dim, false, cx),
+            wv: Linear::new(d, kv_dim, false, cx),
+            wo: Linear::new(q_dim, d, false, cx),
+            q_norm: cx.named_tensor("QNorm", head_dim),
+            k_norm: cx.named_tensor("KNorm", head_dim),
+            gate: Linear::new(d, ff, false, cx),
+            up: Linear::new(d, ff, false, cx),
+            down: Linear::new(ff, d, false, cx),
+            local,
+            window,
+            rope_theta: if local { 10_000.0 } else { 1_000_000.0 },
+            pos_scale: if local { 1.0 } else { 1.0 / 8.0 },
+            n_heads,
+            n_kv_heads,
+            head_dim,
+        }
+    }
+
+    /// x (s, d) + cache slots (slots, kv_dim) + pos (s,) float positions
+    /// → (x', k_cache', v_cache').
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward(
+        &self,
+        x: GraphTensor,
+        k_cache: GraphTensor,
+        v_cache: GraphTensor,
+        gather_idx: GraphTensor,
+        scatter_idx: GraphTensor,
+        prev_seq: Expression,
+        pos: GraphTensor,
+    ) -> (GraphTensor, GraphTensor, GraphTensor) {
+        let normed = self.input_norm.forward(x);
+        let scale = 1.0 / (self.head_dim as f32).sqrt();
+        let scaled_pos = pos * self.pos_scale;
+        // QK-norm before RoPE; attention scale folded into q.
+        let q = crate::rotary_split_half(
+            crate::rms_norm_heads(self.wq.forward(normed), self.head_dim, self.q_norm, 1e-6)
+                * scale,
+            self.head_dim,
+            scaled_pos,
+            self.rope_theta,
+        );
+        let k = crate::rotary_split_half(
+            crate::rms_norm_heads(self.wk.forward(normed), self.head_dim, self.k_norm, 1e-6),
+            self.head_dim,
+            scaled_pos,
+            self.rope_theta,
+        );
+        let (attn, k_cache, v_cache) = crate::paged_attention_windowed(
+            q,
+            k,
+            self.wv.forward(normed),
+            k_cache,
+            v_cache,
+            gather_idx,
+            scatter_idx,
+            prev_seq,
+            self.n_heads,
+            self.n_kv_heads,
+            self.head_dim,
+            self.local.then_some(self.window),
+            1.0, // scale lives in Q (folded above) — the matmul is scale-free
+        );
+        // Sandwich residuals: post-norms wrap the sublayer OUTPUT.
+        let x = x + self.post_attn_norm.forward(self.wo.forward(attn));
+        let ff_in = self.pre_ff_norm.forward(x);
+        let gated = self.gate.forward(ff_in).gelu_fast_tanh_approximation();
+        let ff = self.down.forward(gated * self.up.forward(ff_in));
+        (x + self.post_ff_norm.forward(ff), k_cache, v_cache)
     }
 }
 
@@ -386,7 +543,19 @@ mod tests {
         let mut ref_kc = get(78, SLOTS5 * KV_DIM);
         let mut ref_vc = get(79, SLOTS5 * KV_DIM);
         let attn = ref_paged_step_gqa(
-            &q, &k_new, &v_new, &mut ref_kc, &mut ref_vc, &[0, 1], 1, N_H, N_KV, HD,
+            &q,
+            &k_new,
+            &v_new,
+            &mut ref_kc,
+            &mut ref_vc,
+            &[0, 1],
+            1,
+            N_H,
+            N_KV,
+            HD,
+            1,
+            None,
+            1.0 / (HD as f32).sqrt(),
         );
         let attn_proj = ref_matmul(&attn, &get(74, D5 * D5), D5, D5);
         let x1: Vec<f32> = x_vals.iter().zip(&attn_proj).map(|(a, b)| a + b).collect();

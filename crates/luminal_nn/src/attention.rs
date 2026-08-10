@@ -82,9 +82,49 @@ pub fn paged_attention(
     n_kv_heads: usize,
     head_dim: usize,
 ) -> (GraphTensor, GraphTensor, GraphTensor) {
+    paged_attention_windowed(
+        q,
+        k_new,
+        v_new,
+        k_cache,
+        v_cache,
+        gather_idx,
+        scatter_idx,
+        prev_seq,
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        None,
+        1.0 / (head_dim as f32).sqrt(),
+    )
+}
+
+/// [`paged_attention`] with an optional SLIDING WINDOW (gemma's local
+/// layers): position j is additionally masked when j < i − (window − 1),
+/// i.e. a query attends at most `window` trailing positions (itself
+/// included), in the same position vocabulary the causal mask uses.
+/// `score_scale` makes the scale's HOME explicit: 1/√head_dim here for
+/// the scale-on-scores spelling, or 1.0 when the caller folds the scale
+/// into Q (gemma).
+#[allow(clippy::too_many_arguments)]
+pub fn paged_attention_windowed(
+    q: GraphTensor,
+    k_new: GraphTensor,
+    v_new: GraphTensor,
+    k_cache: GraphTensor,
+    v_cache: GraphTensor,
+    gather_idx: GraphTensor,
+    scatter_idx: GraphTensor,
+    prev_seq: Expression,
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    window: Option<usize>,
+    score_scale: f32,
+) -> (GraphTensor, GraphTensor, GraphTensor) {
     let kv_dim = n_kv_heads * head_dim;
     let kv_groups = n_heads / n_kv_heads;
-    let scale = 1.0 / (head_dim as f32).sqrt();
+    let scale = score_scale;
     let s = q.dims()[0];
     let ctx = gather_idx.dims()[0];
     let cx = q.graph();
@@ -127,13 +167,17 @@ pub fn paged_attention(
     // Build causal mask: query at position prev_seq+i can attend to context j iff j <= prev_seq+i.
     // row_vals[i] = prev_seq + i, col_vals[j] = j
     // mask[i,j] = -1e9 where row_vals[i] < col_vals[j], else 0
-    let row_vals = cx.iota(s, |c| c[0] + prev_seq).expand_dim(1, ctx); // (s, ctx)
-    let col_vals = cx.arange(ctx).expand_dim(0, s); // (s, ctx)
-    let mask = row_vals
-        .cast(DType::F32)
-        .lt(col_vals.cast(DType::F32))
-        .cast(DType::F32)
-        * -1e9;
+    let row_vals = cx
+        .iota(s, |c| c[0] + prev_seq)
+        .expand_dim(1, ctx)
+        .cast(DType::F32); // (s, ctx)
+    let col_vals = cx.arange(ctx).expand_dim(0, s).cast(DType::F32); // (s, ctx)
+    let mut mask = row_vals.lt(col_vals).cast(DType::F32) * -1e9;
+    if let Some(window) = window {
+        // masked where col < row − (window − 1)
+        let outside = col_vals.lt(row_vals - (window as f32 - 1.0)).cast(DType::F32) * -1e9;
+        mask = mask + outside;
+    }
 
     // Broadcast (s, ctx) → (n_kv_heads, kv_groups, s, ctx)
     let mask = mask.expand_dim(0, n_kv_heads).expand_dim(1, kv_groups);
@@ -154,6 +198,65 @@ pub fn paged_attention(
     let out = out.permute((2, 0, 1, 3)).merge_dims(1, 2).merge_dims(1, 2);
 
     (out, k_cache, v_cache)
+}
+
+/// SPLIT-HALF rotary embedding (the llama/qwen/gemma rotation form) at
+/// decode positions: x (s, n·head_dim), pos (s,) float positions —
+/// already multiplied by the family's rope position scaling. Per head,
+/// halves pair (i, i + head_dim/2) and rotate by arg_j = pos ·
+/// theta^(−2j/head_dim): (x1, x2) → (x1·cos − x2·sin, x2·cos + x1·sin).
+/// Angles are computed IN-GRAPH from the position input (per-frequency
+/// scalar multiplies + sin/cos), matching the big examples.
+pub fn rotary_split_half(
+    x: GraphTensor,
+    head_dim: usize,
+    pos: GraphTensor,
+    theta: f32,
+) -> GraphTensor {
+    let half = head_dim / 2;
+    let mut cos_parts = Vec::with_capacity(half);
+    let mut sin_parts = Vec::with_capacity(half);
+    for j in 0..half {
+        let freq = theta.powf(-2.0 * j as f32 / head_dim as f32);
+        let arg = pos * freq; // (s,)
+        cos_parts.push(arg.cos().unsqueeze(1)); // (s, 1)
+        sin_parts.push(arg.sin().unsqueeze(1));
+    }
+    let fold = |parts: Vec<GraphTensor>| {
+        let mut joined = parts[0];
+        for part in &parts[1..] {
+            joined = joined.concat_along(*part, 1);
+        }
+        joined // (s, half)
+    };
+    let (cos, sin) = (fold(cos_parts), fold(sin_parts));
+    let heads = x.split_dims(1, head_dim); // (s, n, head_dim)
+    let x1 = heads.slice_along(0..half, 2); // (s, n, half)
+    let x2 = heads.slice_along(half..head_dim, 2);
+    let dims = x1.dims();
+    let cos = cos.unsqueeze(1).expand(dims.clone());
+    let sin = sin.unsqueeze(1).expand(dims);
+    let r1 = x1 * cos - x2 * sin;
+    let r2 = x2 * cos + x1 * sin;
+    r1.concat_along(r2, 2).merge_dims(1, 2)
+}
+
+/// Per-head RMS norm over a flat (s, n_heads·head_dim) projection with a
+/// learned (head_dim,) weight — the QK-norm primitive Qwen3 and the DiT
+/// family apply to q and k before position encoding. No shift, F32.
+pub fn rms_norm_heads(
+    x: GraphTensor,
+    head_dim: usize,
+    weight: GraphTensor,
+    epsilon: f32,
+) -> GraphTensor {
+    let heads = x.split_dims(1, head_dim); // (s, n_heads, head_dim)
+    let dims = heads.dims();
+    let inv = ((heads * heads).mean(2) + epsilon).sqrt().reciprocal(); // (s, n_heads)
+    let scaled = heads
+        * inv.unsqueeze(2).expand(dims.clone())
+        * weight.unsqueeze(0).unsqueeze(0).expand(dims);
+    scaled.merge_dims(1, 2)
 }
 
 #[cfg(test)]

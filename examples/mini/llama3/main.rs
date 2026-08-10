@@ -1,13 +1,13 @@
-//! MiniLlama demo on the REFERENCE RUNTIME (the model is defined in
+//! MiniLlama3 demo on the REFERENCE RUNTIME (the model is defined in
 //! luminal core — crates/luminal_nn — this runner belongs to the
 //! runtime): one decode step through the native ladder.
-//! Run: cargo run --release --example mini_llama
+//! Run: cargo run --release --example mini_llama3
 
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
 use luminal::shape::Expression;
 use luminal::ssa_reference::SsaReferenceRuntime;
-use luminal_nn::{GatedFfn, MiniLlama};
+use luminal_nn::MiniLlama3;
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {
     (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
@@ -17,7 +17,7 @@ fn main() {
     const VOCAB: usize = 5;
     const D: usize = 8;
     let mut cx = Graph::new();
-    let model = MiniLlama::new(VOCAB, D, 12, 4, 2, 1, GatedFfn::SwiGlu, &mut cx);
+    let model = MiniLlama3::new(VOCAB, D, 12, 4, 2, 1, &mut cx);
     let ids = cx.tensor_dtyped(1, DType::Int);
     let k_cache = cx.tensor((4, 4));
     let v_cache = cx.tensor((4, 4));

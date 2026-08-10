@@ -62,17 +62,33 @@ candle-kernels = { git = "https://github.com/huggingface/candle.git", rev = "a0d
 # (crates/luminal_nn); these runners belong to the reference runtime and
 # live in examples/mini/ beside the full-size example models.
 [[example]]
-name = "mini_llama"
-path = "examples/mini/llama.rs"
+name = "mini_llama3"
+path = "examples/mini/llama3/main.rs"
 
 [[example]]
-name = "mini_moe"
-path = "examples/mini/moe.rs"
+name = "mini_qwen3"
+path = "examples/mini/qwen3/main.rs"
+
+[[example]]
+name = "mini_gemma3"
+path = "examples/mini/gemma3/main.rs"
+
+[[example]]
+name = "mini_qwen3_moe"
+path = "examples/mini/qwen3_moe/main.rs"
+
+[[example]]
+name = "mini_gemma4_moe"
+path = "examples/mini/gemma4_moe/main.rs"
+
+[[example]]
+name = "mini_flux"
+path = "examples/mini/flux/main.rs"
 
 [[example]]
 name = "mini_whisper"
-path = "examples/mini/whisper.rs"
+path = "examples/mini/whisper/main.rs"
 
 [[example]]
 name = "mini_conv"
-path = "examples/mini/conv.rs"
+path = "examples/mini/conv/main.rs"

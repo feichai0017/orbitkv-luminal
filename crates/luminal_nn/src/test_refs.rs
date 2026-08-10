@@ -128,6 +128,7 @@ pub(crate) fn ref_block_step(
 /// GQA paged-attention reference, one new token: query head h reads
 /// KV head h / (n_heads / n_kv_heads).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ref_paged_step_gqa(
     q: &[f32],
     k_new: &[f32],
@@ -139,19 +140,31 @@ pub(crate) fn ref_paged_step_gqa(
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
+    q_pos: usize,
+    window: Option<usize>,
+    score_scale: f32,
 ) -> Vec<f32> {
     let kv_dim = n_kv_heads * head_dim;
     let kv_groups = n_heads / n_kv_heads;
     k_cache[scatter_slot * kv_dim..(scatter_slot + 1) * kv_dim].copy_from_slice(k_new);
     v_cache[scatter_slot * kv_dim..(scatter_slot + 1) * kv_dim].copy_from_slice(v_new);
-    let scale = 1.0 / (head_dim as f32).sqrt();
+    let scale = score_scale;
     let mut out = vec![0f32; n_heads * head_dim];
     for h in 0..n_heads {
         let kv_head = h / kv_groups;
         let q_h = &q[h * head_dim..(h + 1) * head_dim];
         let scores: Vec<f32> = gather
             .iter()
-            .map(|slot| {
+            .enumerate()
+            .map(|(position, slot)| {
+                // Sliding window (gemma local layers): gathered position
+                // j is outside when j < q_pos − (window − 1) — mirror of
+                // the graph-side mask in paged_attention_windowed.
+                if let Some(window) = window {
+                    if (position as i64) < q_pos as i64 - (window as i64 - 1) {
+                        return f32::NEG_INFINITY;
+                    }
+                }
                 let k_row = &k_cache[slot * kv_dim + kv_head * head_dim..][..head_dim];
                 q_h.iter().zip(k_row).map(|(a, b)| a * b).sum::<f32>() * scale
             })

@@ -1,9 +1,10 @@
-//! MiniMoe (MoE-decoder family) demo on the reference runtime.
-//! Run: cargo run --release --example mini_moe
+//! MiniGemma4Moe (gemma4_moe family) demo on the reference runtime —
+//! the MoE decoder plus final logit soft-capping.
+//! Run: cargo run --release --example mini_gemma4_moe
 
 use luminal::prelude::*;
 use luminal::shape::Expression;
-use luminal_nn::{FeedForward, MiniMoe};
+use luminal_nn::{FeedForward, MiniGemma4Moe};
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {
     (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
@@ -13,7 +14,7 @@ fn main() {
     const VOCAB: usize = 5;
     const D: usize = 4;
     let mut cx = Graph::new();
-    let model = MiniMoe::new(VOCAB, D, 2, 1, 2, 1, &mut cx);
+    let model = MiniGemma4Moe::new(VOCAB, D, 2, 1, 2, 1, &mut cx);
     let ids = cx.tensor_dtyped(1, DType::Int);
     let k_cache = cx.tensor((4, D));
     let v_cache = cx.tensor((4, D));
@@ -40,5 +41,5 @@ fn main() {
         (scatter_idx.id, vec![1.0]),
     ];
     let rt = luminal::test_support::run_ssa(&cx, &pairs);
-    println!("logits: {:?}", rt.get_f32(logits.id).unwrap());
+    println!("soft-capped logits: {:?}", rt.get_f32(logits.id).unwrap());
 }
