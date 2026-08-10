@@ -567,8 +567,7 @@ pub struct OpNode {
     pub inputs: Vec<OpInput>,
     pub outputs: Vec<LayoutTensorInfo>,
     pub tooltip: String,
-    pub cost: u32,
-    pub copies: u32,
+    pub heuristic_cost: u64,
 }
 
 /// One slot of the program output: a final value written into a destination buffer.

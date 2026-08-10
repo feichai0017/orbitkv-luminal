@@ -184,13 +184,86 @@ pub fn search_implementations_with_ops(
     let classes: Vec<_> = index.keys().cloned().collect();
     let mut rng = StdRng::seed_from_u64(options.seed);
 
+    // TWO-PHASE SAMPLING (ruling 2026-08-07): the genome searches
+    // PROGRESSING candidates — ops whose inputs are other logical
+    // values — freely; sibling-sourced candidates (layout copies within
+    // one logical value) are subordinate plumbing. Generation 0 elects
+    // one progressing PRIMARY per sibling group; the other members
+    // choose uniformly between their progressing candidates and copies
+    // sourced from the primary. Mutation preserves the same invariant
+    // locally: a sibling-sourced choice needs its source to currently
+    // progress, and a member some sibling currently copies must keep
+    // progressing. Copy⟷Copy welds and copy chains are therefore
+    // unconstructible, while recompute-at-every-layout and
+    // copy-from-boundary-input plans stay in the space. A class whose
+    // allowed set comes up empty falls back to its full candidate list
+    // (same space as the old free sampler); the refusal accounting
+    // stays the loud diagnosis for that corner.
+    let space = extractor::sampling_space(egraph, &index);
+    let group_of: FxHashMap<_, usize> = space
+        .groups
+        .iter()
+        .enumerate()
+        .flat_map(|(group, members)| members.iter().map(move |member| (member.clone(), group)))
+        .collect();
+
     let random_genome = |rng: &mut StdRng| {
         let mut genome = Genome::default();
+        let mut primary_of: FxHashMap<_, _> = FxHashMap::default();
+        for members in &space.groups {
+            let eligible: Vec<_> = members
+                .iter()
+                .filter(|member| {
+                    space.sibling_sources[*member]
+                        .iter()
+                        .any(|sources| sources.is_empty())
+                })
+                .cloned()
+                .collect();
+            if eligible.is_empty() {
+                continue; // copy-only group: full-list fallback below
+            }
+            let primary = eligible[rng.random_range(0..eligible.len())].clone();
+            for member in members {
+                primary_of.insert(member.clone(), primary.clone());
+            }
+        }
         for (class, candidates) in &index {
-            let pick = &candidates[rng.random_range(0..candidates.len())];
-            genome.choices.insert(class.clone(), pick.1.clone());
+            let sources_per_candidate = &space.sibling_sources[class];
+            let allowed: Vec<usize> = match primary_of.get(class) {
+                Some(primary) if class == primary => (0..candidates.len())
+                    .filter(|&position| sources_per_candidate[position].is_empty())
+                    .collect(),
+                Some(primary) => (0..candidates.len())
+                    .filter(|&position| {
+                        sources_per_candidate[position]
+                            .iter()
+                            .all(|source| source == primary)
+                    })
+                    .collect(),
+                None => (0..candidates.len()).collect(),
+            };
+            let position = if allowed.is_empty() {
+                rng.random_range(0..candidates.len())
+            } else {
+                allowed[rng.random_range(0..allowed.len())]
+            };
+            genome
+                .choices
+                .insert(class.clone(), candidates[position].1.clone());
         }
         genome
+    };
+    // Whether a class's CURRENT choice progresses (boundary classes
+    // without genome rows are leaves — they trivially progress).
+    let progresses = |child: &Genome, class: &egraph_serialize::ClassId| -> bool {
+        let (Some(choice), Some(candidates)) = (child.choices.get(class), index.get(class)) else {
+            return true;
+        };
+        candidates
+            .iter()
+            .position(|(_, candidate)| candidate == choice)
+            .is_none_or(|position| space.sibling_sources[class][position].is_empty())
     };
     let mutate = |parent: &Genome, rng: &mut StdRng, count: usize| {
         let mut child = parent.clone();
@@ -200,8 +273,40 @@ pub fn search_implementations_with_ops(
         for _ in 0..count {
             let class = &classes[rng.random_range(0..classes.len())];
             let candidates = &index[class];
-            let pick = &candidates[rng.random_range(0..candidates.len())];
-            child.choices.insert(class.clone(), pick.1.clone());
+            let sources_per_candidate = &space.sibling_sources[class];
+            let copied_by_sibling = group_of.get(class).is_some_and(|group| {
+                space.groups[*group].iter().any(|member| {
+                    member != class
+                        && child.choices.get(member).is_some_and(|choice| {
+                            index[member]
+                                .iter()
+                                .position(|(_, candidate)| candidate == choice)
+                                .is_some_and(|position| {
+                                    space.sibling_sources[member][position]
+                                        .iter()
+                                        .any(|source| source == class)
+                                })
+                        })
+                })
+            });
+            let allowed: Vec<usize> = (0..candidates.len())
+                .filter(|&position| {
+                    let sources = &sources_per_candidate[position];
+                    sources.is_empty()
+                        || (!copied_by_sibling
+                            && sources
+                                .iter()
+                                .all(|source| source != class && progresses(&child, source)))
+                })
+                .collect();
+            let position = if allowed.is_empty() {
+                rng.random_range(0..candidates.len())
+            } else {
+                allowed[rng.random_range(0..allowed.len())]
+            };
+            child
+                .choices
+                .insert(class.clone(), candidates[position].1.clone());
         }
         child
     };

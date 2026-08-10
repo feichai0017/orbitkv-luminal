@@ -102,8 +102,7 @@ pub fn dps_rewrite(graph: &ExtractedGraph) -> ExtractedGraph {
                 inputs: Vec::new(),
                 outputs: vec![poison_value],
                 tooltip: "synthesized by dps_rewrite".to_string(),
-                cost: 0,
-                copies: 0,
+                heuristic_cost: 0,
             }));
 
             let ExtractedNode::LayoutOp(op) = &mut out.dag[idx] else {

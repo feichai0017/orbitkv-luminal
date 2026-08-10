@@ -291,8 +291,7 @@ impl TestGraph {
             inputs: op_inputs,
             outputs: output_infos,
             tooltip: String::new(),
-            cost: 1,
-            copies: 0,
+            heuristic_cost: 1,
         }));
         for (index, value) in inputs.iter().enumerate() {
             let producer = *self

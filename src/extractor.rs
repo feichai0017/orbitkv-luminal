@@ -44,6 +44,18 @@ struct Extractor<'a> {
     /// cleared by `extract_with_genome` — measured 2026-08-06: re-parsing
     /// per genome was 98% of a 378s MLP search (5.8s × 64 genomes).
     op_cache: std::cell::RefCell<HashMap<NodeId, Box<dyn LayoutIrOp>>>,
+    /// GENOME-INDEPENDENT pricing caches for the bytes-moved heuristic
+    /// (ruling 2026-08-10). `bounds_index` is built once by scanning the
+    /// serialized `lower-bound-of` / `upper-bound-of` rows: IntExpr class →
+    /// (lower, upper). `tensor_bytes_cache` memoizes the per-LayoutTensor
+    /// byte size derived from its layout's shape and bit width.
+    bounds_index: std::cell::RefCell<Option<HashMap<ClassId, (Option<i128>, Option<i128>)>>>,
+    tensor_bytes_cache: std::cell::RefCell<HashMap<ClassId, u64>>,
+    /// GENOME-INDEPENDENT stable-key memo (measured 2026-08-10: eager
+    /// per-comparison rendering was 99% of deep extraction — 7395/7471
+    /// sampled stacks inside `is_better`). The rendered form of an enode
+    /// never changes within a session, so one cache serves every genome.
+    stable_key_cache: std::cell::RefCell<HashMap<NodeId, std::rc::Rc<str>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,8 +68,14 @@ struct InputInfo {
 
 #[derive(Debug, Clone)]
 struct Plan {
-    cost: u32,
-    copies: u32,
+    /// Bytes-moved estimate for the subplan (ruling 2026-08-10): the sum
+    /// over each op of the byte sizes of the tensors it reads and the
+    /// results it writes, with symbolic dimensions priced at the midpoint
+    /// of their seeded interval bounds. HEURISTIC by name and by nature:
+    /// it assembles one plan per genome and orders the plain path; it
+    /// never ranks genomes (profiling does) and never overrides the
+    /// genome's op choice.
+    heuristic_cost: u64,
     source_eclass: Option<ClassId>,
     source_enode: Option<NodeId>,
     selected_output_index: Option<usize>,
@@ -430,6 +448,91 @@ pub fn producer_index_with_ops(
     index
 }
 
+/// The sibling anatomy of a producer index — what two-phase sampling
+/// ("select the logical progressing ops first, insert copies as
+/// plumbing", ruling 2026-08-07) consumes. A candidate's SIBLING
+/// SOURCES are its input classes that instantiate the SAME logical
+/// value as the candidate's own class and hold genome rows themselves —
+/// exactly what a layout copy reads. A candidate with no sibling
+/// sources PROGRESSES the computation: its inputs are other logical
+/// values, and since the logical graph is a DAG, per-class choices over
+/// progressing candidates can never close a choice cycle. Every
+/// measured extraction deadlock was a Copy⟷Copy weld between two
+/// layout siblings of one logical value (dossier 2026-08-07); keeping
+/// sibling-sourced candidates subordinate to a progressing producer
+/// removes that whole failure class by construction. Same-logical
+/// inputs WITHOUT genome rows (boundary inputs) are deliberately not
+/// sibling sources: they are leaves, always available, and copying
+/// them can never cycle.
+#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
+pub struct SamplingSpace {
+    /// class → per-candidate sibling-source classes, parallel to the
+    /// class's producer-index entry. An empty inner vec marks a
+    /// progressing candidate.
+    pub sibling_sources: std::collections::BTreeMap<ClassId, Vec<Vec<ClassId>>>,
+    /// Sibling groups: index classes sharing one logical value (only
+    /// groups of two or more), members sorted, groups ordered by their
+    /// logical class — deterministic election order for the sampler.
+    pub groups: Vec<Vec<ClassId>>,
+}
+
+/// Compute the [`SamplingSpace`] for a producer index over its e-graph.
+#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
+pub fn sampling_space(
+    egraph: &EGraph,
+    index: &std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>>,
+) -> SamplingSpace {
+    let class_nodes = class_nodes(egraph);
+    let logical_of = |class: &ClassId| -> Option<ClassId> {
+        class_nodes.get(class)?.iter().find_map(|node_id| {
+            let node = egraph.nodes.get(node_id)?;
+            if node.op != "LayoutTensorLit" {
+                return None;
+            }
+            Some(egraph.nodes.get(node.children.first()?)?.eclass.clone())
+        })
+    };
+    let mut sibling_sources = std::collections::BTreeMap::new();
+    let mut groups_by_logical: std::collections::BTreeMap<ClassId, Vec<ClassId>> =
+        std::collections::BTreeMap::new();
+    for (class, entries) in index {
+        let logical = logical_of(class);
+        let per_candidate: Vec<Vec<ClassId>> = entries
+            .iter()
+            .map(|(_, choice)| {
+                let (Some(node), Some(logical)) = (egraph.nodes.get(&choice.enode), &logical)
+                else {
+                    return Vec::new();
+                };
+                node.children
+                    .iter()
+                    .filter_map(|child| {
+                        let input_class = egraph.nodes.get(child)?.eclass.clone();
+                        (index.contains_key(&input_class)
+                            && logical_of(&input_class).as_ref() == Some(logical))
+                        .then_some(input_class)
+                    })
+                    .collect()
+            })
+            .collect();
+        sibling_sources.insert(class.clone(), per_candidate);
+        if let Some(logical) = logical {
+            groups_by_logical
+                .entry(logical)
+                .or_default()
+                .push(class.clone());
+        }
+    }
+    let groups = groups_by_logical
+        .into_values()
+        .filter(|members| members.len() >= 2)
+        .collect();
+    SamplingSpace {
+        sibling_sources,
+        groups,
+    }
+}
+
 /// A stable fingerprint of a plan's SHAPE: the chosen instances (enode +
 /// claimed slots) and the dataflow between them. Many genomes map to one
 /// plan (dead rows are unread), so the search hashes the built plan and
@@ -523,6 +626,9 @@ impl<'a> Extractor<'a> {
             blocked: HashMap::new(),
             no_candidates: Vec::new(),
             op_cache: Default::default(),
+            bounds_index: Default::default(),
+            tensor_bytes_cache: Default::default(),
+            stable_key_cache: Default::default(),
         }
     }
 
@@ -779,8 +885,7 @@ impl<'a> Extractor<'a> {
             let mut changed = false;
             for (class, candidates) in universe.iter().zip(&candidate_lists) {
                 let mut best = self.input_terminals.get(class).map(|input| Plan {
-                    cost: 0,
-                    copies: 0,
+                    heuristic_cost: 0,
                     source_eclass: None,
                     source_enode: None,
                     selected_output_index: None,
@@ -791,20 +896,17 @@ impl<'a> Extractor<'a> {
                     metadata: Vec::new(),
                 });
                 'candidates: for candidate in candidates {
-                    let mut cost = candidate.base_cost();
-                    let mut copies = candidate.copy_count();
+                    let mut heuristic_cost = self.candidate_heuristic_cost(candidate);
                     let mut child_plans = Vec::with_capacity(candidate.children.len());
                     for child in &candidate.children {
                         let Some(Some(child_plan)) = self.memo.get(&child.class) else {
                             continue 'candidates;
                         };
-                        cost += child_plan.cost;
-                        copies += child_plan.copies;
+                        heuristic_cost += child_plan.heuristic_cost;
                         child_plans.push(child.clone());
                     }
                     let plan = Plan {
-                        cost,
-                        copies,
+                        heuristic_cost,
                         source_eclass: candidate
                             .source_eclass
                             .clone()
@@ -1120,19 +1222,38 @@ impl<'a> Extractor<'a> {
     /// depends on hash-iteration order and flips run to run. Rendering the
     /// source e-node resolves children to let-names/literals, which are stable
     /// across runs — making the (user-blessed) arbitrary tie-break deterministic.
+    /// LAZY evaluation of the same total order (2026-08-10, semantics
+    /// identical): cost decides almost every comparison, so labels are
+    /// only built on cost ties and the rendered stable key only on label
+    /// ties — and each enode's key renders once per session (memo).
+    /// Eagerly building the full tuple rendered BOTH plans to depth 3 on
+    /// EVERY comparison: 99% of deep-extraction wall time.
     fn is_better(&self, plan: &Plan, best: Option<&Plan>) -> bool {
         let Some(best) = best else {
             return true;
         };
-        (plan.cost, plan.copies, plan_label(plan), self.stable_key(plan))
-            < (best.cost, best.copies, plan_label(best), self.stable_key(best))
+        if plan.heuristic_cost != best.heuristic_cost {
+            return plan.heuristic_cost < best.heuristic_cost;
+        }
+        let (plan_label_key, best_label_key) = (plan_label(plan), plan_label(best));
+        if plan_label_key != best_label_key {
+            return plan_label_key < best_label_key;
+        }
+        self.stable_key(plan) < self.stable_key(best)
     }
 
-    fn stable_key(&self, plan: &Plan) -> String {
-        plan.source_enode
-            .as_ref()
-            .map(|enode| self.renderer().render_node(enode, 3))
-            .unwrap_or_default()
+    fn stable_key(&self, plan: &Plan) -> std::rc::Rc<str> {
+        let Some(enode) = plan.source_enode.as_ref() else {
+            return std::rc::Rc::from("");
+        };
+        if let Some(key) = self.stable_key_cache.borrow().get(enode) {
+            return key.clone();
+        }
+        let key: std::rc::Rc<str> = std::rc::Rc::from(self.renderer().render_node(enode, 3));
+        self.stable_key_cache
+            .borrow_mut()
+            .insert(enode.clone(), key.clone());
+        key
     }
 
     fn renderer(&self) -> ClassRenderer<'_> {
@@ -1140,6 +1261,193 @@ impl<'a> Extractor<'a> {
             egraph: self.egraph,
             class_nodes: &self.render_class_nodes,
         }
+    }
+
+    // ---- bytes-moved heuristic pricing (ruling 2026-08-10): the
+    // heuristic_cost of a candidate is the bytes its op moves — operand
+    // bytes for every declared READ plus result bytes for every declared
+    // WRITE. Symbolic dims price at the midpoint of their seeded interval
+    // bounds. Loud on broken invariants: a value tensor with no readable
+    // shape/width, or a dim with neither literal nor bounds, names itself
+    // and panics rather than silently distorting the search.
+
+    /// The candidate's own contribution to `heuristic_cost` (children add
+    /// theirs during relaxation). Structural plumbing and inputs are 0;
+    /// a view (reads nothing, writes nothing) is honestly free.
+    fn candidate_heuristic_cost(&self, candidate: &Candidate) -> u64 {
+        match &candidate.kind {
+            PlanKind::Input(_)
+            | PlanKind::BufferOutputLit
+            | PlanKind::BufferTensorCons
+            | PlanKind::BufferTensorNil
+            | PlanKind::BufferTensorLit { .. } => 0,
+            PlanKind::LayoutIr(op) => {
+                let reads = candidate
+                    .input_list
+                    .iter()
+                    .enumerate()
+                    .filter(|(operand, _)| op.operand_reads_memory(*operand))
+                    .map(|(_, class)| self.tensor_bytes(class))
+                    .fold(0u64, u64::saturating_add);
+                let writes = candidate
+                    .output_list
+                    .iter()
+                    .enumerate()
+                    .filter(|(result, _)| op.result_writes_memory(*result))
+                    .map(|(_, class)| self.tensor_bytes(class))
+                    .fold(0u64, u64::saturating_add);
+                reads.saturating_add(writes)
+            }
+        }
+    }
+
+    /// Byte size of a LayoutTensor class, memoized: product of its
+    /// layout's extents times the element bit width, rounded up to bytes.
+    fn tensor_bytes(&self, layout_tensor: &ClassId) -> u64 {
+        if let Some(&bytes) = self.tensor_bytes_cache.borrow().get(layout_tensor) {
+            return bytes;
+        }
+        let bytes = self.compute_tensor_bytes(layout_tensor);
+        self.tensor_bytes_cache
+            .borrow_mut()
+            .insert(layout_tensor.clone(), bytes);
+        bytes
+    }
+
+    fn compute_tensor_bytes(&self, layout_tensor: &ClassId) -> u64 {
+        let renderer = self.renderer();
+        let lit = renderer
+            .node_with_op(layout_tensor, "LayoutTensorLit")
+            .unwrap_or_else(|| {
+                panic!("heuristic cost: class {layout_tensor} has no LayoutTensorLit spelling")
+            });
+        let node = self.egraph.nodes.get(lit).expect("lit node resolvable");
+        let layout = child_class(self.egraph, node, 1).unwrap_or_else(|| {
+            panic!("heuristic cost: LayoutTensorLit in {layout_tensor} has no layout child")
+        });
+        let dims = self.estimated_layout_dims(&layout).unwrap_or_else(|| {
+            panic!(
+                "heuristic cost: layout {layout} (of tensor {layout_tensor}) has no \
+                 readable ShapeLit shape"
+            )
+        });
+        let bits = renderer.numeric_layout_bits(&layout).unwrap_or_else(|| {
+            panic!(
+                "heuristic cost: layout {layout} (of tensor {layout_tensor}) has no \
+                 literal bit width"
+            )
+        });
+        let elements = dims
+            .iter()
+            .fold(1u128, |product, &dim| product.saturating_mul(dim as u128));
+        let total_bits = elements.saturating_mul(bits.max(0) as u128);
+        total_bits.div_ceil(8).min(u64::MAX as u128) as u64
+    }
+
+    /// The layout's extents with symbolic dims estimated (mirrors the
+    /// renderer's `numeric_layout_dims`, but symbolic-tolerant).
+    fn estimated_layout_dims(&self, class: &ClassId) -> Option<Vec<u64>> {
+        let renderer = self.renderer();
+        for node_id in renderer.class_nodes.get(class)? {
+            let node = self.egraph.nodes.get(node_id)?;
+            let shape_child = match node.op.as_str() {
+                "RightMajorContiguousElementLayoutLit"
+                | "LeftMajorContiguousElementLayoutLit"
+                | "StridedElementLayoutLit" => 0,
+                "ElementOffsetExpressionLayoutLit" | "BitOffsetExpressionLayoutLit" => 1,
+                _ => continue,
+            };
+            let shape_class = child_class(self.egraph, node, shape_child)?;
+            let shape_node_id = renderer.node_with_op(&shape_class, "ShapeLit")?;
+            let shape_node = self.egraph.nodes.get(shape_node_id)?;
+            let mut current = child_class(self.egraph, shape_node, 0)?;
+            let mut dims = Vec::new();
+            loop {
+                if let Some(cons_id) = renderer.node_with_op(&current, "IntExprCons").cloned() {
+                    let cons = self.egraph.nodes.get(&cons_id)?;
+                    dims.push(self.dim_estimate(&child_class(self.egraph, cons, 0)?));
+                    current = child_class(self.egraph, cons, 1)?;
+                } else if renderer.node_with_op(&current, "IntExprNil").is_some() {
+                    return Some(dims);
+                } else {
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// One extent: a literal dim exactly; a symbolic dim at the MIDPOINT
+    /// of its seeded interval (ruling 2026-08-10: halfway between the
+    /// bounds). A dim with neither is a broken seeding contract — loud.
+    fn dim_estimate(&self, dim: &ClassId) -> u64 {
+        if let Some(value) = self.renderer().numeric_int_expr(dim) {
+            return value.max(0) as u64;
+        }
+        self.with_bounds_index(|index| {
+            let (lower, upper) = index.get(dim).copied().unwrap_or((None, None));
+            match (lower, upper) {
+                (Some(lower), Some(upper)) => ((lower + upper) / 2).max(0) as u64,
+                _ => panic!(
+                    "heuristic cost: dim class {dim} has neither a literal value nor \
+                     complete seeded bounds (lower {lower:?}, upper {upper:?}) — the \
+                     bounds-seeding contract is broken"
+                ),
+            }
+        })
+    }
+
+    /// The serialized interval rows, indexed once: IntExpr class →
+    /// (lower, upper). Rows encode as op `lower-bound-of`/`upper-bound-of`
+    /// with the argument node as child 0 and the BigInt value as the row
+    /// node's own eclass (observed encoding, probe 2026-08-10). Multiple
+    /// rows per class merge tightest, mirroring the lattice's `:merge`.
+    fn with_bounds_index<R>(
+        &self,
+        read: impl FnOnce(&HashMap<ClassId, (Option<i128>, Option<i128>)>) -> R,
+    ) -> R {
+        let mut slot = self.bounds_index.borrow_mut();
+        if slot.is_none() {
+            let mut index: HashMap<ClassId, (Option<i128>, Option<i128>)> = HashMap::new();
+            for node in self.egraph.nodes.values() {
+                let is_lower = node.op == "lower-bound-of";
+                if !is_lower && node.op != "upper-bound-of" {
+                    continue;
+                }
+                let Some(arg) = node
+                    .children
+                    .first()
+                    .and_then(|id| self.egraph.nodes.get(id))
+                else {
+                    continue;
+                };
+                let Some(value) = self.bigint_value(&node.eclass) else {
+                    continue;
+                };
+                let entry = index.entry(arg.eclass.clone()).or_insert((None, None));
+                if is_lower {
+                    entry.0 = Some(entry.0.map_or(value, |held: i128| held.max(value)));
+                } else {
+                    entry.1 = Some(entry.1.map_or(value, |held: i128| held.min(value)));
+                }
+            }
+            *slot = Some(index);
+        }
+        read(slot.as_ref().expect("bounds index just built"))
+    }
+
+    /// A BigInt primitive class: the childless member whose op is the
+    /// decimal literal.
+    fn bigint_value(&self, class: &ClassId) -> Option<i128> {
+        for node_id in self.class_nodes.get(class)? {
+            let node = self.egraph.nodes.get(node_id)?;
+            if node.children.is_empty() {
+                if let Ok(value) = node.op.parse::<i128>() {
+                    return Some(value);
+                }
+            }
+        }
+        None
     }
 
     fn logical_name_from_layout_tensor(&self, class: &ClassId) -> Option<String> {
@@ -1195,43 +1503,6 @@ impl Candidate {
         }
     }
 
-    fn base_cost(&self) -> u32 {
-        match &self.kind {
-            PlanKind::Input(_) => 0,
-            PlanKind::BufferOutputLit
-            | PlanKind::BufferTensorCons
-            | PlanKind::BufferTensorNil
-            | PlanKind::BufferTensorLit { .. } => 0,
-            // No per-op special-casing. Cost is a proxy for the data the op moves:
-            // one unit per tensor it READS and per result it WRITES, taken from
-            // the op's own declared memory effects — so an unnecessary copy is
-            // strictly more expensive than not copying, and a metadata view
-            // (reads nothing, writes nothing) is honestly free. Every current
-            // compute op reads all operands and writes all results, so for them
-            // this equals the old slot count.
-            //
-            // TODO(cost): make this the sum of tensor *sizes* (product of dims),
-            // with every symbolic/dynamic dimension assumed to be 100. That is an
-            // extraction-only sampling assumption — a stand-in for "typical input
-            // sizes" — so copies are penalized by bytes moved, not just op count.
-            PlanKind::LayoutIr(op) => {
-                let reads = (0..self.input_list.len())
-                    .filter(|&operand| op.operand_reads_memory(operand))
-                    .count();
-                let writes = (0..self.output_list.len())
-                    .filter(|&result| op.result_writes_memory(result))
-                    .count();
-                (reads + writes) as u32
-            }
-        }
-    }
-
-    fn copy_count(&self) -> u32 {
-        // Copies are no longer special-cased in extraction; they are just ops that
-        // cost what they move (see `base_cost`). Kept returning 0 so the secondary
-        // tie-break degenerates to the arbitrary label order.
-        0
-    }
 }
 
 struct ClassRenderer<'a> {
@@ -2379,8 +2650,7 @@ impl<'a> Extractor<'a> {
         if let Some(index) = plan.selected_output_index {
             push_detail(&mut lines, "selected_output_index", index);
         }
-        push_detail(&mut lines, "cost", plan.cost);
-        push_detail(&mut lines, "copies", plan.copies);
+        push_detail(&mut lines, "heuristic_cost", plan.heuristic_cost);
         push_details(&mut lines, &self.layout_tensor_details(class));
         if !plan.input_list.is_empty() {
             push_detail(
@@ -2530,8 +2800,7 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
                     inputs,
                     outputs,
                     tooltip,
-                    cost: plan.cost,
-                    copies: plan.copies,
+                    heuristic_cost: plan.heuristic_cost,
                 };
                 let index = self.dag.add_node(ExtractedNode::LayoutOp(node));
                 self.op_nodes.insert(key, index);
