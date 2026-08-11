@@ -44,6 +44,56 @@ static SCRATCH: std::sync::Mutex<Option<(usize, crate::cudarc::driver::CudaSlice
 /// softmax. NOT -inf: a fully-masked row would give `-inf - -inf = NaN`.
 /// -1e30 underflows `exp2` to exactly 0 while staying finite.
 const NEUTRAL_SINK: f32 = -1.0e30;
+/// Indptr readback + FA3 plan, memoized for the span of ONE graph execution.
+///
+/// Every layer's attention op reads the same two index buffers and builds the
+/// same plan from them: the indptrs are graph Inputs written once per step, and
+/// a model's layers share `num_qo_heads`/`num_kv_heads`/`head_dim`. Measured on
+/// gpt-oss-120b (36 layers, 16-way decode) the readback alone was 51.7 ms of a
+/// 71.8 ms tick — 72% — because each read ends in `stream.synchronize()`. The
+/// graph therefore drained the pipeline 72 times per tick and never overlapped
+/// host-side planning with GPU work. Prefill was worse: 638 ms of 700.
+///
+/// The key is deliberately conservative: same execution, same buffers, same
+/// lengths, same head geometry; anything else re-reads and re-plans. The
+/// GENERATION component is what makes staleness impossible — the indptr
+/// CONTENTS change every tick while the buffer pointers do not, so a
+/// pointer-only key would happily serve the previous tick's plan.
+type PlanKey = (u64, u64, u64, usize, usize, usize, usize, usize);
+
+#[derive(Clone)]
+struct CachedPlan {
+    qo_indptr: Vec<i32>,
+    kv_indptr: Vec<i32>,
+    plan_info: [i64; 16],
+    plan_info_len: i32,
+}
+
+static PLAN_CACHE: std::sync::Mutex<Option<(PlanKey, CachedPlan)>> = std::sync::Mutex::new(None);
+
+/// Kill switch: `LUMINAL_FA3_PLAN_CACHE=0` restores the read-and-plan-per-layer
+/// behaviour. Kept because reusing one plan across layers is the kind of change
+/// that would fail silently — wrong attention still produces fluent text — so
+/// being able to A/B correctness inside one process, without a rebuild, is
+/// worth a branch that is predicted-taken forever.
+fn plan_cache_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LUMINAL_FA3_PLAN_CACHE").map_or(true, |v| v != "0"))
+}
+
+/// `LUMINAL_FA3_PLAN_VERIFY=1`: on every cache HIT, redo the readback and the
+/// plan and assert the result is byte-identical to what was cached.
+///
+/// This is how the cache is shown to be a semantic no-op. Comparing two SERVER
+/// PROCESSES cannot show it: the schedule search is stochastic, so two starts
+/// compile different (equally valid) schedules whose float association differs,
+/// and a one-token divergence tells you nothing about the cache. Verifying
+/// inside one process holds the schedule fixed and isolates the change.
+fn plan_verify_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LUMINAL_FA3_PLAN_VERIFY").is_ok_and(|v| v != "0"))
+}
+
 static NEUTRAL_SINKS: std::sync::Mutex<Option<(usize, crate::cudarc::driver::CudaSlice<u8>)>> =
     std::sync::Mutex::new(None);
 
@@ -263,49 +313,136 @@ impl HostOp for SinkAttention {
             stream.synchronize()?;
             Ok(bytes_to_i32_vec(host_bytes))
         };
-        let mut qo_indptr = read_device_i32s(qo_indptr_buf)?;
-        let mut kv_indptr = read_device_i32s(kv_indptr_buf)?;
-        anyhow::ensure!(
-            qo_indptr.len() == kv_indptr.len() && qo_indptr.len() >= 2,
-            "SinkAttention: malformed indptrs (qo len {}, kv len {})",
-            qo_indptr.len(),
-            kv_indptr.len()
+
+        let plan_key: PlanKey = (
+            crate::hostop_profile::generation(),
+            qo_indptr_buf.ptr(),
+            kv_indptr_buf.ptr(),
+            qo_indptr_buf.len(),
+            kv_indptr_buf.len(),
+            self.num_qo_heads,
+            self.num_kv_heads,
+            self.head_dim,
         );
-        let batch_size = qo_indptr.len() - 1;
+        let cached = if plan_cache_enabled() {
+            let guard = PLAN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                Some((k, c)) if *k == plan_key => Some(c.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let CachedPlan {
+            qo_indptr,
+            kv_indptr,
+            mut plan_info,
+            plan_info_len,
+        } = match cached {
+            // Same execution, same buffers, same geometry: this is the plan the
+            // previous layer already built. Reusing it skips the planning AND
+            // the two pipeline drains the readback needs to get its inputs.
+            Some(c) => {
+                if plan_verify_enabled() {
+                    let qo = read_device_i32s(qo_indptr_buf)?;
+                    let kv = read_device_i32s(kv_indptr_buf)?;
+                    assert_eq!(qo, c.qo_indptr, "FA3 plan cache: qo_indptr diverged");
+                    assert_eq!(kv, c.kv_indptr, "FA3 plan cache: kv_indptr diverged");
+                    let mut klen: Vec<i32> = kv.windows(2).map(|w| w[1] - w[0]).collect();
+                    let (mut qo_m, mut kv_m) = (qo.clone(), kv.clone());
+                    let mut pinfo = [0i64; 16];
+                    let mut plen: i32 = 0;
+                    let pl = page_locked_workspace();
+                    let ret = unsafe {
+                        (lib.prefill_plan)(
+                            float_ws_ptr as *mut std::ffi::c_void,
+                            super::FLOAT_WORKSPACE_SIZE,
+                            int_ws_ptr as *mut std::ffi::c_void,
+                            pl.0 as *mut std::ffi::c_void,
+                            INT_WORKSPACE_SIZE,
+                            qo_m.as_mut_ptr(),
+                            kv_m.as_mut_ptr(),
+                            klen.as_mut_ptr(),
+                            *qo.last().unwrap() as i32,
+                            (qo.len() - 1) as i32,
+                            self.num_qo_heads as i32,
+                            self.num_kv_heads as i32,
+                            1,
+                            cu_stream,
+                            pinfo.as_mut_ptr(),
+                            &mut plen,
+                        )
+                    };
+                    assert_eq!(ret, 0, "FA3 plan cache: verification plan failed");
+                    assert_eq!(plen, c.plan_info_len, "FA3 plan cache: plan_info_len diverged");
+                    assert_eq!(pinfo, c.plan_info, "FA3 plan cache: plan_info diverged");
+                }
+                c
+            }
+            None => {
+                let mut qo_indptr =
+                    crate::hostop_profile::phase("  SA: indptr DtoH + 2x sync", || {
+                        read_device_i32s(qo_indptr_buf)
+                    })?;
+                let mut kv_indptr =
+                    crate::hostop_profile::phase("  SA: indptr DtoH + 2x sync", || {
+                        read_device_i32s(kv_indptr_buf)
+                    })?;
+                anyhow::ensure!(
+                    qo_indptr.len() == kv_indptr.len() && qo_indptr.len() >= 2,
+                    "SinkAttention: malformed indptrs (qo len {}, kv len {})",
+                    qo_indptr.len(),
+                    kv_indptr.len()
+                );
+                // page_size = 1: per-sequence kv length in tokens == pages.
+                let mut kv_len_arr: Vec<i32> =
+                    kv_indptr.windows(2).map(|w| w[1] - w[0]).collect();
+                let batch_size = qo_indptr.len() - 1;
+                let nnz_qo = *qo_indptr.last().unwrap() as usize;
+                let page_locked = page_locked_workspace();
+                let mut plan_info = [0i64; 16];
+                let mut plan_info_len: i32 = 0;
+                let plan_ret =
+                    crate::hostop_profile::phase("  SA: fa3 prefill_plan", || unsafe {
+                        (lib.prefill_plan)(
+                            float_ws_ptr as *mut std::ffi::c_void,
+                            super::FLOAT_WORKSPACE_SIZE,
+                            int_ws_ptr as *mut std::ffi::c_void,
+                            page_locked.0 as *mut std::ffi::c_void,
+                            INT_WORKSPACE_SIZE,
+                            qo_indptr.as_mut_ptr(),
+                            kv_indptr.as_mut_ptr(),
+                            kv_len_arr.as_mut_ptr(),
+                            nnz_qo as i32,
+                            batch_size as i32,
+                            self.num_qo_heads as i32,
+                            self.num_kv_heads as i32,
+                            /*page_size=*/ 1,
+                            cu_stream,
+                            plan_info.as_mut_ptr(),
+                            &mut plan_info_len,
+                        )
+                    });
+                anyhow::ensure!(plan_ret == 0, "SinkAttention: fa3 plan failed ({plan_ret})");
+                let fresh = CachedPlan {
+                    qo_indptr,
+                    kv_indptr,
+                    plan_info,
+                    plan_info_len,
+                };
+                *PLAN_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((plan_key, fresh.clone()));
+                fresh
+            }
+        };
+
         let nnz_qo = *qo_indptr.last().unwrap() as usize;
         let total_pages = *kv_indptr.last().unwrap() as usize;
         anyhow::ensure!(
             kv_indices.len() >= total_pages * std::mem::size_of::<i32>(),
             "SinkAttention: kv_indices buffer smaller than kv_indptr total"
         );
-        // page_size = 1: per-sequence kv length in tokens == pages.
-        let mut kv_len_arr: Vec<i32> = kv_indptr.windows(2).map(|w| w[1] - w[0]).collect();
-
-        let page_locked = page_locked_workspace();
-
-        let mut plan_info = [0i64; 16];
-        let mut plan_info_len: i32 = 0;
-        let plan_ret = unsafe {
-            (lib.prefill_plan)(
-                float_ws_ptr as *mut std::ffi::c_void,
-                super::FLOAT_WORKSPACE_SIZE,
-                int_ws_ptr as *mut std::ffi::c_void,
-                page_locked.0 as *mut std::ffi::c_void,
-                INT_WORKSPACE_SIZE,
-                qo_indptr.as_mut_ptr(),
-                kv_indptr.as_mut_ptr(),
-                kv_len_arr.as_mut_ptr(),
-                nnz_qo as i32,
-                batch_size as i32,
-                self.num_qo_heads as i32,
-                self.num_kv_heads as i32,
-                /*page_size=*/ 1,
-                cu_stream,
-                plan_info.as_mut_ptr(),
-                &mut plan_info_len,
-            )
-        };
-        anyhow::ensure!(plan_ret == 0, "SinkAttention: fa3 plan failed ({plan_ret})");
 
         // Kernel-native (s, heads, dim) bf16 scratch (front half: transposed
         // q in, back half: kernel out), from the grow-only pool. Reuse is

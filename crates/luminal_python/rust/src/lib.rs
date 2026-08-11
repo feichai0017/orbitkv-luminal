@@ -1,15 +1,21 @@
-mod compiled_graph;
+// `pub` on the PT2 path is what lets a Rust host link the translator instead
+// of driving it through Python: `pt2_compiled_model::translate_pt2` hands back
+// the pre-search HLIR graph, its name maps and its weights, which is enough to
+// build a graph a Rust runtime owns end to end. `process_pt2` (the Python
+// entry) goes further and runs its own search, so it is the wrong seam for a
+// host that has its own dim buckets.
+pub mod compiled_graph;
 mod dim_arith;
 pub mod torch_dtype;
 pub mod typed_data;
 
 // PT2 modules
-mod pt2_compiled_model;
+pub mod pt2_compiled_model;
 mod pt2_expr;
-mod pt2_parser;
-mod pt2_schema;
+pub mod pt2_parser;
+pub mod pt2_schema;
 mod pt2_util;
-mod translator;
+pub mod translator;
 
 use compiled_graph::CompiledGraph;
 use pt2_compiled_model::process_pt2;

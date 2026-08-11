@@ -1,4 +1,5 @@
 pub mod decode;
+pub mod expert_stationary;
 pub mod fused;
 
 use std::sync::{Arc, OnceLock};
@@ -661,7 +662,7 @@ impl HostOp for GLUMoE {
             }
         }
 
-        stream.synchronize()?;
+        crate::hostop_profile::phase("  MoE: trailing sync", || stream.synchronize())?;
         Ok(())
     }
 

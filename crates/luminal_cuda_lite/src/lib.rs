@@ -3,6 +3,7 @@
 // `use luminal_cuda_lite::...` imports.
 extern crate self as luminal_cuda_lite;
 
+pub mod hostop_profile;
 pub mod dyn_backend;
 pub mod host;
 pub mod kernel;

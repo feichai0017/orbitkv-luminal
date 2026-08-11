@@ -721,6 +721,68 @@ impl CudaGraphOp {
             .collect()
     }
 
+    /// Multiset of what this graph launches, as a stable label like
+    /// `GenericMatmul x2+RMSNorm+cuBLASLt`. `hostop_profile` keys the
+    /// per-segment timings by this so the single `CudaGraph` line breaks down
+    /// by what actually ran. Borrows state and allocates — call once per op
+    /// and cache the result.
+    pub fn kernel_composition(&self) -> String {
+        use std::collections::BTreeMap;
+        let state = self.state.borrow();
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for k in &state.kernels {
+            *counts.entry(k.kernel_name).or_default() += 1;
+        }
+        if !state.cublaslt_ops.is_empty() {
+            *counts.entry("cuBLASLt").or_default() += state.cublaslt_ops.len();
+        }
+        if !state.flashinfer_ops.is_empty() {
+            *counts.entry("FlashInferDecode").or_default() += state.flashinfer_ops.len();
+        }
+        if counts.is_empty() {
+            return "empty".to_string();
+        }
+        counts
+            .into_iter()
+            .map(|(name, n)| {
+                if n > 1 {
+                    format!("{name} x{n}")
+                } else {
+                    name.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    /// `(kernel_name, threads_launched)` for every kernel in this graph, at
+    /// the given dynamic dims. Distinguishes a Cast that materialises a whole
+    /// weight matrix (millions of threads) from one over a decode activation
+    /// (tens of thousands) — the launch counts alone cannot tell those apart.
+    /// cuBLASLt/FlashInfer steps have no grid of their own and are reported
+    /// with 0.
+    pub fn kernel_sizes(&self, dyn_map: &FxHashMap<char, usize>) -> Vec<(&'static str, u64)> {
+        let state = self.state.borrow();
+        let mut out = Vec::with_capacity(state.kernels.len());
+        for k in &state.kernels {
+            let dim = |e: &Expression| e.exec(dyn_map).unwrap_or(0) as u64;
+            let threads = dim(&k.grid.0)
+                * dim(&k.grid.1)
+                * dim(&k.grid.2)
+                * dim(&k.block.0)
+                * dim(&k.block.1)
+                * dim(&k.block.2);
+            out.push((k.kernel_name, threads));
+        }
+        for _ in 0..state.cublaslt_ops.len() {
+            out.push(("cuBLASLt", 0));
+        }
+        for _ in 0..state.flashinfer_ops.len() {
+            out.push(("FlashInferDecode", 0));
+        }
+        out
+    }
+
     pub fn debug_summary(&self) -> CudaGraphDebugSummary {
         let state = self.state.borrow();
         let step_dependency_counts = state

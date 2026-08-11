@@ -5,7 +5,11 @@ edition.workspace = true
 
 [lib]
 name = "luminal"
-crate-type = ["cdylib"]
+# cdylib for `import luminal` from Python; rlib so Rust callers can link the
+# translator directly. The serving stack needs `translate_pt2` — the PT2 graph
+# with its name maps, writeback outputs and preloaded weights — without going
+# back out through Python, which a cdylib-only crate cannot provide.
+crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [features]

@@ -3635,6 +3635,8 @@ impl Runtime for CudaRuntime {
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
         let profile_runtime = std::env::var_os("LUMINAL_CUDA_PROFILE_RECAPTURE").is_some();
+        crate::hostop_profile::report_and_reset();
+        crate::hostop_profile::bump_generation();
         let runtime_profile_start = std::time::Instant::now();
         let mut bucket_dispatch_time = Duration::ZERO;
         let mut prepare_buffers_time = Duration::ZERO;
@@ -3690,6 +3692,7 @@ impl Runtime for CudaRuntime {
         let total_start = std::time::Instant::now();
         let bucket = &self.compiled_buckets[self.active_bucket];
 
+        let mut op_idx = 0usize;
         for exec_node in toposort(&bucket.exec_graph, None).unwrap() {
             let exec_op = &bucket.exec_graph[exec_node];
             trace!("Executing: {:?}", exec_op);
@@ -3710,8 +3713,38 @@ impl Runtime for CudaRuntime {
                             exec_op.internal.stats_name().unwrap_or("unknown")
                         );
                     });
-                graph_launch_time += timer.elapsed();
+                if crate::hostop_profile::sync_mode() {
+                    exec_op.stream.synchronize().expect("profile sync");
+                }
+                let el = timer.elapsed();
+                graph_launch_time += el;
                 graph_launches += 1;
+                crate::hostop_profile::record_indexed("CudaGraph", op_idx, el);
+                if crate::hostop_profile::enabled() {
+                    // Break the aggregate CudaGraph line down by what each
+                    // segment launches. The label is derived once per op_idx
+                    // and leaked (bounded by the segment count, ~109 here);
+                    // recomputing it per launch would allocate in the tick.
+                    use std::sync::{Mutex, OnceLock};
+                    static LABELS: OnceLock<Mutex<FxHashMap<usize, &'static str>>> =
+                        OnceLock::new();
+                    let labels = LABELS.get_or_init(|| Mutex::new(FxHashMap::default()));
+                    let label = {
+                        let mut labels = labels.lock().unwrap();
+                        *labels.entry(op_idx).or_insert_with(|| {
+                            // One-shot, first time we see this segment: dump
+                            // every kernel with the threads it launches, so
+                            // the launch counts can be read as traffic or as
+                            // pure launch overhead.
+                            for (name, threads) in cuda_graph.kernel_sizes(dyn_map) {
+                                println!("CGKERNEL seg={op_idx} {name} threads={threads}");
+                            }
+                            let s = format!("  CG: {}", cuda_graph.kernel_composition());
+                            Box::leak(s.into_boxed_str()) as &'static str
+                        })
+                    };
+                    crate::hostop_profile::record(label, el);
+                }
             } else {
                 let timer = std::time::Instant::now();
                 let buffer_map = self
@@ -3735,9 +3768,22 @@ impl Runtime for CudaRuntime {
                             exec_op.internal.stats_name().unwrap_or("unknown")
                         );
                     });
-                host_op_time += timer.elapsed();
+                if crate::hostop_profile::sync_mode() {
+                    exec_op.stream.synchronize().expect("profile sync");
+                }
+                let el = timer.elapsed();
+                host_op_time += el;
                 host_op_launches += 1;
+                // Per-op-type attribution. `host_op_call_ms` lumps 72 calls
+                // together; which KIND of op owns the time is the whole
+                // question when the graph is 36 attention + 36 MoE ops.
+                crate::hostop_profile::record_indexed(
+                    exec_op.internal.stats_name().unwrap_or("unknown"),
+                    op_idx,
+                    el,
+                );
             }
+            op_idx += 1;
 
             if !self.profiling
                 && std::env::var_os("LUMINAL_CUDA_CHECK_NONFINITE_INTERNAL").is_some()
