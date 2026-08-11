@@ -51,6 +51,13 @@ struct Extractor<'a> {
     /// byte size derived from its layout's shape and bit width.
     bounds_index: std::cell::RefCell<Option<HashMap<ClassId, (Option<i128>, Option<i128>)>>>,
     tensor_bytes_cache: std::cell::RefCell<HashMap<ClassId, u64>>,
+    /// GENOME-INDEPENDENT dtype index (typed-buffers landing A,
+    /// 2026-08-11): serialized `dtype-of` rows, scanned once —
+    /// LogicalTensor class → the plan dtype. Same row encoding as the
+    /// bounds index (op = function name, children[0] = the argument
+    /// node, the row's own eclass holds the value member); pinned by
+    /// `dtype_index_reads_serialized_rows` in test_support.
+    dtype_index: std::cell::RefCell<Option<HashMap<ClassId, crate::dtype::PlanDtype>>>,
     /// GENOME-INDEPENDENT stable-key memo (measured 2026-08-10: eager
     /// per-comparison rendering was 99% of deep extraction — 7395/7471
     /// sampled stacks inside `is_better`). The rendered form of an enode
@@ -628,6 +635,7 @@ impl<'a> Extractor<'a> {
             op_cache: Default::default(),
             bounds_index: Default::default(),
             tensor_bytes_cache: Default::default(),
+            dtype_index: Default::default(),
             stable_key_cache: Default::default(),
         }
     }
@@ -1434,6 +1442,69 @@ impl<'a> Extractor<'a> {
             *slot = Some(index);
         }
         read(slot.as_ref().expect("bounds index just built"))
+    }
+
+    /// The serialized `dtype-of` rows, indexed once: LogicalTensor
+    /// class → [`crate::dtype::PlanDtype`]. `dtype-of` is `:no-merge`
+    /// in the preamble (a dtype divergence is a saturation panic), so
+    /// at most one dtype per class can survive to serialization — a
+    /// second, different row here means the invariant broke upstream
+    /// and we refuse loudly rather than pick one.
+    fn with_dtype_index<R>(
+        &self,
+        read: impl FnOnce(&HashMap<ClassId, crate::dtype::PlanDtype>) -> R,
+    ) -> R {
+        let mut slot = self.dtype_index.borrow_mut();
+        if slot.is_none() {
+            let mut index: HashMap<ClassId, crate::dtype::PlanDtype> = HashMap::new();
+            for node in self.egraph.nodes.values() {
+                if node.op != "dtype-of" {
+                    continue;
+                }
+                let Some(arg) = node
+                    .children
+                    .first()
+                    .and_then(|id| self.egraph.nodes.get(id))
+                else {
+                    continue;
+                };
+                let Some(dtype) = self.plan_dtype_value(&node.eclass) else {
+                    continue;
+                };
+                match index.entry(arg.eclass.clone()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(dtype);
+                    }
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        assert!(
+                            *entry.get() == dtype,
+                            "dtype-of divergence for class {}: {:?} vs {:?} \
+                             (the :no-merge tripwire should have caught this \
+                             at saturation)",
+                            arg.eclass,
+                            entry.get(),
+                            dtype
+                        );
+                    }
+                }
+            }
+            *slot = Some(index);
+        }
+        read(slot.as_ref().expect("dtype index just built"))
+    }
+
+    /// A `Dtype` class: the childless member whose op is one of the
+    /// egglog dtype spellings.
+    fn plan_dtype_value(&self, class: &ClassId) -> Option<crate::dtype::PlanDtype> {
+        for node_id in self.class_nodes.get(class)? {
+            let node = self.egraph.nodes.get(node_id)?;
+            if node.children.is_empty() {
+                if let Some(dtype) = crate::dtype::PlanDtype::from_egglog_name(&node.op) {
+                    return Some(dtype);
+                }
+            }
+        }
+        None
     }
 
     /// A BigInt primitive class: the childless member whose op is the
@@ -2416,15 +2487,19 @@ impl<'a> Extractor<'a> {
             ),
         };
 
-        let (dims, element_bits) = match self.layout_tensor_parts(class) {
-            Some((_, layout_class)) => {
+        let (dims, element_bits, dtype_enum) = match self.layout_tensor_parts(class) {
+            Some((logical_class, layout_class)) => {
                 let renderer = self.renderer();
                 (
                     renderer.numeric_layout_dims(&layout_class),
                     renderer.numeric_layout_bits(&layout_class),
+                    // Dtype comes from the LOGICAL side (dtype-of rows) —
+                    // never the layout, which is pure placement by the
+                    // preamble contract.
+                    self.with_dtype_index(|index| index.get(&logical_class).copied()),
                 )
             }
-            None => (None, None),
+            None => (None, None, None),
         };
 
         LayoutTensorInfo {
@@ -2433,6 +2508,7 @@ impl<'a> Extractor<'a> {
             tooltip,
             shape,
             dtype,
+            dtype_enum,
             dims,
             element_bits,
             logical,

@@ -470,6 +470,12 @@ pub struct LayoutTensorInfo {
     pub tooltip: String,
     pub shape: Option<String>,
     pub dtype: Option<String>,
+    /// The machine-readable plan dtype, from the logical side's
+    /// `dtype-of` row (typed-buffers landing A) — unlike `dtype` above,
+    /// which is display text and unreliable for interior values. Same
+    /// consumer contract as `dims`: numeric consumers bail loudly on
+    /// `None`.
+    pub dtype_enum: Option<crate::dtype::PlanDtype>,
     /// The layout's extents as literals, walked off the e-graph terms —
     /// `None` when symbolic or underivable. The executor/translator surface;
     /// numeric consumers bail loudly on `None` rather than parse strings.

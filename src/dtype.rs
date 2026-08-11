@@ -122,3 +122,83 @@ impl DType {
         }
     }
 }
+
+/// The egglog `Dtype` vocabulary as read back from serialized `dtype-of`
+/// rows — the PLAN-side dtype (typed-buffers landing A, 2026-08-11).
+/// Deliberately distinct from the authoring [`DType`]: it includes
+/// `Bool8` (binding vocabulary — the byte-code boolean has no frontend
+/// authoring variant on purpose), and its widths are the egglog
+/// `bits-of` rows (information content — `Bool` is ONE bit), not Rust
+/// storage widths. This is the dtype a plan `Buffer` carries and the
+/// executor dispatches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanDtype {
+    F32,
+    F64,
+    F16,
+    Bf16,
+    TF32,
+    Int,
+    Int64,
+    I4,
+    U4,
+    I8,
+    U8,
+    I16,
+    U16,
+    Bool,
+    Bool8,
+    F8UE8M0,
+    F8E4M3,
+    F8E5M2,
+    F6E2M3,
+    F6E3M2,
+    F4E2M1,
+}
+
+impl PlanDtype {
+    /// Parse a serialized nullary `Dtype` constructor name — the egglog
+    /// spellings (`"Int64"`, never Rust's `I64`).
+    pub fn from_egglog_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "F32" => Self::F32,
+            "F64" => Self::F64,
+            "F16" => Self::F16,
+            "Bf16" => Self::Bf16,
+            "TF32" => Self::TF32,
+            "Int" => Self::Int,
+            "Int64" => Self::Int64,
+            "I4" => Self::I4,
+            "U4" => Self::U4,
+            "I8" => Self::I8,
+            "U8" => Self::U8,
+            "I16" => Self::I16,
+            "U16" => Self::U16,
+            "Bool" => Self::Bool,
+            "Bool8" => Self::Bool8,
+            "F8UE8M0" => Self::F8UE8M0,
+            "F8E4M3" => Self::F8E4M3,
+            "F8E5M2" => Self::F8E5M2,
+            "F6E2M3" => Self::F6E2M3,
+            "F6E3M2" => Self::F6E3M2,
+            "F4E2M1" => Self::F4E2M1,
+            _ => return None,
+        })
+    }
+
+    /// The egglog `bits-of` width — MUST mirror the preamble's eager
+    /// rows exactly (Bool = 1: information content, not storage; the
+    /// byte-backed boolean is the separate `Bool8` dtype).
+    pub fn egglog_bits(self) -> i64 {
+        match self {
+            Self::F64 | Self::Int64 => 64,
+            Self::F32 | Self::Int => 32,
+            Self::TF32 => 19,
+            Self::F16 | Self::Bf16 | Self::I16 | Self::U16 => 16,
+            Self::Bool8 | Self::I8 | Self::U8 | Self::F8UE8M0 | Self::F8E4M3 | Self::F8E5M2 => 8,
+            Self::F6E2M3 | Self::F6E3M2 => 6,
+            Self::F4E2M1 | Self::I4 | Self::U4 => 4,
+            Self::Bool => 1,
+        }
+    }
+}

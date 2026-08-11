@@ -1812,6 +1812,7 @@ mod tests {
                     label: name.to_string(),
                     dims: None,
                     element_bits: None,
+                    dtype: None,
                     lit: None,
                 },
             );

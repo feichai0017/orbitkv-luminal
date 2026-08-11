@@ -196,6 +196,7 @@ impl TestGraph {
             tooltip: String::new(),
             shape: None,
             dtype: None,
+            dtype_enum: None,
             dims: None,
             element_bits: None,
             logical: LogicalInfo {
@@ -1716,6 +1717,52 @@ mod harness_tests {
             .expect("gather rewritten to its DPS form");
         assert_eq!(dps.inputs.len(), 4, "the destination trails the coords");
         assert_eq!(dps.inputs[3].port, "dest0");
+    }
+
+    /// TYPED-BUFFERS LANDING A PIN (2026-08-11): the serialized
+    /// `dtype-of` rows are readable (op = "dtype-of", children[0] = the
+    /// logical argument, the row's own eclass holds the nullary Dtype
+    /// member — the bounds-row encoding), and they thread through
+    /// extraction onto every plan buffer. The mixed-dtype gather fixture
+    /// exercises F32 data, an Int boundary input, an Int interior iota
+    /// (a planner-allocated buffer), and an F32 output — so both
+    /// boundary and allocated buffers must arrive typed, and the
+    /// dtype/width consistency bail inside `annotate_buffer_geometry`
+    /// has run over all of them by the time bufferize returns Ok.
+    #[test]
+    fn dtype_index_reads_serialized_rows_onto_buffers() {
+        use crate::dtype::PlanDtype;
+        let graph = extract_fixture("boundary_gather.egg");
+        let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph))
+            .expect("mixed-dtype plan bufferizes");
+
+        let mut by_lit: std::collections::HashMap<i64, PlanDtype> = Default::default();
+        let mut allocated_int = 0usize;
+        for buffer in plan.buffers.values() {
+            if buffer.element_bits.is_some() {
+                let dtype = buffer.dtype.unwrap_or_else(|| {
+                    panic!("buffer {} has geometry but no dtype", buffer.label)
+                });
+                assert_eq!(
+                    dtype.egglog_bits(),
+                    buffer.element_bits.expect("checked above"),
+                    "buffer {} width disagrees with its dtype",
+                    buffer.label
+                );
+                if let Some(lit) = buffer.lit {
+                    by_lit.insert(lit, dtype);
+                } else if dtype == PlanDtype::Int {
+                    allocated_int += 1;
+                }
+            }
+        }
+        assert_eq!(by_lit.get(&310), Some(&PlanDtype::F32), "embedding table");
+        assert_eq!(by_lit.get(&311), Some(&PlanDtype::Int), "token ids");
+        assert_eq!(by_lit.get(&312), Some(&PlanDtype::F32), "lookup output");
+        assert!(
+            allocated_int >= 1,
+            "the interior column iota's allocated buffer must be typed Int"
+        );
     }
 
     /// The terminal-stratum checker (user ruling 2026-07-23: every

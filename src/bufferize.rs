@@ -119,6 +119,12 @@ pub struct Buffer {
     pub dims: Option<Vec<i64>>,
     /// Element bit width (same provenance and contract as `dims`).
     pub element_bits: Option<i64>,
+    /// The plan dtype, from the logical side's `dtype-of` row (same
+    /// provenance/consumer contract as `dims`). The executor dispatches
+    /// storage on THIS, never on width alone — `bits-of(Int)` equals
+    /// `bits-of(F32)`, so width cannot carry the type (typed-buffers
+    /// landing A, 2026-08-11).
+    pub dtype: Option<crate::dtype::PlanDtype>,
     /// The numeric `BufferLit` id for boundary buffers — the key runtimes
     /// bind caller data by.
     pub lit: Option<i64>,
@@ -1303,7 +1309,7 @@ fn validate_input_program(graph: &ExtractedGraph) -> Result<()> {
 /// source `graph` is borrowed and left untouched.
 pub fn bufferize(graph: &ExtractedGraph) -> Result<BufferIrGraph> {
     let mut plan = lower(buffer_tensor_plan(graph)?)?;
-    annotate_buffer_geometry(&mut plan, graph);
+    annotate_buffer_geometry(&mut plan, graph)?;
     Ok(plan)
 }
 
@@ -1311,25 +1317,30 @@ pub fn bufferize(graph: &ExtractedGraph) -> Result<BufferIrGraph> {
 /// boundary `BufferLit` keys onto the plan's buffers — the sizing/binding
 /// surface the `SsaReferenceRuntime` executes from. Purely additive; `None`
 /// stays `None` for symbolic geometry, and numeric consumers bail loudly.
-fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) {
+fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) -> Result<()> {
     use std::collections::HashMap as Map;
-    let mut value_geometry: Map<ClassId, (Option<Vec<i64>>, Option<i64>)> = Map::new();
+    type Geometry = (Option<Vec<i64>>, Option<i64>, Option<crate::dtype::PlanDtype>);
+    let mut value_geometry: Map<ClassId, Geometry> = Map::new();
     let mut boundary_lits: Map<ClassId, i64> = Map::new();
     for node in graph.dag.node_weights() {
         match node {
             ExtractedNode::BufferInput(input) => {
-                value_geometry
-                    .entry(input.value.eclass.clone())
-                    .or_insert((input.value.dims.clone(), input.value.element_bits));
+                value_geometry.entry(input.value.eclass.clone()).or_insert((
+                    input.value.dims.clone(),
+                    input.value.element_bits,
+                    input.value.dtype_enum,
+                ));
                 if let Some(lit) = input.buffer.lit {
                     boundary_lits.insert(input.buffer.id_eclass.clone(), lit);
                 }
             }
             ExtractedNode::LayoutOp(op) => {
                 for output in &op.outputs {
-                    value_geometry
-                        .entry(output.eclass.clone())
-                        .or_insert((output.dims.clone(), output.element_bits));
+                    value_geometry.entry(output.eclass.clone()).or_insert((
+                        output.dims.clone(),
+                        output.element_bits,
+                        output.dtype_enum,
+                    ));
                 }
             }
             ExtractedNode::BufferOutput(output) => {
@@ -1342,7 +1353,7 @@ fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) {
         }
     }
     for (value, id) in &plan.value_buffer {
-        if let Some((dims, bits)) = value_geometry.get(value) {
+        if let Some((dims, bits, dtype)) = value_geometry.get(value) {
             if let Some(buffer) = plan.buffers.get_mut(id) {
                 if buffer.dims.is_none() {
                     buffer.dims = dims.clone();
@@ -1350,7 +1361,37 @@ fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) {
                 if buffer.element_bits.is_none() {
                     buffer.element_bits = *bits;
                 }
+                // Dtype join is CHECKED, not first-wins: two values
+                // cohabiting one buffer with different dtypes would be a
+                // silent reinterpretation — exactly the smuggling the
+                // typed-buffers ruling forbids. (Width-compatible reuse
+                // across dtypes must instead refuse here, loudly.)
+                match (buffer.dtype, dtype) {
+                    (None, Some(dtype)) => buffer.dtype = Some(*dtype),
+                    (Some(held), Some(dtype)) if held != *dtype => anyhow::bail!(
+                        "buffer {} backs values of conflicting dtypes \
+                         {held:?} and {dtype:?} — dtype-blind buffer reuse \
+                         is not executable",
+                        buffer.label
+                    ),
+                    _ => {}
+                }
             }
+        }
+    }
+    // Consistency tripwire: a buffer's layout width must agree with its
+    // dtype's egglog bits-of row (the always-mint rule guarantees this
+    // for auto-minted layouts; a mismatch means a padded/foreign layout
+    // reached execution, which has no typed-storage story yet).
+    for buffer in plan.buffers.values() {
+        if let (Some(bits), Some(dtype)) = (buffer.element_bits, buffer.dtype) {
+            anyhow::ensure!(
+                bits == dtype.egglog_bits(),
+                "buffer {} is annotated {dtype:?} (bits-of = {}) but its \
+                 layout width is {bits} bits",
+                buffer.label,
+                dtype.egglog_bits()
+            );
         }
     }
     for buffer in plan.buffers.values_mut() {
@@ -1370,7 +1411,7 @@ fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) {
         .collect();
     for (src, dst) in copy_pairs {
         let Some(source) = plan.buffers.get(&src) else { continue };
-        let (dims, bits) = (source.dims.clone(), source.element_bits);
+        let (dims, bits, dtype) = (source.dims.clone(), source.element_bits, source.dtype);
         if let Some(buffer) = plan.buffers.get_mut(&dst) {
             if buffer.dims.is_none() {
                 buffer.dims = dims;
@@ -1378,8 +1419,12 @@ fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) {
             if buffer.element_bits.is_none() {
                 buffer.element_bits = bits;
             }
+            if buffer.dtype.is_none() {
+                buffer.dtype = dtype;
+            }
         }
     }
+    Ok(())
 }
 
 /// The PLANNING half of [`bufferize`]: validate the input program, analyze,
@@ -1617,6 +1662,7 @@ impl Bufferizer {
             label,
             dims: None,
             element_bits: None,
+            dtype: None,
             lit: None,
         });
         id
@@ -1637,6 +1683,7 @@ impl Bufferizer {
                 label,
                 dims: None,
                 element_bits: None,
+                dtype: None,
                 lit: None,
             },
         );

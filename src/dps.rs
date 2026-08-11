@@ -80,6 +80,7 @@ pub fn dps_rewrite(graph: &ExtractedGraph) -> ExtractedGraph {
                 tooltip: "poison destination (contents undefined)".to_string(),
                 shape: result.shape.clone(),
                 dtype: result.dtype.clone(),
+                dtype_enum: result.dtype_enum,
                 // The poison destination is physically coincident with its
                 // tied result, geometry included.
                 dims: result.dims.clone(),
