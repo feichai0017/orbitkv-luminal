@@ -830,7 +830,11 @@ def pt2_backend(gm, example_inputs, factory=None, search_iterations=None):
         # Dynamo is still relying on, and running it inside the backend frame
         # corrupts the freshly-installed guards.
         return _LazyDynamicCompiledModel(
-            gm, user_inputs, user_indices, dynamic_shapes, factory,
+            gm,
+            user_inputs,
+            user_indices,
+            dynamic_shapes,
+            factory,
             search_iterations,
         )
 
