@@ -252,12 +252,36 @@ class CompiledModel:
         # device buffer to register against.
         _use_zero_copy = self._supports_device_ptrs
         output_tensors = []
+        # Write-back positions whose destination pointer we handed to the
+        # runtime before `run()`; the rest still need a readback.
+        writeback_registered: set[int] = set()
         if _use_zero_copy:
             for i, (name, shape) in enumerate(zip(self._output_names, output_shapes)):
                 out_dtype = output_torch_dtypes[i]
                 if i in self._writeback_by_pos:
-                    # Write-backs land in the caller's input tensor below, not
-                    # in a fresh output buffer.
+                    # Write-backs land in the caller's input tensor, so
+                    # register THAT as the output buffer and let the kernel
+                    # write it directly — no copy at all. Safe because #385
+                    # made the write-back output a distinct computed node
+                    # (the output->input relation is metadata, not graph
+                    # structure), so nothing downstream reads the input buffer
+                    # after the mutation point. If the runtime cannot honour
+                    # the registration it says so via `output_is_zero_copy`
+                    # and the loop below falls back to a device-to-device
+                    # copy into the same pointer.
+                    input_name = self._writeback_by_pos[i]
+                    target = user_inputs[self._input_names.index(input_name)]
+                    if (
+                        out_dtype in _zero_copy_native_floats
+                        and target.is_cuda
+                        and target.is_contiguous()
+                    ):
+                        self._graph.set_output_device_ptr(
+                            name,
+                            target.data_ptr(),
+                            target.numel() * target.element_size(),
+                        )
+                        writeback_registered.add(i)
                     output_tensors.append(None)
                     continue
                 out = torch.empty(shape, dtype=out_dtype, device=input_device)
@@ -273,12 +297,32 @@ class CompiledModel:
         for i, (name, shape) in enumerate(zip(self._output_names, output_shapes)):
             out_dtype = output_torch_dtypes[i]
             if i in self._writeback_by_pos:
-                # In-place input mutation: copy the computed state back into
+                # In-place input mutation: the computed state goes back into
                 # the caller's tensor (the same object the model would have
                 # mutated eagerly); it is not part of the returned tuple.
                 input_name = self._writeback_by_pos[i]
                 target = user_inputs[self._input_names.index(input_name)]
-                target.copy_(_read_typed_output(name, shape, out_dtype))
+                # Device-to-device when we can. `_read_typed_output` pulls the
+                # buffer to host as bytes, rebuilds a CPU tensor and ships it
+                # back — a DtoH/HtoD/DtoD round trip, per write-back, per
+                # call. For an HF StaticCache the write-backs ARE the KV
+                # cache, so that dominates: measured ~0.5 ms per MiB of cache
+                # on Qwen3-4B, i.e. ~288 ms of a 353 ms token at a 576 MiB
+                # cache width. `copy_output_to_device_ptr` is the same
+                # fallback ordinary outputs already use when they cannot be
+                # written in place, and needs no aliasing guarantees.
+                if i in writeback_registered:
+                    # Registered pre-run: either the kernel already wrote into
+                    # the caller's tensor, or it could not and we take the
+                    # same device-to-device fallback ordinary outputs use.
+                    if not self._graph.output_is_zero_copy(name):
+                        self._graph.copy_output_to_device_ptr(
+                            name,
+                            target.data_ptr(),
+                            target.numel() * target.element_size(),
+                        )
+                else:
+                    target.copy_(_read_typed_output(name, shape, out_dtype))
                 continue
             if _use_zero_copy and out_dtype in _zero_copy_native_floats:
                 out = output_tensors[i]
