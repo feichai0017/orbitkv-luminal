@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use torch_dtype::TorchDType;
 
 #[pymodule]
-fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_pt2, m)?)?;
     m.add_class::<CompiledGraph>()?;
     m.add_function(wrap_pyfunction!(_reference_factory_capsule, m)?)?;
