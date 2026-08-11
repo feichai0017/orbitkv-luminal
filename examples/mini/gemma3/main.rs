@@ -9,7 +9,7 @@ use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
 use luminal::shape::Expression;
 use luminal::ssa_reference::SsaReferenceRuntime;
-use luminal_nn::MiniGemma3;
+use luminal_nn::{rope_pairing_matrix, rope_tables_split_half, MiniGemma3};
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {
     (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
@@ -34,7 +34,10 @@ fn main() {
         .collect();
     let gather_idx = cx.tensor_dtyped(2, DType::Int);
     let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-    let pos = cx.tensor(1);
+    let rope_inputs: Vec<_> = (0..LAYERS)
+        .map(|_| (cx.tensor((1, HD)), cx.tensor((1, HD))))
+        .collect();
+    let rope_rot = cx.tensor((HD, HD));
     let model = MiniGemma3::new(VOCAB, D, FF, NH, NKV, HD, LAYERS, 1, 2, &mut cx);
     let (logits, _caches_out) = model.forward(
         ids,
@@ -42,7 +45,8 @@ fn main() {
         gather_idx,
         scatter_idx,
         Expression::from(1usize),
-        pos,
+        &rope_inputs,
+        rope_rot,
     );
     let logits = logits.output();
 
@@ -51,9 +55,15 @@ fn main() {
         (model.embed.weight.id, weights(VOCAB * D, 199)),
         (gather_idx.id, vec![0.0, 1.0]),
         (scatter_idx.id, vec![1.0]),
-        (pos.id, vec![1.0]),
+        (rope_rot.id, rope_pairing_matrix(HD, false)),
         (model.final_norm.weight.expect("weighted").id, weights(D, 660)),
     ];
+    for (layer, block) in model.blocks.iter().enumerate() {
+        let (cos_table, sin_table) =
+            rope_tables_split_half(&[1.0], HD, block.rope_theta, block.pos_scale);
+        pairs.push((rope_inputs[layer].0.id, cos_table));
+        pairs.push((rope_inputs[layer].1.id, sin_table));
+    }
     for (layer, block) in model.blocks.iter().enumerate() {
         let seed = |slot: usize| 600 + layer * 20 + slot;
         pairs.push((block.wq.weight.id, weights(D * Q_DIM, seed(0))));

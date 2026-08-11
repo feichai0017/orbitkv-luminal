@@ -343,8 +343,13 @@ impl GemmaBlock {
         }
     }
 
-    /// x (s, d) + cache slots (slots, kv_dim) + pos (s,) float positions
-    /// → (x', k_cache', v_cache').
+    /// x (s, d) + cache slots (slots, kv_dim) + this layer role's rope
+    /// tables (s, head_dim) and the pairing matrix (head_dim, head_dim)
+    /// → (x', k_cache', v_cache'). Tables are host-built from the
+    /// block's own `rope_theta`/`pos_scale` (see
+    /// [`crate::rope_tables_split_half`]) — the concat-free rope
+    /// spelling (rejoin-divergence workaround, 2026-08-10; in-graph
+    /// angle synthesis returns with the divergence ruling).
     #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
@@ -354,24 +359,27 @@ impl GemmaBlock {
         gather_idx: GraphTensor,
         scatter_idx: GraphTensor,
         prev_seq: Expression,
-        pos: GraphTensor,
+        rope_cos: GraphTensor,
+        rope_sin: GraphTensor,
+        rope_rot: GraphTensor,
     ) -> (GraphTensor, GraphTensor, GraphTensor) {
         let normed = self.input_norm.forward(x);
         let scale = 1.0 / (self.head_dim as f32).sqrt();
-        let scaled_pos = pos * self.pos_scale;
         // QK-norm before RoPE; attention scale folded into q.
-        let q = crate::rotary_split_half(
+        let q = crate::rotary_apply(
             crate::rms_norm_heads(self.wq.forward(normed), self.head_dim, self.q_norm, 1e-6)
                 * scale,
             self.head_dim,
-            scaled_pos,
-            self.rope_theta,
+            rope_cos,
+            rope_sin,
+            rope_rot,
         );
-        let k = crate::rotary_split_half(
+        let k = crate::rotary_apply(
             crate::rms_norm_heads(self.wk.forward(normed), self.head_dim, self.k_norm, 1e-6),
             self.head_dim,
-            scaled_pos,
-            self.rope_theta,
+            rope_cos,
+            rope_sin,
+            rope_rot,
         );
         let (attn, k_cache, v_cache) = crate::paged_attention_windowed(
             q,

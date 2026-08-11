@@ -5,7 +5,7 @@
 //! Run: cargo run --release --example mini_flux
 
 use luminal::prelude::*;
-use luminal_nn::{mini_dit_rope_tables, MiniDit};
+use luminal_nn::{mini_dit_rope_tables, rope_pairing_matrix, MiniDit};
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {
     (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
@@ -33,8 +33,10 @@ fn main() {
     let guidance = cx.tensor(1);
     let rope_cos = cx.tensor((S, HD));
     let rope_sin = cx.tensor((S, HD));
+    let rope_rot = cx.tensor((HD, HD));
+    let joint_base = cx.tensor((S, D));
     let velocity = model
-        .forward(latent, text, t, guidance, rope_cos, rope_sin)
+        .forward(latent, text, t, guidance, rope_cos, rope_sin, rope_rot, joint_base)
         .output();
 
     let (cos_table, sin_table) = mini_dit_rope_tables(S_TXT, GRID, GRID);
@@ -45,6 +47,8 @@ fn main() {
         (guidance.id, vec![0.8]),
         (rope_cos.id, cos_table),
         (rope_sin.id, sin_table),
+        (rope_rot.id, rope_pairing_matrix(HD, true)),
+        (joint_base.id, vec![0.0; S * D]),
         (model.x_embed.weight.id, weights(IN_CH * D, 500)),
         (model.ctx_embed.weight.id, weights(TXT_DIM * D, 501)),
         (model.t_mlp1.weight.id, weights(T_CH * D, 502)),
@@ -73,7 +77,8 @@ fn main() {
         (model.ctx_ff_in.weight.id, weights(D * 2 * MLP, 525)),
         (model.ctx_ff_out.weight.id, weights(MLP * D, 526)),
         (model.single_proj.weight.id, weights(D * (3 * D + 2 * MLP), 527)),
-        (model.single_out.weight.id, weights((D + MLP) * D, 528)),
+        (model.single_out_attn.weight.id, weights(D * D, 531)),
+        (model.single_out_mlp.weight.id, weights(MLP * D, 532)),
         (model.single_qnorm.id, weights(HD, 529)),
         (model.single_knorm.id, weights(HD, 530)),
     ];

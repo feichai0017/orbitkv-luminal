@@ -212,9 +212,12 @@ impl MiniGemma3 {
         }
     }
 
-    /// ids (s,) Int, per-layer caches, pos (s,) float rope positions →
-    /// (logits, caches'). Embeddings scale by √d in-graph; the tied
-    /// logits head reads the UNSCALED table (gemma's convention).
+    /// ids (s,) Int, per-layer caches, per-layer rope tables (cos, sin)
+    /// — host-built from each block's role theta/pos_scale — plus the
+    /// shared split-half pairing matrix → (logits, caches'). Embeddings
+    /// scale by √d in-graph; the tied logits head reads the UNSCALED
+    /// table (gemma's convention).
+    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
         ids: GraphTensor,
@@ -222,7 +225,8 @@ impl MiniGemma3 {
         gather_idx: GraphTensor,
         scatter_idx: GraphTensor,
         prev_seq: Expression,
-        pos: GraphTensor,
+        rope: &[(GraphTensor, GraphTensor)],
+        rope_rot: GraphTensor,
     ) -> (GraphTensor, Vec<(GraphTensor, GraphTensor)>) {
         let mut x = self.embed.forward(ids) * (self.d as f32).sqrt();
         let mut caches_out = Vec::with_capacity(self.blocks.len());
@@ -234,7 +238,9 @@ impl MiniGemma3 {
                 gather_idx,
                 scatter_idx,
                 prev_seq,
-                pos,
+                rope[layer].0,
+                rope[layer].1,
+                rope_rot,
             );
             x = next;
             caches_out.push((kc, vc));
@@ -553,7 +559,13 @@ pub struct MiniDit {
     pub ctx_ff_in: Linear,
     pub ctx_ff_out: Linear,
     pub single_proj: Linear,
-    pub single_out: Linear,
+    /// The single-stream out-projection, SPLIT into its attn-rows and
+    /// mlp-rows halves: out = attn·W_attn + mlp·W_mlp — algebraically
+    /// identical to flux2's fused `to_out @ [attn ‖ mlp]`, spelled
+    /// without the concat (rejoin-divergence workaround; the fused
+    /// spelling returns with the divergence ruling).
+    pub single_out_attn: Linear,
+    pub single_out_mlp: Linear,
     pub single_qnorm: GraphTensor,
     pub single_knorm: GraphTensor,
     ln: crate::LayerNorm, // no-affine LayerNorm, shared (stateless)
@@ -607,7 +619,8 @@ impl MiniDit {
             ctx_ff_in: Linear::new(d, 2 * mlp, false, cx),
             ctx_ff_out: Linear::new(mlp, d, false, cx),
             single_proj: Linear::new(d, 3 * d + 2 * mlp, false, cx),
-            single_out: Linear::new(d + mlp, d, false, cx),
+            single_out_attn: Linear::new(d, d, false, cx),
+            single_out_mlp: Linear::new(mlp, d, false, cx),
             single_qnorm: cx.named_tensor("SglQNorm", head_dim),
             single_knorm: cx.named_tensor("SglKNorm", head_dim),
             ln: crate::LayerNorm::new(d, None, None, true, 1e-6, cx),
@@ -641,7 +654,10 @@ impl MiniDit {
     }
 
     /// latent (s_img, in_ch), text (s_txt, txt_dim), t (1,), guidance (1,),
-    /// rope tables (s_txt+s_img, head_dim) → velocity (s_img, in_ch).
+    /// rope tables (s_txt+s_img, head_dim), the interleaved pairing
+    /// matrix (head_dim, head_dim), and a zeros base (s_txt+s_img, d)
+    /// for the scatter-assembled joint sequence → velocity (s_img, in_ch).
+    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
         latent: GraphTensor,
@@ -650,6 +666,8 @@ impl MiniDit {
         guidance: GraphTensor,
         rope_cos: GraphTensor,
         rope_sin: GraphTensor,
+        rope_rot: GraphTensor,
+        joint_base: GraphTensor,
     ) -> GraphTensor {
         let (d, mlp, s_txt) = (self.d, self.mlp, self.s_txt);
         let temb = self.t_mlp2.forward(self.t_mlp1.forward(self.sinusoid(t)).silu())
@@ -683,14 +701,13 @@ impl MiniDit {
                 * weight.unsqueeze(0).unsqueeze(0).expand(dims)
         };
         let rope = |x: GraphTensor| {
-            // interleaved-pair rotation: [x0,x1,…] → [-x1,x0,…]
+            // Interleaved-pair rotation via the pairing matrix — the
+            // concat-free spelling (rejoin-divergence workaround):
+            // rope(x) = x ⊙ cos + (x @ R) ⊙ sin on (H, S, hd).
             let dims = x.dims();
-            let pairs = x.split_dims(2, 2); // (H,S,hd/2,2)
-            let even = pairs.slice_along(0..1, 3);
-            let odd = pairs.slice_along(1..2, 3);
-            let rot = (-odd).concat_along(even, 3).merge_dims(2, 3);
+            let rotated = x.matmul(rope_rot);
             x * rope_cos.unsqueeze(0).expand(dims.clone())
-                + rot * rope_sin.unsqueeze(0).expand(dims)
+                + rotated * rope_sin.unsqueeze(0).expand(dims)
         };
         let sdpa = |q: GraphTensor, k: GraphTensor, v: GraphTensor| {
             let scale = 1.0 / (self.head_dim as f32).sqrt();
@@ -712,14 +729,22 @@ impl MiniDit {
         let txt_n = ada(self.ln.forward(txt), c_scale0, c_shift0);
         let q_img = head_rms(heads(self.img_q.forward(img_n)), self.img_qnorm);
         let k_img = head_rms(heads(self.img_k.forward(img_n)), self.img_knorm);
-        let v_img = heads(self.img_v.forward(img_n));
         let q_txt = head_rms(heads(self.txt_q.forward(txt_n)), self.txt_qnorm);
         let k_txt = head_rms(heads(self.txt_k.forward(txt_n)), self.txt_knorm);
-        let v_txt = heads(self.txt_v.forward(txt_n));
+        // V's sequence concat happens FLAT, before the head split — the
+        // head reshape commutes with row concat, and pads over matmul
+        // outputs (compute) never form the pure-view stack the rejoin
+        // divergence needs. q/k concat after head_rms (a compute) for
+        // the same reason.
+        let v_all = heads(
+            self.txt_v
+                .forward(txt_n)
+                .concat_along(self.img_v.forward(img_n), 0),
+        );
         let attn = unheads(sdpa(
             rope(q_txt.concat_along(q_img, 1)),
             rope(k_txt.concat_along(k_img, 1)),
-            v_txt.concat_along(v_img, 1),
+            v_all,
         )); // (s, d)
         let attn_txt = attn.slice_along(0..s_txt, 0);
         let attn_img = attn.slice_along(s_txt.., 0);
@@ -731,7 +756,21 @@ impl MiniDit {
         txt = txt + gate(self.ctx_ff_out.forward(c_ff), c_gate1);
 
         // ---- single-stream block over [txt ‖ img] ----
-        let mut hidden = txt.concat_along(img, 0); // (s, d)
+        // The joint sequence assembles by SCATTER writes into a zero
+        // base (the paged-attention family's own row-assembly spelling)
+        // instead of concat's pad+add: the head SLICES this tensor, and
+        // a slice distributing down to a pad's clamp view re-creates
+        // the rejoin-divergence stack (measured: stage-8 probe). Scatter
+        // is a compute write — the slice stops there.
+        let graph = latent.graph();
+        let txt_positions = graph.arange(s_txt);
+        let img_positions = graph.iota(latent.dims()[0], move |c| c[0] + s_txt);
+        let mut hidden = crate::scatter_rows(
+            img,
+            img_positions,
+            crate::scatter_rows(txt, txt_positions, joint_base, d),
+            d,
+        ); // (s, d)
         let (s_shift, s_scale, s_gate) = triple(m_single, 0);
         let normed = ada(self.ln.forward(hidden), s_scale, s_shift);
         let proj = self.single_proj.forward(normed); // (s, 3d + 2·mlp)
@@ -740,8 +779,13 @@ impl MiniDit {
         let v = heads(proj.slice_along(2 * d..3 * d, 1));
         let attn = unheads(sdpa(rope(q), rope(k), v)); // (s, d)
         let mlp_out = swiglu(proj.slice_along(3 * d..3 * d + 2 * mlp, 1)); // (s, mlp)
-        let fused = attn.concat_along(mlp_out, 1); // (s, d + mlp)
-        hidden = hidden + gate(self.single_out.forward(fused), s_gate);
+        // Fused out-projection over [attn ‖ mlp], spelled as the
+        // row-split sum (see the single_out_* field note).
+        hidden = hidden
+            + gate(
+                self.single_out_attn.forward(attn) + self.single_out_mlp.forward(mlp_out),
+                s_gate,
+            );
 
         // ---- AdaLayerNormContinuous head: (scale, shift) — REVERSED ----
         let img_final = hidden.slice_along(s_txt.., 0); // (s_img, d)
@@ -1042,18 +1086,22 @@ mod tests {
         });
     }
 
-    /// Split-half rope reference: halves pair (j, j+half) per head,
-    /// arg_j = pos·theta^(−2j/head_dim) — mirror of rotary_split_half.
-    fn ref_rotary_split_half(x: &[f32], head_dim: usize, pos: f32, theta: f32) -> Vec<f32> {
-        let half = head_dim / 2;
-        let mut out = x.to_vec();
-        for head in 0..x.len() / head_dim {
-            for j in 0..half {
-                let freq = theta.powf(-2.0 * j as f32 / head_dim as f32);
-                let (cos, sin) = ((pos * freq).cos(), (pos * freq).sin());
-                let (a, b) = (x[head * head_dim + j], x[head * head_dim + j + half]);
-                out[head * head_dim + j] = a * cos - b * sin;
-                out[head * head_dim + j + half] = b * cos + a * sin;
+    /// Table-and-matrix rope reference — mirror of `rotary_apply`:
+    /// out = x ⊙ cos + (x @ R) ⊙ sin, per head, single row.
+    fn ref_rotary_apply(
+        x: &[f32],
+        head_dim: usize,
+        cos: &[f32],
+        sin: &[f32],
+        rot: &[f32],
+    ) -> Vec<f32> {
+        let mut out = Vec::with_capacity(x.len());
+        for head in x.chunks(head_dim) {
+            for i in 0..head_dim {
+                let rotated: f32 = (0..head_dim)
+                    .map(|source| head[source] * rot[source * head_dim + i])
+                    .sum();
+                out.push(head[i] * cos[i] + rotated * sin[i]);
             }
         }
         out
@@ -1067,10 +1115,6 @@ mod tests {
     /// head. WINDOW = 1 so the local mask provably bites (gathered
     /// position 0 masked at q_pos = 1).
     #[test]
-    #[ignore = "BLOCKED: rejoin saturation divergence — concat-of-slices mints nested \
-                IntAdd offsets that the assoc/commut/subst-demand family breeds \
-                geometrically (test_support rejoin_divergence_probe, 2026-08-10); \
-                re-enable when the divergence ruling lands"]
     fn mini_gemma3_matches_scalar_reference() {
         const VOCAB: usize = 5;
         const D: usize = 6;
@@ -1095,7 +1139,10 @@ mod tests {
             .collect();
         let gather_idx = cx.tensor_dtyped(CTX, DType::Int);
         let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-        let pos = cx.tensor(1);
+        let rope_inputs: Vec<_> = (0..LAYERS)
+            .map(|_| (cx.tensor((1, HD)), cx.tensor((1, HD))))
+            .collect();
+        let rope_rot = cx.tensor((HD, HD));
         let model = MiniGemma3::new(VOCAB, D, FF, NH, NKV, HD, LAYERS, WINDOW, PATTERN, &mut cx);
         let (logits, caches_out) = model.forward(
             ids,
@@ -1103,7 +1150,8 @@ mod tests {
             gather_idx,
             scatter_idx,
             Expression::from(q_pos),
-            pos,
+            &rope_inputs,
+            rope_rot,
         );
         let logits = logits.output();
         let caches_out: Vec<_> = caches_out
@@ -1113,14 +1161,32 @@ mod tests {
 
         let seeds = |layer: usize, slot: usize| 600 + layer * 20 + slot;
         let embed_w = weights(VOCAB * D, 199);
+        let rot_matrix = crate::rope_pairing_matrix(HD, false);
+        // Per-layer tables from each block's role parameters.
+        let role_tables: Vec<(Vec<f32>, Vec<f32>)> = model
+            .blocks
+            .iter()
+            .map(|block| {
+                crate::rope_tables_split_half(
+                    &[q_pos as f32],
+                    HD,
+                    block.rope_theta,
+                    block.pos_scale,
+                )
+            })
+            .collect();
         let mut pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
             (ids.id, vec![token as f32]),
             (model.embed.weight.id, embed_w.clone()),
             (gather_idx.id, vec![0.0, 1.0]),
             (scatter_idx.id, vec![1.0]),
-            (pos.id, vec![q_pos as f32]),
+            (rope_rot.id, rot_matrix.clone()),
             (model.final_norm.weight.expect("weighted").id, weights(D, 660)),
         ];
+        for (layer, (cos_table, sin_table)) in role_tables.iter().enumerate() {
+            pairs.push((rope_inputs[layer].0.id, cos_table.clone()));
+            pairs.push((rope_inputs[layer].1.id, sin_table.clone()));
+        }
         let mut ref_caches: Vec<(Vec<f32>, Vec<f32>)> = Vec::new();
         for (layer, block) in model.blocks.iter().enumerate() {
             pairs.push((block.wq.weight.id, weights(D * Q_DIM, seeds(layer, 0))));
@@ -1159,18 +1225,17 @@ mod tests {
             .collect();
         for layer in 0..LAYERS {
             let local = (layer + 1) % PATTERN != 0;
-            let (theta, pos_scale) = if local { (10_000.0, 1.0) } else { (1_000_000.0, 0.125) };
-            let scaled_pos = q_pos as f32 * pos_scale;
+            let (cos_table, sin_table) = &role_tables[layer];
             let scale = 1.0 / (HD as f32).sqrt();
             let (kc, vc) = &mut ref_caches[layer];
             let h = wrms(&x, &weights(D, seeds(layer, 7)));
             let q = ref_matmul(&h, &weights(D * Q_DIM, seeds(layer, 0)), D, Q_DIM);
             let q = ref_rms_head_norm(&q, HD, &weights(HD, seeds(layer, 11)));
             let q: Vec<f32> = q.iter().map(|v| v * scale).collect(); // folded into Q
-            let q = ref_rotary_split_half(&q, HD, scaled_pos, theta);
+            let q = ref_rotary_apply(&q, HD, cos_table, sin_table, &rot_matrix);
             let k = ref_matmul(&h, &weights(D * KV_DIM, seeds(layer, 1)), D, KV_DIM);
             let k = ref_rms_head_norm(&k, HD, &weights(HD, seeds(layer, 12)));
-            let k = ref_rotary_split_half(&k, HD, scaled_pos, theta);
+            let k = ref_rotary_apply(&k, HD, cos_table, sin_table, &rot_matrix);
             let v = ref_matmul(&h, &weights(D * KV_DIM, seeds(layer, 2)), D, KV_DIM);
             let attn = ref_paged_step_gqa(
                 &q,
@@ -1472,9 +1537,13 @@ mod tests {
     /// (scale, shift) at norm_out, and txt-before-img in every
     /// concat/split — are exercised by construction.
     #[test]
-    #[ignore = "BLOCKED: rejoin saturation divergence (same root as mini_gemma3 — \
-                the interleaved-pair rope rotation is a concat-of-slices); see \
-                test_support rejoin_divergence_probe; re-enable when the ruling lands"]
+    #[ignore = "BLOCKED on the rejoin-divergence ruling: three concat/view spellings \
+                fixed (matmul rope, flat V concat, split out-projection, scatter-\
+                assembled joint sequence) and the graph still finds a slice-through-\
+                elementwise-distribution road into a view stack (stage-8 probe). The \
+                adaLN broadcast-modulation architecture generates these roads \
+                structurally; unblock = stratified composition or structural map \
+                entries. Probes: probe_dit_stages / probe_dit_round_driver."]
     fn mini_dit_matches_scalar_reference() {
         const IN_CH: usize = 4;
         const TXT_DIM: usize = 6;
@@ -1497,11 +1566,14 @@ mod tests {
         let guidance = cx.tensor(1);
         let rope_cos = cx.tensor((S, HD));
         let rope_sin = cx.tensor((S, HD));
+        let rope_rot = cx.tensor((HD, HD));
+        let joint_base = cx.tensor((S, D));
         let velocity = model
-            .forward(latent, text, t, guidance, rope_cos, rope_sin)
+            .forward(latent, text, t, guidance, rope_cos, rope_sin, rope_rot, joint_base)
             .output();
 
         let (cos_table, sin_table) = mini_dit_rope_tables(S_TXT, GRID, GRID);
+        let rot_matrix = crate::rope_pairing_matrix(HD, true);
         let latent_vals = weights(S_IMG * IN_CH, 540);
         let text_vals = weights(S_TXT * TXT_DIM, 541);
         let (t_val, g_val) = (0.35f32, 0.8f32);
@@ -1512,6 +1584,8 @@ mod tests {
             (guidance.id, vec![g_val]),
             (rope_cos.id, cos_table.clone()),
             (rope_sin.id, sin_table.clone()),
+            (rope_rot.id, rot_matrix.clone()),
+            (joint_base.id, vec![0.0; S * D]),
             (model.x_embed.weight.id, weights(IN_CH * D, 500)),
             (model.ctx_embed.weight.id, weights(TXT_DIM * D, 501)),
             (model.t_mlp1.weight.id, weights(T_CH * D, 502)),
@@ -1540,7 +1614,8 @@ mod tests {
             (model.ctx_ff_in.weight.id, weights(D * 2 * MLP, 525)),
             (model.ctx_ff_out.weight.id, weights(MLP * D, 526)),
             (model.single_proj.weight.id, weights(D * (3 * D + 2 * MLP), 527)),
-            (model.single_out.weight.id, weights((D + MLP) * D, 528)),
+            (model.single_out_attn.weight.id, weights(D * D, 531)),
+            (model.single_out_mlp.weight.id, weights(MLP * D, 532)),
             (model.single_qnorm.id, weights(HD, 529)),
             (model.single_knorm.id, weights(HD, 530)),
         ];
@@ -1766,23 +1841,12 @@ mod tests {
         let v = slice_cols(&proj, 2 * D, 3 * D);
         let attn = ref_attention(&q, &k, &v, S, S, NH, HD);
         let mlp_out = swiglu_rows(&slice_cols(&proj, 3 * D, 3 * D + 2 * MLP), S);
-        let fused: Vec<f32> = (0..S)
-            .flat_map(|row| {
-                attn[row * D..(row + 1) * D]
-                    .iter()
-                    .chain(&mlp_out[row * MLP..(row + 1) * MLP])
-                    .copied()
-                    .collect::<Vec<f32>>()
-            })
-            .collect();
-        hidden = add(
-            &hidden,
-            &gate_rows(
-                &matmul_rows(&fused, &weights((D + MLP) * D, 528), S, D + MLP, D),
-                &s_gate,
-                S,
-            ),
+        // Row-split fused out-projection (mirrors single_out_attn/_mlp).
+        let out_sum = add(
+            &matmul_rows(&attn, &weights(D * D, 531), S, D, D),
+            &matmul_rows(&mlp_out, &weights(MLP * D, 532), S, MLP, D),
         );
+        hidden = add(&hidden, &gate_rows(&out_sum, &s_gate, S));
 
         // AdaLayerNormContinuous head — (scale, shift), REVERSED order.
         let img_final = &hidden[S_TXT * D..];
@@ -1956,14 +2020,25 @@ mod tests {
             }
         };
 
-        // (a) rope alone: one head-pair rotation of a (1, 8) projection.
+        // (a) rope alone — now the TABLE-AND-MATRIX spelling (the
+        // rejoin-divergence workaround). The original slice/neg/concat
+        // spelling detonated here (~4GB in 5s); this stage is the
+        // positive control that the workaround saturates cleanly.
         {
             let mut cx = Graph::new();
             let x = cx.tensor((1, 8));
-            let pos = cx.tensor(1);
-            let out = crate::rotary_split_half(x, 4, pos, 10_000.0).output();
+            let cos = cx.tensor((1, 4));
+            let sin = cx.tensor((1, 4));
+            let rot = cx.tensor((4, 4));
+            let out = crate::rotary_apply(x, 4, cos, sin, rot).output();
             let _ = out;
-            let pairs = vec![(x.id, weights(8, 1)), (pos.id, vec![1.0])];
+            let (cos_table, sin_table) = crate::rope_tables_split_half(&[1.0], 4, 10_000.0, 1.0);
+            let pairs = vec![
+                (x.id, weights(8, 1)),
+                (cos.id, cos_table),
+                (sin.id, sin_table),
+                (rot.id, crate::rope_pairing_matrix(4, false)),
+            ];
             run("rope-alone", &cx, &pairs);
         }
 
@@ -2024,6 +2099,120 @@ mod tests {
         }
     }
 
+    /// ROUND DRIVER on the FULL MiniDit graph (stage 7 detonates at one
+    /// genome while stage 6 saturates in 10s): runs the main ruleset one
+    /// round at a time with table-size deltas and top-firing rules, so
+    /// the igniting family names itself. Bounded: 200 rounds, bail on a
+    /// >200k-tuple round. Run:
+    /// cargo test --release -p luminal_nn probe_dit_round_driver -- --ignored --nocapture
+    #[test]
+    #[ignore = "diagnosis probe — run explicitly by name (release, bounded)"]
+    fn probe_dit_round_driver() {
+        const IN_CH: usize = 4;
+        const TXT_DIM: usize = 6;
+        const D: usize = 16;
+        const NH: usize = 2;
+        const HD: usize = 8;
+        const MLP: usize = 6;
+        const T_HALF: usize = 2;
+        const S_TXT: usize = 2;
+        const GRID: usize = 2;
+        const S: usize = S_TXT + GRID * GRID;
+
+        let mut cx = Graph::new();
+        let model = MiniDit::new(IN_CH, TXT_DIM, D, NH, MLP, T_HALF, S_TXT, &mut cx);
+        let latent = cx.tensor((GRID * GRID, IN_CH));
+        let text = cx.tensor((S_TXT, TXT_DIM));
+        let t = cx.tensor(1);
+        let guidance = cx.tensor(1);
+        let rope_cos = cx.tensor((S, HD));
+        let rope_sin = cx.tensor((S, HD));
+        let rope_rot = cx.tensor((HD, HD));
+        let joint_base = cx.tensor((S, D));
+        let _velocity = model
+            .forward(latent, text, t, guidance, rope_cos, rope_sin, rope_rot, joint_base)
+            .output();
+        let (pre, _inputs, _outputs, _post) =
+            cx.logical.native_parts().expect("recorder clean");
+        let full = format!("{}\n\n{pre}", luminal::egglog_snippet::assembled_program());
+        let mut egraph = luminal::egglog_snippet::new_egraph();
+        egraph.parse_and_run_program(None, &full).expect("body loads");
+        let sizes = |egraph: &mut egglog::EGraph| -> rustc_hash::FxHashMap<String, isize> {
+            let out = egraph
+                .parse_and_run_program(None, "(print-size)")
+                .expect("sizes");
+            let mut map = rustc_hash::FxHashMap::default();
+            for chunk in &out {
+                for line in chunk.to_string().lines() {
+                    if let Some((name, count)) = line.rsplit_once(": ") {
+                        if let Ok(count) = count.trim().parse::<isize>() {
+                            map.insert(name.trim().to_string(), count);
+                        }
+                    }
+                }
+            }
+            map
+        };
+        let mut previous = sizes(&mut egraph);
+        for round in 1..=200 {
+            let start = std::time::Instant::now();
+            let round_out = egraph.parse_and_run_program(None, "(run 1)").expect("round");
+            let current = sizes(&mut egraph);
+            let total: isize = current.values().sum();
+            let mut deltas: Vec<(String, isize)> = current
+                .iter()
+                .map(|(name, &count)| {
+                    (name.clone(), count - previous.get(name).copied().unwrap_or(0))
+                })
+                .filter(|(_, delta)| *delta != 0)
+                .collect();
+            deltas.sort_by_key(|(_, delta)| -*delta);
+            let grew: isize = deltas.iter().map(|(_, delta)| *delta).sum();
+            let top: Vec<String> = deltas
+                .iter()
+                .take(6)
+                .map(|(name, delta)| format!("{name} {delta:+}"))
+                .collect();
+            if grew > 400 || round % 10 == 0 || grew == 0 {
+                eprintln!(
+                    "[dit-rounds] round {round}: total {total} ({grew:+}) in {:.2}s | {}",
+                    start.elapsed().as_secs_f64(),
+                    top.join(", ")
+                );
+            }
+            if grew > 2000 {
+                for chunk in &round_out {
+                    let egglog::CommandOutput::RunSchedule(report) = chunk else {
+                        continue;
+                    };
+                    let mut rules: Vec<(String, usize)> = report
+                        .num_matches_per_rule
+                        .iter()
+                        .map(|(name, &matches)| (name.to_string(), matches))
+                        .collect();
+                    rules.sort_by_key(|(_, matches)| std::cmp::Reverse(*matches));
+                    for (name, matches) in rules.iter().take(4) {
+                        let flat: String =
+                            name.split_whitespace().collect::<Vec<_>>().join(" ");
+                        eprintln!(
+                            "[dit-rounds]   x{matches} {}",
+                            flat.chars().take(110).collect::<String>()
+                        );
+                    }
+                }
+            }
+            if grew > 200_000 {
+                eprintln!("[dit-rounds] BAIL: runaway round");
+                break;
+            }
+            if grew == 0 {
+                eprintln!("[dit-rounds] SATURATED at round {round}");
+                break;
+            }
+            previous = current;
+        }
+    }
+
     /// STAGE-BISECT PROBE for the MiniDit saturation blowup (2026-08-10:
     /// the batch run burned 10+ minutes inside egglog free-join at
     /// bounded ~2GB RSS — a tuple/time explosion, not memory). Builds
@@ -2053,7 +2242,7 @@ mod tests {
             seed: 0,
         };
 
-        for stage in 1..=6usize {
+        for stage in [1usize, 2, 3, 4, 5, 6, 8, 9, 10, 7] {
             let start = std::time::Instant::now();
             let mut cx = Graph::new();
             let model = MiniDit::new(IN_CH, TXT_DIM, D, NH, MLP, T_HALF, S_TXT, &mut cx);
@@ -2063,6 +2252,8 @@ mod tests {
             let guidance = cx.tensor(1);
             let rope_cos = cx.tensor((S, HD));
             let rope_sin = cx.tensor((S, HD));
+            let rope_rot = cx.tensor((HD, HD));
+            let joint_base = cx.tensor((S, D));
             let ln = crate::LayerNorm::new(D, None, None, true, 1e-6, &mut cx);
 
             // ---- partial forward, mirroring MiniDit::forward ----
@@ -2101,13 +2292,11 @@ mod tests {
                     * weight.unsqueeze(0).unsqueeze(0).expand(dims)
             };
             let rope = |x: GraphTensor| {
+                // matmul-form rotation — mirrors MiniDit::forward
                 let dims = x.dims();
-                let pairs = x.split_dims(2, 2);
-                let even = pairs.slice_along(0..1, 3);
-                let odd = pairs.slice_along(1..2, 3);
-                let rot = (-odd).concat_along(even, 3).merge_dims(2, 3);
+                let rotated = x.matmul(rope_rot);
                 x * rope_cos.unsqueeze(0).expand(dims.clone())
-                    + rot * rope_sin.unsqueeze(0).expand(dims)
+                    + rotated * rope_sin.unsqueeze(0).expand(dims)
             };
             let sdpa = |q: GraphTensor, k: GraphTensor, v: GraphTensor| {
                 let scale = 1.0 / (HD as f32).sqrt();
@@ -2116,7 +2305,12 @@ mod tests {
             let swiglu =
                 |u: GraphTensor| u.slice_along(0..MLP, 1).silu() * u.slice_along(MLP..2 * MLP, 1);
 
-            let out: GraphTensor = if stage == 1 {
+            let out: GraphTensor = if stage == 7 {
+                // The REAL full forward (head included) — 1-genome
+                // budget: discriminates graph divergence from
+                // search-loop memory at the default 64-genome budget.
+                model.forward(latent, text, t, guidance, rope_cos, rope_sin, rope_rot, joint_base)
+            } else if stage == 1 {
                 m_single
             } else {
                 let (shift0, scale0, gate0) = triple(m_img, 0);
@@ -2132,10 +2326,14 @@ mod tests {
                 } else {
                     let q_img = head_rms(heads(model.img_q.forward(img_n)), model.img_qnorm);
                     let k_img = head_rms(heads(model.img_k.forward(img_n)), model.img_knorm);
-                    let v_img = heads(model.img_v.forward(img_n));
                     let q_txt = head_rms(heads(model.txt_q.forward(txt_n)), model.txt_qnorm);
                     let k_txt = head_rms(heads(model.txt_k.forward(txt_n)), model.txt_knorm);
-                    let v_txt = heads(model.txt_v.forward(txt_n));
+                    let v_all = heads(
+                        model
+                            .txt_v
+                            .forward(txt_n)
+                            .concat_along(model.img_v.forward(img_n), 0),
+                    );
                     let q_all = q_txt.concat_along(q_img, 1);
                     if stage == 3 {
                         unheads(q_all)
@@ -2145,7 +2343,7 @@ mod tests {
                         let attn = unheads(sdpa(
                             rope(q_all),
                             rope(k_txt.concat_along(k_img, 1)),
-                            v_txt.concat_along(v_img, 1),
+                            v_all,
                         ));
                         let attn_txt = attn.slice_along(0..S_TXT, 0);
                         let attn_img = attn.slice_along(S_TXT.., 0);
@@ -2162,7 +2360,16 @@ mod tests {
                         if stage == 5 {
                             img + txt.mean(0).expand_lhs((S_IMG,))
                         } else {
-                            let hidden = txt.concat_along(img, 0);
+                            let graph = latent.graph();
+                            let txt_positions = graph.arange(S_TXT);
+                            let img_positions =
+                                graph.iota(S_IMG, move |c| c[0] + S_TXT);
+                            let hidden = crate::scatter_rows(
+                                img,
+                                img_positions,
+                                crate::scatter_rows(txt, txt_positions, joint_base, D),
+                                D,
+                            );
                             let (s_shift, s_scale, s_gate) = triple(m_single, 0);
                             let normed = ada(ln.forward(hidden), s_scale, s_shift);
                             let proj = model.single_proj.forward(normed);
@@ -2172,8 +2379,31 @@ mod tests {
                             let v = heads(proj.slice_along(2 * D..3 * D, 1));
                             let attn = unheads(sdpa(rope(q), rope(k), v));
                             let mlp_out = swiglu(proj.slice_along(3 * D..3 * D + 2 * MLP, 1));
-                            let fused = attn.concat_along(mlp_out, 1);
-                            hidden + gate(model.single_out.forward(fused), s_gate)
+                            let hidden_out = hidden
+                                + gate(
+                                    model.single_out_attn.forward(attn)
+                                        + model.single_out_mlp.forward(mlp_out),
+                                    s_gate,
+                                );
+                            // Stage 6→7 delta sub-bisect: 8 = +slice,
+                            // 9 = +no-affine LN, 10 = +adaLN head
+                            // modulation. Stage 7 (the real forward)
+                            // adds proj_out on top of stage 10's shape.
+                            if stage == 6 {
+                                hidden_out
+                            } else {
+                                let img_final = hidden_out.slice_along(S_TXT.., 0);
+                                if stage == 8 {
+                                    img_final
+                                } else if stage == 9 {
+                                    ln.forward(img_final)
+                                } else {
+                                    let head = model.norm_out.forward(cond);
+                                    let scale_head = head.slice_along(0..D, 1);
+                                    let shift_head = head.slice_along(D..2 * D, 1);
+                                    ada(ln.forward(img_final), scale_head, shift_head)
+                                }
+                            }
                         }
                     }
                 }
@@ -2188,6 +2418,8 @@ mod tests {
                 (guidance.id, vec![0.8]),
                 (rope_cos.id, mini_dit_rope_tables(S_TXT, GRID, GRID).0),
                 (rope_sin.id, mini_dit_rope_tables(S_TXT, GRID, GRID).1),
+                (rope_rot.id, crate::rope_pairing_matrix(HD, true)),
+                (joint_base.id, vec![0.0; S * D]),
                 (model.x_embed.weight.id, weights(IN_CH * D, 500)),
                 (model.ctx_embed.weight.id, weights(TXT_DIM * D, 501)),
                 (model.t_mlp1.weight.id, weights(2 * T_HALF * D, 502)),
@@ -2216,7 +2448,8 @@ mod tests {
                 (model.ctx_ff_in.weight.id, weights(D * 2 * MLP, 525)),
                 (model.ctx_ff_out.weight.id, weights(MLP * D, 526)),
                 (model.single_proj.weight.id, weights(D * (3 * D + 2 * MLP), 527)),
-                (model.single_out.weight.id, weights((D + MLP) * D, 528)),
+                (model.single_out_attn.weight.id, weights(D * D, 531)),
+                (model.single_out_mlp.weight.id, weights(MLP * D, 532)),
                 (model.single_qnorm.id, weights(HD, 529)),
                 (model.single_knorm.id, weights(HD, 530)),
             ];

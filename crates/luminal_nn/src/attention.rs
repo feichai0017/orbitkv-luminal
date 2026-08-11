@@ -200,45 +200,79 @@ pub fn paged_attention_windowed(
     (out, k_cache, v_cache)
 }
 
-/// SPLIT-HALF rotary embedding (the llama/qwen/gemma rotation form) at
-/// decode positions: x (s, n·head_dim), pos (s,) float positions —
-/// already multiplied by the family's rope position scaling. Per head,
-/// halves pair (i, i + head_dim/2) and rotate by arg_j = pos ·
-/// theta^(−2j/head_dim): (x1, x2) → (x1·cos − x2·sin, x2·cos + x1·sin).
-/// Angles are computed IN-GRAPH from the position input (per-frequency
-/// scalar multiplies + sin/cos), matching the big examples.
-pub fn rotary_split_half(
+/// Rotary embedding applied through a PAIRING MATRIX — the concat-free
+/// spelling (workaround for the rejoin saturation divergence,
+/// 2026-08-10): rope(x) = x ⊙ cos + (x @ R) ⊙ sin, where R is the
+/// constant signed pair-permutation encoding the family's rotation
+/// (split-half or interleaved — see [`rope_pairing_matrix`]) and the
+/// full-width per-position cos/sin tables are host-precomputed (see
+/// [`rope_tables_split_half`]; the flux2 example's own convention).
+/// Mathematically identical to the slice/neg/concat rotation; the
+/// matmul and muls are COMPUTE ops, so no pure-view pad∘slice stack —
+/// the divergence precondition — ever forms.
+///
+/// x (s, n·head_dim); cos/sin (s, head_dim); rot (head_dim, head_dim).
+pub fn rotary_apply(
     x: GraphTensor,
     head_dim: usize,
-    pos: GraphTensor,
-    theta: f32,
+    cos: GraphTensor,
+    sin: GraphTensor,
+    rot: GraphTensor,
 ) -> GraphTensor {
-    let half = head_dim / 2;
-    let mut cos_parts = Vec::with_capacity(half);
-    let mut sin_parts = Vec::with_capacity(half);
-    for j in 0..half {
-        let freq = theta.powf(-2.0 * j as f32 / head_dim as f32);
-        let arg = pos * freq; // (s,)
-        cos_parts.push(arg.cos().unsqueeze(1)); // (s, 1)
-        sin_parts.push(arg.sin().unsqueeze(1));
-    }
-    let fold = |parts: Vec<GraphTensor>| {
-        let mut joined = parts[0];
-        for part in &parts[1..] {
-            joined = joined.concat_along(*part, 1);
-        }
-        joined // (s, half)
-    };
-    let (cos, sin) = (fold(cos_parts), fold(sin_parts));
     let heads = x.split_dims(1, head_dim); // (s, n, head_dim)
-    let x1 = heads.slice_along(0..half, 2); // (s, n, half)
-    let x2 = heads.slice_along(half..head_dim, 2);
-    let dims = x1.dims();
+    let dims = heads.dims();
+    let rotated = heads.matmul(rot); // (s, n, head_dim)
     let cos = cos.unsqueeze(1).expand(dims.clone());
     let sin = sin.unsqueeze(1).expand(dims);
-    let r1 = x1 * cos - x2 * sin;
-    let r2 = x2 * cos + x1 * sin;
-    r1.concat_along(r2, 2).merge_dims(1, 2)
+    (heads * cos + rotated * sin).merge_dims(1, 2)
+}
+
+/// The signed pair-permutation R with x@R = rot(x) for the SPLIT-HALF
+/// rotation rot(x) = [−x₂ ‖ x₁] (halves pair (j, j+h/2)): column i<h/2
+/// reads −x[i+h/2], column i≥h/2 reads +x[i−h/2]. Host-side constant,
+/// fed as an input like the tables. `interleaved` gives the flux2
+/// adjacent-pair form rot(x) = [−x₁, x₀, −x₃, x₂, …] instead.
+pub fn rope_pairing_matrix(head_dim: usize, interleaved: bool) -> Vec<f32> {
+    let mut rot = vec![0f32; head_dim * head_dim];
+    for column in 0..head_dim {
+        // rot(x)[column] = ±x[source]  ⇒  R[source, column] = ±1
+        let (source, sign) = if interleaved {
+            if column % 2 == 0 { (column + 1, -1.0) } else { (column - 1, 1.0) }
+        } else {
+            let half = head_dim / 2;
+            if column < half { (column + half, -1.0) } else { (column - half, 1.0) }
+        };
+        rot[source * head_dim + column] = sign;
+    }
+    rot
+}
+
+/// Host-side split-half rope tables for decode positions: row p gets
+/// cos/sin(pos[p]·scale · theta^(−2j/head_dim)) at BOTH slots (j and
+/// j+h/2) of frequency j — the full-width tables [`rotary_apply`]
+/// consumes. Dual-theta families (gemma) call this once per layer role.
+pub fn rope_tables_split_half(
+    positions: &[f32],
+    head_dim: usize,
+    theta: f32,
+    pos_scale: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let half = head_dim / 2;
+    let (mut cos, mut sin) = (Vec::new(), Vec::new());
+    for &position in positions {
+        let (mut cos_row, mut sin_row) = (vec![0f32; head_dim], vec![0f32; head_dim]);
+        for j in 0..half {
+            let freq = theta.powf(-2.0 * j as f32 / head_dim as f32);
+            let arg = position * pos_scale * freq;
+            cos_row[j] = arg.cos();
+            cos_row[j + half] = arg.cos();
+            sin_row[j] = arg.sin();
+            sin_row[j + half] = arg.sin();
+        }
+        cos.extend(cos_row);
+        sin.extend(sin_row);
+    }
+    (cos, sin)
 }
 
 /// Per-head RMS norm over a flat (s, n_heads·head_dim) projection with a
