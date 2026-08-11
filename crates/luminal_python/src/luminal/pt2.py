@@ -137,20 +137,26 @@ def _decomp_table():
 
 
 def _collect_input_device_ptrs(ep, user_inputs):
-    """Map user-input placeholder names to (device_ptr, n_bytes) for live,
-    contiguous CUDA nn.Parameters. Parameters are read-only in inference
-    graphs, so the search can safely alias their memory; buffers and
-    activations are excluded because in-place kernel candidates
-    (output_aliases_input, e.g. KernelScatterNoCopy) may write into their
-    alias target's buffer during profiling. Excluded inputs fall back to the
-    search's ones-buffer seeding."""
+    """Collect search pointers and serving provenance for lifted parameters.
+
+    Contiguous CUDA parameters supply search-time device pointers. Parameter
+    names and strong references are retained independently of device/layout so
+    a later bound executable can classify frozen inputs from source identity,
+    never from names or observed pointer stability. Buffers and activations do
+    not supply search aliases because in-place candidates may mutate them.
+    """
     from torch.export.graph_signature import InputKind
 
     user_specs = [
         s for s in ep.graph_signature.input_specs if s.kind == InputKind.USER_INPUT
     ]
     ptrs = {}
+    frozen_parameter_names = []
+    frozen_parameter_refs = []
     for spec, tensor in zip(user_specs, user_inputs):
+        if isinstance(tensor, torch.nn.Parameter):
+            frozen_parameter_names.append(spec.arg.name)
+            frozen_parameter_refs.append(tensor)
         if (
             isinstance(tensor, torch.nn.Parameter)
             and tensor.is_cuda
@@ -160,7 +166,7 @@ def _collect_input_device_ptrs(ep, user_inputs):
                 tensor.data_ptr(),
                 tensor.numel() * tensor.element_size(),
             )
-    return ptrs
+    return ptrs, frozen_parameter_names, frozen_parameter_refs
 
 
 def _lower_sym_sum(ep) -> None:
@@ -226,7 +232,13 @@ def _lower_sym_sum(ep) -> None:
 
 
 def _save_and_compile(
-    ep_or_path, factory, search_iterations, user_indices=None, input_device_ptrs=None
+    ep_or_path,
+    factory,
+    search_iterations,
+    user_indices=None,
+    input_device_ptrs=None,
+    frozen_parameter_names=None,
+    frozen_parameter_refs=None,
 ):
     """Compile a PT2 model via Rust, return CompiledModel.
 
@@ -265,7 +277,10 @@ def _save_and_compile(
         _load_cpu_weights(compiled, cpu_weights)
 
         return CompiledModel(
-            compiled, weight_refs=keep_alive, user_indices=user_indices
+            compiled,
+            weight_refs=[*keep_alive, *(frozen_parameter_refs or ())],
+            user_indices=user_indices,
+            frozen_parameter_names=frozen_parameter_names,
         )
     finally:
         if owns_tmpdir and tmpdir:
@@ -686,7 +701,11 @@ def _eager_pt2_compile(
     # duplicating the full parameter set on device (OOM at ~2x weights for
     # whole-model compiles) and profiling with synthetic data. Nothing is
     # baked: the runtime still takes pointers per call.
-    input_device_ptrs = _collect_input_device_ptrs(ep, user_inputs)
+    (
+        input_device_ptrs,
+        frozen_parameter_names,
+        frozen_parameter_refs,
+    ) = _collect_input_device_ptrs(ep, user_inputs)
 
     del ep, gm
     gc.collect()
@@ -700,6 +719,8 @@ def _eager_pt2_compile(
             search_iterations,
             user_indices=user_indices,
             input_device_ptrs=input_device_ptrs,
+            frozen_parameter_names=frozen_parameter_names,
+            frozen_parameter_refs=frozen_parameter_refs,
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -775,6 +796,9 @@ class _LazyDynamicCompiledModel:
 
     def set_dim(self, name, value):
         return self._ensure_compiled().set_dim(name, value)
+
+    def bind(self, *inputs):
+        return self._ensure_compiled().bind(*inputs)
 
 
 def pt2_backend(gm, example_inputs, factory=None, search_iterations=None):

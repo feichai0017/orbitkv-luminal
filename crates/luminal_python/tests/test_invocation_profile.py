@@ -1,15 +1,18 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 from luminal.compiled_model import (
+    BoundCompiledModel,
     CompiledModel,
     _cuda_input_binding_signature,
     _profile_stage,
 )
 from luminal.dtype_util import torch_dtype_code
+from luminal.pt2 import _collect_input_device_ptrs
 
 
 class _ProfileTestGraph:
@@ -96,6 +99,37 @@ class _CudaBindingTestGraph:
         return [3]
 
 
+class _BoundCudaTestGraph:
+    has_dynamic_dims = False
+    device_type = "cuda"
+    supports_device_ptrs = True
+
+    def __init__(self):
+        self.input_names = ["weight", "state", "token"]
+        self.output_names = ["state", "logits"]
+        self.writeback_outputs = [(0, "state")]
+        self.output_shapes = [[1], [1, 4]]
+        self.input_dtypes = [torch_dtype_code(torch.float32)] * 3
+        self.output_dtypes = [torch_dtype_code(torch.float32)] * 2
+        self.input_pointer_calls = []
+        self.output_pointer_calls = []
+        self.zero_copy_queries = []
+        self.run_count = 0
+
+    def set_input_device_ptr(self, name, ptr, n_bytes):
+        self.input_pointer_calls.append((name, ptr, n_bytes))
+
+    def set_output_device_ptr_at(self, position, ptr, n_bytes):
+        self.output_pointer_calls.append((position, ptr, n_bytes))
+
+    def output_is_zero_copy_at(self, position):
+        self.zero_copy_queries.append(position)
+        return True
+
+    def run(self):
+        self.run_count += 1
+
+
 class _DuplicateOutputNameGraph:
     has_dynamic_dims = False
     device_type = "cpu"
@@ -147,6 +181,35 @@ def test_cuda_input_binding_cache_tracks_resource_relevant_metadata():
     )
 
 
+def test_parameter_provenance_is_preserved_without_a_cuda_search_pointer():
+    from torch.export.graph_signature import InputKind
+
+    parameter = torch.nn.Parameter(torch.ones(2))
+    activation = torch.ones(2)
+    ep = SimpleNamespace(
+        graph_signature=SimpleNamespace(
+            input_specs=[
+                SimpleNamespace(
+                    kind=InputKind.USER_INPUT,
+                    arg=SimpleNamespace(name="weight"),
+                ),
+                SimpleNamespace(
+                    kind=InputKind.USER_INPUT,
+                    arg=SimpleNamespace(name="activation"),
+                ),
+            ]
+        )
+    )
+
+    pointers, names, refs = _collect_input_device_ptrs(
+        ep, [parameter, activation]
+    )
+
+    assert pointers == {}
+    assert names == ["weight"]
+    assert refs == [parameter]
+
+
 def test_duplicate_output_names_are_resolved_by_position():
     model = CompiledModel(_DuplicateOutputNameGraph())
     mutated = torch.tensor([1.0])
@@ -175,6 +238,34 @@ def test_compiled_model_skips_unchanged_cuda_input_pointer_registration():
     replacement = tensor.clone()
     assert model(replacement)[0].item() == 3
     assert len(graph.input_pointer_calls) == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_bound_model_registers_once_and_replays_without_input_or_output_scans():
+    graph = _BoundCudaTestGraph()
+    model = CompiledModel(graph, frozen_parameter_names=["weight"])
+    weight = torch.nn.Parameter(torch.ones(1, device="cuda"))
+    state = torch.zeros(1, device="cuda")
+    token = torch.zeros(1, device="cuda")
+
+    bound = model.bind(weight, state, token)
+    assert isinstance(bound, BoundCompiledModel)
+    assert len(graph.input_pointer_calls) == 3
+    assert len(graph.output_pointer_calls) == 2
+
+    first_outputs = bound.run()
+    token.fill_(1)
+    second_outputs = bound.run()
+
+    assert first_outputs is second_outputs
+    assert first_outputs[0].data_ptr() == second_outputs[0].data_ptr()
+    assert graph.run_count == 2
+    # CUDA output alias resolution is lazy, but it is inspected only after
+    # the first replay. The second replay performs no output planning scan.
+    assert graph.zero_copy_queries == [0, 1]
+    assert len(graph.input_pointer_calls) == 3
+    with pytest.raises(RuntimeError, match="BoundCompiledModel.run"):
+        model(weight, state, token)
 
 
 def test_invocation_profile_is_captured_when_compiled_model_is_created(

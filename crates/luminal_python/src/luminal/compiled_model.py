@@ -130,7 +130,12 @@ class CompiledModel:
     """Wrapper around CompiledGraph that handles PyTorch tensor conversion."""
 
     def __init__(
-        self, graph_result, weight_refs=None, input_names=None, user_indices=None
+        self,
+        graph_result,
+        weight_refs=None,
+        input_names=None,
+        user_indices=None,
+        frozen_parameter_names=None,
     ):
         """Initialize with a compiled CompiledGraph from Rust.
 
@@ -141,6 +146,8 @@ class CompiledModel:
             user_indices: When torch.compile lifts model parameters into extra args,
                 this tells __call__ which arg positions are actual user inputs.
                 None means all args are user inputs (PT2 path).
+            frozen_parameter_names: Input names proven to originate from
+                ``nn.Parameter`` objects during PT2 export.
         """
         self._graph = graph_result
         self._input_names = input_names or graph_result.input_names
@@ -158,7 +165,9 @@ class CompiledModel:
         self._output_shapes = graph_result.output_shapes
         self._has_dynamic_dims = getattr(graph_result, "has_dynamic_dims", False)
         self._weight_refs = weight_refs or []
+        self._frozen_parameter_names = frozenset(frozen_parameter_names or ())
         self._user_indices = user_indices
+        self._is_bound = False
         self.skip_input_names = frozenset()
         self._is_gpu = getattr(graph_result, "device_type", "cpu") != "cpu"
         self._supports_device_ptrs = getattr(
@@ -197,7 +206,133 @@ class CompiledModel:
 
     def set_dim(self, param_name: str, value: int) -> None:
         """Set a dynamic dimension value by its param name."""
+        if self._is_bound:
+            raise RuntimeError("Cannot change dimensions after binding this model")
         self._graph.set_dim(param_name, value)
+
+    def _select_user_inputs(self, inputs):
+        if self._user_indices is not None:
+            return tuple(inputs[i] for i in self._user_indices)
+        return tuple(inputs)
+
+    def bind(self, *inputs: torch.Tensor):
+        """Bind fixed CUDA storage once for scan-free serving replay.
+
+        Binding is exclusive for this CompiledModel. The returned executable
+        retains every tensor whose device pointer Rust uses; callers update
+        invocation-buffer contents in place and call ``run()`` with no args.
+        """
+        if self._is_bound:
+            raise RuntimeError("This CompiledModel already has a bound executable")
+        if not self._supports_device_ptrs:
+            raise RuntimeError("Bound execution requires a device-pointer backend")
+        if self.skip_input_names:
+            raise RuntimeError("Bound execution does not support skipped inputs")
+
+        user_inputs = self._select_user_inputs(inputs)
+        if len(user_inputs) != len(self._input_names):
+            raise ValueError(
+                f"Expected {len(self._input_names)} inputs, got {len(user_inputs)}"
+            )
+
+        if self._has_dynamic_dims:
+            self._graph.auto_set_dims_from_input_shapes(
+                [list(tensor.shape) for tensor in user_inputs]
+            )
+            output_shapes = self._graph.resolve_output_shapes()
+        else:
+            output_shapes = self._output_shapes
+
+        output_dtype_codes = self._graph.output_dtypes
+        if len(output_dtype_codes) != len(self._output_names):
+            raise RuntimeError(
+                f"CompiledGraph returned {len(output_dtype_codes)} output dtype "
+                f"codes for {len(self._output_names)} declared outputs"
+            )
+        output_dtypes = [code_to_torch_dtype(code) for code in output_dtype_codes]
+        native_output_dtypes = (torch.float32, torch.float16, torch.bfloat16)
+
+        input_refs = []
+        input_signatures = []
+        for position, (name, tensor, expected_dtype) in enumerate(
+            zip(self._input_names, user_inputs, self._input_dtypes)
+        ):
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(f"Bound input '{name}' is not a tensor")
+            if not tensor.is_cuda:
+                raise ValueError(f"Bound input '{name}' must be a CUDA tensor")
+            if not tensor.is_contiguous():
+                raise ValueError(f"Bound input '{name}' must be contiguous")
+            if tensor.dtype != expected_dtype:
+                raise DTypeBoundaryError(
+                    f"Luminal compiled input '{name}' expects {expected_dtype} "
+                    f"but got {tensor.dtype}"
+                )
+            n_bytes = tensor.numel() * tensor.element_size()
+            self._graph.set_input_device_ptr(name, tensor.data_ptr(), n_bytes)
+            self._cuda_input_bindings[name] = (
+                *_cuda_input_binding_signature(tensor, n_bytes),
+                tensor,
+            )
+            input_refs.append(tensor)
+            input_signatures.append(
+                (position, name, tuple(tensor.shape), tuple(tensor.stride()), n_bytes)
+            )
+
+        persistent_outputs = []
+        output_destinations = []
+        durable_input_positions = set(self._writeback_input_pos.values())
+        for position, (name, shape, dtype) in enumerate(
+            zip(self._output_names, output_shapes, output_dtypes)
+        ):
+            if position in self._writeback_by_pos:
+                target = user_inputs[self._writeback_input_pos[position]]
+                expected_numel = math.prod(shape)
+                if target.numel() != expected_numel or target.dtype != dtype:
+                    raise ValueError(
+                        f"Writeback output '{name}' does not match its bound target"
+                    )
+            else:
+                if dtype not in native_output_dtypes:
+                    raise NotImplementedError(
+                        f"Bound output '{name}' has unsupported dtype {dtype}; "
+                        "ordinary bound outputs currently require a native "
+                        "CUDA float dtype"
+                    )
+                target = torch.empty(shape, dtype=dtype, device=user_inputs[0].device)
+                persistent_outputs.append(target)
+            n_bytes = target.numel() * target.element_size()
+            self._graph.set_output_device_ptr_at(
+                position, target.data_ptr(), n_bytes
+            )
+            output_destinations.append((position, target, n_bytes))
+
+        frozen_positions = tuple(
+            position
+            for position, name in enumerate(self._input_names)
+            if name in self._frozen_parameter_names
+        )
+        overlap = durable_input_positions.intersection(frozen_positions)
+        if overlap:
+            raise ValueError(
+                "Inputs cannot be both frozen parameters and durable state: "
+                f"{sorted(overlap)}"
+            )
+
+        bound = BoundCompiledModel(
+            parent=self,
+            input_refs=tuple(input_refs),
+            input_signatures=tuple(input_signatures),
+            outputs=tuple(persistent_outputs),
+            output_destinations=tuple(output_destinations),
+            frozen_count=len(frozen_positions),
+            durable_count=len(durable_input_positions),
+            invocation_count=(
+                len(user_inputs) - len(frozen_positions) - len(durable_input_positions)
+            ),
+        )
+        self._is_bound = True
+        return bound
 
     @property
     def writeback_inputs(self) -> dict:
@@ -227,6 +362,10 @@ class CompiledModel:
         Returns:
             Tuple of PyTorch tensors containing the model outputs
         """
+        if self._is_bound:
+            raise RuntimeError(
+                "This CompiledModel is bound; call BoundCompiledModel.run()"
+            )
         profile_path = self._profile_path
         profile_enabled = self._profile_enabled
         profile_total_start = time.perf_counter_ns() if profile_enabled else None
@@ -586,6 +725,7 @@ class CompiledModel:
                     else "unknown"
                 ),
                 "logical_tokens": logical_tokens,
+                "execution_mode": "generic",
                 "compiled_model": {
                     "timings_us": {
                         "total": total_us,
@@ -597,8 +737,22 @@ class CompiledModel:
                     "counts": {
                         "inputs": len(user_inputs),
                         "input_bindings": input_bindings,
+                        "bindings_inspected": input_bindings,
                         "changed_input_bindings": changed_input_bindings,
+                        "frozen_bindings": len(self._frozen_parameter_names),
+                        "durable_bindings": len(
+                            set(self._writeback_input_pos.values())
+                        ),
+                        "invocation_buffers": (
+                            len(user_inputs)
+                            - len(self._frozen_parameter_names)
+                            - len(set(self._writeback_input_pos.values()))
+                        ),
                         "outputs": len(self._output_names),
+                        "ordinary_outputs_planned": (
+                            len(self._output_names) - len(self._writeback_by_pos)
+                        ),
+                        "durable_outputs_registered": len(direct_writebacks),
                         "output_allocations": output_allocations,
                         "output_registrations": output_registrations,
                         "writebacks": len(self._writeback_by_pos),
@@ -613,3 +767,131 @@ class CompiledModel:
             _append_profile_record(profile_path, record)
 
         return tuple(outputs)
+
+
+class BoundCompiledModel:
+    """A fixed-storage serving executable with a scan-free steady hot path.
+
+    Inputs and outputs are registered by :meth:`CompiledModel.bind`. ``run``
+    accepts no tensors: callers mutate invocation-buffer contents in place.
+    Returned output tensors are persistent and overwritten by the next replay.
+    """
+
+    def __init__(
+        self,
+        *,
+        parent,
+        input_refs,
+        input_signatures,
+        outputs,
+        output_destinations,
+        frozen_count,
+        durable_count,
+        invocation_count,
+    ):
+        self._parent = parent
+        self._graph = parent._graph
+        self._input_refs = input_refs
+        self._input_signatures = input_signatures
+        self._outputs = outputs
+        self._output_destinations = output_destinations
+        self._fallback_output_copies = None
+        self._frozen_count = frozen_count
+        self._durable_count = durable_count
+        self._invocation_count = invocation_count
+
+    @property
+    def outputs(self):
+        """Persistent ordinary-output tensors, in graph return order."""
+        return self._outputs
+
+    def _finish_output_binding(self):
+        """Resolve lazy CUDA output aliases after the first bound execution."""
+        fallback = []
+        for position, target, n_bytes in self._output_destinations:
+            if not self._graph.output_is_zero_copy_at(position):
+                fallback.append((position, target.data_ptr(), n_bytes))
+        self._fallback_output_copies = tuple(fallback)
+        self._output_destinations = ()
+
+    def run(self):
+        """Replay against already-bound storage and return persistent outputs."""
+        parent = self._parent
+        profile_enabled = parent._profile_enabled
+        profile_path = parent._profile_path
+        profile_total_start = time.perf_counter_ns() if profile_enabled else None
+        invocation_id = next(_PROFILE_INVOCATION_IDS) if profile_enabled else None
+        call_index = parent._profile_call_index
+        if profile_enabled:
+            parent._profile_call_index += 1
+        profile_timings = {}
+
+        with _profile_stage(
+            profile_enabled,
+            f"luminal.bound_model.graph_run.{invocation_id}",
+            profile_timings,
+            "graph_run",
+        ):
+            if profile_enabled:
+                self._graph.set_profile_invocation_id(invocation_id)
+            self._graph.run()
+
+        first_run = self._fallback_output_copies is None
+        if first_run:
+            self._finish_output_binding()
+        if self._fallback_output_copies:
+            with _profile_stage(
+                profile_enabled,
+                f"luminal.bound_model.output_copy.{invocation_id}",
+                profile_timings,
+                "output_copy",
+            ):
+                self._graph.copy_outputs_to_device_ptrs_at(
+                    self._fallback_output_copies
+                )
+
+        runtime_profile_json = (
+            self._graph.take_last_execution_profile_json()
+            if profile_enabled
+            else None
+        )
+        if profile_enabled:
+            total_us = (time.perf_counter_ns() - profile_total_start) / 1_000.0
+            runtime_profile = (
+                json.loads(runtime_profile_json) if runtime_profile_json else None
+            )
+            record = {
+                "schema_version": 1,
+                "kind": "luminal_invocation",
+                "pid": os.getpid(),
+                "thread": threading.get_ident(),
+                "graph": parent._profile_graph_id,
+                "invocation": invocation_id,
+                "call_index": call_index,
+                "phase": "decode",
+                "logical_tokens": 1,
+                "execution_mode": "bound",
+                "compiled_model": {
+                    "timings_us": {"total": total_us, **profile_timings},
+                    "counts": {
+                        "inputs": len(self._input_refs),
+                        "input_bindings": 0,
+                        "bindings_inspected": 0,
+                        "changed_input_bindings": 0,
+                        "frozen_bindings": self._frozen_count,
+                        "durable_bindings": self._durable_count,
+                        "invocation_buffers": self._invocation_count,
+                        "outputs": len(parent._output_names),
+                        "ordinary_outputs_planned": 0,
+                        "durable_outputs_registered": 0,
+                        "fallback_output_copies": len(
+                            self._fallback_output_copies
+                        ),
+                        "first_bound_run": int(first_run),
+                    },
+                },
+                "runtime": runtime_profile,
+            }
+            _append_profile_record(profile_path, record)
+
+        return self._outputs
