@@ -1,29 +1,23 @@
 [package]
 name = "qwen"
-version = "0.1.0"
-edition = "2024"
+version = "0.2.0"
+edition.workspace = true
 
 [[bin]]
 name = "qwen"
 path = "src/main.rs"
 
-[features]
-default = []
-cuda = ["dep:luminal_cuda_lite"]
-metal = ["dep:luminal_metal"]
-
+# The pure-logical exemplar (conversion directive 2026-08-10): the model
+# is authored in logical ops only and runs on the SSA reference runtime
+# through the native ladder. No backend features — GPU runtimes return
+# with the cuda_lite/metal M4 re-seat, binding the same logical graph.
 [dependencies]
 luminal = { path = "../.." }
-tikv-jemallocator = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }
 luminal_nn = { path = "../../crates/luminal_nn" }
-luminal_tracing = { path = "../../crates/luminal_tracing" }
-luminal_cuda_lite = { path = "../../crates/luminal_cuda_lite", optional = true }
-luminal_metal = { path = "../../crates/luminal_metal", optional = true }
+rustc-hash = "2.1"
 tokenizers = "0.22.2"
-tracing = "0.1.43"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# HuggingFace model download
+# HuggingFace model download + weight repack (host-side only)
 hf-hub = { version = "0.4", default-features = false, features = ["rustls-tls", "ureq"] }
 safetensors = "0.7.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -31,4 +25,3 @@ serde_json = "1.0"
 half = { version = "2.7.1", features = ["bytemuck"] }
 bytemuck = "1.24.0"
 memmap2 = "0.9.9"
-rustc-hash = "2.1"

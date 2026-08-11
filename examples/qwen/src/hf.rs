@@ -36,7 +36,7 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 /// Convert tensor data to an f32 vec.
-fn tensor_to_f32(tensor: &safetensors::tensor::TensorView) -> Vec<f32> {
+pub(crate) fn tensor_to_f32(tensor: &safetensors::tensor::TensorView) -> Vec<f32> {
     let dtype = tensor.dtype();
     let data = tensor.data();
 
@@ -116,9 +116,10 @@ fn model_shard_files(model_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::erro
     }
 }
 
-/// Combines sharded safetensors into a single bf16 file (norm weights kept
-/// F32). Linear projections, the token embedding and the lm_head are bf16; the
-/// model is pure HLIR and the e-graph rewrites pick up the bf16 matmuls.
+/// Combines sharded safetensors into a single bf16 file (norm weights
+/// kept F32) — the on-disk staging format. The reference runtime
+/// converts everything to f32 at weight load (see weights.rs); bf16
+/// execution returns with the backend re-seat.
 ///
 /// Qwen3-4B ties the lm_head to the embedding table, so no separate
 /// `lm_head.weight` is stored — the model reuses `model.embed_tokens.weight`.

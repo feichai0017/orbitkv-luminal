@@ -53,6 +53,10 @@ proptest = "1.9.0"
 members = [
     "crates/luminal_nn",
     "crates/luminal_tracing",
+    # First re-seated example (conversion directive 2026-08-10): pure
+    # logical ops on the native ladder — the pattern for the rest of
+    # the zoo.
+    "examples/qwen",
 ]
 
 [patch.crates-io]

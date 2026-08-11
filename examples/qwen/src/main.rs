@@ -1,46 +1,45 @@
-// glibc malloc degrades into an allocating livelock inside
-// nvrtcCompileProgram after heavy search heap churn (hundreds of
-// thousands of compiles). jemalloc built with unprefixed symbols
-// interposes malloc for the whole process, including dlopened CUDA
-// libraries like libnvrtc — a Rust-only global allocator would not.
-#[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+use qwen::{QwenRunConfig, run_qwen};
 
-#[cfg(all(feature = "cuda", feature = "metal"))]
-compile_error!("features `cuda` and `metal` are mutually exclusive");
+const USAGE: &str = "\
+qwen — Qwen3-4B as pure logical ops on the SSA reference runtime
 
-#[cfg(all(feature = "cuda", feature = "metal"))]
-fn main() {}
+USAGE: cargo run --release -p qwen [-- OPTIONS]
+  --prompt <text>     user prompt (chat template applied)
+  --layers <n>        transformer layers to instantiate, 1..=36 (default 1;
+                      the f32 reference runtime cannot hold all 36)
+  --tokens <n>        tokens to generate (default 8)
+  --max-seq <n>       cache slots / maximum sequence length (default 64)
+  --repo <id>         HuggingFace repo (default Qwen/Qwen3-4B)
+  --random-weights    skip the download; deterministic fake parameters
+  --help              this text";
 
-#[cfg(all(feature = "cuda", not(feature = "metal")))]
-use luminal_cuda_lite::{cudarc::driver::CudaContext, runtime::CudaRuntime};
-#[cfg(all(feature = "metal", not(feature = "cuda"), target_vendor = "apple"))]
-use luminal_metal::MetalRuntime;
-#[cfg(any(
-    all(feature = "cuda", not(feature = "metal")),
-    all(feature = "metal", not(feature = "cuda"), target_vendor = "apple")
-))]
-use qwen::{QwenRunConfig, Runtime, run_qwen};
-
-#[cfg(all(feature = "cuda", not(feature = "metal")))]
 fn main() {
-    let ctx = CudaContext::new(0).unwrap();
-    let stream = ctx.default_stream();
-    run_qwen(CudaRuntime::initialize(stream), QwenRunConfig::default()).unwrap();
-}
-
-#[cfg(all(feature = "metal", not(feature = "cuda"), target_vendor = "apple"))]
-fn main() {
-    run_qwen(MetalRuntime::initialize(()), QwenRunConfig::default()).unwrap();
-}
-
-#[cfg(all(feature = "metal", not(feature = "cuda"), not(target_vendor = "apple")))]
-fn main() {
-    eprintln!("qwen --features metal requires an Apple target with Metal support.");
-}
-
-#[cfg(not(any(feature = "cuda", feature = "metal")))]
-fn main() {
-    eprintln!("select exactly one backend with `--features cuda` or `--features metal`.");
-    std::process::exit(2);
+    let mut config = QwenRunConfig::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| {
+            args.next()
+                .unwrap_or_else(|| panic!("{name} needs a value\n{USAGE}"))
+        };
+        match arg.as_str() {
+            "--prompt" => config.prompt = value("--prompt"),
+            "--layers" => config.layers = value("--layers").parse().expect("--layers: integer"),
+            "--tokens" => config.gen_tokens = value("--tokens").parse().expect("--tokens: integer"),
+            "--max-seq" => config.max_seq = value("--max-seq").parse().expect("--max-seq: integer"),
+            "--repo" => config.repo_id = value("--repo"),
+            "--random-weights" => config.random_weights = true,
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return;
+            }
+            other => {
+                eprintln!("unknown argument '{other}'\n{USAGE}");
+                std::process::exit(2);
+            }
+        }
+    }
+    if let Err(err) = run_qwen(config) {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
 }
