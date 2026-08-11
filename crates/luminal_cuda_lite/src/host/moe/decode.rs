@@ -105,6 +105,12 @@ pub fn fused_moe_decode(
         seq as i32,
         idx_row_stride as i32,
     );
+    // Phase timing: the two launches are async, so each is followed by a sync
+    // under the profile flag. Expected traffic split if this is weight-bound:
+    // phase1 reads gate_up (2*inter x hidden / 2 = 8.29 MB/expert), phase2
+    // reads down (hidden x inter / 2 = 4.15 MB/expert), so phase1 ~ 2x phase2.
+    let prof = crate::hostop_profile::enabled();
+    let t0 = std::time::Instant::now();
     unsafe {
         stream
             .launch_builder(p1)
@@ -122,6 +128,13 @@ pub fn fused_moe_decode(
             .arg(&alpha)
             .arg(&limit)
             .launch(grid(seq * top_k * inter / rows))?;
+    }
+    if prof {
+        stream.synchronize()?;
+        crate::hostop_profile::record("  MoE p1: gate_up GEMV + swiglu", t0.elapsed());
+    }
+    let t1 = std::time::Instant::now();
+    unsafe {
         stream
             .launch_builder(p2)
             .arg(&dn_q_ptr)
@@ -137,6 +150,10 @@ pub fn fused_moe_decode(
             .arg(&s)
             .arg(&stride)
             .launch(grid(seq * hidden_dim / rows))?;
+    }
+    if prof {
+        stream.synchronize()?;
+        crate::hostop_profile::record("  MoE p2: down GEMV + topk mix", t1.elapsed());
     }
     Ok(())
 }

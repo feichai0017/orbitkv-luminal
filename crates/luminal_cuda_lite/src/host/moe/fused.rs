@@ -1,9 +1,19 @@
-//! FusedMoE: the gpt-oss MXFP4 MoE as one host op — a stream-ordered pair
-//! of GEMV launches (see `decode.cu`) at every batch size: phase 1 gate_up
-//! dequant-GEMV + clamped SwiGLU, phase 2 down projection + top-k weighted
-//! mix. (An expert-grouped tensor-core chain for large prefill batches was
-//! built and benched during bring-up but removed before upstreaming:
-//! post-row-blocking, it only beat the GEMV by ~10% at 512 pairs.)
+//! FusedMoE: the gpt-oss MXFP4 MoE as one host op, dispatching on batch size
+//! between two implementations of the same math:
+//!
+//! - narrow (`num_pairs` < `expert_stationary::MIN_PAIRS`, which is every
+//!   decode tick): a stream-ordered pair of GEMV launches, see `decode.cu`.
+//!   Phase 1 gate_up dequant-GEMV + clamped SwiGLU, phase 2 down projection
+//!   + top-k weighted mix. Each (token, expert) pair reads the expert's
+//!   weights, which at one token per expert is already the minimum traffic.
+//! - wide (prefill): the expert-stationary chain in `expert_stationary.cu`,
+//!   which reads each expert's weights once per row-tile and streams that
+//!   expert's tokens past them. 2.3x at a 256-token prefill chunk.
+//!
+//! (A third implementation, an expert-grouped tensor-core chain, was built
+//! during bring-up and removed before upstreaming: post-row-blocking it only
+//! beat the GEMV by ~10% at 512 pairs. It remains the way past the
+//! instruction-issue ceiling the expert-stationary SIMT kernel now sits on.)
 //!
 //! Installed by the union-only rewrite in `fused_moe_rewrite.egg`, whose LHS
 //! is the model's dense reference spelling (`moe_naive`). Enforcement of the
@@ -48,7 +58,7 @@ use crate::{
     host::{DeviceBuffer, HostOp},
 };
 
-use super::decode;
+use super::{decode, expert_stationary};
 
 const SWIGLU_ALPHA: f32 = 1.702;
 const SWIGLU_LIMIT: f32 = 7.0;
@@ -64,6 +74,7 @@ fn ensure_kernels_compiled() {
         if let Ok(ctx) = crate::cudarc::driver::CudaContext::new(0) {
             let stream = ctx.default_stream();
             decode::warm(&stream);
+            expert_stationary::warm(&stream);
         }
     });
 }
@@ -293,6 +304,54 @@ impl HostOp for FusedMoE {
             use crate::cudarc::driver::DevicePtr;
             hidden_scratch.device_ptr(stream).0
         };
+
+        // Wide enough that each expert sees several tokens? Then read its
+        // weights once per row-tile instead of once per pair. Below the
+        // threshold (all decode, narrow prefill) the GEMV wins — see the
+        // measured crossover table in expert_stationary.rs.
+        if expert_stationary::use_expert_stationary(num_pairs) {
+            let es_scratch = unsafe {
+                stream.alloc::<u8>(expert_stationary::scratch_bytes(
+                    num_experts,
+                    num_pairs,
+                    hidden,
+                ))?
+            };
+            let es_ptr = {
+                use crate::cudarc::driver::DevicePtr;
+                es_scratch.device_ptr(stream).0
+            };
+            let align = |n: usize| n.next_multiple_of(256) as u64;
+            let expert_off_ptr = es_ptr;
+            let sorted_pairs_ptr = expert_off_ptr + align((num_experts + 1) * 4);
+            let partial_ptr = sorted_pairs_ptr + align(num_pairs * 4);
+            return expert_stationary::fused_moe_expert_stationary(
+                stream,
+                x_buf.ptr(),
+                gu_blocks_buf.ptr(),
+                gu_scales_buf.ptr(),
+                gu_bias_buf.ptr(),
+                dn_blocks_buf.ptr(),
+                dn_scales_buf.ptr(),
+                dn_bias_buf.ptr(),
+                topk_idx_buf.ptr(),
+                topk_vals_buf.ptr(),
+                hs_ptr,
+                expert_off_ptr,
+                sorted_pairs_ptr,
+                partial_ptr,
+                output_buf.ptr(),
+                hidden,
+                intermediate,
+                top_k,
+                seq,
+                num_experts,
+                idx_row_stride,
+                SWIGLU_ALPHA,
+                SWIGLU_LIMIT,
+            );
+        }
+
         decode::fused_moe_decode(
             stream,
             x_buf.ptr(),
