@@ -3448,7 +3448,7 @@
 
 (rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntLit ?value)))
-  ((set (int-subst-of ?expr ?map) (IntLit ?value)))
+  ((union (int-subst-of ?expr ?map) (IntLit ?value)))
 )
 ; A IntVar is coordinate-free (maps bind coordinates, not unknowns), so substitution is the
 ; identity on it — without this case a symbolic stride anywhere in the
@@ -3456,7 +3456,7 @@
 ; below need BOTH child images).
 (rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntVar ?dim_name)))
-  ((set (int-subst-of ?expr ?map) ?expr))
+  ((union (int-subst-of ?expr ?map) ?expr))
 )
 (rule
   (
@@ -3495,7 +3495,7 @@
     (= ?extent_lower (lower-bound-of ?extent))
     (<= ?entry_upper (- ?extent_lower (bigint 1)))
   )
-  ((set (int-subst-of ?expr ?map) ?entry))
+  ((union (int-subst-of ?expr ?map) ?entry))
 )
 ; STRUCTURAL IN-RANGE ARM (deep-dive item 1): an entry that IS a
 ; coordinate over the SAME extent class is in-box by construction —
@@ -3518,7 +3518,7 @@
     (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))
     (= ?entry_extent ?extent)
   )
-  ((set (int-subst-of ?expr ?map) ?entry))
+  ((union (int-subst-of ?expr ?map) ?entry))
 )
 (rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntAdd ?lhs ?rhs)))
@@ -3531,7 +3531,7 @@
     (= ?lhs_image (int-subst-of ?lhs ?map))
     (= ?rhs_image (int-subst-of ?rhs ?map))
   )
-  ((set (int-subst-of ?expr ?map) (IntAdd ?lhs_image ?rhs_image)))
+  ((union (int-subst-of ?expr ?map) (IntAdd ?lhs_image ?rhs_image)))
 )
 (rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs)))
@@ -3565,7 +3565,7 @@
     (= ?lhs_image (int-subst-of ?lhs ?map))
     (= ?lhs_image (IntLit 0))
   )
-  ((set (int-subst-of ?expr ?map) (IntLit 0)))
+  ((union (int-subst-of ?expr ?map) (IntLit 0)))
 )
 (rule
   (
@@ -3574,7 +3574,7 @@
     (= ?rhs_image (int-subst-of ?rhs ?map))
     (= ?rhs_image (IntLit 0))
   )
-  ((set (int-subst-of ?expr ?map) (IntLit 0)))
+  ((union (int-subst-of ?expr ?map) (IntLit 0)))
 )
 (rule
   (
@@ -3583,7 +3583,7 @@
     (= ?lhs_image (int-subst-of ?lhs ?map))
     (= ?rhs_image (int-subst-of ?rhs ?map))
   )
-  ((set (int-subst-of ?expr ?map) (IntMul ?lhs_image ?rhs_image)))
+  ((union (int-subst-of ?expr ?map) (IntMul ?lhs_image ?rhs_image)))
 )
 
 ; Division-family descent (Stage D3): substitution commutes with every
@@ -3602,7 +3602,7 @@
     (= ?lhs_image (int-subst-of ?lhs ?map))
     (= ?rhs_image (int-subst-of ?rhs ?map))
   )
-  ((set (int-subst-of ?expr ?map) (IntTruncDiv ?lhs_image ?rhs_image)))
+  ((union (int-subst-of ?expr ?map) (IntTruncDiv ?lhs_image ?rhs_image)))
 )
 (rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs)))
@@ -3615,7 +3615,7 @@
     (= ?lhs_image (int-subst-of ?lhs ?map))
     (= ?rhs_image (int-subst-of ?rhs ?map))
   )
-  ((set (int-subst-of ?expr ?map) (IntTruncRem ?lhs_image ?rhs_image)))
+  ((union (int-subst-of ?expr ?map) (IntTruncRem ?lhs_image ?rhs_image)))
 )
 (rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs)))
@@ -3632,7 +3632,7 @@
     (= ?lhs_image (int-subst-of ?lhs ?map))
     (= ?rhs_image (int-subst-of ?rhs ?map))
   )
-  ((set (int-subst-of ?expr ?map) (IntMin ?lhs_image ?rhs_image)))
+  ((union (int-subst-of ?expr ?map) (IntMin ?lhs_image ?rhs_image)))
 )
 (rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs)))
@@ -3645,7 +3645,7 @@
     (= ?lhs_image (int-subst-of ?lhs ?map))
     (= ?rhs_image (int-subst-of ?rhs ?map))
   )
-  ((set (int-subst-of ?expr ?map) (IntMax ?lhs_image ?rhs_image)))
+  ((union (int-subst-of ?expr ?map) (IntMax ?lhs_image ?rhs_image)))
 )
 (rule
   (
@@ -3654,7 +3654,7 @@
     (= ?lhs_image (int-subst-of ?lhs ?map))
     (= ?rhs_image (int-subst-of ?rhs ?map))
   )
-  ((set (int-subst-of ?expr ?map) (IntCeilDiv ?lhs_image ?rhs_image)))
+  ((union (int-subst-of ?expr ?map) (IntCeilDiv ?lhs_image ?rhs_image)))
 )
 
 ; --- the bool bridge crosses substitution (Austin's ruling 2026-07-29) ---
@@ -3680,12 +3680,12 @@
     (= ?expr (IntCastFromBool ?bool))
     (= ?bool_image (bool-subst-of ?bool ?map))
   )
-  ((set (int-subst-of ?expr ?map) (IntCastFromBool ?bool_image)))
+  ((union (int-subst-of ?expr ?map) (IntCastFromBool ?bool_image)))
 )
 ; A bool literal is coordinate-free: substitution is the identity on it.
 (rule
   ((bool-subst-demand ?bool ?map) (= ?bool (BoolLit ?value)))
-  ((set (bool-subst-of ?bool ?map) (BoolLit ?value)))
+  ((union (bool-subst-of ?bool ?map) (BoolLit ?value)))
 )
 (rule
   ((bool-subst-demand ?bool ?map) (= ?bool (BoolLessThanInt ?lhs ?rhs)))
@@ -3698,7 +3698,7 @@
     (= ?lhs_image (int-subst-of ?lhs ?map))
     (= ?rhs_image (int-subst-of ?rhs ?map))
   )
-  ((set (bool-subst-of ?bool ?map) (BoolLessThanInt ?lhs_image ?rhs_image)))
+  ((union (bool-subst-of ?bool ?map) (BoolLessThanInt ?lhs_image ?rhs_image)))
 )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

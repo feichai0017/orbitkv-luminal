@@ -3148,7 +3148,7 @@ mod subst_guard_study {
 
     /// The structural arm's rule text as landed (comment elided; the
     /// unique premise pair suffices as the removal anchor).
-    const STRUCTURAL_ARM_ANCHOR: &str = "(rule\n  (\n    (int-subst-demand ?expr ?map)\n    (= ?expr (CoordVar ?source_shape ?axis))\n    (= ?map (IndexMapLit ?entries ?source_shape))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?extent (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?entry (CoordVar ?entry_shape ?entry_axis))\n    (= ?entry_shape (ShapeLit ?entry_dims))\n    (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))\n    (= ?entry_extent ?extent)\n  )\n  ((set (int-subst-of ?expr ?map) ?entry))\n)";
+    const STRUCTURAL_ARM_ANCHOR: &str = "(rule\n  (\n    (int-subst-demand ?expr ?map)\n    (= ?expr (CoordVar ?source_shape ?axis))\n    (= ?map (IndexMapLit ?entries ?source_shape))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?extent (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?entry (CoordVar ?entry_shape ?entry_axis))\n    (= ?entry_shape (ShapeLit ?entry_dims))\n    (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))\n    (= ?entry_extent ?extent)\n  )\n  ((union (int-subst-of ?expr ?map) ?entry))\n)";
 
     fn variant(text: &str, name: &str) -> String {
         match name {
