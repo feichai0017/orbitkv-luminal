@@ -84,6 +84,16 @@ pub trait DynBackend {
             self.name()
         );
     }
+
+    /// Hand `from`'s computed buffer to `to`, without copying.
+    ///
+    /// A paged KV cache is a graph input the model reads and a graph output the
+    /// model rewrites; the next execution must see this execution's output as
+    /// its input. Moving the buffer is how that happens without a device copy
+    /// per layer per tick.
+    fn move_buffer(&mut self, _from: NodeIndex, _to: NodeIndex) {
+        panic!("move_buffer not supported by '{}'", self.name());
+    }
 }
 
 // ---------------------------------------------------------------------------

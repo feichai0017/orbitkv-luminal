@@ -20,6 +20,10 @@ impl DynBackend for CudaLiteDynBackend {
         "cuda"
     }
 
+    fn move_buffer(&mut self, from: NodeIndex, to: NodeIndex) {
+        let buf = self.runtime.remove_buffer(from);
+        self.runtime.set_buffer(to, buf);
+    }
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, _dtype: DType) {
         self.runtime.set_data(node, bytes);
     }
