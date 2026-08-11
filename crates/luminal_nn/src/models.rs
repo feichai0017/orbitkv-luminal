@@ -251,13 +251,68 @@ impl LlamaBlock {
             self.head_dim,
         );
         let x = x + self.wo.forward(attn);
+        let ff = self.ffn(x);
+        (x + ff, k_cache, v_cache)
+    }
+
+    /// The llama/qwen full-anatomy forward: RoPE threaded between the
+    /// QK-norm and the cache path (the [`GemmaBlock::forward`]
+    /// ordering), and the causal mask driven by a `q_pos` (s,) Int DATA
+    /// input via [`crate::paged_attention_positional`] — so a decode
+    /// loop searches the graph once and executes per token. Rope tables
+    /// (s, head_dim) and the pairing matrix (head_dim, head_dim) are
+    /// host-built ([`crate::rope_tables_split_half`] /
+    /// [`crate::rope_pairing_matrix`]) — the concat-free rope spelling.
+    /// Scale stays on the scores (the llama/qwen convention).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_rope(
+        &self,
+        x: GraphTensor,
+        k_cache: GraphTensor,
+        v_cache: GraphTensor,
+        gather_idx: GraphTensor,
+        scatter_idx: GraphTensor,
+        q_pos: GraphTensor,
+        rope_cos: GraphTensor,
+        rope_sin: GraphTensor,
+        rope_rot: GraphTensor,
+    ) -> (GraphTensor, GraphTensor, GraphTensor) {
+        let normed = self.attn_norm.forward(x);
+        let mut q = self.wq.forward(normed);
+        let mut k = self.wk.forward(normed);
+        if let Some((q_weight, k_weight)) = self.qk_norm {
+            q = crate::rms_norm_heads(q, self.head_dim, q_weight, 1e-6);
+            k = crate::rms_norm_heads(k, self.head_dim, k_weight, 1e-6);
+        }
+        q = crate::rotary_apply(q, self.head_dim, rope_cos, rope_sin, rope_rot);
+        k = crate::rotary_apply(k, self.head_dim, rope_cos, rope_sin, rope_rot);
+        let (attn, k_cache, v_cache) = crate::paged_attention_positional(
+            q,
+            k,
+            self.wv.forward(normed),
+            k_cache,
+            v_cache,
+            gather_idx,
+            scatter_idx,
+            q_pos,
+            self.n_heads,
+            self.n_kv_heads,
+            self.head_dim,
+            None,
+            1.0 / (self.head_dim as f32).sqrt(),
+        );
+        let x = x + self.wo.forward(attn);
+        let ff = self.ffn(x);
+        (x + ff, k_cache, v_cache)
+    }
+
+    fn ffn(&self, x: GraphTensor) -> GraphTensor {
         let ff_in = self.ffn_norm.forward(x);
         let gated = match self.ffn_kind {
             GatedFfn::SwiGlu => self.gate.forward(ff_in).silu(),
             GatedFfn::GeGlu => self.gate.forward(ff_in).gelu_fast_tanh_approximation(),
         };
-        let ff = self.down.forward(gated * self.up.forward(ff_in));
-        (x + ff, k_cache, v_cache)
+        self.down.forward(gated * self.up.forward(ff_in))
     }
 }
 
@@ -1145,5 +1200,138 @@ mod tests {
                 runtime_v[layer] = v_out;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod forward_rope_tests {
+    use super::LlamaBlock;
+    use crate::test_refs::*;
+    use luminal::prelude::*;
+    use luminal::shape::Expression;
+
+    /// forward_rope ≡ the hand-composed Expression path: one graph, one
+    /// set of block weights, the same decode-step inputs — the new
+    /// method on one side; rms_norm_heads → rotary_apply →
+    /// paged_attention(Expression) → residual/FFN spelled out on the
+    /// other. Outputs and both cache outs must agree exactly, proving
+    /// the rope threading and the data-driven mask change nothing at
+    /// the pinned position.
+    #[test]
+    fn llama_block_forward_rope_matches_expression_path() {
+        const D: usize = 8;
+        const FF: usize = 12;
+        const N_HEADS: usize = 4;
+        const N_KV_HEADS: usize = 2;
+        const HEAD_DIM: usize = D / N_HEADS;
+        const KV_DIM: usize = N_KV_HEADS * HEAD_DIM;
+        const SLOTS: usize = 4;
+        const CTX: usize = 3;
+        let position = 1usize;
+
+        let mut cx = Graph::new();
+        let block = LlamaBlock::new(D, FF, N_HEADS, N_KV_HEADS, &mut cx).with_qk_norm(&mut cx);
+        let x = cx.tensor((1, D));
+        let k_cache = cx.tensor((SLOTS, KV_DIM));
+        let v_cache = cx.tensor((SLOTS, KV_DIM));
+        let gather_idx = cx.tensor_dtyped(CTX, DType::Int);
+        let scatter_idx = cx.tensor_dtyped(1, DType::Int);
+        let q_pos = cx.tensor_dtyped(1, DType::Int);
+        let rope_cos = cx.tensor((1, HEAD_DIM));
+        let rope_sin = cx.tensor((1, HEAD_DIM));
+        let rope_rot = cx.tensor((HEAD_DIM, HEAD_DIM));
+
+        let (out_rope, k_rope, v_rope) = block.forward_rope(
+            x, k_cache, v_cache, gather_idx, scatter_idx, q_pos, rope_cos, rope_sin, rope_rot,
+        );
+        let out_rope = out_rope.output();
+        let k_rope = k_rope.output();
+        let v_rope = v_rope.output();
+
+        // The same anatomy composed by hand on the Expression path.
+        let normed = block.attn_norm.forward(x);
+        let (q_weight, k_weight) = block.qk_norm.expect("qk-norm minted");
+        let q = crate::rotary_apply(
+            crate::rms_norm_heads(block.wq.forward(normed), HEAD_DIM, q_weight, 1e-6),
+            HEAD_DIM,
+            rope_cos,
+            rope_sin,
+            rope_rot,
+        );
+        let k = crate::rotary_apply(
+            crate::rms_norm_heads(block.wk.forward(normed), HEAD_DIM, k_weight, 1e-6),
+            HEAD_DIM,
+            rope_cos,
+            rope_sin,
+            rope_rot,
+        );
+        let (attn, k_expr, v_expr) = crate::paged_attention(
+            q,
+            k,
+            block.wv.forward(normed),
+            k_cache,
+            v_cache,
+            gather_idx,
+            scatter_idx,
+            Expression::from(position),
+            N_HEADS,
+            N_KV_HEADS,
+            HEAD_DIM,
+        );
+        let x_mid = x + block.wo.forward(attn);
+        let ff_in = block.ffn_norm.forward(x_mid);
+        let ff = block
+            .down
+            .forward(block.gate.forward(ff_in).silu() * block.up.forward(ff_in));
+        let out_expr = (x_mid + ff).output();
+        let k_expr = k_expr.output();
+        let v_expr = v_expr.output();
+
+        let mut pairs = vec![
+            (x.id, weights(D, 1)),
+            (k_cache.id, weights(SLOTS * KV_DIM, 2)),
+            (v_cache.id, weights(SLOTS * KV_DIM, 3)),
+            (gather_idx.id, vec![0.0f32, 1.0, 2.0]),
+            (scatter_idx.id, vec![1.0f32]),
+            (q_pos.id, vec![position as f32]),
+        ];
+        let (cos, sin) = crate::rope_tables_split_half(&[position as f32], HEAD_DIM, 10_000.0, 1.0);
+        pairs.push((rope_cos.id, cos));
+        pairs.push((rope_sin.id, sin));
+        pairs.push((rope_rot.id, crate::rope_pairing_matrix(HEAD_DIM, false)));
+        for (seed, tensor) in [
+            block.wq.weight,
+            block.wk.weight,
+            block.wv.weight,
+            block.wo.weight,
+            block.gate.weight,
+            block.up.weight,
+            block.down.weight,
+            q_weight,
+            k_weight,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let n: usize = tensor
+                .dims()
+                .iter()
+                .map(|d| d.to_usize().expect("static dim"))
+                .product();
+            pairs.push((tensor.id, weights(n, 10 + seed)));
+        }
+
+        let rt = luminal::test_support::run_ssa(&cx, &pairs);
+        let rope_out = rt.get_f32(out_rope.id).expect("rope out").clone();
+        let expr_out = rt.get_f32(out_expr.id).expect("expr out").clone();
+        assert_close(&rope_out, &expr_out);
+        assert_close(
+            rt.get_f32(k_rope.id).expect("k rope"),
+            rt.get_f32(k_expr.id).expect("k expr"),
+        );
+        assert_close(
+            rt.get_f32(v_rope.id).expect("v rope"),
+            rt.get_f32(v_expr.id).expect("v expr"),
+        );
     }
 }
