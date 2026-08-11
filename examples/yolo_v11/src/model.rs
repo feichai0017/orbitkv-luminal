@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! YOLO v11n model definition for Luminal.
 //!
 //! Mirrors the Ultralytics architecture for the `yolo11n` variant:
@@ -49,7 +48,6 @@ fn canonicalize_static_shape(mut t: GraphTensor) -> GraphTensor {
 
 pub const NC: usize = 80;
 pub const REG_MAX: usize = 16;
-pub const NO: usize = NC + REG_MAX * 4; // 84
 pub const STRIDES: [usize; 3] = [8, 16, 32];
 pub const IMG_SIZE: usize = 640;
 
@@ -68,8 +66,6 @@ pub struct Conv {
     pub k: usize,
     pub s: usize,
     pub p: usize,
-    pub c_in: usize,
-    pub c_out: usize,
 }
 
 impl Conv {
@@ -92,8 +88,6 @@ impl Conv {
             k,
             s,
             p,
-            c_in,
-            c_out,
         }
     }
 
@@ -204,7 +198,6 @@ impl Conv {
 pub struct DwConv {
     pub weight: GraphTensor,
     pub bias: GraphTensor,
-    pub c: usize,
     pub k: usize,
     pub s: usize,
     pub p: usize,
@@ -219,7 +212,6 @@ impl DwConv {
         Self {
             weight,
             bias,
-            c,
             k,
             s,
             p,
@@ -307,7 +299,6 @@ pub struct C3k {
     pub cv2: Conv,
     pub cv3: Conv,
     pub m: Vec<Bottleneck>,
-    pub c_: usize,
 }
 
 impl C3k {
@@ -319,13 +310,7 @@ impl C3k {
         let m = (0..n)
             .map(|i| Bottleneck::new(&format!("{name}.m.{i}"), c_, c_, shortcut, (3, 3), 1.0, cx))
             .collect();
-        Self {
-            cv1,
-            cv2,
-            cv3,
-            m,
-            c_,
-        }
+        Self { cv1, cv2, cv3, m }
     }
 
     pub fn forward(&self, x: GraphTensor) -> GraphTensor {
@@ -363,7 +348,6 @@ pub struct C3k2 {
     pub cv1b: Conv,
     pub cv2: Conv,
     pub m: Vec<C3k2Inner>,
-    pub c: usize, // hidden channel size
 }
 
 #[derive(Clone, Copy)]
@@ -418,13 +402,7 @@ impl C3k2 {
                 }
             })
             .collect();
-        Self {
-            cv1a,
-            cv1b,
-            cv2,
-            m,
-            c,
-        }
+        Self { cv1a, cv1b, cv2, m }
     }
 
     pub fn forward(&self, x: GraphTensor) -> GraphTensor {
@@ -519,10 +497,8 @@ pub struct Attention {
     pub v_split: Conv,
     pub proj: Conv,
     pub pe: DwConv,
-    pub num_heads: usize,
     pub head_dim: usize,
     pub key_dim: usize,
-    pub c: usize,
     pub scale: f32,
 }
 
@@ -565,10 +541,8 @@ impl Attention {
             v_split,
             proj,
             pe,
-            num_heads,
             head_dim,
             key_dim,
-            c,
             scale: (key_dim as f32).powf(-0.5),
         }
     }
@@ -650,7 +624,6 @@ pub struct C2psa {
     pub cv1b: Conv,
     pub cv2: Conv,
     pub m: Vec<PsaBlock>,
-    pub c: usize,
 }
 
 impl C2psa {
@@ -664,13 +637,7 @@ impl C2psa {
         let m = (0..n)
             .map(|i| PsaBlock::new(&format!("{name}.m.{i}"), c, 0.5, num_heads, cx))
             .collect();
-        Self {
-            cv1a,
-            cv1b,
-            cv2,
-            m,
-            c,
-        }
+        Self { cv1a, cv1b, cv2, m }
     }
 
     pub fn forward(&self, x: GraphTensor) -> GraphTensor {
@@ -697,8 +664,6 @@ pub struct DetectScale {
     pub dw_b: DwConv,  // 3x3 depthwise + SiLU
     pub pw_b: Conv,    // 1x1 + SiLU
     pub cls_out: Conv, // 1x1 plain Conv2d with bias (no act)
-
-    pub c_in: usize,
 }
 
 impl DetectScale {
@@ -757,7 +722,6 @@ impl DetectScale {
             dw_b,
             pw_b,
             cls_out,
-            c_in,
         }
     }
 
@@ -791,7 +755,6 @@ pub struct Detect {
     pub dfl_weight: GraphTensor, // (16,) - constant arange(16)
     pub anchors: GraphTensor,    // (2, 8400) precomputed
     pub strides: GraphTensor,    // (1, 8400) precomputed
-    pub feat_sizes: Vec<usize>,
 }
 
 impl Detect {
@@ -828,7 +791,6 @@ impl Detect {
             dfl_weight,
             anchors,
             strides,
-            feat_sizes: feat_sizes.to_vec(),
         }
     }
 

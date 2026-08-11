@@ -332,14 +332,13 @@ pub trait EgglogOp: Debug {
     /// Extract this op from the egraph.
     /// - `kind_children`: metadata fields from OpKind enode (shapes, strides, dtypes, etc.)
     /// - `input_enodes`: IR inputs from IList, already walked and resolved
-    #[allow(unused_variables)]
     fn extract<'a>(
         &'a self,
-        egraph: &'a SerializedEGraph,
-        kind_children: &[&'a ENodeId],
-        input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _egraph: &'a SerializedEGraph,
+        _kind_children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         panic!("Extraction not implemented for {self:?}!");
     }

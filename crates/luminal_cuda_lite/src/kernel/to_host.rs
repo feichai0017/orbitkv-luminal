@@ -3064,7 +3064,7 @@ pub fn kernel_to_host(
         clear_global_dyn_dims();
 
         // Use the final global ordering if it was extended during compilation
-        let mut dyn_dims_order: Vec<char> = if let Some(final_order) = final_global {
+        let dyn_dims_order: Vec<char> = if let Some(final_order) = final_global {
             final_order
         } else {
             let mut dims: Vec<char> = all_dyn_dims.into_iter().collect();

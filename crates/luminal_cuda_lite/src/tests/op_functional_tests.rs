@@ -1,5 +1,4 @@
 use candle_core::{Device, Tensor};
-use cudarc::driver::CudaContext;
 use luminal::prelude::*;
 use proptest::prelude::*;
 
@@ -9,7 +8,6 @@ use luminal::egglog_utils::{
 
 use crate::runtime::CudaRuntime;
 
-#[allow(unused_imports)]
 use super::utilities::{
     GENOME_FUZZ_COUNT, TOLERANCE_SAFETY_FACTOR, assert_close, dtype_epsilon, fuzz_genomes,
     gen_slice_range, get_cuda_stream, gpu_supports_dtype, op_ir_nodes, random_f32_vec,
@@ -208,121 +206,6 @@ proptest! {
         test_binary_cuda((y, x), (y, x), |a, b| a.lt(b).cast(luminal::dtype::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), gen_lambda, gen_lambda, seed, 0.0, 0.0);
     }
 }
-
-#[allow(dead_code)]
-fn run_argsort_test(rows: usize, cols: usize, seed: u64) {
-    let total = rows * cols;
-
-    let mut cx = Graph::default();
-    let input = cx.tensor((rows, cols));
-    let sorted_dim0 = input.stable_argsort(0, true).output(); // descend
-    let sorted_dim1 = input.stable_argsort(1, false).output(); // ascend
-
-    // random and unique data using seed
-    let data: Vec<f32> = random_f32_vec(total, seed, 0.0, 1.0);
-
-    let sorted_cols: Vec<Vec<i32>> = (0..cols)
-        .map(|col| {
-            let mut indices: Vec<i32> = (0..rows as i32).collect();
-            indices.sort_by(|&a, &b| {
-                let va = data[(a as usize) * cols + col];
-                let vb = data[(b as usize) * cols + col];
-                vb.partial_cmp(&va).unwrap()
-            });
-            indices
-        })
-        .collect();
-
-    let expected_dim0: Vec<i32> = (0..rows)
-        .flat_map(|row| {
-            (0..cols)
-                .map(|col| sorted_cols[col][row])
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let expected_dim1: Vec<i32> = (0..rows)
-        .flat_map(|row| {
-            let mut indices: Vec<i32> = (0..cols as i32).collect();
-            indices.sort_by(|&a, &b| {
-                let va = data[row * cols + (a as usize)];
-                let vb = data[row * cols + (b as usize)];
-                va.partial_cmp(&vb).unwrap()
-            });
-            indices
-        })
-        .collect();
-
-    let ctx = CudaContext::new(0).unwrap();
-    ctx.bind_to_thread().unwrap();
-    let stream = ctx.default_stream();
-    cx.build_search_space::<CudaRuntime>(CompileOptions::default());
-    let mut rt = CudaRuntime::initialize(stream);
-    rt.set_data(input, data);
-    rt = cx.search(rt, CompileOptions::default().search_graph_limit(10));
-    rt.execute(&cx.dyn_map);
-    let out_dim0 = rt.get_i32(sorted_dim0.id);
-    let out_dim1 = rt.get_i32(sorted_dim1.id);
-
-    assert_eq!(out_dim0.len(), expected_dim0.len(), "dim0 length mismatch");
-    assert_eq!(out_dim1.len(), expected_dim1.len(), "dim1 length mismatch");
-
-    // Debug: check for out-of-range values (indices should be 0..rows for dim0, 0..cols for dim1)
-    let max_valid_dim0 = rows as i32 - 1;
-    let max_valid_dim1 = cols as i32 - 1;
-    let bad_dim0: Vec<_> = out_dim0
-        .iter()
-        .enumerate()
-        .filter(|&(_, &v)| v < 0 || v > max_valid_dim0)
-        .take(10)
-        .collect();
-    let bad_dim1: Vec<_> = out_dim1
-        .iter()
-        .enumerate()
-        .filter(|&(_, &v)| v < 0 || v > max_valid_dim1)
-        .take(10)
-        .collect();
-
-    if !bad_dim0.is_empty() {
-        panic!(
-            "dim0 has out-of-range values (valid: 0-{max_valid_dim0}): {:?}\nFirst 20 values: {:?}",
-            bad_dim0,
-            &out_dim0[..20.min(out_dim0.len())]
-        );
-    }
-    if !bad_dim1.is_empty() {
-        panic!(
-            "dim1 has out-of-range values (valid: 0-{max_valid_dim1}): {:?}",
-            bad_dim1
-        );
-    }
-
-    for i in 0..out_dim0.len() {
-        assert_eq!(
-            out_dim0[i], expected_dim0[i],
-            "dim0 mismatch at {i}: got {}, expected {}",
-            out_dim0[i], expected_dim0[i]
-        );
-    }
-
-    for i in 0..out_dim1.len() {
-        assert_eq!(
-            out_dim1[i], expected_dim1[i],
-            "dim1 mismatch at {i}: got {}, expected {}",
-            out_dim1[i], expected_dim1[i]
-        );
-    }
-}
-
-// NOTE: Argsort proptest disabled due to pre-existing bug where argsort output shape
-// through e-graph compilation returns only `rows` elements instead of `rows * cols`.
-// proptest! {
-//     #![proptest_config(ProptestConfig::with_cases(10))]
-//     #[test]
-//     fn test_argsort(seed in any::<u64>()) {
-//         run_argsort_test(5, 500, seed);
-//     }
-// }
 
 /// Test F32 -> F16 -> F32 cast roundtrip with edge-case values.
 #[test]

@@ -17,8 +17,6 @@ use crate::{
     kernel::{KernelOp, hlir::dtype_includes, hlir::generate_dyn_dims_defines},
 };
 use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream};
-#[allow(unused_imports)]
-use luminal::dtype::DType;
 use luminal::{
     egglog_utils::{
         api::{Rule, SortDef, sort},

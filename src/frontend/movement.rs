@@ -548,33 +548,6 @@ impl GraphTensor {
         self.slice(s)
     }
 
-    // /// Cut out 'size' elements every 'spacing' elements on a dimension. 'size' must be smaller than the dimension
-    // pub fn excise(mut self, spacing: usize, size: usize) -> GraphTensor {
-    //     let n_dims = self.shape.len();
-    //     // Pad out to a multiple of spacing + size
-    //     let total_size = (self.shape.dims[n_dims - 1] + ((spacing + size) - 1))
-    //         / (spacing + size)
-    //         * (spacing + size);
-    //     let padding = total_size - self.shape.dims[self.shape.indexes[n_dims - 1]];
-    //     self.shape.padding[self.shape.indexes[n_dims - 1]].1 = padding;
-
-    //     self = self.contiguous();
-    //     // Expand a new dimension to do the slicing on
-    //     let n_rows = total_size / (spacing + size);
-    //     self.shape.expand_dim(n_dims, spacing + size);
-    //     // self = self.contiguous();
-    //     self.shape.dims[self.shape.indexes[n_dims - 1]] = n_rows;
-    //     self.shape.fake[self.shape.indexes[n_dims]] = false;
-
-    //     // Slice
-    //     self.shape.mask[self.shape.indexes[n_dims]].1 = spacing.into();
-
-    //     self = self.contiguous();
-
-    //     self.shape.remove_dim(n_dims);
-    //     self
-    // }
-
     /// Pad out dimensions of a tensor with an element
     pub fn pad(self, padding: impl ToPad, elem: f32) -> GraphTensor {
         let mut padding = padding.to_pad_vec();

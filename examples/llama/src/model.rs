@@ -14,8 +14,6 @@ pub const HEAD_DIM: usize = 128;
 pub const KV_GROUPS: usize = 4;
 pub const VOCAB_SIZE: usize = 128256;
 pub const N_KV_HEADS: usize = HIDDEN / HEAD_DIM / KV_GROUPS; // 8
-#[allow(dead_code)]
-pub const N_HEADS: usize = HIDDEN / HEAD_DIM; // 32
 pub const KV_DIM: usize = N_KV_HEADS * HEAD_DIM; // 1024
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

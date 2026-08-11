@@ -1,11 +1,9 @@
-#![allow(unused)]
-
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
+use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream};
 use luminal::prelude::*;
 use luminal_tracing::schema::{
-    self as schema, TrackEvent, debug_annotation::NameField, trace_packet, track_event,
+    self as schema, TrackEvent, debug_annotation::NameField, track_event,
 };
 use uuid::Uuid;
 
@@ -112,7 +110,7 @@ pub fn record_cuda_graph_timings(
     trace: &schema::Trace,
     cuda_graph_timings: &[(CudaGraphTiming, Uuid)],
 ) -> Vec<schema::TracePacket> {
-    use luminal_tracing::schema::{trace_packet, track_descriptor};
+    use luminal_tracing::schema::trace_packet;
 
     // Build interned string lookup table
     let interned = build_interned_strings(trace);

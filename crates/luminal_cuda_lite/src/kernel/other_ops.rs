@@ -6,11 +6,10 @@ use crate::{
     kernel::hlir::{dtype_includes, generate_dyn_dims_defines},
 };
 use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream};
-use itertools::Itertools;
 use luminal::{
     egglog_utils::{
         api::{Rule, SortDef, sort},
-        base::{DTYPE, ELIST, EXPRESSION, OP_KIND, STRING},
+        base::{DTYPE, ELIST, EXPRESSION, OP_KIND},
         extract_dtype, extract_expr, extract_expr_list,
     },
     op::*,

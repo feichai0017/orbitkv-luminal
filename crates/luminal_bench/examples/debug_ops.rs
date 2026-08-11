@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 //! Debug script to locate which HLIR op(s) fail to lower to a backend dialect,
 //! leading to `No valid graphs present in the e-graph!`.
 //!
@@ -581,6 +579,3 @@ fn main() {
         run_case::<ActiveBackend>(args.case, args.size, &args);
     }
 }
-
-#[cfg(not(feature = "metal"))]
-fn main() {}

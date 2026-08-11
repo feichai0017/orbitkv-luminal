@@ -8,8 +8,16 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 luminal = { path = "../.." }
 itertools = "0.11.0"
+mnist = { version = "0.6", features = ["download"], optional = true }
+
+[features]
+default = []
+mnist-example = ["dep:mnist"]
 
 [dev-dependencies]
 rand = "0.9.2"
-mnist = { version = "0.6", features = ["download"] }
 luminal_nn = { path = "../luminal_nn" }
+
+[[example]]
+name = "mnist"
+required-features = ["mnist-example"]

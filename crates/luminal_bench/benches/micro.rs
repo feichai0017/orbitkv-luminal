@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 //! Micro benchmark runner using criterion.
 //!
 //! Usage and output locations: see `crates/luminal_bench/README.md`.
@@ -134,11 +132,6 @@ fn metal_micro_benchmarks(c: &mut Criterion) {
         println!("  - {}", metrics_path.display());
         println!("  - {}", report_path.display());
     }
-}
-
-#[cfg(not(feature = "metal"))]
-fn metal_micro_benchmarks(_c: &mut Criterion) {
-    println!("Metal benchmarks disabled. Run with --features metal");
 }
 
 criterion_group! {

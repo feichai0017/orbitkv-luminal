@@ -633,7 +633,6 @@ fn scatter_rows(
 
 /// Handles to every named input of the paged-attention test graph, returned
 /// alongside the graph so the GA-selection test can `set_data` on each one.
-#[allow(dead_code)]
 struct PagedAttnHandles {
     attn_out: GraphTensor,
     q_rope: GraphTensor,
@@ -644,8 +643,6 @@ struct PagedAttnHandles {
     scatter_idx: GraphTensor,
     gather_idx: GraphTensor,
     q_pos: GraphTensor,
-    qo_indptr: GraphTensor,
-    kv_indptr: GraphTensor,
 }
 
 #[derive(Clone, Copy)]
@@ -793,8 +790,6 @@ fn build_paged_attention_graph_with_mask_and_cache_provenance(
             scatter_idx,
             gather_idx,
             q_pos,
-            qo_indptr,
-            kv_indptr,
         },
     )
 }

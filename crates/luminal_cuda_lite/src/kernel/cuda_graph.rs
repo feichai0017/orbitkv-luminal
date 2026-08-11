@@ -629,14 +629,9 @@ pub fn record_event_on_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, Tensor};
     use cudarc::driver::CudaContext;
     use luminal::prelude::*;
-    use proptest::prelude::*;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
-    use std::sync::Arc;
 
-    use crate::cuda_bandwidth_gbps;
     use crate::runtime::CudaRuntime;
     use crate::tests::utilities::*;
 

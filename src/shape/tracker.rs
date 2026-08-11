@@ -744,19 +744,4 @@ mod tests {
         tracker.repeat((2,));
         tracker.split_dims(0, 4);
     }
-
-    // #[test]
-    // fn test_symbolic_idx() {
-    //     let mut cx = Graph::new();
-    //     let seq = 2;
-    //     let head_dim = 4;
-    //     let a = cx.named_tensor("a", (seq, head_dim)).keep();
-    //     let _b = cx.tensor((seq, head_dim / 2, 1)).keep();
-    //     // Split input into evens and odds
-    //     let split = a.reshape((seq, head_dim / 2, 2));
-    //     let x0 = split.slice((.., .., ..1));
-    //     let _x = split.slice((.., .., 1..));
-
-    //     println!("x0: {:?}", x0.shape.index_expression());
-    // }
 }

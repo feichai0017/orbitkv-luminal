@@ -648,15 +648,6 @@ fn base_expression_egglog_impl(use_interval_analysis: bool) -> String {
     // matches in a single early-stage saturate. Productive simplifications
     // (`div-self`, `mod-mul-self`, `div-const`, `merge-dims`) cover the
     // cases we actually need without the explosion.
-    // p.add_rule(
-    //     rewrite(
-    //         "div-cancel-factor",
-    //         div(mul(v("a"), v("b")), mul(v("a"), v("c"))),
-    //         div(v("b"), v("c")),
-    //     )
-    //     .ruleset("expr"),
-    // );
-
     // Division self-cancel: a/a → 1
     p.add_rule(rewrite("div-self", div(v("a"), v("a")), num(i64(1))).ruleset("expr"));
     p.add_rule(

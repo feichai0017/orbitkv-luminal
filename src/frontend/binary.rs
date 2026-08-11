@@ -409,7 +409,6 @@ impl F32Pow for f32 {
     }
 }
 
-// #[cfg(test)]
 #[cfg(test)]
 pub(super) mod tests {
     use crate::{

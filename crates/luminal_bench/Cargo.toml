@@ -25,10 +25,16 @@ rand = "0.9.2"
 default = []
 metal = ["dep:luminal_metal", "dep:metal"]
 
+[[example]]
+name = "debug_ops"
+required-features = ["metal"]
+
 [[bench]]
 name = "micro"
 harness = false
+required-features = ["metal"]
 
 [[bench]]
 name = "patterns"
 harness = false
+required-features = ["metal"]

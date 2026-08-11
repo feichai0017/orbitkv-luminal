@@ -382,10 +382,7 @@ fn swiglu_chain_atoms() -> &'static str {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct KernelSwiglu {
-    /// Output shape `(rows, intermediate)`; rows may be dynamic.
-    out_shape: Vec<Expression>,
-}
+pub struct KernelSwiglu;
 
 impl EgglogOp for KernelSwiglu {
     fn sort(&self) -> SortDef {
@@ -440,9 +437,7 @@ impl EgglogOp for KernelSwiglu {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct KernelSwigluQuant {
-    out_shape: Vec<Expression>,
-}
+pub struct KernelSwigluQuant;
 
 impl EgglogOp for KernelSwigluQuant {
     fn sort(&self) -> SortDef {

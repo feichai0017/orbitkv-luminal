@@ -56,7 +56,6 @@ fn parse_cublas_op(s: &str) -> cublasOperation_t {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct CuBlasLt {
     m: Expression,
     n: Expression,
@@ -218,13 +217,12 @@ impl EgglogOp for CuBlasLt {
         ]
     }
 
-    #[allow(unused_variables)]
     fn extract<'a>(
         &'a self,
         egraph: &'a luminal::egglog_utils::SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         // Extract dimensions from egglog
@@ -324,13 +322,12 @@ impl EgglogOp for CuBlasLtScaled {
         4
     }
 
-    #[allow(unused_variables)]
     fn extract<'a>(
         &'a self,
         egraph: &'a luminal::egglog_utils::SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let m = extract_expr(egraph, kind_children[0], expr_cache).unwrap();

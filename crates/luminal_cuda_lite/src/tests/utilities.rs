@@ -100,7 +100,6 @@ impl TestDType for i32 {
     }
 }
 
-#[allow(dead_code)]
 pub fn random_i32_vec(n: usize, seed: u64, low: i32, high: i32) -> Vec<i32> {
     let mut rng = StdRng::seed_from_u64(seed);
     (0..n).map(|_| rng.random_range(low..=high)).collect()

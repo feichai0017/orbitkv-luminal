@@ -440,10 +440,7 @@ pub fn fused_rms_norm_quant(
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Default, Debug, Clone)]
-pub struct KernelRMSNorm {
-    out_shape: Vec<Expression>,
-    eps: f64,
-}
+pub struct KernelRMSNorm;
 
 use luminal::{
     egglog_utils::{
@@ -610,10 +607,7 @@ impl EgglogOp for KernelRMSNorm {
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Default, Debug, Clone)]
-pub struct KernelRMSNormQuant {
-    out_shape: Vec<Expression>,
-    eps: f64,
-}
+pub struct KernelRMSNormQuant;
 
 impl EgglogOp for KernelRMSNormQuant {
     fn sort(&self) -> SortDef {

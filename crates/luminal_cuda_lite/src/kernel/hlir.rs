@@ -1,18 +1,15 @@
 use std::sync::Arc;
 
-use crate::{
-    compile_module_image_for_current_device, cuda_dtype,
-    kernel::{CudaFunctionExt, KernelOp},
-};
+use crate::{compile_module_image_for_current_device, cuda_dtype, kernel::KernelOp};
 use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream};
 use itertools::Itertools;
 use luminal::{
     egglog_utils::{
-        api::{Rule, SortDef, Term, app, eq, rule, set, sort, union, v},
+        api::{Rule, SortDef, Term, app, eq, rule, sort, union, v},
         base::{DTYPE, ELIST, EXPRESSION, F64, OP_KIND, SORTS, dtype, ilist, op_term},
         extract_dtype, extract_expr, extract_expr_list,
     },
-    hlir::{LessThan, MaxReduce, Mod, Scatter, SumReduce},
+    hlir::{LessThan, MaxReduce, Mod, SumReduce},
     op::*,
     prelude::*,
 };
@@ -2142,10 +2139,10 @@ extern \"C\" {{
     }
 }
 
-/// Thread-local global dim ordering override. When set, `generate_dyn_dims_defines`
-/// uses this ordering for buffer indices instead of the kernel's local ordering.
-/// This ensures all kernels in a CudaGraphOp use consistent indices into the shared
-/// dyn_dims buffer.
+// Thread-local global dim ordering override. When set, `generate_dyn_dims_defines`
+// uses this ordering for buffer indices instead of the kernel's local ordering.
+// This ensures all kernels in a CudaGraphOp use consistent indices into the shared
+// dyn_dims buffer.
 thread_local! {
     static GLOBAL_DYN_DIMS: std::cell::RefCell<Option<Vec<char>>> = const { std::cell::RefCell::new(None) };
 }

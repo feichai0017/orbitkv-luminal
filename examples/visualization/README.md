@@ -18,7 +18,7 @@ The integrated nature of these extensions makes viewing these files easy even on
 
 ## Visualization Providers
 - `.html` file formatting is provided by [egraph-visualizer](https://github.com/egraphs-good/egraph-visualizer)
-- `.dot` file formatting is provided by [graphviz-rust](https://crates.io/crates/graphviz-rust)
+- `.dot` files are generated directly from Luminal's graph representation.
 
 ## Example Provided 
 In the example program, as simple program is defined. 

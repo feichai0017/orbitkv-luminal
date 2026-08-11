@@ -31,7 +31,7 @@ use luminal::{
     graph::LLIRGraph,
     hlir::Input,
     prelude::{
-        petgraph::{Direction, algo::toposort, visit::EdgeRef},
+        petgraph::{Direction, visit::EdgeRef},
         *,
     },
 };
@@ -1424,7 +1424,8 @@ fn elementwise_body(op: &str, locals: &[&str]) -> String {
 #[allow(clippy::type_complexity)]
 pub(crate) struct CompiledRegion {
     pub function: CudaFunction,
-    pub module: Arc<CudaModule>,
+    /// Keeps the CUDA module alive for `function`.
+    pub _module: Arc<CudaModule>,
     pub kernel_str: String,
     pub grid: (Expression, Expression, Expression),
     pub block: (Expression, Expression, Expression),
@@ -1650,7 +1651,7 @@ pub(crate) fn compile_region(
 
     CompiledRegion {
         function,
-        module,
+        _module: module,
         kernel_str: kernel,
         grid: (out_size.ceil_div(256), 1.into(), 1.into()),
         block: (out_size.min(256), 1.into(), 1.into()),
@@ -1988,7 +1989,7 @@ mod tests {
         };
 
         let mut g: LLIRGraph = LLIRGraph::default();
-        let mut add_nodes = |g: &mut LLIRGraph| {
+        let add_nodes = |g: &mut LLIRGraph| {
             let p_sqrt = g.add_node(llir_of(unary("Sqrt")));
             let p_sin = g.add_node(llir_of(unary("Sin")));
             let p_exp = g.add_node(llir_of(unary("Exp")));
