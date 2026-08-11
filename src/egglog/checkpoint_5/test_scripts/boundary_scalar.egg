@@ -12,7 +12,7 @@
 (let x_layout_tensor (LayoutTensorLit x_logical x_layout))
 
 (let bias_constant (LogicalConstant 1.5))
-(let bias_field (LogicalIndexMapApply bias_constant (IndexMapLit (IntExprNil)) x_shape))
+(let bias_field (LogicalIndexMapApply bias_constant (IndexMapLit (IntExprNil) (ShapeLit (IntExprNil))) x_shape))
 
 (let biased_logical (LogicalAdd x_logical bias_field))
 

@@ -36,7 +36,8 @@
   (IndexMapLit
     (IntExprCons (IntLit 0)
       (IntExprCons (CoordVar row_shape 0)
-        (IntExprNil)))))
+        (IntExprNil)))
+    x_shape))
 (let row0_view_logical (LogicalIndexMapApply x_logical row0_map row_shape))
 
 (let y_logical (LogicalSqrt x_logical))
@@ -85,7 +86,7 @@
 (check
   (= expected_view_layout
      (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul x_element_offset (IntLit 32)) row0_map x_shape)
+       (int-subst-of (IntMul x_element_offset (IntLit 32)) row0_map)
        row_shape
        (bits-of x_dtype))))
 

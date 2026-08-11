@@ -17,13 +17,15 @@
   (IndexMapLit
     (IntExprCons (IntLit 0)
       (IntExprCons (CoordVar view_shape 0)
-        (IntExprNil)))))
+        (IntExprNil)))
+    storage_shape))
 
 (let row1_index_map
   (IndexMapLit
     (IntExprCons (IntLit 1)
       (IntExprCons (CoordVar view_shape 0)
-        (IntExprNil)))))
+        (IntExprNil)))
+    storage_shape))
 
 (let row0_view_logical
   (LogicalIndexMapApply storage_logical row0_index_map view_shape))

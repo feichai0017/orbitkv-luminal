@@ -18,7 +18,7 @@
 
 ; --- broadcast to [3, 5] through the empty index map ---
 (let bcast_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprCons (IntLit 5) (IntExprNil)))))
-(let bias_field (LogicalIndexMapApply bias_constant (IndexMapLit (IntExprNil)) bcast_shape))
+(let bias_field (LogicalIndexMapApply bias_constant (IndexMapLit (IntExprNil) scalar_shape) bcast_shape))
 (let bcast_layout (RightMajorContiguousElementLayoutLit bcast_shape (bits-of (F32))))
 
 ; --- full reduction: [4] -> rank 0 ---
@@ -60,7 +60,7 @@
 (check
   (= (LayoutTensorOpIndexMapApplyMaterialize
        (LayoutTensorLit bias_constant scalar_layout)
-       (IndexMapLit (IntExprNil))
+       (IndexMapLit (IntExprNil) scalar_shape)
        bcast_shape
        bcast_layout)
      (LayoutTensorOpLit

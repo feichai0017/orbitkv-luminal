@@ -30,10 +30,12 @@
          (IntExprCons ?m_dim (IntExprCons ?n_dim (IntExprCons ?k_dim (IntExprNil))))))
     (= ?lhs_map
        (IndexMapLit
-         (IntExprCons (CoordVar ?expanded_shape 2) (IntExprCons (CoordVar ?expanded_shape 0) (IntExprNil)))))
+         (IntExprCons (CoordVar ?expanded_shape 2) (IntExprCons (CoordVar ?expanded_shape 0) (IntExprNil)))
+         ?lhs_source_shape))
     (= ?rhs_map
        (IndexMapLit
-         (IntExprCons (CoordVar ?expanded_shape 0) (IntExprCons (CoordVar ?expanded_shape 1) (IntExprNil)))))
+         (IntExprCons (CoordVar ?expanded_shape 0) (IntExprCons (CoordVar ?expanded_shape 1) (IntExprNil)))
+         ?rhs_source_shape))
     (= (injectivity-of ?out_layout_tensor) (Injective))
   )
   (

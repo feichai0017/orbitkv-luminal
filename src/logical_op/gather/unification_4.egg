@@ -12,9 +12,12 @@
     (= ?out_logical (LogicalGather ?data_logical ?coordinate_list))
     (coordinate-iota-expressions ?coordinate_list ?entry_expressions)
     (= ?common_shape (coords-common-shape ?coordinate_list))
+    ; the minted map's domain tag = the data tensor's own shape
+    (= ?data_shape (shape-of ?data_logical))
   )
   (
     (union ?out_logical
-      (LogicalIndexMapApply ?data_logical (IndexMapLit ?entry_expressions) ?common_shape))
+      (LogicalIndexMapApply ?data_logical
+        (IndexMapLit ?entry_expressions ?data_shape) ?common_shape))
   )
 )

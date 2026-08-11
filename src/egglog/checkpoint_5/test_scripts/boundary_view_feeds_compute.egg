@@ -27,7 +27,8 @@
   (IndexMapLit
     (IntExprCons (CoordVar transposed_shape 0)
       (IntExprCons (CoordVar transposed_shape 1)
-        (IntExprNil)))))
+        (IntExprNil)))
+    x_shape))
 (let view_logical (LogicalIndexMapApply x_logical transpose_map transposed_shape))
 (let y_logical (LogicalSqrt view_logical))
 
@@ -66,7 +67,7 @@
 (check
   (= expected_view_layout
      (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul x_element_offset (IntLit 32)) transpose_map x_shape)
+       (int-subst-of (IntMul x_element_offset (IntLit 32)) transpose_map)
        transposed_shape
        (bits-of x_dtype))))
 

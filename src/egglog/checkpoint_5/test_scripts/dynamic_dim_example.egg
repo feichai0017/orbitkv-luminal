@@ -48,7 +48,8 @@
   (IndexMapLit
     (IntExprCons (IntLit 0)
       (IntExprCons (CoordVar view_shape 0)
-        (IntExprNil)))))
+        (IntExprNil)))
+    storage_shape))
 (let row0_view_logical (LogicalIndexMapApply storage_logical row0_map view_shape))
 
 (let storage_layout (RightMajorContiguousElementLayoutLit storage_shape (bits-of storage_dtype)))
@@ -69,7 +70,8 @@
   (IndexMapLit
     (IntExprCons (CoordVar transposed_shape 0)
       (IntExprCons (CoordVar transposed_shape 1)
-        (IntExprNil)))))
+        (IntExprNil)))
+    storage_shape))
 (let transposed_view_logical (LogicalIndexMapApply storage_logical transpose_map transposed_shape))
 
 ; Path (ii): a pinned dynamic dim.
@@ -149,7 +151,8 @@
   (IndexMapLit
     (IntExprCons (CoordVar gap_transposed_shape 0)
       (IntExprCons (CoordVar gap_transposed_shape 1)
-        (IntExprNil)))))
+        (IntExprNil)))
+    gap_probe_shape))
 (let gap_view_logical
   (LogicalIndexMapApply gap_probe_logical gap_transpose_map gap_transposed_shape))
 (let gap_probe_offset
@@ -180,16 +183,16 @@
      (ElementOffsetExpressionLayoutLit storage_offset storage_shape (bits-of storage_dtype))))
 
 ; Path (i) pins. Substitution is the identity on the symbolic constant...
-(check (= (subst-of seq_len row0_map storage_shape) seq_len))
+(check (= (int-subst-of seq_len row0_map) seq_len))
 ; ...the zero entry annihilates the symbolic-stride summand directly
 ; (zero-aware IntMul image: no stranded IntMul(0, seq_len) scaffolding)...
-(check (= (subst-of storage_offset row0_map storage_shape) row0_offset))
+(check (= (int-subst-of storage_offset row0_map) row0_offset))
 ; ...and the COMPOSED view layout lands in the hand-written class at the
 ; bit level (the composition acceptance shape, now symbolic).
 (check
   (= row0_view_layout
      (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul storage_offset (IntLit 32)) row0_map storage_shape)
+       (int-subst-of (IntMul storage_offset (IntLit 32)) row0_map)
        view_shape
        (bits-of storage_dtype))))
 
@@ -209,14 +212,14 @@
 ; Transpose pins: substitution lands the symbolic-coefficient offset...
 (let transposed_offset
   (IntAdd (IntMul (CoordVar transposed_shape 0) seq_len) (CoordVar transposed_shape 1)))
-(check (= (subst-of storage_offset transpose_map storage_shape) transposed_offset))
+(check (= (int-subst-of storage_offset transpose_map) transposed_offset))
 ; ...and SYMBOLIC-STRIDE DISCOVERY (single-occurrence extraction) now
 ; derives the strided form ([1, seq_len] over [seq_len, 4]) — this pin
 ; was a deliberate fail-check while 3b was literal-only; it flipped when
 ; the pointing rules landed...
 (check
   (= (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul storage_offset (IntLit 32)) transpose_map storage_shape)
+       (int-subst-of (IntMul storage_offset (IntLit 32)) transpose_map)
        transposed_shape
        (bits-of storage_dtype))
      (StridedElementLayoutLit transposed_shape
@@ -230,31 +233,23 @@
 ; classified.
 (check
   (= (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul storage_offset (IntLit 32)) transpose_map storage_shape)
+       (int-subst-of (IntMul storage_offset (IntLit 32)) transpose_map)
        transposed_shape
        (bits-of storage_dtype))
      (LeftMajorContiguousElementLayoutLit transposed_shape (bits-of storage_dtype))))
 
 ; The gap-dim probe: composition COMPLETES (the relaxed substitution
-; needs no certificates — the composed bit-offset class exists), but
-; symbolic-stride discovery STALLS on the gap axis (no support facts, so
-; the single-occurrence recursion cannot identify its summand): the
-; strided form deliberately never derives.
+; needs no certificates — the composed bit-offset class exists). The
+; scalar single-occurrence discovery still stalls on the gap axis, but
+; since the affine migration the NATIVE CHAIN COMPOSITION road (a
+; parallel, structural path — pure-selection arms need no scalar
+; reasoning) derives the transposed strided form anyway. The old
+; fail-pin that froze the scalar road's stall as a system limitation
+; was removed by ruling 2026-08-11 ("get rid of the pin").
 (check
-  (= (subst-of gap_probe_offset gap_transpose_map gap_probe_shape)
+  (= (int-subst-of gap_probe_offset gap_transpose_map)
      (IntAdd (IntMul (CoordVar gap_transposed_shape 0) gap_probe_dim)
        (CoordVar gap_transposed_shape 1))))
-(fail
-  (check
-    (= (BitOffsetExpressionLayoutLit
-         (subst-of (IntMul gap_probe_offset (IntLit 32)) gap_transpose_map gap_probe_shape)
-         gap_transposed_shape
-         (bits-of storage_dtype))
-       (StridedElementLayoutLit gap_transposed_shape
-    (IntAffineExprCons (CoordVar gap_transposed_shape 1)
-      (IntAffineExprCons (IntMul (CoordVar gap_transposed_shape 0) gap_probe_dim)
-      (IntAffineExprNil)))
-    (bits-of storage_dtype)))))
 
 ; Path (ii) pins: the pin is congruence-visible everywhere.
 (check (= pinned_product (IntLit 6)))

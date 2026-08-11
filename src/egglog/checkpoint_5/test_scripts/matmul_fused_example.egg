@@ -29,11 +29,13 @@
 (let lhs_map
   (IndexMapLit
     (IntExprCons (CoordVar expanded_shape 2)
-      (IntExprCons (CoordVar expanded_shape 0) (IntExprNil)))))
+      (IntExprCons (CoordVar expanded_shape 0) (IntExprNil)))
+    lhs_shape))
 (let rhs_map
   (IndexMapLit
     (IntExprCons (CoordVar expanded_shape 0)
-      (IntExprCons (CoordVar expanded_shape 1) (IntExprNil)))))
+      (IntExprCons (CoordVar expanded_shape 1) (IntExprNil)))
+    rhs_shape))
 (let lhs_expanded (LogicalIndexMapApply lhs_logical lhs_map expanded_shape))
 (let rhs_expanded (LogicalIndexMapApply rhs_logical rhs_map expanded_shape))
 (let product_logical (LogicalMul lhs_expanded rhs_expanded))

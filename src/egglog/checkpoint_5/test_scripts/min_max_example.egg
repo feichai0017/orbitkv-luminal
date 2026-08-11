@@ -53,8 +53,8 @@
 (let tile_coordinate (CoordVar minmax_source_shape 0))
 (let coordinate_minimum (IntMin tile_coordinate (IntLit 64)))
 (let identity_rank1_map
-  (IndexMapLit (IntExprCons tile_coordinate (IntExprNil))))
-(subst-demand coordinate_minimum identity_rank1_map minmax_source_shape)
+  (IndexMapLit (IntExprCons tile_coordinate (IntExprNil)) minmax_source_shape))
+(int-subst-demand coordinate_minimum identity_rank1_map)
 
 (run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
 
@@ -91,4 +91,4 @@
 (check (provably-cannot-union-with-zero bounded_minimum))
 
 ; --- substitution descends through the lattice pair ---
-(check (= (subst-of coordinate_minimum identity_rank1_map minmax_source_shape) coordinate_minimum))
+(check (= (int-subst-of coordinate_minimum identity_rank1_map) coordinate_minimum))

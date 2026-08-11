@@ -59,7 +59,8 @@
   (LogicalIndexMapApply table_logical
     (IndexMapLit
       (IntExprCons (CoordVar transpose_shape 0)
-        (IntExprCons (CoordVar transpose_shape 1) (IntExprNil))))
+        (IntExprCons (CoordVar transpose_shape 1) (IntExprNil)))
+      table_shape)
     transpose_shape))
 
 (run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))

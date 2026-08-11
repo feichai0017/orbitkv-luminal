@@ -162,14 +162,16 @@
     (IntExprCons (CoordVar projection_product_shape 4)
       (IntExprCons (CoordVar projection_product_shape 2)
         (IntExprCons (CoordVar projection_product_shape 0)
-          (IntExprNil))))))
+          (IntExprNil))))
+    model_shape))
 
 (let weight_to_projection_product_map
   (IndexMapLit
     (IntExprCons (CoordVar projection_product_shape 3)
       (IntExprCons (CoordVar projection_product_shape 1)
         (IntExprCons (CoordVar projection_product_shape 0)
-          (IntExprNil))))))
+          (IntExprNil))))
+    projection_weight_shape))
 
 (let x_for_q_logical
   (LogicalIndexMapApply x_logical x_to_projection_product_map projection_product_shape))
@@ -211,7 +213,8 @@
       (IntExprCons (CoordVar attn_scores_product_shape 3)
         (IntExprCons (CoordVar attn_scores_product_shape 2)
           (IntExprCons (CoordVar attn_scores_product_shape 0)
-            (IntExprNil)))))))
+            (IntExprNil)))))
+    qkv_shape))
 
 (let k_to_scores_product_map
   (IndexMapLit
@@ -219,7 +222,8 @@
       (IntExprCons (CoordVar attn_scores_product_shape 3)
         (IntExprCons (CoordVar attn_scores_product_shape 1)
           (IntExprCons (CoordVar attn_scores_product_shape 0)
-            (IntExprNil)))))))
+            (IntExprNil)))))
+    qkv_shape))
 
 (let q_for_scores_logical
   (LogicalIndexMapApply q_logical q_to_scores_product_map attn_scores_product_shape))
@@ -255,7 +259,8 @@
     (IntExprCons (CoordVar attn_scores_shape 3)
       (IntExprCons (CoordVar attn_scores_shape 2)
         (IntExprCons (CoordVar attn_scores_shape 1)
-          (IntExprNil))))))
+          (IntExprNil))))
+    attn_row_shape))
 
 (let attn_row_sum_bcast_logical
   (LogicalIndexMapApply attn_row_sum_logical row_sum_to_scores_map attn_scores_shape))
@@ -276,7 +281,8 @@
       (IntExprCons (CoordVar attn_scores_product_shape 3)
         (IntExprCons (CoordVar attn_scores_product_shape 2)
           (IntExprCons (CoordVar attn_scores_product_shape 1)
-            (IntExprNil)))))))
+            (IntExprNil)))))
+    attn_scores_shape))
 
 (let v_to_value_product_map
   (IndexMapLit
@@ -284,7 +290,8 @@
       (IntExprCons (CoordVar attn_scores_product_shape 3)
         (IntExprCons (CoordVar attn_scores_product_shape 1)
           (IntExprCons (CoordVar attn_scores_product_shape 0)
-            (IntExprNil)))))))
+            (IntExprNil)))))
+    qkv_shape))
 
 (let probs_for_value_logical
   (LogicalIndexMapApply attn_probs_logical probs_to_value_product_map attn_scores_product_shape))
@@ -308,14 +315,16 @@
       (IntExprCons (CoordVar output_projection_product_shape 1)
         (IntExprCons (CoordVar output_projection_product_shape 3)
           (IntExprCons (CoordVar output_projection_product_shape 0)
-            (IntExprNil)))))))
+            (IntExprNil)))))
+    qkv_shape))
 
 (let wo_to_output_projection_product_map
   (IndexMapLit
     (IntExprCons (CoordVar output_projection_product_shape 2)
       (IntExprCons (CoordVar output_projection_product_shape 1)
         (IntExprCons (CoordVar output_projection_product_shape 0)
-          (IntExprNil))))))
+          (IntExprNil))))
+    output_projection_weight_shape))
 
 (let context_for_output_projection_logical
   (LogicalIndexMapApply context_logical context_to_output_projection_product_map output_projection_product_shape))
@@ -342,13 +351,15 @@
     (IntExprCons (CoordVar ff_up_product_shape 3)
       (IntExprCons (CoordVar ff_up_product_shape 2)
         (IntExprCons (CoordVar ff_up_product_shape 0)
-          (IntExprNil))))))
+          (IntExprNil))))
+    model_shape))
 
 (let wff_up_to_product_map
   (IndexMapLit
     (IntExprCons (CoordVar ff_up_product_shape 1)
       (IntExprCons (CoordVar ff_up_product_shape 0)
-        (IntExprNil)))))
+        (IntExprNil)))
+    ff_up_weight_shape))
 
 (let hidden_for_ff_up_logical
   (LogicalIndexMapApply attn_residual_logical hidden_to_ff_up_product_map ff_up_product_shape))
@@ -366,13 +377,15 @@
     (IntExprCons (CoordVar ff_down_product_shape 3)
       (IntExprCons (CoordVar ff_down_product_shape 2)
         (IntExprCons (CoordVar ff_down_product_shape 0)
-          (IntExprNil))))))
+          (IntExprNil))))
+    ff_shape))
 
 (let wff_down_to_product_map
   (IndexMapLit
     (IntExprCons (CoordVar ff_down_product_shape 1)
       (IntExprCons (CoordVar ff_down_product_shape 0)
-        (IntExprNil)))))
+        (IntExprNil)))
+    ff_down_weight_shape))
 
 (let ff_activation_for_down_logical
   (LogicalIndexMapApply ff_activation_logical ff_activation_to_down_product_map ff_down_product_shape))

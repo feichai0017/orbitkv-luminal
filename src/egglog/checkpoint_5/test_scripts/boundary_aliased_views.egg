@@ -17,13 +17,15 @@
   (IndexMapLit
     (IntExprCons (IntLit 0)
       (IntExprCons (CoordVar view_shape 0)
-        (IntExprNil)))))
+        (IntExprNil)))
+    storage_shape))
 
 (let row1_index_map
   (IndexMapLit
     (IntExprCons (IntLit 1)
       (IntExprCons (CoordVar view_shape 0)
-        (IntExprNil)))))
+        (IntExprNil)))
+    storage_shape))
 
 (let row0_view_logical
   (LogicalIndexMapApply storage_logical row0_index_map view_shape))
@@ -55,8 +57,8 @@
 ; selectors) exercise the IntLit-entry path.
 (let storage_contig_offset
   (IntAdd (IntMul (CoordVar storage_shape 1) (IntLit 2)) (CoordVar storage_shape 0)))
-(subst-demand storage_contig_offset row0_index_map storage_shape)
-(subst-demand storage_contig_offset row1_index_map storage_shape)
+(int-subst-demand storage_contig_offset row0_index_map)
+(int-subst-demand storage_contig_offset row1_index_map)
 
 (let row0_view_layout_tensor
   (LayoutTensorLit row0_view_logical row0_view_layout))
@@ -131,8 +133,8 @@
 ; Substitution pins: composing the storage's contiguous offset with each
 ; row map reproduces the hand-written view offsets (constant entries fold:
 ; row0 selects row 0, row1 lands on 2 + v0).
-(check (= (subst-of storage_contig_offset row0_index_map storage_shape) row0_element_offset))
-(check (= (subst-of storage_contig_offset row1_index_map storage_shape) row1_element_offset))
+(check (= (int-subst-of storage_contig_offset row0_index_map) row0_element_offset))
+(check (= (int-subst-of storage_contig_offset row1_index_map) row1_element_offset))
 
 ; COMPOSITION ACCEPTANCE (Step 2): the DERIVED view layouts — composed at
 ; the bit level through the storage's minted contiguous layout — land in
@@ -140,12 +142,12 @@
 (check
   (= row0_view_layout
      (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul storage_contig_offset (IntLit 32)) row0_index_map storage_shape)
+       (int-subst-of (IntMul storage_contig_offset (IntLit 32)) row0_index_map)
        view_shape
        (bits-of view_dtype))))
 (check
   (= row1_view_layout
      (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul storage_contig_offset (IntLit 32)) row1_index_map storage_shape)
+       (int-subst-of (IntMul storage_contig_offset (IntLit 32)) row1_index_map)
        view_shape
        (bits-of view_dtype))))

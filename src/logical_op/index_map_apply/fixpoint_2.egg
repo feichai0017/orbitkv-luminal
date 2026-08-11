@@ -1,6 +1,6 @@
 (rule
   (
-    (= ?out_logical (LogicalIndexMapApply ?in_logical (IndexMapLit ?entry_list) ?out_shape))
+    (= ?out_logical (LogicalIndexMapApply ?in_logical (IndexMapLit ?entry_list ?map_source_shape) ?out_shape))
     (= ?in_shape (shape-of ?in_logical))
     (= ?in_rank (rank-of ?in_shape))
   )

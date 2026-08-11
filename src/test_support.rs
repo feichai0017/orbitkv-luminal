@@ -2584,11 +2584,11 @@ mod intcoordvar_probe {
 (let v_in (LogicalTensorInputLit (LogicalIdLit "v") vec_shape (F32)))
 (let coord (CoordVar out_shape 0))
 (let slice_a (LogicalIndexMapApply v_in
-  (IndexMapLit (IntExprCons coord (IntExprNil))) out_shape))
+  (IndexMapLit (IntExprCons coord (IntExprNil)) vec_shape) out_shape))
 (let slice_b (LogicalIndexMapApply v_in
-  (IndexMapLit (IntExprCons (IntAdd coord (IntLit 1)) (IntExprNil))) out_shape))
+  (IndexMapLit (IntExprCons (IntAdd coord (IntLit 1)) (IntExprNil)) vec_shape) out_shape))
 (let slice_a2 (LogicalIndexMapApply v_in
-  (IndexMapLit (IntExprCons (CoordVar out_shape 0) (IntExprNil))) out_shape))
+  (IndexMapLit (IntExprCons (CoordVar out_shape 0) (IntExprNil)) vec_shape) out_shape))
 (let v_layout (RightMajorContiguousElementLayoutLit vec_shape (bits-of (F32))))
 (let v_lt (LayoutTensorLit v_in v_layout))
 (run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
@@ -2757,7 +2757,7 @@ mod stage4b_probes {
 (let plog (LogicalTensorInputLit (LogicalIdLit "p") psh (F32)))
 (let plt (LayoutTensorLit plog p))
 (let osh (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 5) (IntExprCons (IntLit 3) (IntExprNil))))))
-(let v (LogicalIndexMapApply plog (IndexMapLit (IntExprCons (CoordVar osh 2) (IntExprCons (CoordVar osh 0) (IntExprNil)))) osh))
+(let v (LogicalIndexMapApply plog (IndexMapLit (IntExprCons (CoordVar osh 2) (IntExprCons (CoordVar osh 0) (IntExprNil))) psh) osh))
 (let dsh (ShapeLit (IntExprCons (IntLit 1) (IntExprCons (IntLit 2) (IntExprNil)))))
 (let d (RightMajorContiguousElementLayoutLit dsh (bits-of (F32))))
 (run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
@@ -2815,6 +2815,175 @@ mod stage4b_probes {
         assert!(matches!(v[0], Some(ChainStride::Expr(_))), "{v:?}");
         assert_eq!(v[1], Some(ChainStride::Zero), "broadcast axis is determined: {v:?}");
         assert_eq!(v[2], Some(ChainStride::Unit), "{v:?}");
+    }
+
+    /// Dump THE assembled program — the core preamble plus every
+    /// registered op's spliced snippets, i.e. exactly what every
+    /// pipeline run and fixture executes — to target/assembled_program.egg.
+    /// The preamble FILE alone is one shard; this is the authority.
+    /// Run: cargo test --release dump_assembled_program -- --ignored --nocapture
+    #[test]
+    #[ignore = "utility — run explicitly by name"]
+    fn dump_assembled_program() {
+        let program = crate::egglog_snippet::assembled_program();
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/target/assembled_program.egg");
+        std::fs::write(path, program).expect("dump written");
+        eprintln!("[dump] {} lines -> {path}", program.lines().count());
+    }
+
+    /// REJOIN-DIVERGENCE ROUND DRIVER (2026-08-10): the two sick mini
+    /// graphs (full-anatomy gemma3: 5.8GB in 12s; MiniDit: 10+ min in
+    /// free-join) bisected to a 5-line movement reproducer — slice two
+    /// halves of a rank-3 tensor with a leading extent-1 axis, concat
+    /// them back (pad+add), merge. sin/cos/pad/concat/split-merge alone
+    /// are all clean (~90ms); this rejoin detonates. The driver runs
+    /// the MAIN ruleset one round at a time, printing total tuples and
+    /// the top-growing tables per round — the exploding table names the
+    /// rule family. Bounded: 40 rounds, bail on a >200k-tuple round.
+    /// Run: cargo test --release rejoin_divergence_probe -- --ignored --nocapture
+    #[test]
+    #[ignore = "diagnostic — run explicitly by name (release, bounded)"]
+    fn rejoin_divergence_probe() {
+        for lead in [1usize, 2usize] {
+        eprintln!("[rejoin-probe] ===== lead extent {lead} =====");
+        let mut cx = crate::graph::Graph::new();
+        let x = cx.tensor((lead, 8usize));
+        let heads = x.split_dims(1, 4);
+        let x1 = heads.slice_along(0..2, 2);
+        let x2 = heads.slice_along(2..4, 2);
+        let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
+        let (pre, _inputs, _outputs, _post) =
+            cx.logical.native_parts().expect("recorder clean");
+        let full = format!("{}\n\n{pre}", crate::egglog_snippet::assembled_program());
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph.parse_and_run_program(None, &full).expect("body loads");
+        let sizes = |egraph: &mut egglog::EGraph| -> std::collections::HashMap<String, isize> {
+            let out = egraph
+                .parse_and_run_program(None, "(print-size)")
+                .expect("sizes");
+            let mut map = std::collections::HashMap::new();
+            for chunk in &out {
+                for line in chunk.to_string().lines() {
+                    if let Some((name, count)) = line.rsplit_once(": ") {
+                        if let Ok(count) = count.trim().parse::<isize>() {
+                            map.insert(name.trim().to_string(), count);
+                        }
+                    }
+                }
+            }
+            map
+        };
+        // GROWTH-CHANNEL ACCOUNTING (Austin's root-cause experiment,
+        // 2026-08-11): per round, separate the three channels —
+        // NODES (spellings: IntAdd table size), CLASSES (new sub-sums:
+        // distinct IntAdd e-classes in a serialization), and DEMAND
+        // ROWS (subst-demand fan-out) — to name which growth LEADS at
+        // ignition. Serialization runs only near/after ignition.
+        let channel_counts = |egraph: &mut egglog::EGraph| -> (usize, usize, usize) {
+            use egglog::SerializeConfig;
+            let serialized = egraph.serialize(SerializeConfig::default()).egraph;
+            let mut intadd_nodes = 0usize;
+            let mut intadd_classes = std::collections::HashSet::new();
+            let mut all_classes = std::collections::HashSet::new();
+            for node in serialized.nodes.values() {
+                all_classes.insert(node.eclass.clone());
+                if node.op == "IntAdd" {
+                    intadd_nodes += 1;
+                    intadd_classes.insert(node.eclass.clone());
+                }
+            }
+            (intadd_nodes, intadd_classes.len(), all_classes.len())
+        };
+        let mut previous = sizes(&mut egraph);
+        for round in 1..=150 {
+            let start = std::time::Instant::now();
+            let round_out = egraph.parse_and_run_program(None, "(run 1)").expect("round runs");
+            // Name the firing rules once the mint turns geometric.
+            for chunk in &round_out {
+                let egglog::CommandOutput::RunSchedule(report) = chunk else {
+                    continue;
+                };
+                let mut rules: Vec<(String, usize)> = report
+                    .num_matches_per_rule
+                    .iter()
+                    .map(|(name, &matches)| (name.to_string(), matches))
+                    .collect();
+                rules.sort_by_key(|(_, matches)| std::cmp::Reverse(*matches));
+                let hot: Vec<String> = rules
+                    .iter()
+                    .take(4)
+                    .filter(|(_, matches)| *matches > 50)
+                    .map(|(name, matches)| {
+                        let flat: String =
+                            name.split_whitespace().collect::<Vec<_>>().join(" ");
+                        format!("x{matches} {}", flat.chars().take(90).collect::<String>())
+                    })
+                    .collect();
+                if !hot.is_empty() {
+                    eprintln!("[rejoin-probe]   rules: {}", hot.join(" ‖ "));
+                }
+            }
+            let current = sizes(&mut egraph);
+            let total: isize = current.values().sum();
+            let mut deltas: Vec<(String, isize)> = current
+                .iter()
+                .map(|(name, &count)| {
+                    (name.clone(), count - previous.get(name).copied().unwrap_or(0))
+                })
+                .filter(|(_, delta)| *delta != 0)
+                .collect();
+            deltas.sort_by_key(|(_, delta)| -*delta);
+            let grew: isize = deltas.iter().map(|(_, delta)| *delta).sum();
+            let top: Vec<String> = deltas
+                .iter()
+                .take(6)
+                .map(|(name, delta)| format!("{name} {delta:+}"))
+                .collect();
+            eprintln!(
+                "[rejoin-probe] round {round}: total {total} ({grew:+}) in {:.2}s | {}",
+                start.elapsed().as_secs_f64(),
+                top.join(", ")
+            );
+            // Channel accounting near ignition: spellings-per-class vs
+            // class mint vs demand fan-out.
+            if (36..=50).contains(&round) {
+                let (nodes, classes, total_classes) = channel_counts(&mut egraph);
+                let demand_rows = current.get("int-subst-demand").copied().unwrap_or(0);
+                let image_rows = current.get("int-subst-of").copied().unwrap_or(0);
+                eprintln!(
+                    "[channels] round {round}: IntAdd nodes {nodes} / classes {classes} \
+                     (spellings-per-class {:.2}) | all classes {total_classes} | \
+                     int-subst-demand rows {demand_rows} | int-subst-of rows {image_rows}",
+                    nodes as f64 / classes.max(1) as f64
+                );
+            }
+            // Specimen dumps at the pre-ignition and early-geometric
+            // rounds: the ACTUAL IntAdd rows being bred (extracted
+            // representative terms), for the divergence walkthrough.
+            if round == 41 || round == 45 {
+                let dump = egraph
+                    .parse_and_run_program(None, "(print-function IntAdd 18)")
+                    .expect("dump");
+                eprintln!("[rejoin-probe] --- IntAdd rows @ round {round} ---");
+                for chunk in &dump {
+                    for line in chunk.to_string().lines().take(18) {
+                        let flat: String =
+                            line.split_whitespace().collect::<Vec<_>>().join(" ");
+                        eprintln!("[rejoin-probe]   {}", flat.chars().take(200).collect::<String>());
+                    }
+                }
+            }
+            if grew > 200_000 {
+                eprintln!("[rejoin-probe] BAIL: runaway round — divergence confirmed");
+                break;
+            }
+            if grew == 0 {
+                eprintln!("[rejoin-probe] SATURATED at round {round}");
+                break;
+            }
+            previous = current;
+        }
+        }
     }
 
     /// SATURATION PROFILER (Austin commissioned 2026-08-05): run each
@@ -2927,7 +3096,7 @@ mod stage4b_probes {
 (let p (RightMajorContiguousElementLayoutLit psh (bits-of (F32))))
 (let plt (LayoutTensorLit plog p))
 (let osh (ShapeLit (IntExprCons (IntLit 5) (IntExprCons (IntLit 4) (IntExprNil)))))
-(let v (LogicalIndexMapApply plog (IndexMapLit (IntExprCons (CoordVar osh 1) (IntExprCons (CoordVar osh 0) (IntExprNil)))) osh))
+(let v (LogicalIndexMapApply plog (IndexMapLit (IntExprCons (CoordVar osh 1) (IntExprCons (CoordVar osh 0) (IntExprNil))) psh) osh))
 (run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
@@ -2979,7 +3148,7 @@ mod subst_guard_study {
 
     /// The structural arm's rule text as landed (comment elided; the
     /// unique premise pair suffices as the removal anchor).
-    const STRUCTURAL_ARM_ANCHOR: &str = "(rule\n  (\n    (subst-demand ?expr ?map ?source_shape)\n    (= ?expr (CoordVar ?source_shape ?axis))\n    (= ?map (IndexMapLit ?entries))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?extent (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?entry (CoordVar ?entry_shape ?entry_axis))\n    (= ?entry_shape (ShapeLit ?entry_dims))\n    (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))\n    (= ?entry_extent ?extent)\n  )\n  ((set (subst-of ?expr ?map ?source_shape) ?entry))\n)";
+    const STRUCTURAL_ARM_ANCHOR: &str = "(rule\n  (\n    (int-subst-demand ?expr ?map)\n    (= ?expr (CoordVar ?source_shape ?axis))\n    (= ?map (IndexMapLit ?entries ?source_shape))\n    (= ?entry (expr-list-nth-from-end ?entries ?axis))\n    (= ?source_shape (ShapeLit ?source_dims))\n    (= ?extent (expr-list-nth-from-end ?source_dims ?axis))\n    (= ?entry (CoordVar ?entry_shape ?entry_axis))\n    (= ?entry_shape (ShapeLit ?entry_dims))\n    (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))\n    (= ?entry_extent ?extent)\n  )\n  ((set (int-subst-of ?expr ?map) ?entry))\n)";
 
     fn variant(text: &str, name: &str) -> String {
         match name {
@@ -3010,9 +3179,9 @@ mod subst_guard_study {
 (let sg_cout (CoordVar sg_cout_shape 0))\n\
 (let sg_entry (IntAdd sg_cout (IntLit 5)))\n\
 (let sg_src (ShapeLit (IntExprCons sgn (IntExprNil))))\n\
-(let sg_map (IndexMapLit (IntExprCons sg_entry (IntExprNil))))\n\
+(let sg_map (IndexMapLit (IntExprCons sg_entry (IntExprNil)) sg_src))\n\
 (let sg_coord (CoordVar sg_src 0))\n\
-(subst-demand sg_coord sg_map sg_src)\n\
+(int-subst-demand sg_coord sg_map)\n\
 (run-schedule (saturate (run)))\n";
         let sg4_common = "\
 (let s4n (IntVar \"s4n\"))\n\
@@ -3020,23 +3189,23 @@ mod subst_guard_study {
 (set (upper-bound-of s4n) (bigint 8))\n\
 (let s4_entry (IntLit 5))\n\
 (let s4_src (ShapeLit (IntExprCons s4n (IntExprNil))))\n\
-(let s4_map (IndexMapLit (IntExprCons s4_entry (IntExprNil))))\n\
+(let s4_map (IndexMapLit (IntExprCons s4_entry (IntExprNil)) s4_src))\n\
 (let s4_coord (CoordVar s4_src 0))\n\
-(subst-demand s4_coord s4_map s4_src)\n\
+(int-subst-demand s4_coord s4_map)\n\
 (run-schedule (saturate (run)))\n";
         vec![
-            ("sg1_admits", format!("{sg1_common}(check (= (subst-of sg_coord sg_map sg_src) sg_entry))\n")),
+            ("sg1_admits", format!("{sg1_common}(check (= (int-subst-of sg_coord sg_map) sg_entry))\n")),
             ("sg1_tighten", format!("{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (run)))\n")),
             ("sg2_static", "\
 (let s2_cout_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))\n\
 (let s2_cout (CoordVar s2_cout_shape 0))\n\
 (let s2_entry (IntAdd s2_cout (IntLit 1)))\n\
 (let s2_src (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))\n\
-(let s2_map (IndexMapLit (IntExprCons s2_entry (IntExprNil))))\n\
+(let s2_map (IndexMapLit (IntExprCons s2_entry (IntExprNil)) s2_src))\n\
 (let s2_coord (CoordVar s2_src 0))\n\
-(subst-demand s2_coord s2_map s2_src)\n\
+(int-subst-demand s2_coord s2_map)\n\
 (run-schedule (saturate (run)))\n\
-(check (= (subst-of s2_coord s2_map s2_src) s2_entry))\n".to_string()),
+(check (= (int-subst-of s2_coord s2_map) s2_entry))\n".to_string()),
             ("sg3_identity", "\
 (let s3n (IntVar \"s3n\"))\n\
 (set (lower-bound-of s3n) (bigint 1))\n\
@@ -3044,12 +3213,12 @@ mod subst_guard_study {
 (let s3_entry_shape (ShapeLit (IntExprCons s3n (IntExprCons s3n (IntExprNil)))))\n\
 (let s3_entry (CoordVar s3_entry_shape 1))\n\
 (let s3_src (ShapeLit (IntExprCons s3n (IntExprNil))))\n\
-(let s3_map (IndexMapLit (IntExprCons s3_entry (IntExprNil))))\n\
+(let s3_map (IndexMapLit (IntExprCons s3_entry (IntExprNil)) s3_src))\n\
 (let s3_coord (CoordVar s3_src 0))\n\
-(subst-demand s3_coord s3_map s3_src)\n\
+(int-subst-demand s3_coord s3_map)\n\
 (run-schedule (saturate (run)))\n\
-(check (= (subst-of s3_coord s3_map s3_src) s3_entry))\n".to_string()),
-            ("sg4_admits", format!("{s4}(check (= (subst-of s4_coord s4_map s4_src) s4_entry))\n", s4 = sg4_common)),
+(check (= (int-subst-of s3_coord s3_map) s3_entry))\n".to_string()),
+            ("sg4_admits", format!("{s4}(check (= (int-subst-of s4_coord s4_map) s4_entry))\n", s4 = sg4_common)),
             ("sg4_tighten", format!("{s4}(set (upper-bound-of s4n) (bigint 1))\n(run-schedule (saturate (run)))\n", s4 = sg4_common)),
         ]
     }

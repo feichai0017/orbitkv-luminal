@@ -25,7 +25,8 @@
   (IndexMapLit
     (IntExprCons (CoordVar z_shape 0)
       (IntExprCons (CoordVar z_shape 1)
-        (IntExprNil))))
+        (IntExprNil)))
+    x_shape)
 )
 
 ; Transpose onto the [4x2] view of left_input: var 0 spans 2, var 1 spans 4.
@@ -33,7 +34,8 @@
   (IndexMapLit
     (IntExprCons (CoordVar x_shape 0)
       (IntExprCons (CoordVar x_shape 1)
-        (IntExprNil))))
+        (IntExprNil)))
+    z_shape)
 )
 
 ; This is our version of view ops
@@ -140,7 +142,7 @@
 
 ; Substitution pin (the SWAP case — sequential substitution would botch a
 ; transpose): compose the strided input offset with the transpose map.
-(subst-demand x_input_element_offset x_to_z_transpose_map x_shape)
+(int-subst-demand x_input_element_offset x_to_z_transpose_map)
 
 
 ; SOURCE SEAM rows for list-authored strided layouts (affine migration)
@@ -152,7 +154,7 @@
 ; x offset v1*8 + v0*2 over x's coords becomes 8*z_v0 + 2*z_v1 over z's
 ; (entry 0 = z_v1 spans 2, entry 1 = z_v0 spans 4).
 (check
-  (= (subst-of x_input_element_offset x_to_z_transpose_map x_shape)
+  (= (int-subst-of x_input_element_offset x_to_z_transpose_map)
      (IntAdd
        (IntMul (CoordVar z_shape 0) (IntLit 8))
        (IntMul (CoordVar z_shape 1) (IntLit 2)))))

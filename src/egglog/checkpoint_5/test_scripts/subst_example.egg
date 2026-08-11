@@ -1,5 +1,5 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-; Adversarial substitution pins (subst-of): the cases most likely to
+; Adversarial substitution pins (int-subst-of): the cases most likely to
 ; expose an unsound or non-simultaneous substitution. Every expected
 ; result is hand-computed. Conventions under test:
 ;   - entries: first list element <-> HIGHEST input axis; nth-from-end
@@ -12,7 +12,8 @@
 ;     CoordVar arm's in-range instantiation guard)
 ;   - identification (ruling 2026-07-29): a substitution is
 ;     (expr, map, SOURCE SHAPE) — the shape names σ's domain (WHICH
-;     coordinates are rewritten) and joins the subst-of key; under
+;     coordinates are rewritten) and rides in the map itself
+;     (IndexMapLit's source-shape tag), keeping it in the key; under
 ;     scoped CoordVar a coordinate CARRIES its owner shape, so domain
 ;     membership is structural (owner = source shape) and instantiation
 ;     legality (range) is the separate premise group
@@ -33,8 +34,8 @@
   (IndexMapLit
     (IntExprCons (CoordVar p1_source_shape 0)
       (IntExprCons (CoordVar p1_source_shape 1)
-        (IntExprNil)))))
-(subst-demand p1_parent p1_map p1_source_shape)
+        (IntExprNil))) p1_source_shape))
+(int-subst-demand p1_parent p1_map)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P2 — rank-3 FULL PERMUTATION (a 3-cycle), all sizes distinct so any
@@ -59,8 +60,8 @@
     (IntExprCons (CoordVar p2_out_shape 0)
       (IntExprCons (CoordVar p2_out_shape 2)
         (IntExprCons (CoordVar p2_out_shape 1)
-          (IntExprNil))))))
-(subst-demand p2_parent p2_map p2_source_shape)
+          (IntExprNil)))) p2_source_shape))
+(int-subst-demand p2_parent p2_map)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P3 — DIAGONAL: one output variable feeds BOTH input axes (repeated
@@ -75,8 +76,8 @@
   (IndexMapLit
     (IntExprCons (CoordVar p3_out_shape 0)
       (IntExprCons (CoordVar p3_out_shape 0)
-        (IntExprNil)))))
-(subst-demand p3_parent p3_map p3_source_shape)
+        (IntExprNil))) p3_source_shape))
+(int-subst-demand p3_parent p3_map)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P4 — COMPOUND entries + cross-axis mapping: dim0(8) <- 2*v1 + 1 (a
@@ -92,8 +93,8 @@
   (IndexMapLit
     (IntExprCons (CoordVar p4_out_shape 0)
       (IntExprCons (IntAdd (IntMul (CoordVar p4_out_shape 1) (IntLit 2)) (IntLit 1))
-        (IntExprNil)))))
-(subst-demand p4_parent p4_map p4_source_shape)
+        (IntExprNil))) p4_source_shape))
+(int-subst-demand p4_parent p4_map)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P5 — MULTI-REPRESENTATIVE agreement: the parent class is given TWO
@@ -116,8 +117,8 @@
   (IndexMapLit
     (IntExprCons (IntLit 2)
       (IntExprCons (CoordVar p5_out_shape 0)
-        (IntExprNil)))))
-(subst-demand p5_parent p5_map p5_source_shape)
+        (IntExprNil))) p5_source_shape))
+(int-subst-demand p5_parent p5_map)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P6 — IDENTITY / BROADCAST rank-up: rank-1 parent viewed inside [4,5]
@@ -133,8 +134,8 @@
 (let p6_map
   (IndexMapLit
     (IntExprCons (CoordVar p6_out_shape 0)
-      (IntExprNil))))
-(subst-demand p6_parent p6_map p6_source_shape)
+      (IntExprNil)) p6_source_shape))
+(int-subst-demand p6_parent p6_map)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P7 — OUT-OF-RANGE axis: the parent mentions v2 but the map has two
@@ -153,8 +154,8 @@
   (IndexMapLit
     (IntExprCons (IntLit 0)
       (IntExprCons (CoordVar p7_out_shape 0)
-        (IntExprNil)))))
-(subst-demand p7_parent p7_map p7_source_shape)
+        (IntExprNil))) p7_source_shape))
+(int-subst-demand p7_parent p7_map)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P8 — DOMAIN TARGETING (ruling 2026-07-29): a FOREIGN coordinate —
@@ -164,11 +165,11 @@
 ; be the blocker here, which is exactly what this pins. The source
 ; box's own coordinate substitutes normally.
 (let p8_source_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
-(let p8_map (IndexMapLit (IntExprCons (IntLit 1) (IntExprNil))))
+(let p8_map (IndexMapLit (IntExprCons (IntLit 1) (IntExprNil)) p8_source_shape))
 (let p8_own (CoordVar p8_source_shape 0))
 (let p8_foreign (CoordVar (ShapeLit (IntExprCons (IntLit 5) (IntExprNil))) 0))
-(subst-demand p8_own p8_map p8_source_shape)
-(subst-demand p8_foreign p8_map p8_source_shape)
+(int-subst-demand p8_own p8_map)
+(int-subst-demand p8_foreign p8_map)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P9 — BOOL BRIDGE traversal (ruling 2026-07-29): substitution crosses
@@ -181,22 +182,22 @@
 ; source, so entry and parent coordinates share one term.
 (let p9_source_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
 (let p9_entry (IntAdd (IntLit 2) (IntMul (IntLit -1) (CoordVar p9_source_shape 0))))
-(let p9_map (IndexMapLit (IntExprCons p9_entry (IntExprNil))))
+(let p9_map (IndexMapLit (IntExprCons p9_entry (IntExprNil)) p9_source_shape))
 (let p9_parent
   (IntCastFromBool (BoolLessThanInt (CoordVar p9_source_shape 0) (IntLit 2))))
-(subst-demand p9_parent p9_map p9_source_shape)
+(int-subst-demand p9_parent p9_map)
 
 (run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P1: swap lands both variables at once: 3*v0 + v1.
 (check
-  (= (subst-of p1_parent p1_map p1_source_shape)
+  (= (int-subst-of p1_parent p1_map)
      (IntAdd (IntMul (CoordVar p1_source_shape 0) (IntLit 3)) (CoordVar p1_source_shape 1))))
 
 ; P2: the 3-cycle: 15*v0 + 5*v2 + v1, all out-box [3,5,2] coordinates.
 (check
-  (= (subst-of p2_parent p2_map p2_source_shape)
+  (= (int-subst-of p2_parent p2_map)
      (IntAdd (IntMul (CoordVar p2_out_shape 0) (IntLit 15))
        (IntAdd (IntMul (CoordVar p2_out_shape 2) (IntLit 5))
          (CoordVar p2_out_shape 1)))))
@@ -204,12 +205,12 @@
 ; P3: the diagonal: 4*v0 + v0, exactly this form (no ring folding —
 ; distributivity is deliberately absent).
 (check
-  (= (subst-of p3_parent p3_map p3_source_shape)
+  (= (int-subst-of p3_parent p3_map)
      (IntAdd (IntMul (CoordVar p3_out_shape 0) (IntLit 4)) (CoordVar p3_out_shape 0))))
 
 ; P4: compound entry lands intact: 8*v0 + (2*v1 + 1), out-box [3,2].
 (check
-  (= (subst-of p4_parent p4_map p4_source_shape)
+  (= (int-subst-of p4_parent p4_map)
      (IntAdd (IntMul (CoordVar p4_out_shape 0) (IntLit 8))
        (IntAdd (IntMul (CoordVar p4_out_shape 1) (IntLit 2)) (IntLit 1)))))
 
@@ -217,33 +218,33 @@
 ; factored image verbatim, and the expanded image with its constant
 ; folded (2*2 -> 4).
 (check
-  (= (subst-of p5_parent p5_map p5_source_shape)
+  (= (int-subst-of p5_parent p5_map)
      (IntMul (IntAdd (IntLit 2) (CoordVar p5_out_shape 0)) (IntLit 2))))
 (check
-  (= (subst-of p5_parent p5_map p5_source_shape)
+  (= (int-subst-of p5_parent p5_map)
      (IntAdd (IntLit 4) (IntMul (CoordVar p5_out_shape 0) (IntLit 2)))))
 
 ; P6: composition lands on the out box's inner coordinate — same axis
 ; and extent as the parent's, but OWNED by [4,5] (pre-scoping this was
 ; term-identical to p6_parent; ownership now separates the boxes).
-(check (= (subst-of p6_parent p6_map p6_source_shape) (CoordVar p6_out_shape 0)))
+(check (= (int-subst-of p6_parent p6_map) (CoordVar p6_out_shape 0)))
 
 ; P7: the in-range subterm resolves to the out box's coordinate...
 (check
-  (= (subst-of (CoordVar p7_source_shape 0) p7_map p7_source_shape)
+  (= (int-subst-of (CoordVar p7_source_shape 0) p7_map)
      (CoordVar p7_out_shape 0)))
 ; ...and the root never completes: axis 2 has no map entry and no
 ; source dim, which downstream consumers see as "composition not
 ; derivable" — the fail-safe.
-(fail (check (= ?p7_image (subst-of p7_parent p7_map p7_source_shape))))
+(fail (check (= ?p7_image (int-subst-of p7_parent p7_map))))
 
 ; P8: the source box's own coordinate substitutes; the foreign
 ; coordinate's slot never fills — domain membership, not range, is the
 ; refusal (the entry is in-range for both boxes).
-(check (= (subst-of p8_own p8_map p8_source_shape) (IntLit 1)))
-(fail (check (= ?p8_image (subst-of p8_foreign p8_map p8_source_shape))))
+(check (= (int-subst-of p8_own p8_map) (IntLit 1)))
+(fail (check (= ?p8_image (int-subst-of p8_foreign p8_map))))
 
 ; P9: the cast crosses: image = cast((2 - v0) < 2), structurally.
 (check
-  (= (subst-of p9_parent p9_map p9_source_shape)
+  (= (int-subst-of p9_parent p9_map)
      (IntCastFromBool (BoolLessThanInt p9_entry (IntLit 2)))))

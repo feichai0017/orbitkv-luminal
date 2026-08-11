@@ -1,6 +1,6 @@
 (rule
   (
-    (= ?out_logical (LogicalIndexMapApply ?in_logical (IndexMapLit ?entry_list) ?out_shape))
+    (= ?out_logical (LogicalIndexMapApply ?in_logical (IndexMapLit ?entry_list ?map_source_shape) ?out_shape))
     (= ?entry_count (expr-list-length-of ?entry_list))
   )
   (

@@ -549,6 +549,18 @@ impl LogicalGraph {
                 return None;
             }
         };
+        // The map's DOMAIN TAG (ruling 2026-08-11): an IndexMapLit
+        // carries the source shape it substitutes into — the parent's
+        // own dims, written here at the single mint site so the
+        // apply/map coherence tripwire can never fire on recorder output.
+        let source_dims = self.values[base.0 as usize].dims.clone();
+        let source_shape = match Self::shape_term(&source_dims) {
+            Ok(term) => term,
+            Err(reason) => {
+                self.poison(format!("view at t{at}: {reason}"));
+                return None;
+            }
+        };
         let mut entries_term = "(IntExprNil)".to_string();
         for entry in entries.iter().rev() {
             match Self::entry_term(entry, &shape) {
@@ -562,7 +574,7 @@ impl LogicalGraph {
         Some(self.push(Value {
             constructor: "LogicalIndexMapApply".to_string(),
             operands: vec![base],
-            aux: format!("(IndexMapLit {entries_term}) {shape}"),
+            aux: format!("(IndexMapLit {entries_term} {source_shape}) {shape}"),
             form: RenderForm::Plain,
             entries: Some(entries),
             dims: out_dims,

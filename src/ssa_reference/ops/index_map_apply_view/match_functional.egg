@@ -16,7 +16,7 @@
     (= ?out_logical (LogicalIndexMapApply ?in_logical ?index_map ?out_shape))
     (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?in_layout))
     (= ?in_layout (BitOffsetExpressionLayoutLit ?parent_bit_offset ?in_shape ?bit_width))
-    (= ?composed_bit_offset (subst-of ?parent_bit_offset ?index_map ?in_shape))
+    (= ?composed_bit_offset (int-subst-of ?parent_bit_offset ?index_map))
     (= ?out_layout (BitOffsetExpressionLayoutLit ?composed_bit_offset ?out_shape ?bit_width))
     (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
   )

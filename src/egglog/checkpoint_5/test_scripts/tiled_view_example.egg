@@ -36,7 +36,8 @@
 (let tiling_map
   (IndexMapLit
     (IntExprCons (CoordVar tiled_shape 2)
-      (IntExprCons tile_recomposition (IntExprNil)))))
+      (IntExprCons tile_recomposition (IntExprNil)))
+    flat_shape))
 (let tiled_view_logical (LogicalIndexMapApply flat_logical tiling_map tiled_shape))
 
 ; --- UNTILING: tiled storage, flat view ---
@@ -50,11 +51,12 @@
   (IndexMapLit
     (IntExprCons (CoordVar flat_shape 1)
       (IntExprCons tile_index_entry
-        (IntExprCons tile_offset_entry (IntExprNil))))))
+        (IntExprCons tile_offset_entry (IntExprNil))))
+    tiled_shape))
 (let flat_view_logical (LogicalIndexMapApply tiled_logical untiling_map flat_shape))
 
 ; hand-written fold offsets (the ladder derives these in the layout
-; classes; subst-of is keyed by class)
+; classes; int-subst-of is keyed by class)
 (let flat_element_offset
   (IntAdd (IntMul (CoordVar flat_shape 1) (IntLit 128)) (CoordVar flat_shape 0)))
 (let tiled_element_offset
@@ -80,8 +82,8 @@
 (let negative_divisor_ceiling (IntCeilDiv standalone_inner_coordinate (IntLit -64)))
 ; descent completion: the identity map carries a division term through
 (let identity_rank1_map
-  (IndexMapLit (IntExprCons standalone_inner_coordinate (IntExprNil))))
-(subst-demand direct_quotient identity_rank1_map identity_rank1_source_shape)
+  (IndexMapLit (IntExprCons standalone_inner_coordinate (IntExprNil)) identity_rank1_source_shape))
+(int-subst-demand direct_quotient identity_rank1_map)
 
 (run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
@@ -89,7 +91,7 @@
 ; discovery classifies it completely ---
 (check
   (= (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map flat_shape)
+       (int-subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map)
        tiled_shape
        (bits-of storage_dtype))
      (StridedElementLayoutLit tiled_shape
@@ -100,7 +102,7 @@
     (bits-of storage_dtype))))
 (check
   (= (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map flat_shape)
+       (int-subst-of (IntMul flat_element_offset (IntLit 32)) tiling_map)
        tiled_shape
        (bits-of storage_dtype))
      (RightMajorContiguousElementLayoutLit tiled_shape (bits-of storage_dtype))))
@@ -110,7 +112,7 @@
 ; the round trip, as layouts ---
 (check
   (= (BitOffsetExpressionLayoutLit
-       (subst-of (IntMul tiled_element_offset (IntLit 32)) untiling_map tiled_shape)
+       (int-subst-of (IntMul tiled_element_offset (IntLit 32)) untiling_map)
        flat_shape
        (bits-of storage_dtype))
      (RightMajorContiguousElementLayoutLit flat_shape (bits-of storage_dtype))))
@@ -138,4 +140,4 @@
 (check (= negative_divisor_ceiling (IntCeilDiv (IntMul (IntLit -1) standalone_inner_coordinate) (IntLit 64))))
 
 ; --- substitution descends through division constructors ---
-(check (= (subst-of direct_quotient identity_rank1_map identity_rank1_source_shape) direct_quotient))
+(check (= (int-subst-of direct_quotient identity_rank1_map) direct_quotient))

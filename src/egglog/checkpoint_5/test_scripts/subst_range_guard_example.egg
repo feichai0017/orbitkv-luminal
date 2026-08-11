@@ -20,11 +20,11 @@
 
 ; Reversal view, entry 2 - c0: range [0, 2] — inside the parent box [0, 3).
 (let rev_map
-  (IndexMapLit (IntExprCons (IntAdd (IntLit 2) (IntMul (IntLit -1) c0)) (IntExprNil))))
+  (IndexMapLit (IntExprCons (IntAdd (IntLit 2) (IntMul (IntLit -1) c0)) (IntExprNil)) d_shape))
 (let rev_view (LogicalIndexMapApply d rev_map d_shape))
 
 ; Shift view, entry c0 + 1: range [1, 3] — the value 3 is OUTSIDE [0, 3).
-(let oor_map (IndexMapLit (IntExprCons (IntAdd c0 (IntLit 1)) (IntExprNil))))
+(let oor_map (IndexMapLit (IntExprCons (IntAdd c0 (IntLit 1)) (IntExprNil)) d_shape))
 (let oor_view (LogicalIndexMapApply d oor_map d_shape))
 
 (run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
@@ -33,25 +33,25 @@
 ; has an image under rev_map, and the composed layout tensor was minted.
 (check
   (= d_layout (BitOffsetExpressionLayoutLit ?bit d_shape ?bw))
-  (= ?rev_image (subst-of ?bit rev_map d_shape)))
+  (= ?rev_image (int-subst-of ?bit rev_map)))
 (check
   (= d_layout (BitOffsetExpressionLayoutLit ?bit d_shape ?bw))
   (= ?rev_lt
      (LayoutTensorLit rev_view
-       (BitOffsetExpressionLayoutLit (subst-of ?bit rev_map d_shape) d_shape ?bw))))
+       (BitOffsetExpressionLayoutLit (int-subst-of ?bit rev_map) d_shape ?bw))))
 
 ; (2) The out-of-range composition stalled fail-closed: no coordinate
 ; image, no root image, no composed layout tensor. (These absence pins
 ; are not vacuous: the positive checks above bind the same ?bit.)
-(fail (check (= ?c_image (subst-of c0 oor_map d_shape))))
+(fail (check (= ?c_image (int-subst-of c0 oor_map))))
 (fail (check
   (= d_layout (BitOffsetExpressionLayoutLit ?bit d_shape ?bw))
-  (= ?oor_image (subst-of ?bit oor_map d_shape))))
+  (= ?oor_image (int-subst-of ?bit oor_map))))
 (fail (check
   (= d_layout (BitOffsetExpressionLayoutLit ?bit d_shape ?bw))
   (= ?oor_lt
      (LayoutTensorLit oor_view
-       (BitOffsetExpressionLayoutLit (subst-of ?bit oor_map d_shape) d_shape ?bw)))))
+       (BitOffsetExpressionLayoutLit (int-subst-of ?bit oor_map) d_shape ?bw)))))
 
 ; No corruption anywhere: distinct literals stay distinct (the distinct-
 ; literal tripwire would have panicked during the run; these pins document
