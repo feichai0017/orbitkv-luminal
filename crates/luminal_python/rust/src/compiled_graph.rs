@@ -313,7 +313,7 @@ impl CompiledGraph {
     ///
     /// Multi-variable dims are skipped here; another input's shape — or an
     /// explicit `set_dim` call — is expected to bind those.
-    fn auto_set_dims_from_input_shapes(&mut self, input_shapes: Vec<Vec<usize>>) {
+    pub fn auto_set_dims_from_input_shapes(&mut self, input_shapes: Vec<Vec<usize>>) {
         for (shape_exprs, shape) in self.input_shape_exprs.iter().zip(input_shapes.iter()) {
             for (dim_expr, &dim_val) in shape_exprs.iter().zip(shape.iter()) {
                 if let Some((var, value)) = solve_single_var_dim(dim_expr, dim_val) {
