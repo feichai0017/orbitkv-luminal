@@ -20,6 +20,9 @@ impl DynBackend for CudaLiteDynBackend {
         "cuda"
     }
 
+    fn write_external(&mut self, node: NodeIndex, bytes: &[u8]) -> bool {
+        self.runtime.write_external(node, bytes)
+    }
     fn move_buffer(&mut self, from: NodeIndex, to: NodeIndex) {
         let buf = self.runtime.remove_buffer(from);
         self.runtime.set_buffer(to, buf);

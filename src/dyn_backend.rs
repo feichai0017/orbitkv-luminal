@@ -85,6 +85,13 @@ pub trait DynBackend {
         );
     }
 
+    /// Write host bytes into an input already bound by device pointer, keeping
+    /// that binding. Returns false when the node has no such buffer, so callers
+    /// can fall back to `set_data_bytes`.
+    fn write_external(&mut self, _node: NodeIndex, _bytes: &[u8]) -> bool {
+        false
+    }
+
     /// Hand `from`'s computed buffer to `to`, without copying.
     ///
     /// A paged KV cache is a graph input the model reads and a graph output the

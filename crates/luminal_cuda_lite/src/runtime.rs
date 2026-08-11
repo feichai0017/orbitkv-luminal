@@ -738,6 +738,42 @@ impl CudaRuntime {
     /// aliasing is explicitly represented by the graph, its byte range must not
     /// overlap another input or output range that may be read or written during
     /// the same execution.
+    /// Write host bytes into a node's EXTERNAL buffer, leaving the binding —
+    /// and crucially the device address — intact. Returns false if the node has
+    /// no external buffer, or the bytes do not fit.
+    ///
+    /// `set_data` cannot be used for this: it re-homes the data in an hlir
+    /// buffer at a NEW address and calls `external_buffers.remove`. That is
+    /// harmless for a graph we drive eagerly, but a captured CUDA graph holds
+    /// the original address, so the next replay reads whatever is there now.
+    pub fn write_external(&mut self, id: impl ToId, bytes: &[u8]) -> bool {
+        let id = id.to_id();
+        let Self {
+            external_buffers,
+            cuda_stream,
+            changed_hlir,
+            ..
+        } = self;
+        let Some(slice) = external_buffers.get_mut(&id) else {
+            if std::env::var_os("LUMINAL_DEBUG_BUFFERS").is_some() {
+                println!("[write_external] {id:?}: NO external entry (have {} entries)", external_buffers.len());
+            }
+            return false;
+        };
+        if bytes.len() > slice.len() {
+            if std::env::var_os("LUMINAL_DEBUG_BUFFERS").is_some() {
+                println!("[write_external] {id:?}: {} bytes > capacity {}", bytes.len(), slice.len());
+            }
+            return false;
+        }
+        if !bytes.is_empty() {
+            let mut view = slice.slice_mut(..bytes.len());
+            cuda_stream.memcpy_htod(bytes, &mut view).unwrap();
+        }
+        changed_hlir.insert(id);
+        true
+    }
+
     pub unsafe fn set_device_ptr(&mut self, id: impl ToId, device_ptr: u64, n_bytes: usize) {
         debug_assert!(device_ptr != 0, "set_device_ptr called with null pointer");
         let id = id.to_id();
@@ -2371,7 +2407,11 @@ impl CudaRuntime {
         allow_missing_inputs: bool,
     ) -> anyhow::Result<Option<FxHashMap<NodeIndex, DeviceBuffer>>> {
         let mut buffer_map: FxHashMap<NodeIndex, DeviceBuffer> = FxHashMap::default();
+        let dbg_extra = std::env::var_os("LUMINAL_DEBUG_BUFFERS").is_some();
+        let mut dbg_resolved = 0usize;
+        let mut dbg_total = 0usize;
         for node in cuda_graph.extra_buffer_nodes() {
+            dbg_total += 1;
             // The HLIR sync caches input buffers only for the one LLIR node in
             // hlir_to_llir, but convex partitioning duplicates Input nodes
             // across CudaGraphOps — fall back to the full resolution (which
@@ -2390,12 +2430,32 @@ impl CudaRuntime {
                 if allow_missing_inputs {
                     return Ok(None);
                 }
+                // Name the node. The LLIR index alone is unactionable to a
+                // caller binding buffers by HLIR node, and the two spaces are
+                // unrelated.
+                let hlir = bucket.llir_to_hlir.get(&node);
                 anyhow::bail!(
-                    "missing cached buffer for CUDA graph materialization: LLIR node {:?}",
-                    node
+                    "missing cached buffer for CUDA graph materialization: \
+                     LLIR node {:?} -> HLIR {:?} | in hlir_buffers: {} | \
+                     external: {} | external_output: {}",
+                    node,
+                    hlir,
+                    hlir.map(|h| self.hlir_buffers.contains_key(h)).unwrap_or(false),
+                    hlir.map(|h| self.external_buffers.contains_key(h)).unwrap_or(false),
+                    hlir.map(|h| self.external_output_buffers.contains_key(h))
+                        .unwrap_or(false),
                 );
             };
+            dbg_resolved += 1;
             buffer_map.insert(node, buf);
+        }
+        if dbg_extra {
+            println!(
+                "[buffers] extra_buffer_nodes: {dbg_resolved}/{dbg_total} resolved                  | hlir_buffers={} external={} external_output={}",
+                self.hlir_buffers.len(),
+                self.external_buffers.len(),
+                self.external_output_buffers.len()
+            );
         }
         Ok(Some(buffer_map))
     }
