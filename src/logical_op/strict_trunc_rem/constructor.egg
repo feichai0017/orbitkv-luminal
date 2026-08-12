@@ -1,2 +1,0 @@
-; The dynamic-checked truncated remainder; see LogicalStrictTruncDiv.
-(constructor LogicalStrictTruncRem (LogicalTensor LogicalTensor) LogicalTensor)

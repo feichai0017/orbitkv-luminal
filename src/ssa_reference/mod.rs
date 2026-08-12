@@ -476,10 +476,6 @@ mod tests {
             "LayoutTensorOpScatterFunctionalGeneric",
             "LayoutTensorOpSinFunctionalGeneric",
             "LayoutTensorOpSqrtFunctionalGeneric",
-            "LayoutTensorOpStrictAddFunctionalGeneric",
-            "LayoutTensorOpStrictMulFunctionalGeneric",
-            "LayoutTensorOpStrictTruncDivFunctionalGeneric",
-            "LayoutTensorOpStrictTruncRemFunctionalGeneric",
             "LayoutTensorOpTruncDivFunctionalGeneric",
             "LayoutTensorOpTruncRemFunctionalGeneric",
         ];
@@ -1003,7 +999,14 @@ mod tests {
         let expected = vec![20.0, 0.0, 50.0, 40.0];
 
         cx.logical.native_program().expect("native program");
-        let ours = run_ssa(&cx, &[(data.id, data_vals.into()), (idx.id, idx_vals.into())]);
+        // Landing D: plain Int assembly is proof-gated — the caller
+        // ATTESTS the index range (gather semantics require it in
+        // [-d, d) anyway; the attestation states the contract).
+        let ours = crate::test_support::run_ssa_with_ranges(
+            &cx,
+            &[(data.id, data_vals.into()), (idx.id, idx_vals.into())],
+            &[(idx.id, -3, 2)],
+        );
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
     }
 
@@ -1025,8 +1028,10 @@ mod tests {
         let expected = vec![0.0, 200.0, 2.0, 3.0, 100.0, 5.0];
 
         cx.logical.native_program().expect("native program");
-        let ours = run_ssa(&cx,
+        let ours = crate::test_support::run_ssa_with_ranges(
+            &cx,
             &[(data.id, data_vals.into()), (idx.id, idx_vals.into()), (upd.id, upd_vals.into())],
+            &[(idx.id, -3, 2)],
         );
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
     }
@@ -1048,8 +1053,10 @@ mod tests {
         let expected = vec![200.0, 201.0, 2.0, 3.0, 100.0, 101.0];
 
         cx.logical.native_program().expect("native program");
-        let ours = run_ssa(&cx,
+        let ours = crate::test_support::run_ssa_with_ranges(
+            &cx,
             &[(data.id, data_vals.into()), (idx.id, idx_vals.into()), (upd.id, upd_vals.into())],
+            &[(idx.id, 0, 2)],
         );
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
     }
@@ -1388,15 +1395,15 @@ mod tests {
         assert_eq!(rt.get_i32(out.id).unwrap(), &vec![0i32, 3, 6, 9, 12]);
     }
 
-    /// LANDING D, the whole non-wrapping story in three acts.
-    /// (1) A plain Int add over UNBOUNDED caller data is UNPROVABLE —
-    /// no implementation mints and the search refuses loudly.
-    /// (2) `bind_value_range` supplies the caller's contract and the
-    /// SAME graph becomes provable, executes, and reads back exactly.
-    /// (3) The Strict form needs no proof — and an overflow at execute
-    /// is a loud kernel error, never a wrapped value.
+    /// LANDING D, the whole non-wrapping story: (1) a plain Int add
+    /// over UNATTESTED caller data is UNPROVABLE — no implementation
+    /// mints and the search refuses loudly (there is no Strict escape
+    /// hatch, by ruling: reject, never check-and-hope); (2)
+    /// `bind_value_range` supplies the caller's attestation and the
+    /// SAME graph proves, executes, and reads back exactly — while the
+    /// kernel keeps its checked arithmetic as the proof's tripwire.
     #[test]
-    fn int_add_proof_gating_three_acts() {
+    fn int_add_proof_gating() {
         // Act 1: unproven plain add refuses at search.
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor_dtyped(1, DType::Int);
@@ -1428,30 +1435,14 @@ mod tests {
         rt.set_data(b.id, vec![300i32]);
         rt.execute().expect("proven add executes");
         assert_eq!(rt.get_i32(out.id).unwrap(), &vec![1000i32]);
-
-        // Act 3: Strict needs no proof; overflow is loud at execute.
-        let mut cx = crate::graph::Graph::new();
-        let a = cx.tensor_dtyped(1, DType::Int);
-        let b = cx.tensor_dtyped(1, DType::Int);
-        let _out = a.strict_add(b).output();
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
-        rt.search(&data, &crate::test_support::harness_search_options())
-            .expect("strict add implements without proofs");
-        rt.set_data(a.id, vec![i32::MAX]);
-        rt.set_data(b.id, vec![1i32]);
-        let err = rt.execute().unwrap_err();
-        assert!(
-            format!("{err:#}").contains("overflow"),
-            "expected the checked-add refusal, got: {err:#}"
-        );
     }
 
-    /// TruncDiv is proof-gated on the divisor excluding zero: with a
-    /// declared positive divisor range it implements and truncates
-    /// toward zero; the Strict form refuses a zero divisor loudly at
-    /// execute.
+    /// TruncDiv is proof-gated on the divisor excluding zero: with an
+    /// attested positive divisor range it implements and truncates
+    /// toward zero; without the attestation the divisor might be zero
+    /// and the search refuses to find a plan at all.
     #[test]
-    fn trunc_div_gating_and_strict_zero_divisor() {
+    fn trunc_div_gating() {
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor_dtyped(4, DType::Int);
         let b = cx.tensor_dtyped(4, DType::Int);
@@ -1469,23 +1460,22 @@ mod tests {
         rt.execute().expect("proven trunc-div executes");
         assert_eq!(rt.get_i32(out.id).unwrap(), &vec![3i32, -3, 33, 0]);
 
-        // Strict twin: no proof needed, zero divisor loud.
+        // Without the divisor attestation the same graph REFUSES: the
+        // bounds admit zero, so no implementation exists to find.
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor_dtyped(1, DType::Int);
         let b = cx.tensor_dtyped(1, DType::Int);
-        let _out = a.strict_trunc_div(b).output();
+        let _out = a.trunc_div(b).output();
         let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
         let mut data = FxHashMap::default();
         data.insert(a.id, vec![7i32].into());
         data.insert(b.id, vec![2i32].into());
-        rt.search(&data, &crate::test_support::harness_search_options())
-            .expect("strict trunc-div implements");
-        rt.set_data(a.id, vec![7i32]);
-        rt.set_data(b.id, vec![0i32]);
-        let err = rt.execute().unwrap_err();
+        let err = rt
+            .search(&data, &crate::test_support::harness_search_options())
+            .unwrap_err();
         assert!(
-            format!("{err:#}").contains("zero divisor"),
-            "expected the zero-divisor refusal, got: {err:#}"
+            format!("{err:#}").contains("no candidate genome"),
+            "expected the unattested refusal, got: {err:#}"
         );
     }
 }

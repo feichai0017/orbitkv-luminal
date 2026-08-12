@@ -153,10 +153,6 @@ mod recip;
 mod reduce_max;
 mod reduce_sum;
 mod scatter;
-mod strict_add;
-mod strict_mul;
-mod strict_trunc_div;
-mod strict_trunc_rem;
 mod trunc_div;
 mod trunc_rem;
 mod sin;
@@ -181,10 +177,6 @@ pub use constant::LogicalConstant;
 pub use gather::LogicalGather;
 pub use scatter::LogicalScatter;
 pub use index_map_apply::LogicalIndexMapApply;
-pub use strict_add::LogicalStrictAdd;
-pub use strict_mul::LogicalStrictMul;
-pub use strict_trunc_div::LogicalStrictTruncDiv;
-pub use strict_trunc_rem::LogicalStrictTruncRem;
 pub use trunc_div::LogicalTruncDiv;
 pub use trunc_rem::LogicalTruncRem;
 
@@ -220,10 +212,6 @@ pub fn built_in_logical_ops() -> &'static [Box<dyn LogicalOp + Send + Sync>] {
             Box::new(LogicalIndexMapApply),
             Box::new(LogicalTruncDiv),
             Box::new(LogicalTruncRem),
-            Box::new(LogicalStrictAdd),
-            Box::new(LogicalStrictMul),
-            Box::new(LogicalStrictTruncDiv),
-            Box::new(LogicalStrictTruncRem),
         ]
     })
 }

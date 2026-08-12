@@ -2750,6 +2750,20 @@ pub fn run_ssa(
     cx: &crate::graph::Graph,
     inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
 ) -> crate::ssa_reference::SsaReferenceRuntime {
+    run_ssa_with_ranges(cx, inputs, &[])
+}
+
+/// [`run_ssa`] with VALUE-RANGE ATTESTATIONS (typed-buffers landing D):
+/// plain Int arithmetic is proof-gated, so a graph doing arithmetic
+/// over caller Int data implements only when the caller attests the
+/// data's range — no attestation, no proof, and the search refuses
+/// loudly. `ranges` entries are (tensor, lower, upper), seeded via
+/// `bind_value_range` between load and search.
+pub fn run_ssa_with_ranges(
+    cx: &crate::graph::Graph,
+    inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
+    ranges: &[(petgraph::graph::NodeIndex, i64, i64)],
+) -> crate::ssa_reference::SsaReferenceRuntime {
     let mut rt = crate::ssa_reference::SsaReferenceRuntime::load(cx)
         .expect("recorder clean for a covered graph");
     let mut vars: Vec<_> = cx.dyn_map.iter().collect();
@@ -2757,6 +2771,10 @@ pub fn run_ssa(
     for (var, value) in vars {
         rt.bind_dyn_range(*var, *value as u64, *value as u64)
             .expect("dyn pin binds");
+    }
+    for (tensor, lower, upper) in ranges {
+        rt.bind_value_range(*tensor, *lower, *upper)
+            .expect("value range binds");
     }
     let data: rustc_hash::FxHashMap<_, _> = inputs.iter().cloned().collect();
     rt.search(&data, &harness_search_options())

@@ -334,21 +334,9 @@ impl GraphTensor {
             .with_logical(logical)
     }
 
-    /// Checked Int add (Rust `strict_*` naming, ruling 2026-08-11):
-    /// overflow is a loud kernel panic. The escape hatch for arithmetic
-    /// over caller data the value-bounds analysis cannot bound; plain
-    /// `+` on Int is proof-gated and refuses unproven.
-    pub fn strict_add(self, rhs: GraphTensor) -> GraphTensor {
-        self.int_binary(rhs, "LogicalStrictAdd")
-    }
-
-    /// Checked Int mul; see [`Self::strict_add`].
-    pub fn strict_mul(self, rhs: GraphTensor) -> GraphTensor {
-        self.int_binary(rhs, "LogicalStrictMul")
-    }
-
     /// Integer truncated division (toward zero) — proof-gated: implements
-    /// only where the divisor's value bounds exclude zero.
+    /// only where the divisor's value bounds exclude zero (declare input
+    /// ranges with `bind_value_range` when the divisor is caller data).
     pub fn trunc_div(self, rhs: GraphTensor) -> GraphTensor {
         self.int_binary(rhs, "LogicalTruncDiv")
     }
@@ -356,17 +344,6 @@ impl GraphTensor {
     /// Integer truncated remainder; see [`Self::trunc_div`].
     pub fn trunc_rem(self, rhs: GraphTensor) -> GraphTensor {
         self.int_binary(rhs, "LogicalTruncRem")
-    }
-
-    /// Checked truncated division: zero divisor / MIN÷-1 are loud kernel
-    /// panics; see [`Self::strict_add`].
-    pub fn strict_trunc_div(self, rhs: GraphTensor) -> GraphTensor {
-        self.int_binary(rhs, "LogicalStrictTruncDiv")
-    }
-
-    /// Checked truncated remainder; see [`Self::strict_trunc_div`].
-    pub fn strict_trunc_rem(self, rhs: GraphTensor) -> GraphTensor {
-        self.int_binary(rhs, "LogicalStrictTruncRem")
     }
 
     /// Less than comparison

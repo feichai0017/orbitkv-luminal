@@ -27,10 +27,6 @@ mod add_mul_fused;
 mod cast;
 mod constant;
 mod div;
-mod strict_add;
-mod strict_mul;
-mod strict_trunc_div;
-mod strict_trunc_rem;
 mod trunc_div;
 mod trunc_rem;
 mod exp;
@@ -117,10 +113,6 @@ pub use add_mul_fused::AddMulFusedMatcher;
 pub use cast::CastMatcher;
 pub use constant::ConstantMatcher;
 pub use div::{DivFunctionalMatcher, DivMutatingMatcher};
-pub use strict_add::{StrictAddFunctional, StrictAddFunctionalDps, StrictAddFunctionalMatcher};
-pub use strict_mul::{StrictMulFunctional, StrictMulFunctionalDps, StrictMulFunctionalMatcher};
-pub use strict_trunc_div::{StrictTruncDivFunctional, StrictTruncDivFunctionalDps, StrictTruncDivFunctionalMatcher};
-pub use strict_trunc_rem::{StrictTruncRemFunctional, StrictTruncRemFunctionalDps, StrictTruncRemFunctionalMatcher};
 pub use trunc_div::{TruncDivFunctional, TruncDivFunctionalDps, TruncDivFunctionalMatcher};
 pub use trunc_rem::{TruncRemFunctional, TruncRemFunctionalDps, TruncRemFunctionalMatcher};
 pub use exp::{ExpFunctionalMatcher, ExpMutatingMatcher};
@@ -158,10 +150,6 @@ pub fn built_in_matchers() -> Vec<Box<dyn crate::layout_ir::OpMatcher>> {
         Box::new(DivFunctionalMatcher),
         Box::new(TruncDivFunctionalMatcher),
         Box::new(TruncRemFunctionalMatcher),
-        Box::new(StrictAddFunctionalMatcher),
-        Box::new(StrictMulFunctionalMatcher),
-        Box::new(StrictTruncDivFunctionalMatcher),
-        Box::new(StrictTruncRemFunctionalMatcher),
         Box::new(SqrtMutatingMatcher),
         Box::new(ExpMutatingMatcher),
         Box::new(AddMutatingMatcher),

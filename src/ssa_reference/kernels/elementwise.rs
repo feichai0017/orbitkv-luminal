@@ -280,22 +280,6 @@ pub(super) fn add_mul_fused(
     Ok(())
 }
 
-/// Checked Int add/mul bodies shared by the plain (proof-gated) and
-/// Strict (dynamic-checked) forms — under a proof the check is
-/// belt-and-suspenders (a trip means the analysis has a bug; hear it).
-pub(super) fn strict_add(
-    _op: &dyn BufferTensorIrOp,
-    ctx: &mut ReferenceKernelCtx,
-) -> anyhow::Result<()> {
-    add(_op, ctx)
-}
-
-pub(super) fn strict_mul(
-    _op: &dyn BufferTensorIrOp,
-    ctx: &mut ReferenceKernelCtx,
-) -> anyhow::Result<()> {
-    mul(_op, ctx)
-}
 
 /// Truncated integer division (toward zero). checked_div covers both
 /// loud cases: zero divisor and the MIN / -1 overflow corner.
