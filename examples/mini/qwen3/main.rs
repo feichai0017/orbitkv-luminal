@@ -30,22 +30,22 @@ fn main() {
 
     let block = &model.blocks[0];
     let (q_norm, k_norm) = block.qk_norm.expect("qwen3 block carries QK-norm");
-    let pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-        (ids.id, vec![3.0]),
-        (model.embed.weight.id, weights(VOCAB * D, 1)),
-        (block.wq.weight.id, weights(D * D, 2)),
-        (block.wk.weight.id, weights(D * 4, 3)),
-        (block.wv.weight.id, weights(D * 4, 4)),
-        (block.wo.weight.id, weights(D * D, 5)),
-        (block.gate.weight.id, weights(D * 12, 6)),
-        (block.up.weight.id, weights(D * 12, 7)),
-        (block.down.weight.id, weights(12 * D, 8)),
-        (q_norm.id, weights(HD, 11)),
-        (k_norm.id, weights(HD, 12)),
-        (k_cache.id, weights(16, 9)),
-        (v_cache.id, weights(16, 10)),
-        (gather_idx.id, vec![0.0, 1.0]),
-        (scatter_idx.id, vec![1.0]),
+    let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+        (ids.id, vec![3i32].into()),
+        (model.embed.weight.id, weights(VOCAB * D, 1).into()),
+        (block.wq.weight.id, weights(D * D, 2).into()),
+        (block.wk.weight.id, weights(D * 4, 3).into()),
+        (block.wv.weight.id, weights(D * 4, 4).into()),
+        (block.wo.weight.id, weights(D * D, 5).into()),
+        (block.gate.weight.id, weights(D * 12, 6).into()),
+        (block.up.weight.id, weights(D * 12, 7).into()),
+        (block.down.weight.id, weights(12 * D, 8).into()),
+        (q_norm.id, weights(HD, 11).into()),
+        (k_norm.id, weights(HD, 12).into()),
+        (k_cache.id, weights(16, 9).into()),
+        (v_cache.id, weights(16, 10).into()),
+        (gather_idx.id, vec![0i32, 1].into()),
+        (scatter_idx.id, vec![1i32].into()),
     ];
     let data = pairs.iter().cloned().collect();
     let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");

@@ -9,13 +9,12 @@ use luminal::shape::Expression;
 ///
 /// Returns: (N, D) tensor where output[i] = data[indices[i]]
 ///
-/// COORDINATE form, not flat sugar (2026-08-11): the reference runtime
-/// stores Int buffer VALUES in f32, exact only below 2^24 — a
-/// materialized flat index (indices·D + col) overflows that at
-/// embedding scale (Qwen3-4B: vocab·hidden ≈ 3.9e8) and whether it
-/// materializes is a PLAN decision, so the flat spelling is
-/// plan-dependently unsound. Per-axis coordinates (row < R, col < D)
-/// stay exact for any real model dims.
+/// COORDINATE form, not flat sugar — the 2026-07-31 "coordinate form
+/// is THE primary" ruling. (Historically this also dodged the
+/// Int-in-f32 smuggling's 2^24 cliff; typed buffers now make flat
+/// index arithmetic exact too, but per-axis coordinates remain the
+/// primary spelling and keep every component bounded by its axis
+/// extent.)
 pub fn gather_rows(data: GraphTensor, indices: GraphTensor, d: usize) -> GraphTensor {
     assert_eq!(indices.dtype, DType::Int);
     let n = indices.dims1();
@@ -404,12 +403,12 @@ mod tests {
         let out = gather_rows(data, idx, 3).output();
 
         let data_vals: Vec<f32> = (0..12).map(|v| v as f32).collect();
-        let idx_vals = vec![2.0f32, 0.0];
+        let idx_vals = vec![2i32, 0];
         let expected = vec![6.0, 7.0, 8.0, 0.0, 1.0, 2.0];
 
         let mut inputs = FxHashMap::default();
-        inputs.insert(data.id, data_vals.clone());
-        inputs.insert(idx.id, idx_vals.clone());
+        inputs.insert(data.id, data_vals.clone().into());
+        inputs.insert(idx.id, idx_vals.clone().into());
         let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
         rt.search(&inputs, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
@@ -431,16 +430,16 @@ mod tests {
         assert_eq!(out.dims(), dest.dims());
 
         let src_vals = vec![100.0f32, 101.0, 102.0, 200.0, 201.0, 202.0];
-        let idx_vals = vec![1.0f32, 3.0];
+        let idx_vals = vec![1i32, 3];
         let dest_vals: Vec<f32> = (0..12).map(|v| v as f32).collect();
         let expected = vec![
             0.0, 1.0, 2.0, 100.0, 101.0, 102.0, 6.0, 7.0, 8.0, 200.0, 201.0, 202.0,
         ];
 
         let mut inputs = FxHashMap::default();
-        inputs.insert(src.id, src_vals.clone());
-        inputs.insert(idx.id, idx_vals.clone());
-        inputs.insert(dest.id, dest_vals.clone());
+        inputs.insert(src.id, src_vals.clone().into());
+        inputs.insert(idx.id, idx_vals.clone().into());
+        inputs.insert(dest.id, dest_vals.clone().into());
         let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
         rt.search(&inputs, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
@@ -496,8 +495,8 @@ mod tests {
         let v_new_vals = vec![1.0f32, -1.0, 0.5, 2.0];
         let k_cache_vals: Vec<f32> = (0..SLOTS * HIDDEN).map(|v| v as f32 * 0.1).collect();
         let v_cache_vals: Vec<f32> = (0..SLOTS * HIDDEN).map(|v| v as f32 * 0.2 + 1.0).collect();
-        let gather_vals = vec![0.0f32, 1.0]; // context = slots 0, 1
-        let scatter_vals = vec![1.0f32]; // new KV lands in slot 1
+        let gather_vals = vec![0i32, 1]; // context = slots 0, 1
+        let scatter_vals = vec![1i32]; // new KV lands in slot 1
 
         // Scalar reference. Cache update: row 1 replaced by k_new/v_new.
         let mut k_cache_ref = k_cache_vals.clone();
@@ -532,13 +531,13 @@ mod tests {
         let rt = luminal::test_support::run_ssa(
             &cx,
             &[
-                (q.id, q_vals),
-                (k_new.id, k_new_vals),
-                (v_new.id, v_new_vals),
-                (k_cache.id, k_cache_vals),
-                (v_cache.id, v_cache_vals),
-                (gather_idx.id, gather_vals),
-                (scatter_idx.id, scatter_vals),
+                (q.id, q_vals.into()),
+                (k_new.id, k_new_vals.into()),
+                (v_new.id, v_new_vals.into()),
+                (k_cache.id, k_cache_vals.into()),
+                (v_cache.id, v_cache_vals.into()),
+                (gather_idx.id, gather_vals.into()),
+                (scatter_idx.id, scatter_vals.into()),
             ],
         );
         assert_close(rt.get_f32(attn.id).expect("attn out"), &attn_ref);
@@ -610,9 +609,9 @@ mod tests {
         let v_new_vals = vec![1.0f32, -1.0, 0.5, 2.0];
         let k_cache_vals: Vec<f32> = (0..SLOTS * HIDDEN).map(|v| v as f32 * 0.1).collect();
         let v_cache_vals: Vec<f32> = (0..SLOTS * HIDDEN).map(|v| v as f32 * 0.2 + 1.0).collect();
-        let gather_vals = vec![0.0f32, 1.0, 2.0]; // slot 2 is beyond position 1
-        let scatter_vals = vec![1.0f32];
-        let q_pos_vals = vec![q_position as f32];
+        let gather_vals = vec![0i32, 1, 2]; // slot 2 is beyond position 1
+        let scatter_vals = vec![1i32];
+        let q_pos_vals = vec![q_position as i32];
 
         let mut k_cache_ref = k_cache_vals.clone();
         let mut v_cache_ref = v_cache_vals.clone();
@@ -645,14 +644,14 @@ mod tests {
         let rt = luminal::test_support::run_ssa(
             &cx,
             &[
-                (q.id, q_vals),
-                (k_new.id, k_new_vals),
-                (v_new.id, v_new_vals),
-                (k_cache.id, k_cache_vals),
-                (v_cache.id, v_cache_vals),
-                (gather_idx.id, gather_vals),
-                (scatter_idx.id, scatter_vals),
-                (q_pos.id, q_pos_vals),
+                (q.id, q_vals.into()),
+                (k_new.id, k_new_vals.into()),
+                (v_new.id, v_new_vals.into()),
+                (k_cache.id, k_cache_vals.into()),
+                (v_cache.id, v_cache_vals.into()),
+                (gather_idx.id, gather_vals.into()),
+                (scatter_idx.id, scatter_vals.into()),
+                (q_pos.id, q_pos_vals.into()),
             ],
         );
         assert_close(rt.get_f32(attn_pos.id).expect("positional attn"), &attn_ref);

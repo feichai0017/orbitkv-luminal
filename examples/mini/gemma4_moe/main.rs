@@ -26,19 +26,19 @@ fn main() {
     let logits = logits.output();
     let block = &model.blocks[0];
     let FeedForward::Moe(moe) = &block.ff else { unreachable!() };
-    let pairs = vec![
-        (ids.id, vec![2.0]),
-        (model.embed.weight.id, weights(VOCAB * D, 1)),
-        (block.wq.weight.id, weights(D * D, 2)),
-        (block.wk.weight.id, weights(D * D, 3)),
-        (block.wv.weight.id, weights(D * D, 4)),
-        (block.wo.weight.id, weights(D * D, 5)),
-        (moe.router.id, weights(D * 2, 6)),
-        (moe.expert_weights.id, weights(2 * D * D, 7)),
-        (k_cache.id, weights(4 * D, 8)),
-        (v_cache.id, weights(4 * D, 9)),
-        (gather_idx.id, vec![0.0, 1.0]),
-        (scatter_idx.id, vec![1.0]),
+    let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+        (ids.id, vec![2i32].into()),
+        (model.embed.weight.id, weights(VOCAB * D, 1).into()),
+        (block.wq.weight.id, weights(D * D, 2).into()),
+        (block.wk.weight.id, weights(D * D, 3).into()),
+        (block.wv.weight.id, weights(D * D, 4).into()),
+        (block.wo.weight.id, weights(D * D, 5).into()),
+        (moe.router.id, weights(D * 2, 6).into()),
+        (moe.expert_weights.id, weights(2 * D * D, 7).into()),
+        (k_cache.id, weights(4 * D, 8).into()),
+        (v_cache.id, weights(4 * D, 9).into()),
+        (gather_idx.id, vec![0i32, 1].into()),
+        (scatter_idx.id, vec![1i32].into()),
     ];
     let rt = luminal::test_support::run_ssa(&cx, &pairs);
     println!("soft-capped logits: {:?}", rt.get_f32(logits.id).unwrap());

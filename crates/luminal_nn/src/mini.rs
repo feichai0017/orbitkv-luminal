@@ -998,32 +998,32 @@ mod tests {
             .collect();
 
         let embed_w = weights(VOCAB * D, 199);
-        let mut pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-            (ids.id, vec![token as f32]),
-            (embed.weight.id, embed_w.clone()),
-            (gather_idx.id, vec![0.0, 1.0]),
-            (scatter_idx.id, vec![1.0]),
+        let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+            (ids.id, vec![token as i32].into()),
+            (embed.weight.id, embed_w.clone().into()),
+            (gather_idx.id, vec![0i32, 1].into()),
+            (scatter_idx.id, vec![1i32].into()),
         ];
         let qk_seeds_for = |layer: usize| (260 + layer * 2, 261 + layer * 2);
         let mut ref_caches: Vec<(Vec<f32>, Vec<f32>)> = Vec::new();
         for (layer, block) in blocks.iter().enumerate() {
             let (wq_s, wk_s, wv_s, wo_s, gate_s, up_s, down_s) = seeds_for(layer);
-            pairs.push((block.wq.weight.id, weights(D * D, wq_s)));
-            pairs.push((block.wk.weight.id, weights(D * KV_DIM, wk_s)));
-            pairs.push((block.wv.weight.id, weights(D * KV_DIM, wv_s)));
-            pairs.push((block.wo.weight.id, weights(D * D, wo_s)));
-            pairs.push((block.gate.weight.id, weights(D * FF, gate_s)));
-            pairs.push((block.up.weight.id, weights(D * FF, up_s)));
-            pairs.push((block.down.weight.id, weights(FF * D, down_s)));
+            pairs.push((block.wq.weight.id, weights(D * D, wq_s).into()));
+            pairs.push((block.wk.weight.id, weights(D * KV_DIM, wk_s).into()));
+            pairs.push((block.wv.weight.id, weights(D * KV_DIM, wv_s).into()));
+            pairs.push((block.wo.weight.id, weights(D * D, wo_s).into()));
+            pairs.push((block.gate.weight.id, weights(D * FF, gate_s).into()));
+            pairs.push((block.up.weight.id, weights(D * FF, up_s).into()));
+            pairs.push((block.down.weight.id, weights(FF * D, down_s).into()));
             if let Some((q_norm, k_norm)) = block.qk_norm {
                 let (q_seed, k_seed) = qk_seeds_for(layer);
-                pairs.push((q_norm.id, weights(HD, q_seed)));
-                pairs.push((k_norm.id, weights(HD, k_seed)));
+                pairs.push((q_norm.id, weights(HD, q_seed).into()));
+                pairs.push((k_norm.id, weights(HD, k_seed).into()));
             }
             let kc = weights(SLOTS * KV_DIM, 300 + layer);
             let vc = weights(SLOTS * KV_DIM, 320 + layer);
-            pairs.push((caches[layer].0.id, kc.clone()));
-            pairs.push((caches[layer].1.id, vc.clone()));
+            pairs.push((caches[layer].0.id, kc.clone().into()));
+            pairs.push((caches[layer].1.id, vc.clone().into()));
             ref_caches.push((kc, vc));
         }
 
@@ -1175,37 +1175,37 @@ mod tests {
                 )
             })
             .collect();
-        let mut pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-            (ids.id, vec![token as f32]),
-            (model.embed.weight.id, embed_w.clone()),
-            (gather_idx.id, vec![0.0, 1.0]),
-            (scatter_idx.id, vec![1.0]),
-            (rope_rot.id, rot_matrix.clone()),
-            (model.final_norm.weight.expect("weighted").id, weights(D, 660)),
+        let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+            (ids.id, vec![token as i32].into()),
+            (model.embed.weight.id, embed_w.clone().into()),
+            (gather_idx.id, vec![0i32, 1].into()),
+            (scatter_idx.id, vec![1i32].into()),
+            (rope_rot.id, rot_matrix.clone().into()),
+            (model.final_norm.weight.expect("weighted").id, weights(D, 660).into()),
         ];
         for (layer, (cos_table, sin_table)) in role_tables.iter().enumerate() {
-            pairs.push((rope_inputs[layer].0.id, cos_table.clone()));
-            pairs.push((rope_inputs[layer].1.id, sin_table.clone()));
+            pairs.push((rope_inputs[layer].0.id, cos_table.clone().into()));
+            pairs.push((rope_inputs[layer].1.id, sin_table.clone().into()));
         }
         let mut ref_caches: Vec<(Vec<f32>, Vec<f32>)> = Vec::new();
         for (layer, block) in model.blocks.iter().enumerate() {
-            pairs.push((block.wq.weight.id, weights(D * Q_DIM, seeds(layer, 0))));
-            pairs.push((block.wk.weight.id, weights(D * KV_DIM, seeds(layer, 1))));
-            pairs.push((block.wv.weight.id, weights(D * KV_DIM, seeds(layer, 2))));
-            pairs.push((block.wo.weight.id, weights(Q_DIM * D, seeds(layer, 3))));
-            pairs.push((block.gate.weight.id, weights(D * FF, seeds(layer, 4))));
-            pairs.push((block.up.weight.id, weights(D * FF, seeds(layer, 5))));
-            pairs.push((block.down.weight.id, weights(FF * D, seeds(layer, 6))));
-            pairs.push((block.input_norm.weight.expect("weighted").id, weights(D, seeds(layer, 7))));
-            pairs.push((block.post_attn_norm.weight.expect("weighted").id, weights(D, seeds(layer, 8))));
-            pairs.push((block.pre_ff_norm.weight.expect("weighted").id, weights(D, seeds(layer, 9))));
-            pairs.push((block.post_ff_norm.weight.expect("weighted").id, weights(D, seeds(layer, 10))));
-            pairs.push((block.q_norm.id, weights(HD, seeds(layer, 11))));
-            pairs.push((block.k_norm.id, weights(HD, seeds(layer, 12))));
+            pairs.push((block.wq.weight.id, weights(D * Q_DIM, seeds(layer, 0)).into()));
+            pairs.push((block.wk.weight.id, weights(D * KV_DIM, seeds(layer, 1)).into()));
+            pairs.push((block.wv.weight.id, weights(D * KV_DIM, seeds(layer, 2)).into()));
+            pairs.push((block.wo.weight.id, weights(Q_DIM * D, seeds(layer, 3)).into()));
+            pairs.push((block.gate.weight.id, weights(D * FF, seeds(layer, 4)).into()));
+            pairs.push((block.up.weight.id, weights(D * FF, seeds(layer, 5)).into()));
+            pairs.push((block.down.weight.id, weights(FF * D, seeds(layer, 6)).into()));
+            pairs.push((block.input_norm.weight.expect("weighted").id, weights(D, seeds(layer, 7)).into()));
+            pairs.push((block.post_attn_norm.weight.expect("weighted").id, weights(D, seeds(layer, 8)).into()));
+            pairs.push((block.pre_ff_norm.weight.expect("weighted").id, weights(D, seeds(layer, 9)).into()));
+            pairs.push((block.post_ff_norm.weight.expect("weighted").id, weights(D, seeds(layer, 10)).into()));
+            pairs.push((block.q_norm.id, weights(HD, seeds(layer, 11)).into()));
+            pairs.push((block.k_norm.id, weights(HD, seeds(layer, 12)).into()));
             let kc = weights(SLOTS * KV_DIM, 300 + layer);
             let vc = weights(SLOTS * KV_DIM, 320 + layer);
-            pairs.push((caches[layer].0.id, kc.clone()));
-            pairs.push((caches[layer].1.id, vc.clone()));
+            pairs.push((caches[layer].0.id, kc.clone().into()));
+            pairs.push((caches[layer].1.id, vc.clone().into()));
             ref_caches.push((kc, vc));
         }
 
@@ -1323,19 +1323,19 @@ mod tests {
         let embed_w = weights(VOCAB * D, 400);
         let block = &blocks[0];
         let crate::FeedForward::Moe(moe) = &block.ff else { unreachable!() };
-        let pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-            (ids.id, vec![token as f32]),
-            (embed.weight.id, embed_w.clone()),
-            (block.wq.weight.id, weights(D * D, 401)),
-            (block.wk.weight.id, weights(D * D, 402)),
-            (block.wv.weight.id, weights(D * D, 403)),
-            (block.wo.weight.id, weights(D * D, 404)),
-            (moe.router.id, weights(D * E, 405)),
-            (moe.expert_weights.id, weights(E * D * D, 406)),
-            (k_cache.id, weights(SLOTS * D, 407)),
-            (v_cache.id, weights(SLOTS * D, 408)),
-            (gather_idx.id, vec![0.0, 1.0]),
-            (scatter_idx.id, vec![1.0]),
+        let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+            (ids.id, vec![token as i32].into()),
+            (embed.weight.id, embed_w.clone().into()),
+            (block.wq.weight.id, weights(D * D, 401).into()),
+            (block.wk.weight.id, weights(D * D, 402).into()),
+            (block.wv.weight.id, weights(D * D, 403).into()),
+            (block.wo.weight.id, weights(D * D, 404).into()),
+            (moe.router.id, weights(D * E, 405).into()),
+            (moe.expert_weights.id, weights(E * D * D, 406).into()),
+            (k_cache.id, weights(SLOTS * D, 407).into()),
+            (v_cache.id, weights(SLOTS * D, 408).into()),
+            (gather_idx.id, vec![0i32, 1].into()),
+            (scatter_idx.id, vec![1i32].into()),
         ];
 
         // Scalar reference: embed row → block (attn + MoE ffn) → LN →
@@ -1415,21 +1415,21 @@ mod tests {
 
         let audio_vals = weights(S_ENC * D, 500);
         let token_vals = weights(D, 501);
-        let pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-            (audio.id, audio_vals.clone()),
-            (tokens.id, token_vals.clone()),
-            (model.enc_wq.weight.id, weights(D * D, 502)),
-            (model.enc_wk.weight.id, weights(D * D, 503)),
-            (model.enc_wv.weight.id, weights(D * D, 504)),
-            (model.enc_wo.weight.id, weights(D * D, 505)),
-            (model.enc_up.weight.id, weights(D * FF, 506)),
-            (model.enc_down.weight.id, weights(FF * D, 507)),
-            (model.dec_wq.weight.id, weights(D * D, 508)),
-            (model.dec_wk.weight.id, weights(D * D, 509)),
-            (model.dec_wv.weight.id, weights(D * D, 510)),
-            (model.dec_wo.weight.id, weights(D * D, 511)),
-            (model.dec_up.weight.id, weights(D * FF, 512)),
-            (model.dec_down.weight.id, weights(FF * D, 513)),
+        let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+            (audio.id, audio_vals.clone().into()),
+            (tokens.id, token_vals.clone().into()),
+            (model.enc_wq.weight.id, weights(D * D, 502).into()),
+            (model.enc_wk.weight.id, weights(D * D, 503).into()),
+            (model.enc_wv.weight.id, weights(D * D, 504).into()),
+            (model.enc_wo.weight.id, weights(D * D, 505).into()),
+            (model.enc_up.weight.id, weights(D * FF, 506).into()),
+            (model.enc_down.weight.id, weights(FF * D, 507).into()),
+            (model.dec_wq.weight.id, weights(D * D, 508).into()),
+            (model.dec_wk.weight.id, weights(D * D, 509).into()),
+            (model.dec_wv.weight.id, weights(D * D, 510).into()),
+            (model.dec_wo.weight.id, weights(D * D, 511).into()),
+            (model.dec_up.weight.id, weights(D * FF, 512).into()),
+            (model.dec_down.weight.id, weights(FF * D, 513).into()),
         ];
 
         // Scalar reference.
@@ -1491,11 +1491,11 @@ mod tests {
         let w1 = weights(C1 * 9, 601);
         let w2 = weights(C2 * C1 * 9, 602);
         let wh = weights(C2 * CLASSES, 603);
-        let pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-            (x.id, x_vals.clone()),
-            (model.conv1.weight.id, w1.clone()),
-            (model.conv2.weight.id, w2.clone()),
-            (model.head.weight.id, wh.clone()),
+        let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+            (x.id, x_vals.clone().into()),
+            (model.conv1.weight.id, w1.clone().into()),
+            (model.conv2.weight.id, w2.clone().into()),
+            (model.head.weight.id, wh.clone().into()),
         ];
 
         // Scalar reference: valid 3×3 convs; ConvND weight layout is
@@ -1577,47 +1577,47 @@ mod tests {
         let latent_vals = weights(S_IMG * IN_CH, 540);
         let text_vals = weights(S_TXT * TXT_DIM, 541);
         let (t_val, g_val) = (0.35f32, 0.8f32);
-        let pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-            (latent.id, latent_vals.clone()),
-            (text.id, text_vals.clone()),
-            (t.id, vec![t_val]),
-            (guidance.id, vec![g_val]),
-            (rope_cos.id, cos_table.clone()),
-            (rope_sin.id, sin_table.clone()),
-            (rope_rot.id, rot_matrix.clone()),
-            (joint_base.id, vec![0.0; S * D]),
-            (model.x_embed.weight.id, weights(IN_CH * D, 500)),
-            (model.ctx_embed.weight.id, weights(TXT_DIM * D, 501)),
-            (model.t_mlp1.weight.id, weights(T_CH * D, 502)),
-            (model.t_mlp2.weight.id, weights(D * D, 503)),
-            (model.g_mlp1.weight.id, weights(T_CH * D, 504)),
-            (model.g_mlp2.weight.id, weights(D * D, 505)),
-            (model.mod_img.weight.id, weights(D * 6 * D, 506)),
-            (model.mod_txt.weight.id, weights(D * 6 * D, 507)),
-            (model.mod_single.weight.id, weights(D * 3 * D, 508)),
-            (model.norm_out.weight.id, weights(D * 2 * D, 509)),
-            (model.proj_out.weight.id, weights(D * IN_CH, 510)),
-            (model.img_q.weight.id, weights(D * D, 511)),
-            (model.img_k.weight.id, weights(D * D, 512)),
-            (model.img_v.weight.id, weights(D * D, 513)),
-            (model.img_out.weight.id, weights(D * D, 514)),
-            (model.txt_q.weight.id, weights(D * D, 515)),
-            (model.txt_k.weight.id, weights(D * D, 516)),
-            (model.txt_v.weight.id, weights(D * D, 517)),
-            (model.txt_out.weight.id, weights(D * D, 518)),
-            (model.img_qnorm.id, weights(HD, 519)),
-            (model.img_knorm.id, weights(HD, 520)),
-            (model.txt_qnorm.id, weights(HD, 521)),
-            (model.txt_knorm.id, weights(HD, 522)),
-            (model.ff_in.weight.id, weights(D * 2 * MLP, 523)),
-            (model.ff_out.weight.id, weights(MLP * D, 524)),
-            (model.ctx_ff_in.weight.id, weights(D * 2 * MLP, 525)),
-            (model.ctx_ff_out.weight.id, weights(MLP * D, 526)),
-            (model.single_proj.weight.id, weights(D * (3 * D + 2 * MLP), 527)),
-            (model.single_out_attn.weight.id, weights(D * D, 531)),
-            (model.single_out_mlp.weight.id, weights(MLP * D, 532)),
-            (model.single_qnorm.id, weights(HD, 529)),
-            (model.single_knorm.id, weights(HD, 530)),
+        let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+            (latent.id, latent_vals.clone().into()),
+            (text.id, text_vals.clone().into()),
+            (t.id, vec![t_val].into()),
+            (guidance.id, vec![g_val].into()),
+            (rope_cos.id, cos_table.clone().into()),
+            (rope_sin.id, sin_table.clone().into()),
+            (rope_rot.id, rot_matrix.clone().into()),
+            (joint_base.id, vec![0.0; S * D].into()),
+            (model.x_embed.weight.id, weights(IN_CH * D, 500).into()),
+            (model.ctx_embed.weight.id, weights(TXT_DIM * D, 501).into()),
+            (model.t_mlp1.weight.id, weights(T_CH * D, 502).into()),
+            (model.t_mlp2.weight.id, weights(D * D, 503).into()),
+            (model.g_mlp1.weight.id, weights(T_CH * D, 504).into()),
+            (model.g_mlp2.weight.id, weights(D * D, 505).into()),
+            (model.mod_img.weight.id, weights(D * 6 * D, 506).into()),
+            (model.mod_txt.weight.id, weights(D * 6 * D, 507).into()),
+            (model.mod_single.weight.id, weights(D * 3 * D, 508).into()),
+            (model.norm_out.weight.id, weights(D * 2 * D, 509).into()),
+            (model.proj_out.weight.id, weights(D * IN_CH, 510).into()),
+            (model.img_q.weight.id, weights(D * D, 511).into()),
+            (model.img_k.weight.id, weights(D * D, 512).into()),
+            (model.img_v.weight.id, weights(D * D, 513).into()),
+            (model.img_out.weight.id, weights(D * D, 514).into()),
+            (model.txt_q.weight.id, weights(D * D, 515).into()),
+            (model.txt_k.weight.id, weights(D * D, 516).into()),
+            (model.txt_v.weight.id, weights(D * D, 517).into()),
+            (model.txt_out.weight.id, weights(D * D, 518).into()),
+            (model.img_qnorm.id, weights(HD, 519).into()),
+            (model.img_knorm.id, weights(HD, 520).into()),
+            (model.txt_qnorm.id, weights(HD, 521).into()),
+            (model.txt_knorm.id, weights(HD, 522).into()),
+            (model.ff_in.weight.id, weights(D * 2 * MLP, 523).into()),
+            (model.ff_out.weight.id, weights(MLP * D, 524).into()),
+            (model.ctx_ff_in.weight.id, weights(D * 2 * MLP, 525).into()),
+            (model.ctx_ff_out.weight.id, weights(MLP * D, 526).into()),
+            (model.single_proj.weight.id, weights(D * (3 * D + 2 * MLP), 527).into()),
+            (model.single_out_attn.weight.id, weights(D * D, 531).into()),
+            (model.single_out_mlp.weight.id, weights(MLP * D, 532).into()),
+            (model.single_qnorm.id, weights(HD, 529).into()),
+            (model.single_knorm.id, weights(HD, 530).into()),
         ];
 
         // ---- scalar reference ----
@@ -1890,7 +1890,7 @@ mod tests {
             trials: 1,
             seed: 0,
         };
-        let run = |label: &str, cx: &Graph, pairs: &[(petgraph::graph::NodeIndex, Vec<f32>)]| {
+        let run = |label: &str, cx: &Graph, pairs: &[(petgraph::graph::NodeIndex, TypedBuffer)]| {
             let start = std::time::Instant::now();
             let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
             let mut rt =
@@ -1913,28 +1913,28 @@ mod tests {
             let mut cx = Graph::new();
             let x = cx.tensor(1);
             let _ = x.sin().output();
-            run("sin-alone", &cx, &[(x.id, vec![0.5])]);
+            run("sin-alone", &cx, &[(x.id, vec![0.5].into())]);
         }
         // 2: sin of scaled input
         {
             let mut cx = Graph::new();
             let x = cx.tensor(1);
             let _ = (x * 0.37).sin().output();
-            run("sin-scaled", &cx, &[(x.id, vec![0.5])]);
+            run("sin-scaled", &cx, &[(x.id, vec![0.5].into())]);
         }
         // 3: cos = sin(π/2 − x)
         {
             let mut cx = Graph::new();
             let x = cx.tensor(1);
             let _ = x.cos().output();
-            run("cos", &cx, &[(x.id, vec![0.5])]);
+            run("cos", &cx, &[(x.id, vec![0.5].into())]);
         }
         // 4: pad alone (no trig)
         {
             let mut cx = Graph::new();
             let x = cx.tensor((1, 1));
             let _ = x.pad_along(0, 1, 1, 0.).output();
-            run("pad-alone", &cx, &[(x.id, vec![0.5])]);
+            run("pad-alone", &cx, &[(x.id, vec![0.5].into())]);
         }
         // 5: concat of two (1,1) tensors (pad + add, no trig)
         {
@@ -1942,7 +1942,7 @@ mod tests {
             let a = cx.tensor((1, 1));
             let b = cx.tensor((1, 1));
             let _ = a.concat_along(b, 1).output();
-            run("concat-alone", &cx, &[(a.id, vec![0.5]), (b.id, vec![0.7])]);
+            run("concat-alone", &cx, &[(a.id, vec![0.5].into()), (b.id, vec![0.7].into())]);
         }
         // 6: the angle table — cos/sin of scaled positions, concatenated
         {
@@ -1951,14 +1951,14 @@ mod tests {
             let c0 = pos.cos().unsqueeze(1);
             let c1 = (pos * 0.01).cos().unsqueeze(1);
             let _ = c0.concat_along(c1, 1).output();
-            run("angle-table", &cx, &[(pos.id, vec![1.0])]);
+            run("angle-table", &cx, &[(pos.id, vec![1.0].into())]);
         }
         // 7: rank-3 movement round-trip (split → merge, no slices)
         {
             let mut cx = Graph::new();
             let x = cx.tensor((1, 8));
             let _ = x.split_dims(1, 4).merge_dims(1, 2).output();
-            run("split-merge", &cx, &[(x.id, weights(8, 11))]);
+            run("split-merge", &cx, &[(x.id, weights(8, 11).into())]);
         }
         // 8: THE REJOIN — slice halves of a rank-3, concat them back
         // (the composition-rows divergence pattern), no trig involved
@@ -1969,7 +1969,7 @@ mod tests {
             let x1 = heads.slice_along(0..2, 2);
             let x2 = heads.slice_along(2..4, 2);
             let _ = x2.concat_along(x1, 2).merge_dims(1, 2).output();
-            run("rejoin", &cx, &[(x.id, weights(8, 12))]);
+            run("rejoin", &cx, &[(x.id, weights(8, 12).into())]);
         }
         // 9: broadcast-multiply — angle row expanded onto the sliced half
         {
@@ -1980,7 +1980,7 @@ mod tests {
             let x1 = heads.slice_along(0..2, 2); // (1, 2, 2)
             let bcast = table.unsqueeze(1).expand(x1.dims());
             let _ = (x1 * bcast).merge_dims(1, 2).output();
-            run("broadcast-mul", &cx, &[(x.id, weights(8, 13)), (table.id, weights(2, 14))]);
+            run("broadcast-mul", &cx, &[(x.id, weights(8, 13).into()), (table.id, weights(2, 14).into())]);
         }
     }
 
@@ -2002,7 +2002,7 @@ mod tests {
             trials: 1,
             seed: 0,
         };
-        let run = |label: &str, cx: &Graph, pairs: &[(petgraph::graph::NodeIndex, Vec<f32>)]| {
+        let run = |label: &str, cx: &Graph, pairs: &[(petgraph::graph::NodeIndex, TypedBuffer)]| {
             let start = std::time::Instant::now();
             let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
             let mut rt =
@@ -2033,11 +2033,11 @@ mod tests {
             let out = crate::rotary_apply(x, 4, cos, sin, rot).output();
             let _ = out;
             let (cos_table, sin_table) = crate::rope_tables_split_half(&[1.0], 4, 10_000.0, 1.0);
-            let pairs = vec![
-                (x.id, weights(8, 1)),
-                (cos.id, cos_table),
-                (sin.id, sin_table),
-                (rot.id, crate::rope_pairing_matrix(4, false)),
+            let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+                (x.id, weights(8, 1).into()),
+                (cos.id, cos_table.into()),
+                (sin.id, sin_table.into()),
+                (rot.id, crate::rope_pairing_matrix(4, false).into()),
             ];
             run("rope-alone", &cx, &pairs);
         }
@@ -2068,14 +2068,14 @@ mod tests {
                 0.5,
             );
             let _ = (attn.output(), kc.output(), vc.output());
-            let pairs = vec![
-                (q.id, weights(4, 2)),
-                (k_new.id, weights(4, 3)),
-                (v_new.id, weights(4, 4)),
-                (k_cache.id, weights(16, 5)),
-                (v_cache.id, weights(16, 6)),
-                (gather_idx.id, vec![0.0, 1.0]),
-                (scatter_idx.id, vec![1.0]),
+            let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+                (q.id, weights(4, 2).into()),
+                (k_new.id, weights(4, 3).into()),
+                (v_new.id, weights(4, 4).into()),
+                (k_cache.id, weights(16, 5).into()),
+                (v_cache.id, weights(16, 6).into()),
+                (gather_idx.id, vec![0i32, 1].into()),
+                (scatter_idx.id, vec![1i32].into()),
             ];
             run("window-alone", &cx, &pairs);
         }
@@ -2089,11 +2089,11 @@ mod tests {
             let post = crate::LayerNorm::new(6, Some("Post"), None, false, 1e-6, &mut cx);
             let out = (x + post.forward(pre.forward(x).matmul(w))).output();
             let _ = out;
-            let pairs = vec![
-                (x.id, weights(6, 7)),
-                (w.id, weights(36, 8)),
-                (pre.weight.expect("w").id, weights(6, 9)),
-                (post.weight.expect("w").id, weights(6, 10)),
+            let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+                (x.id, weights(6, 7).into()),
+                (w.id, weights(36, 8).into()),
+                (pre.weight.expect("w").id, weights(6, 9).into()),
+                (post.weight.expect("w").id, weights(6, 10).into()),
             ];
             run("sandwich-alone", &cx, &pairs);
         }
@@ -2411,47 +2411,47 @@ mod tests {
             let out = out.output();
             let _ = out;
 
-            let pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-                (latent.id, weights(S_IMG * IN_CH, 540)),
-                (text.id, weights(S_TXT * TXT_DIM, 541)),
-                (t.id, vec![0.35]),
-                (guidance.id, vec![0.8]),
-                (rope_cos.id, mini_dit_rope_tables(S_TXT, GRID, GRID).0),
-                (rope_sin.id, mini_dit_rope_tables(S_TXT, GRID, GRID).1),
-                (rope_rot.id, crate::rope_pairing_matrix(HD, true)),
-                (joint_base.id, vec![0.0; S * D]),
-                (model.x_embed.weight.id, weights(IN_CH * D, 500)),
-                (model.ctx_embed.weight.id, weights(TXT_DIM * D, 501)),
-                (model.t_mlp1.weight.id, weights(2 * T_HALF * D, 502)),
-                (model.t_mlp2.weight.id, weights(D * D, 503)),
-                (model.g_mlp1.weight.id, weights(2 * T_HALF * D, 504)),
-                (model.g_mlp2.weight.id, weights(D * D, 505)),
-                (model.mod_img.weight.id, weights(D * 6 * D, 506)),
-                (model.mod_txt.weight.id, weights(D * 6 * D, 507)),
-                (model.mod_single.weight.id, weights(D * 3 * D, 508)),
-                (model.norm_out.weight.id, weights(D * 2 * D, 509)),
-                (model.proj_out.weight.id, weights(D * IN_CH, 510)),
-                (model.img_q.weight.id, weights(D * D, 511)),
-                (model.img_k.weight.id, weights(D * D, 512)),
-                (model.img_v.weight.id, weights(D * D, 513)),
-                (model.img_out.weight.id, weights(D * D, 514)),
-                (model.txt_q.weight.id, weights(D * D, 515)),
-                (model.txt_k.weight.id, weights(D * D, 516)),
-                (model.txt_v.weight.id, weights(D * D, 517)),
-                (model.txt_out.weight.id, weights(D * D, 518)),
-                (model.img_qnorm.id, weights(HD, 519)),
-                (model.img_knorm.id, weights(HD, 520)),
-                (model.txt_qnorm.id, weights(HD, 521)),
-                (model.txt_knorm.id, weights(HD, 522)),
-                (model.ff_in.weight.id, weights(D * 2 * MLP, 523)),
-                (model.ff_out.weight.id, weights(MLP * D, 524)),
-                (model.ctx_ff_in.weight.id, weights(D * 2 * MLP, 525)),
-                (model.ctx_ff_out.weight.id, weights(MLP * D, 526)),
-                (model.single_proj.weight.id, weights(D * (3 * D + 2 * MLP), 527)),
-                (model.single_out_attn.weight.id, weights(D * D, 531)),
-                (model.single_out_mlp.weight.id, weights(MLP * D, 532)),
-                (model.single_qnorm.id, weights(HD, 529)),
-                (model.single_knorm.id, weights(HD, 530)),
+            let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+                (latent.id, weights(S_IMG * IN_CH, 540).into()),
+                (text.id, weights(S_TXT * TXT_DIM, 541).into()),
+                (t.id, vec![0.35].into()),
+                (guidance.id, vec![0.8].into()),
+                (rope_cos.id, mini_dit_rope_tables(S_TXT, GRID, GRID).0.into()),
+                (rope_sin.id, mini_dit_rope_tables(S_TXT, GRID, GRID).1.into()),
+                (rope_rot.id, crate::rope_pairing_matrix(HD, true).into()),
+                (joint_base.id, vec![0.0; S * D].into()),
+                (model.x_embed.weight.id, weights(IN_CH * D, 500).into()),
+                (model.ctx_embed.weight.id, weights(TXT_DIM * D, 501).into()),
+                (model.t_mlp1.weight.id, weights(2 * T_HALF * D, 502).into()),
+                (model.t_mlp2.weight.id, weights(D * D, 503).into()),
+                (model.g_mlp1.weight.id, weights(2 * T_HALF * D, 504).into()),
+                (model.g_mlp2.weight.id, weights(D * D, 505).into()),
+                (model.mod_img.weight.id, weights(D * 6 * D, 506).into()),
+                (model.mod_txt.weight.id, weights(D * 6 * D, 507).into()),
+                (model.mod_single.weight.id, weights(D * 3 * D, 508).into()),
+                (model.norm_out.weight.id, weights(D * 2 * D, 509).into()),
+                (model.proj_out.weight.id, weights(D * IN_CH, 510).into()),
+                (model.img_q.weight.id, weights(D * D, 511).into()),
+                (model.img_k.weight.id, weights(D * D, 512).into()),
+                (model.img_v.weight.id, weights(D * D, 513).into()),
+                (model.img_out.weight.id, weights(D * D, 514).into()),
+                (model.txt_q.weight.id, weights(D * D, 515).into()),
+                (model.txt_k.weight.id, weights(D * D, 516).into()),
+                (model.txt_v.weight.id, weights(D * D, 517).into()),
+                (model.txt_out.weight.id, weights(D * D, 518).into()),
+                (model.img_qnorm.id, weights(HD, 519).into()),
+                (model.img_knorm.id, weights(HD, 520).into()),
+                (model.txt_qnorm.id, weights(HD, 521).into()),
+                (model.txt_knorm.id, weights(HD, 522).into()),
+                (model.ff_in.weight.id, weights(D * 2 * MLP, 523).into()),
+                (model.ff_out.weight.id, weights(MLP * D, 524).into()),
+                (model.ctx_ff_in.weight.id, weights(D * 2 * MLP, 525).into()),
+                (model.ctx_ff_out.weight.id, weights(MLP * D, 526).into()),
+                (model.single_proj.weight.id, weights(D * (3 * D + 2 * MLP), 527).into()),
+                (model.single_out_attn.weight.id, weights(D * D, 531).into()),
+                (model.single_out_mlp.weight.id, weights(MLP * D, 532).into()),
+                (model.single_qnorm.id, weights(HD, 529).into()),
+                (model.single_knorm.id, weights(HD, 530).into()),
             ];
             let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
             let mut rt =

@@ -61,7 +61,7 @@ struct NativeSpec {
 pub struct SsaReferenceRuntime {
     plan: Option<BufferIrGraph>,
     /// Caller-staged data by numeric `BufferLit` id, consumed at `execute`.
-    staged: FxHashMap<i64, Vec<f32>>,
+    staged: FxHashMap<i64, TypedBuffer>,
     /// Post-execute storage, kept for `get_f32` / `get_bool`.
     storage: FxHashMap<BufferId, TypedBuffer>,
     /// `BufferLit` id → plan buffer, built at `load_plan`.
@@ -141,7 +141,7 @@ impl SsaReferenceRuntime {
     /// plan on this runtime with the given data; the winner loads.
     pub fn search(
         &mut self,
-        input_data: &FxHashMap<petgraph::graph::NodeIndex, Vec<f32>>,
+        input_data: &FxHashMap<petgraph::graph::NodeIndex, TypedBuffer>,
         options: &crate::implementation_search::ImplementationSearchOptions,
     ) -> Result<crate::implementation_search::SearchOutcome> {
         let spec = self.native.take().ok_or_else(|| anyhow!("search before load"))?;
@@ -187,19 +187,23 @@ impl SsaReferenceRuntime {
         Ok(outcome)
     }
 
-    /// Stage caller data for an INPUT tensor. Loud if the tensor is not
-    /// a bound input of the loaded program.
-    pub fn set_data(&mut self, tensor: petgraph::graph::NodeIndex, data: Vec<f32>) {
+    /// Stage caller data for an INPUT tensor — TYPED (2026-08-11): the
+    /// payload's variant must match the buffer's dtype at execute;
+    /// there is no conversion at this boundary, ever. `Vec<f32>`,
+    /// `Vec<i32>`, and `Vec<i64>` convert via `From`; boolean data must
+    /// come through the validated [`TypedBuffer::bool8`] constructor.
+    /// Loud if the tensor is not a bound input of the loaded program.
+    pub fn set_data(&mut self, tensor: petgraph::graph::NodeIndex, data: impl Into<TypedBuffer>) {
         let buffer = *self
             .input_buffers
             .get(&tensor)
             .unwrap_or_else(|| panic!("tensor {tensor:?} is not a bound input"));
-        self.staged.insert(buffer, data);
+        self.staged.insert(buffer, data.into());
     }
 
     /// Buffer-id staging for search internals (the slots carry the ids).
-    pub fn set_data_buffer(&mut self, buffer: i64, data: Vec<f32>) {
-        self.staged.insert(buffer, data);
+    pub fn set_data_buffer(&mut self, buffer: i64, data: impl Into<TypedBuffer>) {
+        self.staged.insert(buffer, data.into());
     }
 
     fn numel(dims: &[i64]) -> usize {
@@ -210,48 +214,59 @@ impl SsaReferenceRuntime {
         let plan = self.plan.as_ref().ok_or_else(|| anyhow!("no plan loaded"))?;
 
         // Materialize every buffer: staged caller data where provided
-        // (length-checked against the annotated geometry), zeros otherwise.
-        // The element bit width picks the TYPED representation: 32 = f32;
-        // 1 (the logical Bool width) and 8 (the reference binding's
-        // byte-backed Bool layout) are both stored byte-backed. Anything
-        // else refuses loudly.
+        // (variant-checked against the buffer's DTYPE, length-checked
+        // against the annotated geometry), zeros otherwise. The plan
+        // dtype picks the typed representation (2026-08-11) — width
+        // alone cannot: bits-of(Int) == bits-of(F32). A staged payload
+        // of the wrong variant is a loud refusal, never a conversion.
         let mut storage: FxHashMap<BufferId, TypedBuffer> = FxHashMap::default();
         for (id, buffer) in &plan.buffers {
             let dims = buffer.dims.as_ref().ok_or_else(|| {
                 anyhow!("buffer {} has no numeric geometry (symbolic dims are not executable yet)", buffer.label)
             })?;
-            let bits = buffer.element_bits.ok_or_else(|| {
-                anyhow!("buffer {} has no element bit width", buffer.label)
+            let dtype = buffer.dtype.ok_or_else(|| {
+                anyhow!("buffer {} has no dtype (dtype-of row never reached the plan)", buffer.label)
             })?;
             let numel = Self::numel(dims);
             let staged = buffer.lit.and_then(|lit| self.staged.get(&lit));
-            let data = match bits {
-                32 => match staged {
-                    Some(staged) => {
-                        ensure!(
-                            staged.len() == numel,
-                            "staged data for {} has {} elements, buffer holds {numel}",
-                            buffer.label,
-                            staged.len()
-                        );
-                        TypedBuffer::F32(staged.clone())
-                    }
-                    None => TypedBuffer::F32(vec![0.0; numel]),
-                },
-                // 1 = the logical Bool width, 8 = Bool8 (the boundary
-                // code type, ruling 2026-07-30); both live as Bool8 codes
-                // in reference storage.
-                1 | 8 => {
-                    ensure!(
-                        staged.is_none(),
-                        "buffer {} is boolean; set_data stages f32 only (a \
-                         Bool8 staging surface does not exist yet)",
-                        buffer.label
-                    );
-                    TypedBuffer::Bool8(vec![0u8; numel])
+            if let Some(staged) = staged {
+                ensure!(
+                    staged.len() == numel,
+                    "staged data for {} has {} elements, buffer holds {numel}",
+                    buffer.label,
+                    staged.len()
+                );
+            }
+            use crate::dtype::PlanDtype;
+            let data = match (dtype, staged) {
+                (PlanDtype::F32, Some(TypedBuffer::F32(values))) => {
+                    TypedBuffer::F32(values.clone())
                 }
-                other => anyhow::bail!(
-                    "buffer {} has unsupported element width {other} bits (f32 and bool only)",
+                (PlanDtype::F32, None) => TypedBuffer::F32(vec![0.0; numel]),
+                (PlanDtype::Int, Some(TypedBuffer::I32(values))) => {
+                    TypedBuffer::I32(values.clone())
+                }
+                (PlanDtype::Int, None) => TypedBuffer::I32(vec![0; numel]),
+                (PlanDtype::Int64, Some(TypedBuffer::I64(values))) => {
+                    TypedBuffer::I64(values.clone())
+                }
+                (PlanDtype::Int64, None) => TypedBuffer::I64(vec![0; numel]),
+                // 1-bit logical Bool and byte-code Bool8 both live as
+                // Bool8 codes in reference storage; staged codes were
+                // validated at the TypedBuffer::bool8 door.
+                (PlanDtype::Bool | PlanDtype::Bool8, Some(TypedBuffer::Bool8(codes))) => {
+                    TypedBuffer::Bool8(codes.clone())
+                }
+                (PlanDtype::Bool | PlanDtype::Bool8, None) => TypedBuffer::Bool8(vec![0u8; numel]),
+                (expected, Some(staged)) => anyhow::bail!(
+                    "buffer {} is {expected:?}; staged {} data is the wrong \
+                     type (staging never converts)",
+                    buffer.label,
+                    staged.type_name()
+                ),
+                (other, None) => anyhow::bail!(
+                    "buffer {} has dtype {other:?}, which the reference \
+                     runtime cannot execute (f32, i32, i64, bool only)",
                     buffer.label
                 ),
             };
@@ -324,10 +339,7 @@ impl SsaReferenceRuntime {
                         let existing = storage
                             .get(id)
                             .ok_or_else(|| anyhow!("{} writes unknown buffer", op.label()))?;
-                        dests.push(match existing {
-                            TypedBuffer::F32(values) => TypedBuffer::F32(vec![0.0; values.len()]),
-                            TypedBuffer::Bool8(bits) => TypedBuffer::Bool8(vec![0u8; bits.len()]),
-                        });
+                        dests.push(existing.zeroed_like());
                     }
                     let mut ctx = ReferenceKernelCtx { operands, operand_dims, dests };
                     match kernels::kernel_for(op.as_ref()) {
@@ -360,6 +372,18 @@ impl SsaReferenceRuntime {
         self.get_typed(self.output_buffer(tensor)?)?.as_bool8()
     }
 
+    /// The i32 twin of [`Self::get_f32`] — native Int output readback
+    /// (typed buffers 2026-08-11; Int results no longer need an
+    /// observe-only cast to F32).
+    pub fn get_i32(&self, tensor: petgraph::graph::NodeIndex) -> Result<&Vec<i32>> {
+        self.get_typed(self.output_buffer(tensor)?)?.as_i32()
+    }
+
+    /// The i64 twin of [`Self::get_f32`].
+    pub fn get_i64(&self, tensor: petgraph::graph::NodeIndex) -> Result<&Vec<i64>> {
+        self.get_typed(self.output_buffer(tensor)?)?.as_i64()
+    }
+
     /// Buffer-id read for search internals.
     pub fn get_f32_buffer(&self, buffer: i64) -> Result<&Vec<f32>> {
         self.get_typed(buffer)?.as_f32()
@@ -385,8 +409,12 @@ impl SsaReferenceRuntime {
 
 #[cfg(test)]
 mod tests {
+    use crate::buffer_tensor_ir::TypedBuffer;
+    use crate::dtype::DType;
     use crate::graph::Graph;
+    use crate::ssa_reference::SsaReferenceRuntime;
     use crate::test_support::run_ssa;
+    use rustc_hash::FxHashMap;
 
     /// The allow list is DERIVED from the kernel registry; this pins the
     /// resolved claim set so a registry edit that silently grows or
@@ -474,10 +502,10 @@ mod tests {
         let ours = run_ssa(
             &cx2,
             &[
-                (b2.id, b_data),
-                (c2.id, c_data),
-                (g2.id, g_data),
-                (e2.id, e_data),
+                (b2.id, b_data.into()),
+                (c2.id, c_data.into()),
+                (g2.id, g_data.into()),
+                (e2.id, e_data.into()),
             ],
         );
         assert_close(ours.get_f32(a2.id).unwrap(), &expected_a);
@@ -501,7 +529,7 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![10.0, 80.0, 60.0, 200.0, 150.0, 360.0];
         let (cx2, x2, y2, out2) = build();
-        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -522,7 +550,7 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![9.0, 18.0, 27.0, 36.0];
         let (cx2, x2, y2, out2) = build();
-        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -544,7 +572,7 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![38.0, 44.0, 50.0, 56.0, 83.0, 98.0, 113.0, 128.0];
         let (cx2, a2, b2, c2) = build();
-        let ours = run_ssa(&cx2, &[(a2.id, a_data), (b2.id, b_data)]);
+        let ours = run_ssa(&cx2, &[(a2.id, a_data.into()), (b2.id, b_data.into())]);
         assert_close(ours.get_f32(c2.id).unwrap(), &expected);
     }
 
@@ -578,7 +606,7 @@ mod tests {
             // The pin arrives as BINDING seeds, not model content: run_ssa
             // injects (bigint {pin}) bounds from the graph's dyn_map — the
             // execution below at both pins is the proof.
-            let ours = run_ssa(&cx2, &[(x2.id, data_x), (y2.id, data_y)]);
+            let ours = run_ssa(&cx2, &[(x2.id, data_x.into()), (y2.id, data_y.into())]);
             assert_close(ours.get_f32(out2.id).unwrap(), &expected);
         }
     }
@@ -606,7 +634,7 @@ mod tests {
             "the slice must arrive as a view:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
+        let ours = run_ssa(&cx2, &[(x2.id, x_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -633,7 +661,7 @@ mod tests {
             "the slice must arrive as a view:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
+        let ours = run_ssa(&cx2, &[(x2.id, x_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -664,7 +692,7 @@ mod tests {
             "unfold must arrive as a view:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         assert_close(ours.get_f32(plain2.id).unwrap(), &expected_plain);
         assert_close(
             ours.get_f32(dilated2.id).unwrap(),
@@ -698,7 +726,7 @@ mod tests {
                 "the mask must ride the bool bridge:\n{}",
                 program.text
             );
-            let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
+            let ours = run_ssa(&cx2, &[(x2.id, x_data.into())]);
             assert_close(ours.get_f32(out2.id).unwrap(), &expected);
         }
     }
@@ -727,7 +755,7 @@ mod tests {
                 "clamp view + indicator mask expected:\n{}",
                 program.text
             );
-            let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
+            let ours = run_ssa(&cx2, &[(x2.id, x_data.into())]);
             assert_close(ours.get_f32(out2.id).unwrap(), &expected);
         }
     }
@@ -751,8 +779,8 @@ mod tests {
         let data_vals: Vec<f32> = (0..12).map(|v| v as f32 * 1.5 + 1.0).collect();
         let row_ints = vec![0i32, 2, 1, 2, 0, 1];
         let col_ints = vec![3i32, 0, 2, 3, 1, 0];
-        let row_vals: Vec<f32> = row_ints.iter().map(|v| *v as f32).collect();
-        let col_vals: Vec<f32> = col_ints.iter().map(|v| *v as f32).collect();
+        let row_vals: Vec<i32> = row_ints.to_vec();
+        let col_vals: Vec<i32> = col_ints.to_vec();
 
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![5.5, 13.0, 10.0, 17.5, 2.5, 7.0];
@@ -765,9 +793,9 @@ mod tests {
         );
         let ours = run_ssa(&cx2,
             &[
-                (data2.id, data_vals),
-                (row2.id, row_vals),
-                (col2.id, col_vals),
+                (data2.id, data_vals.into()),
+                (row2.id, row_vals.into()),
+                (col2.id, col_vals.into()),
             ],
         );
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
@@ -790,8 +818,8 @@ mod tests {
         let dest_vals: Vec<f32> = (0..12).map(|v| v as f32).collect();
         let row_ints = vec![0i32, 1, 2, 1];
         let col_ints = vec![1i32, 3, 0, 0];
-        let row_vals: Vec<f32> = row_ints.iter().map(|v| *v as f32).collect();
-        let col_vals: Vec<f32> = col_ints.iter().map(|v| *v as f32).collect();
+        let row_vals: Vec<i32> = row_ints.to_vec();
+        let col_vals: Vec<i32> = col_ints.to_vec();
         let src_vals = vec![100.0, 200.0, 300.0, 400.0];
 
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
@@ -805,10 +833,10 @@ mod tests {
         );
         let ours = run_ssa(&cx2,
             &[
-                (dest2.id, dest_vals),
-                (row2.id, row_vals),
-                (col2.id, col_vals),
-                (src2.id, src_vals),
+                (dest2.id, dest_vals.into()),
+                (row2.id, row_vals.into()),
+                (col2.id, col_vals.into()),
+                (src2.id, src_vals.into()),
             ],
         );
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
@@ -826,7 +854,7 @@ mod tests {
 
         let data_vals: Vec<f32> = (0..12).map(|v| v as f32 * 1.5 + 1.0).collect();
         let idx_ints = [0i32, 5, 11, 7, 3, 2];
-        let idx_vals: Vec<f32> = idx_ints.iter().map(|v| *v as f32).collect();
+        let idx_vals: Vec<i32> = idx_ints.to_vec();
         // Hand golden: data.flat[i] = i*1.5 + 1.
         let expected = vec![1.0, 8.5, 17.5, 11.5, 5.5, 4.0];
 
@@ -836,7 +864,7 @@ mod tests {
             "flat sugar lowers to coordinate gather:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx, &[(data.id, data_vals), (idx.id, idx_vals)]);
+        let ours = run_ssa(&cx, &[(data.id, data_vals.into()), (idx.id, idx_vals.into())]);
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
     }
 
@@ -852,7 +880,7 @@ mod tests {
         assert_eq!(out.dims(), dest.dims(), "out shape = dest shape");
 
         let dest_vals: Vec<f32> = (0..12).map(|v| v as f32).collect();
-        let idx_vals = vec![3.0f32, 0.0, 11.0, 6.0];
+        let idx_vals = vec![3i32, 0, 11, 6];
         let src_vals = vec![100.0f32, 200.0, 300.0, 400.0];
         let expected = vec![200.0, 1.0, 2.0, 100.0, 4.0, 5.0, 400.0, 7.0, 8.0, 9.0, 10.0, 300.0];
 
@@ -863,7 +891,7 @@ mod tests {
             program.text
         );
         let ours = run_ssa(&cx,
-            &[(dest.id, dest_vals), (idx.id, idx_vals), (src.id, src_vals)],
+            &[(dest.id, dest_vals.into()), (idx.id, idx_vals.into()), (src.id, src_vals.into())],
         );
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
     }
@@ -874,11 +902,9 @@ mod tests {
     #[test]
     fn differential_rank2_iota_records_natively() {
         let mut cx = Graph::new();
-        // out[r, c] = (r·3 + c)·2 over (2, 3), cast to observe.
-        let out = cx
-            .iota((2, 3), |c| (c[0] * 3 + c[1]) * 2)
-            .cast(crate::dtype::DType::F32)
-            .output();
+        // out[r, c] = (r·3 + c)·2 over (2, 3) — read back NATIVE i32
+        // (the observe-only cast to F32 died with typed buffers).
+        let out = cx.iota((2, 3), |c| (c[0] * 3 + c[1]) * 2).output();
 
         let program = cx.logical.native_program().expect("native program");
         assert!(
@@ -891,9 +917,9 @@ mod tests {
             "no view detour for a bare multi-dim iota:\n{}",
             program.text
         );
-        let expected = vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0];
+        let expected = vec![0i32, 2, 4, 6, 8, 10];
         let ours = run_ssa(&cx, &[]);
-        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+        assert_eq!(ours.get_i32(out.id).unwrap(), &expected);
     }
 
     /// DYNAMIC-EXTENT ARANGE: a symbolic iota total previously collapsed
@@ -906,12 +932,11 @@ mod tests {
         cx.set_dim('a', 5);
         let out = cx
             .arange(crate::shape::Expression::from('a'))
-            .cast(crate::dtype::DType::F32)
             .output();
 
-        let expected = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        let expected = vec![0i32, 1, 2, 3, 4];
         let ours = run_ssa(&cx, &[]);
-        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+        assert_eq!(ours.get_i32(out.id).unwrap(), &expected);
     }
 
     /// A symbolic var inside the iota EXPRESSION (not just the shape)
@@ -922,14 +947,11 @@ mod tests {
     fn differential_dynamic_offset_iota() {
         let mut cx = Graph::new();
         cx.set_dim('a', 10);
-        let out = cx
-            .iota(3, |c| c[0] + 'a')
-            .cast(crate::dtype::DType::F32)
-            .output();
+        let out = cx.iota(3, |c| c[0] + 'a').output();
 
-        let expected = vec![10.0, 11.0, 12.0];
+        let expected = vec![10i32, 11, 12];
         let ours = run_ssa(&cx, &[]);
-        assert_close(ours.get_f32(out.id).unwrap(), &expected);
+        assert_eq!(ours.get_i32(out.id).unwrap(), &expected);
     }
 
     /// ONNX GatherElements over axis 1 (rides the flat sugar + the
@@ -943,11 +965,11 @@ mod tests {
 
         let data_vals: Vec<f32> = (0..6).map(|v| v as f32 * 10.0).collect();
         // out[i, j] = data[i, idx[i, j]]; -1 normalizes to axis extent - 1 = 2.
-        let idx_vals = vec![2.0f32, 0.0, -1.0, 1.0];
+        let idx_vals = vec![2i32, 0, -1, 1];
         let expected = vec![20.0, 0.0, 50.0, 40.0];
 
         cx.logical.native_program().expect("native program");
-        let ours = run_ssa(&cx, &[(data.id, data_vals), (idx.id, idx_vals)]);
+        let ours = run_ssa(&cx, &[(data.id, data_vals.into()), (idx.id, idx_vals.into())]);
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
     }
 
@@ -964,13 +986,13 @@ mod tests {
 
         let data_vals: Vec<f32> = (0..6).map(|v| v as f32).collect();
         // out[idx[0, j], j] = upd[0, j]: column 0 → row 2, column 1 → row 0.
-        let idx_vals = vec![2.0f32, 0.0];
+        let idx_vals = vec![2i32, 0];
         let upd_vals = vec![100.0f32, 200.0];
         let expected = vec![0.0, 200.0, 2.0, 3.0, 100.0, 5.0];
 
         cx.logical.native_program().expect("native program");
         let ours = run_ssa(&cx,
-            &[(data.id, data_vals), (idx.id, idx_vals), (upd.id, upd_vals)],
+            &[(data.id, data_vals.into()), (idx.id, idx_vals.into()), (upd.id, upd_vals.into())],
         );
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
     }
@@ -987,13 +1009,13 @@ mod tests {
         assert_eq!(out.dims(), data.dims());
 
         let data_vals: Vec<f32> = (0..6).map(|v| v as f32).collect();
-        let idx_vals = vec![2.0f32, 0.0];
+        let idx_vals = vec![2i32, 0];
         let upd_vals = vec![100.0f32, 101.0, 200.0, 201.0];
         let expected = vec![200.0, 201.0, 2.0, 3.0, 100.0, 101.0];
 
         cx.logical.native_program().expect("native program");
         let ours = run_ssa(&cx,
-            &[(data.id, data_vals), (idx.id, idx_vals), (upd.id, upd_vals)],
+            &[(data.id, data_vals.into()), (idx.id, idx_vals.into()), (upd.id, upd_vals.into())],
         );
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
     }
@@ -1033,8 +1055,8 @@ mod tests {
         let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
         rt.stage_slots(&program.input_slots, &program.output_slots);
         rt.load_plan(plan);
-        rt.set_data(dest.id, (0..6).map(|v| v as f32).collect());
-        rt.set_data(idx.id, vec![1.0, 4.0, 1.0]); // 1 appears twice — conflict
+        rt.set_data(dest.id, (0..6).map(|v| v as f32).collect::<Vec<f32>>());
+        rt.set_data(idx.id, vec![1i32, 4, 1]); // 1 appears twice — conflict
         rt.set_data(src.id, vec![10.0, 20.0, 30.0]);
         let err = rt.execute().expect_err("duplicate targets must refuse");
         assert!(
@@ -1090,10 +1112,10 @@ mod tests {
         cx2.logical.native_program().expect("native program");
         let ours = run_ssa(&cx2,
             &[
-                (b2.id, b_data),
-                (c2.id, c_data),
-                (g2.id, g_data),
-                (e2.id, e_data),
+                (b2.id, b_data.into()),
+                (c2.id, c_data.into()),
+                (g2.id, g_data.into()),
+                (e2.id, e_data.into()),
             ],
         );
         assert_close(ours.get_f32(a2.id).unwrap(), &expected_a);
@@ -1127,7 +1149,7 @@ mod tests {
             "comparison + cast expected in the model:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -1162,7 +1184,7 @@ mod tests {
             "Bool8 boundary layout width expected:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         let codes = ours.get_bool8(out2.id).expect("bool8 boundary");
         assert_eq!(codes.len(), expected.len());
         for (index, (code, truth)) in codes.iter().zip(&expected).enumerate() {
@@ -1210,12 +1232,12 @@ mod tests {
         let ours = run_ssa(
             &cx2,
             &[
-                (a2.id, v12a),
-                (b2.id, v12b),
-                (c2.id, v12c),
-                (d2.id, v12d),
-                (e2.id, v12e),
-                (f2.id, v12f),
+                (a2.id, v12a.into()),
+                (b2.id, v12b.into()),
+                (c2.id, v12c.into()),
+                (d2.id, v12d.into()),
+                (e2.id, v12e.into()),
+                (f2.id, v12f.into()),
             ],
         );
         assert_close(ours.get_f32(split2.id).unwrap(), &expected_split);
@@ -1243,7 +1265,7 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![0.5, 3.0, 7.5, 3.5, 9.0, 16.5, 6.5, 15.0, 25.5, 9.5, 21.0, 34.5];
         let (cx2, x2, y2, out2) = build();
-        let ours = run_ssa(&cx2, &[(x2.id, x_data), (y2.id, y_data)]);
+        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -1262,7 +1284,92 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![11.0, 22.0, 33.0];
         let (cx2, x2, s2) = build();
-        let ours = run_ssa(&cx2, &[(x2.id, x_data)]);
+        let ours = run_ssa(&cx2, &[(x2.id, x_data.into())]);
         assert_close(ours.get_f32(s2.id).unwrap(), &expected);
+    }
+
+    /// TYPED-BUFFERS LANDING B PINS (2026-08-11).
+    /// Bool8 INPUT staging end to end: a Bool input tensor takes caller
+    /// codes through the validated constructor, the indicator cast
+    /// turns them into exact 0/1 weights, and (a) ill-formed codes are
+    /// refused at the door, (b) an f32 payload staged into the boolean
+    /// buffer is a loud variant refusal at execute — staging never
+    /// converts.
+    #[test]
+    fn differential_bool8_input_staging() {
+        let mut cx = crate::graph::Graph::new();
+        let mask = cx.tensor_dtyped(4, DType::Bool);
+        let x = cx.tensor(4);
+        let out = (mask.cast(DType::F32) * x).output();
+
+        let x_vals = vec![2.0f32, 3.0, 5.0, 7.0];
+        let codes = TypedBuffer::bool8(vec![1u8, 0, 1, 0]).expect("legal codes");
+        let rt = crate::test_support::run_ssa(
+            &cx,
+            &[(mask.id, codes), (x.id, x_vals.clone().into())],
+        );
+        assert_close(rt.get_f32(out.id).unwrap(), &[2.0, 0.0, 5.0, 0.0]);
+
+        // (a) the two-legal-codes door
+        let err = TypedBuffer::bool8(vec![0u8, 2]).unwrap_err();
+        assert!(err.to_string().contains("ill-formed code 2"), "{err}");
+
+        // (b) staging never converts: f32 into the boolean buffer refuses
+        let mut cx2 = crate::graph::Graph::new();
+        let mask2 = cx2.tensor_dtyped(4, DType::Bool);
+        let x2 = cx2.tensor(4);
+        let out2 = (mask2.cast(DType::F32) * x2).output();
+        let _ = out2;
+        let mut rt2 = SsaReferenceRuntime::load(&cx2).expect("native load");
+        let mut data = FxHashMap::default();
+        data.insert(mask2.id, TypedBuffer::bool8(vec![1u8, 0, 1, 0]).unwrap());
+        data.insert(x2.id, x_vals.clone().into());
+        rt2.search(&data, &crate::test_support::harness_search_options())
+            .expect("search finds a plan");
+        rt2.set_data(mask2.id, vec![1.0f32, 0.0, 1.0, 0.0]);
+        rt2.set_data(x2.id, x_vals);
+        let err = rt2.execute().unwrap_err();
+        assert!(
+            err.to_string().contains("staging never converts"),
+            "expected the variant refusal, got: {err}"
+        );
+    }
+
+    /// Native Int output readback: an Int result reads back through
+    /// get_i32 with NO observe-only cast to F32 — and the values are
+    /// native i32, not rounded floats.
+    #[test]
+    fn differential_int_output_reads_native() {
+        let mut cx = crate::graph::Graph::new();
+        let idx = cx.tensor_dtyped(5, DType::Int);
+        let out = (idx * 3usize).output();
+        let rt = crate::test_support::run_ssa(&cx, &[(idx.id, vec![0i32, 1, 2, 3, 4].into())]);
+        assert_eq!(rt.get_i32(out.id).unwrap(), &vec![0i32, 3, 6, 9, 12]);
+    }
+
+    /// Non-wrapping Int arithmetic: an i32 add that overflows is a LOUD
+    /// kernel error at execute, never a wrapped value (ruling
+    /// 2026-08-11; the landing-D bounds proofs will gate this
+    /// statically — this dynamic check is the soundness floor).
+    #[test]
+    fn i32_add_overflow_refuses() {
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor_dtyped(1, DType::Int);
+        let b = cx.tensor_dtyped(1, DType::Int);
+        let out = (a + b).output();
+        let _ = out;
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut data = FxHashMap::default();
+        data.insert(a.id, vec![1i32].into());
+        data.insert(b.id, vec![2i32].into());
+        rt.search(&data, &crate::test_support::harness_search_options())
+            .expect("search finds a plan");
+        rt.set_data(a.id, vec![i32::MAX]);
+        rt.set_data(b.id, vec![1i32]);
+        let err = rt.execute().unwrap_err();
+        assert!(
+            format!("{err:#}").contains("overflow"),
+            "expected the checked-add refusal, got: {err:#}"
+        );
     }
 }

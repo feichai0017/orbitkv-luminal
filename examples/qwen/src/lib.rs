@@ -16,7 +16,7 @@ pub mod weights;
 use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
-use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex};
+use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, TypedBuffer};
 use luminal::ssa_reference::SsaReferenceRuntime;
 use model::{Qwen, QwenDims};
 use std::error::Error;
@@ -155,7 +155,7 @@ impl Decoder {
     /// position-0 step inputs), and stage the step-invariant constants.
     pub fn start(
         step: DecodeStep,
-        weight_pairs: &[(NodeIndex, Vec<f32>)],
+        weight_pairs: &[(NodeIndex, TypedBuffer)],
         options: &ImplementationSearchOptions,
     ) -> Result<Self, Box<dyn Error>> {
         let dims = step.model.dims.clone();
@@ -164,21 +164,21 @@ impl Decoder {
         let (cos_table, sin_table) =
             luminal_nn::rope_tables_split_half(&positions, dims.head_dim, dims.rope_theta, 1.0);
         let rot = luminal_nn::rope_pairing_matrix(dims.head_dim, false);
-        let gather: Vec<f32> = (0..max_seq).map(|p| p as f32).collect();
+        let gather: Vec<i32> = (0..max_seq as i32).collect();
         let zero_cache = vec![0f32; max_seq * dims.kv_dim()];
 
-        let mut search_data: FxHashMap<NodeIndex, Vec<f32>> =
+        let mut search_data: FxHashMap<NodeIndex, TypedBuffer> =
             weight_pairs.iter().cloned().collect();
-        search_data.insert(step.token.id, vec![0.0]);
-        search_data.insert(step.q_pos.id, vec![0.0]);
-        search_data.insert(step.rope_cos.id, cos_table[..dims.head_dim].to_vec());
-        search_data.insert(step.rope_sin.id, sin_table[..dims.head_dim].to_vec());
-        search_data.insert(step.rope_rot.id, rot.clone());
-        search_data.insert(step.gather_idx.id, gather.clone());
-        search_data.insert(step.scatter_idx.id, vec![0.0]);
+        search_data.insert(step.token.id, vec![0i32].into());
+        search_data.insert(step.q_pos.id, vec![0i32].into());
+        search_data.insert(step.rope_cos.id, cos_table[..dims.head_dim].to_vec().into());
+        search_data.insert(step.rope_sin.id, sin_table[..dims.head_dim].to_vec().into());
+        search_data.insert(step.rope_rot.id, rot.clone().into());
+        search_data.insert(step.gather_idx.id, gather.clone().into());
+        search_data.insert(step.scatter_idx.id, vec![0i32].into());
         for (k, v) in &step.caches {
-            search_data.insert(k.id, zero_cache.clone());
-            search_data.insert(v.id, zero_cache.clone());
+            search_data.insert(k.id, zero_cache.clone().into());
+            search_data.insert(v.id, zero_cache.clone().into());
         }
 
         let mut rt = SsaReferenceRuntime::load(&step.cx)?;
@@ -216,14 +216,14 @@ impl Decoder {
             return Err(format!("sequence exceeded max_seq {}", self.step.max_seq).into());
         }
         let row = self.pos * self.head_dim..(self.pos + 1) * self.head_dim;
-        self.rt.set_data(self.step.token.id, vec![token as f32]);
-        self.rt.set_data(self.step.q_pos.id, vec![self.pos as f32]);
+        self.rt.set_data(self.step.token.id, vec![token as i32]);
+        self.rt.set_data(self.step.q_pos.id, vec![self.pos as i32]);
         self.rt
             .set_data(self.step.rope_cos.id, self.cos_table[row.clone()].to_vec());
         self.rt
             .set_data(self.step.rope_sin.id, self.sin_table[row].to_vec());
         self.rt
-            .set_data(self.step.scatter_idx.id, vec![self.pos as f32]);
+            .set_data(self.step.scatter_idx.id, vec![self.pos as i32]);
         for (layer, (k, v)) in self.step.caches.iter().enumerate() {
             self.rt.set_data(k.id, self.k_state[layer].clone());
             self.rt.set_data(v.id, self.v_state[layer].clone());

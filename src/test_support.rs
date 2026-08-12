@@ -2746,7 +2746,10 @@ pub fn plain_plan_exists(cx: &crate::graph::Graph) -> anyhow::Result<()> {
 /// output reads. The frontend candle differentials and the ssa_reference
 /// differentials both run through here — the same load → bind → search →
 /// execute ladder as the nn module tests, on the harness budget above.
-pub fn run_ssa(cx: &crate::graph::Graph, inputs: &[(petgraph::graph::NodeIndex, Vec<f32>)]) -> crate::ssa_reference::SsaReferenceRuntime {
+pub fn run_ssa(
+    cx: &crate::graph::Graph,
+    inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
+) -> crate::ssa_reference::SsaReferenceRuntime {
     let mut rt = crate::ssa_reference::SsaReferenceRuntime::load(cx)
         .expect("recorder clean for a covered graph");
     let mut vars: Vec<_> = cx.dyn_map.iter().collect();
@@ -2785,7 +2788,7 @@ mod stage4b_probes {
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor(2);
         let b = a.output();
-        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![1.0, 2.0])]);
+        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
         let got = rt.get_f32(b.id).unwrap();
         assert_eq!(got, &vec![1.0, 2.0]);
     }
@@ -3167,7 +3170,7 @@ mod stage4b_probes {
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor(1);
         let b = (a * 2.0).output();
-        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![0.5])]);
+        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![0.5f32].into())]);
         let got = rt.get_f32(b.id).unwrap();
         assert!((got[0] - 1.0).abs() < 1e-6, "{got:?}");
     }

@@ -458,11 +458,19 @@ impl LogicalGraph {
             }
         };
         let full_label = format!("{label}_{slot}");
-        let aux = format!(
-            "(LogicalIdLit \"{full_label}\") {shape} {}",
-            Self::dtype_term(dtype)
-        );
-        Some(self.push(Value {
+        // Boolean inputs cross the boundary as Bool8 (the Bool8 ruling:
+        // models compute in 1-bit Bool; bindings state the byte
+        // representation). Outputs get their boundary cast from the
+        // binding generator; INPUTS get it here — the wire tensor is
+        // declared Bool8 and a LogicalCast hands the model its Bool
+        // value, so the boundary buffer's dtype-of row (Bool8) agrees
+        // with its 8-bit layout (typed-buffers landing B, 2026-08-11).
+        let wire_dtype_term = match dtype {
+            DType::Bool => "(Bool8)".to_string(),
+            other => Self::dtype_term(other),
+        };
+        let aux = format!("(LogicalIdLit \"{full_label}\") {shape} {wire_dtype_term}");
+        let lit = self.push(Value {
             constructor: "LogicalTensorInputLit".to_string(),
             operands: Vec::new(),
             aux,
@@ -472,7 +480,18 @@ impl LogicalGraph {
             dtype,
             input_slot: Some(slot),
             input_label: Some(full_label),
-        }))
+        });
+        if dtype == DType::Bool {
+            return self.op(
+                slot,
+                "LogicalCast",
+                &[(Some(lit), dims.to_vec())],
+                "(Bool)",
+                dims.to_vec(),
+                DType::Bool,
+            );
+        }
+        Some(lit)
     }
 
     /// Record an op over operand values.

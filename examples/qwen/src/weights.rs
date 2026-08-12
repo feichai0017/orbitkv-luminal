@@ -1,11 +1,11 @@
-//! Host-side weight staging. The reference runtime stages every buffer
-//! as f32, so the combined bf16 checkpoint converts on the way in —
+//! Host-side weight staging: the combined bf16 checkpoint converts to
+//! f32 on the way in (the parameters ARE f32-typed in this model) —
 //! per-tensor, keyed by [`crate::model::Qwen::weight_bindings`]. Loud
 //! bails on a missing key or a shape mismatch; no silent skips.
 
 use crate::hf::tensor_to_f32;
 use crate::model::Qwen;
-use luminal::prelude::NodeIndex;
+use luminal::prelude::{NodeIndex, TypedBuffer};
 use safetensors::SafeTensors;
 use std::error::Error;
 use std::path::Path;
@@ -15,7 +15,7 @@ use std::path::Path;
 pub fn load_safetensors_weights(
     model: &Qwen,
     model_dir: &Path,
-) -> Result<Vec<(NodeIndex, Vec<f32>)>, Box<dyn Error>> {
+) -> Result<Vec<(NodeIndex, TypedBuffer)>, Box<dyn Error>> {
     let path = model_dir.join("model_combined_bf16_v1.safetensors");
     let file = std::fs::File::open(&path)
         .map_err(|e| format!("open {}: {e}", path.display()))?;
@@ -40,14 +40,14 @@ pub fn load_safetensors_weights(
             )
             .into());
         }
-        pairs.push((handle.id, tensor_to_f32(&view)));
+        pairs.push((handle.id, tensor_to_f32(&view).into()));
     }
     Ok(pairs)
 }
 
 /// Deterministic pseudo-random parameters (the mini-runner formula) for
 /// offline runs and the smoke tests — anatomy-real, weights fake.
-pub fn random_weights(model: &Qwen) -> Vec<(NodeIndex, Vec<f32>)> {
+pub fn random_weights(model: &Qwen) -> Vec<(NodeIndex, TypedBuffer)> {
     model
         .weight_bindings()
         .into_iter()
@@ -58,10 +58,10 @@ pub fn random_weights(model: &Qwen) -> Vec<(NodeIndex, Vec<f32>)> {
                 .iter()
                 .map(|d| d.to_usize().expect("model dims are static"))
                 .product();
-            let data = (0..n)
+            let data: Vec<f32> = (0..n)
                 .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
                 .collect();
-            (handle.id, data)
+            (handle.id, data.into())
         })
         .collect()
 }

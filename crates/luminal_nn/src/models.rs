@@ -517,10 +517,10 @@ mod tests {
         }
 
         let mut data = FxHashMap::default();
-        data.insert(x.id, x_data.clone());
+        data.insert(x.id, x_data.clone().into());
         for (layer, (w, b)) in model.layers.iter().zip(&layer_data) {
-            data.insert(layer.weight.id, w.clone());
-            data.insert(layer.bias.unwrap().id, b.clone());
+            data.insert(layer.weight.id, w.clone().into());
+            data.insert(layer.bias.unwrap().id, b.clone().into());
         }
         let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
         let outcome = rt
@@ -582,19 +582,19 @@ mod tests {
         let vc = vc.output();
 
         let x_vals = weights(D5, 70);
-        let pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-            (x.id, x_vals.clone()),
-            (block.wq.weight.id, weights(D5 * D5, 71)),
-            (block.wk.weight.id, weights(D5 * KV_DIM, 72)),
-            (block.wv.weight.id, weights(D5 * KV_DIM, 73)),
-            (block.wo.weight.id, weights(D5 * D5, 74)),
-            (block.gate.weight.id, weights(D5 * FF5, 75)),
-            (block.up.weight.id, weights(D5 * FF5, 76)),
-            (block.down.weight.id, weights(FF5 * D5, 77)),
-            (k_cache.id, weights(SLOTS5 * KV_DIM, 78)),
-            (v_cache.id, weights(SLOTS5 * KV_DIM, 79)),
-            (gather_idx.id, vec![0.0, 1.0]),
-            (scatter_idx.id, vec![1.0]),
+        let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+            (x.id, x_vals.clone().into()),
+            (block.wq.weight.id, weights(D5 * D5, 71).into()),
+            (block.wk.weight.id, weights(D5 * KV_DIM, 72).into()),
+            (block.wv.weight.id, weights(D5 * KV_DIM, 73).into()),
+            (block.wo.weight.id, weights(D5 * D5, 74).into()),
+            (block.gate.weight.id, weights(D5 * FF5, 75).into()),
+            (block.up.weight.id, weights(D5 * FF5, 76).into()),
+            (block.down.weight.id, weights(FF5 * D5, 77).into()),
+            (k_cache.id, weights(SLOTS5 * KV_DIM, 78).into()),
+            (v_cache.id, weights(SLOTS5 * KV_DIM, 79).into()),
+            (gather_idx.id, vec![0i32, 1].into()),
+            (scatter_idx.id, vec![1i32].into()),
         ];
 
         // Scalar reference.
@@ -711,21 +711,21 @@ mod tests {
             }
             let _ = h.output();
 
-            let mut pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-                (x.id, weights(d, 90)),
-                (gather_idx.id, vec![0.0, 1.0]),
-                (scatter_idx.id, vec![1.0]),
+            let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+                (x.id, weights(d, 90).into()),
+                (gather_idx.id, vec![0i32, 1].into()),
+                (scatter_idx.id, vec![1i32].into()),
             ];
             for (layer, block) in blocks.iter().enumerate() {
-                pairs.push((block.wq.weight.id, weights(d * d, 91 + layer)));
-                pairs.push((block.wk.weight.id, weights(d * kv_dim, 92 + layer)));
-                pairs.push((block.wv.weight.id, weights(d * kv_dim, 93 + layer)));
-                pairs.push((block.wo.weight.id, weights(d * d, 94 + layer)));
-                pairs.push((block.gate.weight.id, weights(d * ff, 95 + layer)));
-                pairs.push((block.up.weight.id, weights(d * ff, 96 + layer)));
-                pairs.push((block.down.weight.id, weights(ff * d, 97 + layer)));
-                pairs.push((caches[layer].0.id, weights(SLOTS6 * kv_dim, 98 + layer)));
-                pairs.push((caches[layer].1.id, weights(SLOTS6 * kv_dim, 99 + layer)));
+                pairs.push((block.wq.weight.id, weights(d * d, 91 + layer).into()));
+                pairs.push((block.wk.weight.id, weights(d * kv_dim, 92 + layer).into()));
+                pairs.push((block.wv.weight.id, weights(d * kv_dim, 93 + layer).into()));
+                pairs.push((block.wo.weight.id, weights(d * d, 94 + layer).into()));
+                pairs.push((block.gate.weight.id, weights(d * ff, 95 + layer).into()));
+                pairs.push((block.up.weight.id, weights(d * ff, 96 + layer).into()));
+                pairs.push((block.down.weight.id, weights(ff * d, 97 + layer).into()));
+                pairs.push((caches[layer].0.id, weights(SLOTS6 * kv_dim, 98 + layer).into()));
+                pairs.push((caches[layer].1.id, weights(SLOTS6 * kv_dim, 99 + layer).into()));
             }
             let data: FxHashMap<_, _> = pairs.iter().cloned().collect();
             let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
@@ -789,21 +789,21 @@ mod tests {
 
         // Assemble + saturate once, then draw single-genome searches
         // until a refusal is recorded (tiny budgets, varying seed).
-        let mut pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-            (x.id, weights(8, 90)),
-            (gather_idx.id, vec![0.0, 1.0]),
-            (scatter_idx.id, vec![1.0]),
+        let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+            (x.id, weights(8, 90).into()),
+            (gather_idx.id, vec![0i32, 1].into()),
+            (scatter_idx.id, vec![1i32].into()),
         ];
         for (layer, block) in blocks.iter().enumerate() {
-            pairs.push((block.wq.weight.id, weights(64, 91 + layer)));
-            pairs.push((block.wk.weight.id, weights(32, 92 + layer)));
-            pairs.push((block.wv.weight.id, weights(32, 93 + layer)));
-            pairs.push((block.wo.weight.id, weights(64, 94 + layer)));
-            pairs.push((block.gate.weight.id, weights(96, 95 + layer)));
-            pairs.push((block.up.weight.id, weights(96, 96 + layer)));
-            pairs.push((block.down.weight.id, weights(96, 97 + layer)));
-            pairs.push((caches[layer].0.id, weights(16, 98 + layer)));
-            pairs.push((caches[layer].1.id, weights(16, 99 + layer)));
+            pairs.push((block.wq.weight.id, weights(64, 91 + layer).into()));
+            pairs.push((block.wk.weight.id, weights(32, 92 + layer).into()));
+            pairs.push((block.wv.weight.id, weights(32, 93 + layer).into()));
+            pairs.push((block.wo.weight.id, weights(64, 94 + layer).into()));
+            pairs.push((block.gate.weight.id, weights(96, 95 + layer).into()));
+            pairs.push((block.up.weight.id, weights(96, 96 + layer).into()));
+            pairs.push((block.down.weight.id, weights(96, 97 + layer).into()));
+            pairs.push((caches[layer].0.id, weights(16, 98 + layer).into()));
+            pairs.push((caches[layer].1.id, weights(16, 99 + layer).into()));
         }
         let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
         for seed in 0..16 {
@@ -932,28 +932,28 @@ mod tests {
     /// Everything the block binds, with deterministic weights; returns
     /// (tensor-keyed data map, scalar-side copies).
     #[allow(clippy::type_complexity)]
-    fn block_data(fx: &BlockFixture) -> (FxHashMap<petgraph::graph::NodeIndex, Vec<f32>>, Vec<(petgraph::graph::NodeIndex, Vec<f32>)>) {
+    fn block_data(fx: &BlockFixture) -> (FxHashMap<petgraph::graph::NodeIndex, TypedBuffer>, Vec<(petgraph::graph::NodeIndex, TypedBuffer)>) {
         let token = 3usize;
-        let mut pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-            (fx.ids.id, vec![token as f32]),
-            (fx.embed.weight.id, weights(VOCAB * D, 1)),
-            (fx.block.wq.weight.id, weights(D * D, 2)),
-            (fx.block.wk.weight.id, weights(D * D, 3)),
-            (fx.block.wv.weight.id, weights(D * D, 4)),
-            (fx.block.wo.weight.id, weights(D * D, 5)),
-            (fx.k_cache.id, weights(SLOTS * D, 6)),
-            (fx.v_cache.id, weights(SLOTS * D, 8)),
-            (fx.gather_idx.id, vec![0.0, 1.0]),
-            (fx.scatter_idx.id, vec![1.0]),
+        let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+            (fx.ids.id, vec![token as i32].into()),
+            (fx.embed.weight.id, weights(VOCAB * D, 1).into()),
+            (fx.block.wq.weight.id, weights(D * D, 2).into()),
+            (fx.block.wk.weight.id, weights(D * D, 3).into()),
+            (fx.block.wv.weight.id, weights(D * D, 4).into()),
+            (fx.block.wo.weight.id, weights(D * D, 5).into()),
+            (fx.k_cache.id, weights(SLOTS * D, 6).into()),
+            (fx.v_cache.id, weights(SLOTS * D, 8).into()),
+            (fx.gather_idx.id, vec![0i32, 1].into()),
+            (fx.scatter_idx.id, vec![1i32].into()),
         ];
         match &fx.block.ff {
             FeedForward::Dense { up, down } => {
-                pairs.push((up.weight.id, weights(D * FF_HIDDEN, 9)));
-                pairs.push((down.weight.id, weights(FF_HIDDEN * D, 10)));
+                pairs.push((up.weight.id, weights(D * FF_HIDDEN, 9).into()));
+                pairs.push((down.weight.id, weights(FF_HIDDEN * D, 10).into()));
             }
             FeedForward::Moe(moe) => {
-                pairs.push((moe.router.id, weights(D * EXPERTS, 9)));
-                pairs.push((moe.expert_weights.id, weights(EXPERTS * D * D, 10)));
+                pairs.push((moe.router.id, weights(D * EXPERTS, 9).into()));
+                pairs.push((moe.expert_weights.id, weights(EXPERTS * D * D, 10).into()));
             }
         }
         (pairs.iter().cloned().collect(), pairs)
@@ -1123,26 +1123,26 @@ mod tests {
                 )
             };
             let embed_w = weights(VOCAB * D, 1);
-            let mut pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-                (ids.id, vec![*token as f32]),
-                (model.embed.weight.id, embed_w.clone()),
-                (gather_idx.id, (0..ctx).map(|s| s as f32).collect()),
-                (scatter_idx.id, vec![step as f32]),
+            let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+                (ids.id, vec![*token as i32].into()),
+                (model.embed.weight.id, embed_w.clone().into()),
+                (gather_idx.id, (0..ctx as i32).collect::<Vec<i32>>().into()),
+                (scatter_idx.id, vec![step as i32].into()),
             ];
             for layer in 0..LAYERS {
                 let (wq, wk, wv, wo, up, down) = layer_weights(layer);
                 let block = &model.blocks[layer];
-                pairs.push((block.wq.weight.id, wq));
-                pairs.push((block.wk.weight.id, wk));
-                pairs.push((block.wv.weight.id, wv));
-                pairs.push((block.wo.weight.id, wo));
+                pairs.push((block.wq.weight.id, wq.into()));
+                pairs.push((block.wk.weight.id, wk.into()));
+                pairs.push((block.wv.weight.id, wv.into()));
+                pairs.push((block.wo.weight.id, wo.into()));
                 let FeedForward::Dense { up: up_l, down: down_l } = &block.ff else {
                     unreachable!()
                 };
-                pairs.push((up_l.weight.id, up));
-                pairs.push((down_l.weight.id, down));
-                pairs.push((cache_inputs[layer].0.id, runtime_k[layer].clone()));
-                pairs.push((cache_inputs[layer].1.id, runtime_v[layer].clone()));
+                pairs.push((up_l.weight.id, up.into()));
+                pairs.push((down_l.weight.id, down.into()));
+                pairs.push((cache_inputs[layer].0.id, runtime_k[layer].clone().into()));
+                pairs.push((cache_inputs[layer].1.id, runtime_v[layer].clone().into()));
             }
 
             // Scalar reference for this step.
@@ -1287,18 +1287,18 @@ mod forward_rope_tests {
         let k_expr = k_expr.output();
         let v_expr = v_expr.output();
 
-        let mut pairs = vec![
-            (x.id, weights(D, 1)),
-            (k_cache.id, weights(SLOTS * KV_DIM, 2)),
-            (v_cache.id, weights(SLOTS * KV_DIM, 3)),
-            (gather_idx.id, vec![0.0f32, 1.0, 2.0]),
-            (scatter_idx.id, vec![1.0f32]),
-            (q_pos.id, vec![position as f32]),
+        let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+            (x.id, weights(D, 1).into()),
+            (k_cache.id, weights(SLOTS * KV_DIM, 2).into()),
+            (v_cache.id, weights(SLOTS * KV_DIM, 3).into()),
+            (gather_idx.id, vec![0i32, 1, 2].into()),
+            (scatter_idx.id, vec![1i32].into()),
+            (q_pos.id, vec![position as i32].into()),
         ];
         let (cos, sin) = crate::rope_tables_split_half(&[position as f32], HEAD_DIM, 10_000.0, 1.0);
-        pairs.push((rope_cos.id, cos));
-        pairs.push((rope_sin.id, sin));
-        pairs.push((rope_rot.id, crate::rope_pairing_matrix(HEAD_DIM, false)));
+        pairs.push((rope_cos.id, cos.into()));
+        pairs.push((rope_sin.id, sin.into()));
+        pairs.push((rope_rot.id, crate::rope_pairing_matrix(HEAD_DIM, false).into()));
         for (seed, tensor) in [
             block.wq.weight,
             block.wk.weight,
@@ -1318,7 +1318,7 @@ mod forward_rope_tests {
                 .iter()
                 .map(|d| d.to_usize().expect("static dim"))
                 .product();
-            pairs.push((tensor.id, weights(n, 10 + seed)));
+            pairs.push((tensor.id, weights(n, 10 + seed).into()));
         }
 
         let rt = luminal::test_support::run_ssa(&cx, &pairs);

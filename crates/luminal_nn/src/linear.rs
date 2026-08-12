@@ -86,8 +86,8 @@ mod tests {
         }
 
         let mut data = FxHashMap::default();
-        data.insert(x.id, x_data.clone());
-        data.insert(model.weight.id, w_data.clone());
+        data.insert(x.id, x_data.clone().into());
+        data.insert(model.weight.id, w_data.clone().into());
         let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
         rt.search(&data, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
@@ -119,9 +119,9 @@ mod tests {
         }
 
         let mut data = FxHashMap::default();
-        data.insert(x.id, x_data.clone());
-        data.insert(model.weight.id, w_data.clone());
-        data.insert(model.bias.unwrap().id, b_data.clone());
+        data.insert(x.id, x_data.clone().into());
+        data.insert(model.weight.id, w_data.clone().into());
+        data.insert(model.bias.unwrap().id, b_data.clone().into());
         let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
         rt.search(&data, &ImplementationSearchOptions::default())
             .expect("search finds a plan");

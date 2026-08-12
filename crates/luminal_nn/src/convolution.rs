@@ -447,7 +447,7 @@ mod forward_tests {
         let out = conv.forward(x).output();
         let rt = luminal::test_support::run_ssa(
             &cx,
-            &[(x.id, x_data.clone()), (conv.weight.id, w_data.clone())],
+            &[(x.id, x_data.clone().into()), (conv.weight.id, w_data.clone().into())],
         );
         let got = rt.get_f32(out.id).unwrap().clone();
 

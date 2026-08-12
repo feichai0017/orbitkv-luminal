@@ -71,7 +71,7 @@ mod tests {
         let x = cx.tensor(input.len());
         let out = build(x).output();
         let mut data = rustc_hash::FxHashMap::default();
-        data.insert(x.id, input.clone());
+        data.insert(x.id, input.clone().into());
         let mut rt = luminal::ssa_reference::SsaReferenceRuntime::load(&cx).expect("native load");
         rt.search(
             &data,

@@ -4,10 +4,71 @@
 //! scatter body was deleted with the ScatterMutating kernel — the
 //! reference runtime is out-of-place only and duplicate scatter targets
 //! are a deterministic runtime panic here, never last-write-wins.
+//!
+//! TYPED (2026-08-11): coordinates are read from NATIVE i32 buffers —
+//! the old `as_f32` read plus `as i64` truncation was the consumer side
+//! of the Int-in-f32 smuggling (a 4.9999995 truncating to 4 while
+//! passing the bounds check). Payload movement is variant-generic:
+//! the index computation is dtype-independent, and the element moves
+//! dispatch once on the (source, dest) variant pair.
 
 use super::expect_op;
-use crate::buffer_tensor_ir::{BufferTensorIrOp, ReferenceKernelCtx};
+use crate::buffer_tensor_ir::{BufferTensorIrOp, ReferenceKernelCtx, TypedBuffer};
 use crate::ssa_reference::ops::{GatherDps, IndexMapApplyMaterializeDps, ScatterFunctionalDps};
+
+/// Read a rank of coordinate operands as native i32, promoted to i64
+/// for index arithmetic.
+fn coordinate_columns(
+    operands: &[TypedBuffer],
+) -> anyhow::Result<Vec<Vec<i64>>> {
+    operands
+        .iter()
+        .map(|operand| {
+            Ok(operand
+                .as_i32()?
+                .iter()
+                .map(|value| i64::from(*value))
+                .collect())
+        })
+        .collect()
+}
+
+/// dest[flat] = source[index[flat]] for every flat, whatever the payload
+/// dtype — variants must match (the plan annotated both sides).
+fn move_gathered(
+    source: &TypedBuffer,
+    dest: &mut TypedBuffer,
+    index_of: &[usize],
+) -> anyhow::Result<()> {
+    match (source, dest) {
+        (TypedBuffer::F32(data), TypedBuffer::F32(dest)) => {
+            for (flat, index) in index_of.iter().enumerate() {
+                dest[flat] = data[*index];
+            }
+        }
+        (TypedBuffer::I32(data), TypedBuffer::I32(dest)) => {
+            for (flat, index) in index_of.iter().enumerate() {
+                dest[flat] = data[*index];
+            }
+        }
+        (TypedBuffer::I64(data), TypedBuffer::I64(dest)) => {
+            for (flat, index) in index_of.iter().enumerate() {
+                dest[flat] = data[*index];
+            }
+        }
+        (TypedBuffer::Bool8(data), TypedBuffer::Bool8(dest)) => {
+            for (flat, index) in index_of.iter().enumerate() {
+                dest[flat] = data[*index];
+            }
+        }
+        (source, dest) => anyhow::bail!(
+            "payload move between {} and {} buffers",
+            source.type_name(),
+            dest.type_name()
+        ),
+    }
+    Ok(())
+}
 
 pub(super) fn gather(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
     let op = expect_op::<GatherDps>(op)?;
@@ -23,17 +84,13 @@ pub(super) fn gather(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) ->
     for k in (0..rank.saturating_sub(1)).rev() {
         data_strides[k] = data_strides[k + 1] * data_dims[k + 1];
     }
-    let data = ctx.operands[0].as_f32()?.clone();
-    let coord_operands: Vec<&Vec<f32>> = ctx.operands[1..1 + rank]
-        .iter()
-        .map(|operand| operand.as_f32())
-        .collect::<anyhow::Result<_>>()?;
-    let dest = ctx.dests[0].as_f32_mut()?;
-    for flat in 0..dest.len() {
+    let coord_operands = coordinate_columns(&ctx.operands[1..1 + rank])?;
+    let numel = ctx.dests[0].len();
+    let mut index_of = vec![0usize; numel];
+    for (flat, slot) in index_of.iter_mut().enumerate() {
         let mut data_flat = 0usize;
         for axis in 0..rank {
             let coord = coord_operands[axis][flat];
-            let coord = coord as i64;
             anyhow::ensure!(
                 coord >= 0 && (coord as usize) < data_dims[axis],
                 "gather coordinate {coord} out of bounds for axis {axis} (extent {}) — \
@@ -42,9 +99,10 @@ pub(super) fn gather(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) ->
             );
             data_flat += coord as usize * data_strides[axis];
         }
-        dest[flat] = data[data_flat];
+        *slot = data_flat;
     }
-    Ok(())
+    let source = ctx.operands[0].clone();
+    move_gathered(&source, &mut ctx.dests[0], &index_of)
 }
 
 /// The CHECKED scatter kernel (ruling 2026-08-06): dest starts as a copy
@@ -72,19 +130,15 @@ pub(super) fn scatter_checked(
     for k in (0..rank.saturating_sub(1)).rev() {
         strides[k] = strides[k + 1] * init_dims[k + 1];
     }
-    let init = ctx.operands[0].as_f32()?.clone();
-    let src = ctx.operands[1].as_f32()?.clone();
-    let coord_operands: Vec<Vec<f32>> = ctx.operands[2..2 + rank]
-        .iter()
-        .map(|operand| operand.as_f32().cloned())
-        .collect::<anyhow::Result<_>>()?;
-    let dest = ctx.dests[0].as_f32_mut()?;
-    dest.copy_from_slice(&init);
-    let mut written = vec![false; dest.len()];
-    for i in 0..src.len() {
+    let coord_operands = coordinate_columns(&ctx.operands[2..2 + rank])?;
+    let src_len = ctx.operands[1].len();
+    let dest_len = ctx.dests[0].len();
+    let mut target_of = vec![0usize; src_len];
+    let mut written = vec![false; dest_len];
+    for (i, target) in target_of.iter_mut().enumerate() {
         let mut flat = 0usize;
         for axis in 0..rank {
-            let coord = coord_operands[axis][i] as i64;
+            let coord = coord_operands[axis][i];
             anyhow::ensure!(
                 coord >= 0 && (coord as usize) < init_dims[axis],
                 "scatter coordinate {coord} out of bounds for axis {axis} (extent {}) — \
@@ -100,7 +154,40 @@ pub(super) fn scatter_checked(
              injective (checked-scatter ruling 2026-08-06)"
         );
         written[flat] = true;
-        dest[flat] = src[i];
+        *target = flat;
+    }
+    // Payload move: dest = copy(init); dest[target[i]] = src[i].
+    match (&ctx.operands[0], &ctx.operands[1], &mut ctx.dests[0]) {
+        (TypedBuffer::F32(init), TypedBuffer::F32(src), TypedBuffer::F32(dest)) => {
+            dest.copy_from_slice(init);
+            for (i, target) in target_of.iter().enumerate() {
+                dest[*target] = src[i];
+            }
+        }
+        (TypedBuffer::I32(init), TypedBuffer::I32(src), TypedBuffer::I32(dest)) => {
+            dest.copy_from_slice(init);
+            for (i, target) in target_of.iter().enumerate() {
+                dest[*target] = src[i];
+            }
+        }
+        (TypedBuffer::I64(init), TypedBuffer::I64(src), TypedBuffer::I64(dest)) => {
+            dest.copy_from_slice(init);
+            for (i, target) in target_of.iter().enumerate() {
+                dest[*target] = src[i];
+            }
+        }
+        (TypedBuffer::Bool8(init), TypedBuffer::Bool8(src), TypedBuffer::Bool8(dest)) => {
+            dest.copy_from_slice(init);
+            for (i, target) in target_of.iter().enumerate() {
+                dest[*target] = src[i];
+            }
+        }
+        (init, src, dest) => anyhow::bail!(
+            "scatter payload dtypes disagree: init {}, src {}, dest {}",
+            init.type_name(),
+            src.type_name(),
+            dest.type_name()
+        ),
     }
     Ok(())
 }
@@ -128,9 +215,9 @@ pub(super) fn materialize(
         parent_strides[k] = parent_strides[k + 1] * parent_dims[k + 1];
     }
     let out_rank = out_dims.len();
-    let parent = ctx.operands[0].as_f32()?.clone();
-    let dest = ctx.dests[0].as_f32_mut()?;
-    for flat in 0..dest.len() {
+    let numel = ctx.dests[0].len();
+    let mut index_of = vec![0usize; numel];
+    for (flat, slot) in index_of.iter_mut().enumerate() {
         // Decompose the flat OUT index into row-major coordinates.
         let mut remainder = flat;
         let mut coords = vec![0usize; out_rank];
@@ -148,9 +235,10 @@ pub(super) fn materialize(
             );
             parent_flat += index as usize * parent_strides[k];
         }
-        dest[flat] = parent[parent_flat];
+        *slot = parent_flat;
     }
-    Ok(())
+    let parent = ctx.operands[0].clone();
+    move_gathered(&parent, &mut ctx.dests[0], &index_of)
 }
 
 /// Dense same-geometry copy (CopyGeneric / MaterializeLayoutCopy). The
@@ -165,9 +253,11 @@ pub(super) fn copy(_op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> 
         ctx.operand_dims[0],
         ctx.operand_dims[1]
     );
-    let input = ctx.operands[0].as_f32()?;
-    let dest = ctx.dests[0].as_f32_mut()?;
-    anyhow::ensure!(input.len() == dest.len(), "copy kernel length mismatch");
-    dest.copy_from_slice(input);
-    Ok(())
+    anyhow::ensure!(
+        ctx.operands[0].len() == ctx.dests[0].len(),
+        "copy kernel length mismatch"
+    );
+    let index_of: Vec<usize> = (0..ctx.dests[0].len()).collect();
+    let source = ctx.operands[0].clone();
+    move_gathered(&source, &mut ctx.dests[0], &index_of)
 }

@@ -241,17 +241,17 @@ impl GraphTensor {
 
         // Normalize negative indices for axis dim
         let axis_dim = dims[axis].to_usize().unwrap();
-        let idx_f32 = indexes.cast(DType::F32);
-        let zero = idx_f32
+        // Int-native normalization (2026-08-11): the comparison and the
+        // adjustment stay in i32 end to end — the old f32 detour ended
+        // in a cast back to Int, which the cast policy now refuses.
+        assert_eq!(indexes.dtype, DType::Int, "index tensor must be Int");
+        let zero = indexes.graph().constant(0).expand_rhs(indexes.dims());
+        let adj = indexes
             .graph()
-            .constant_float(0.0)
-            .expand_rhs(idx_f32.dims());
-        let adj = idx_f32
-            .graph()
-            .constant_float(axis_dim as f32)
-            .expand_rhs(idx_f32.dims());
-        let is_neg = idx_f32.lt(zero).cast(DType::F32);
-        let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
+            .constant(axis_dim)
+            .expand_rhs(indexes.dims());
+        let is_neg = indexes.lt(zero).cast(DType::Int);
+        let idx_normalized = indexes + is_neg * adj;
 
         // Non-axis flat contribution as a coordinate function — no
         // flat-index div/mod chain ever enters the model (P1, 2026-08-07).
@@ -307,17 +307,15 @@ impl GraphTensor {
 
         // Normalize negative indices for axis dim
         let axis_dim = data_dims[axis].to_usize().unwrap();
-        let idx_f32 = indices.cast(DType::F32);
-        let zero = idx_f32
+        // Int-native normalization (2026-08-11) — see gather_elements.
+        assert_eq!(indices.dtype, DType::Int, "index tensor must be Int");
+        let zero = indices.graph().constant(0).expand_rhs(indices.dims());
+        let adj = indices
             .graph()
-            .constant_float(0.0)
-            .expand_rhs(idx_f32.dims());
-        let adj = idx_f32
-            .graph()
-            .constant_float(axis_dim as f32)
-            .expand_rhs(idx_f32.dims());
-        let is_neg = idx_f32.lt(zero).cast(DType::F32);
-        let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
+            .constant(axis_dim)
+            .expand_rhs(indices.dims());
+        let is_neg = indices.lt(zero).cast(DType::Int);
+        let idx_normalized = indices + is_neg * adj;
 
         // Non-axis flat contribution as a coordinate function (P1).
         let non_axis_flat = self.graph().iota(idx_shape.clone(), |c| {
@@ -351,7 +349,9 @@ impl GraphTensor {
     ///   multi_idx = indices[s0, ..., sq-2, :]
     ///   output[multi_idx[0], ..., multi_idx[K-1], :, ..] = updates[s0, ..., sq-2, :, ..]
     pub fn scatter_nd(self, indices: GraphTensor, updates: GraphTensor) -> GraphTensor {
-        let indices = indices.cast(DType::Int);
+        // Was a convenience cast; a float index tensor would now record
+        // the refused f32 -> Int cast, so demand Int at the door.
+        assert_eq!(indices.dtype, DType::Int, "scatter_nd indices must be Int");
         let data_dims = self.dims();
         let data_rank = data_dims.len();
         let idx_dims = indices.dims();
@@ -1202,7 +1202,7 @@ mod tests {
         let a = cx.tensor((2, 3));
         let repeated = (a.repeat((2, 2)) * 1.0).output();
 
-        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])]);
+        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].into())]);
 
         assert_exact(
             rt.get_f32(repeated.id).unwrap(),

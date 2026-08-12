@@ -73,24 +73,48 @@ impl<T: BufferTensorIrOp + Clone + 'static> CloneBufferTensorIrOp for T {
 /// this trait — they have no logical semantics, no egglog constructor, and
 /// never meet the analyzer.
 
-/// Typed reference storage (rulings 2026-07-28 and 2026-07-30: booleans
-/// are REAL dtypes, never an f32 value-encoding). Floats live as f32;
-/// booleans live as Bool8 CODES — one u8 per element, exactly 0x00 or
-/// 0x01, every other pattern ill-formed (see the Bool8 contract in the
-/// preamble's Dtype declaration). The Bool8 variant serves both
-/// Bool8-typed buffers and, as an internal representation, buffers of the
-/// 1-bit logical Bool. Access is loud: a kernel asking for the wrong type
-/// is a bug in the op's dtype story, never an implicit coercion.
-#[derive(Debug, Clone)]
+/// Typed reference storage (rulings 2026-07-28, 2026-07-30, and the
+/// typed-buffers ruling 2026-08-11: NO value ever rides a buffer of
+/// another type — "no smuggling data in invalid types"). Floats live
+/// as f32; 32-bit integers as i32 and 64-bit as i64, NATIVE values
+/// (every bit pattern legal — total-code dtypes), which is what makes
+/// index arithmetic exact past f32's 2^24 ceiling; booleans live as
+/// Bool8 CODES — one u8 per element, exactly 0x00 or 0x01, every other
+/// pattern ill-formed (see the Bool8 contract in the preamble's Dtype
+/// declaration). The Bool8 variant serves both Bool8-typed buffers
+/// and, as an internal representation, buffers of the 1-bit logical
+/// Bool. Access is loud: a kernel asking for the wrong type is a bug
+/// in the op's dtype story, never an implicit coercion.
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypedBuffer {
     F32(Vec<f32>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
     Bool8(Vec<u8>),
 }
 
 impl TypedBuffer {
+    /// The validated Bool8 entry point — the ONLY way caller bytes
+    /// become boolean storage. The two-legal-codes invariant is
+    /// established here, at the door, so an ill-formed code never
+    /// exists inside a TypedBuffer (kernel-side checks remain as
+    /// defense in depth).
+    pub fn bool8(codes: Vec<u8>) -> Result<Self> {
+        for (index, code) in codes.iter().enumerate() {
+            anyhow::ensure!(
+                *code <= 1,
+                "Bool8 data holds ill-formed code {code} at element {index} \
+                 (the two legal codes are 0x00 and 0x01)"
+            );
+        }
+        Ok(TypedBuffer::Bool8(codes))
+    }
+
     pub fn len(&self) -> usize {
         match self {
             TypedBuffer::F32(values) => values.len(),
+            TypedBuffer::I32(values) => values.len(),
+            TypedBuffer::I64(values) => values.len(),
             TypedBuffer::Bool8(bits) => bits.len(),
         }
     }
@@ -102,6 +126,8 @@ impl TypedBuffer {
     pub fn type_name(&self) -> &'static str {
         match self {
             TypedBuffer::F32(_) => "f32",
+            TypedBuffer::I32(_) => "i32",
+            TypedBuffer::I64(_) => "i64",
             TypedBuffer::Bool8(_) => "bool8",
         }
     }
@@ -120,6 +146,34 @@ impl TypedBuffer {
         }
     }
 
+    pub fn as_i32(&self) -> Result<&Vec<i32>> {
+        match self {
+            TypedBuffer::I32(values) => Ok(values),
+            other => anyhow::bail!("expected an i32 buffer, found {}", other.type_name()),
+        }
+    }
+
+    pub fn as_i32_mut(&mut self) -> Result<&mut Vec<i32>> {
+        match self {
+            TypedBuffer::I32(values) => Ok(values),
+            other => anyhow::bail!("expected an i32 buffer, found {}", other.type_name()),
+        }
+    }
+
+    pub fn as_i64(&self) -> Result<&Vec<i64>> {
+        match self {
+            TypedBuffer::I64(values) => Ok(values),
+            other => anyhow::bail!("expected an i64 buffer, found {}", other.type_name()),
+        }
+    }
+
+    pub fn as_i64_mut(&mut self) -> Result<&mut Vec<i64>> {
+        match self {
+            TypedBuffer::I64(values) => Ok(values),
+            other => anyhow::bail!("expected an i64 buffer, found {}", other.type_name()),
+        }
+    }
+
     pub fn as_bool8(&self) -> Result<&Vec<u8>> {
         match self {
             TypedBuffer::Bool8(bits) => Ok(bits),
@@ -132,6 +186,37 @@ impl TypedBuffer {
             TypedBuffer::Bool8(bits) => Ok(bits),
             other => anyhow::bail!("expected a Bool8 buffer, found {}", other.type_name()),
         }
+    }
+
+    /// A fresh zero-filled buffer of the same variant and length —
+    /// the executor's dest-allocation shape.
+    pub fn zeroed_like(&self) -> TypedBuffer {
+        match self {
+            TypedBuffer::F32(values) => TypedBuffer::F32(vec![0.0; values.len()]),
+            TypedBuffer::I32(values) => TypedBuffer::I32(vec![0; values.len()]),
+            TypedBuffer::I64(values) => TypedBuffer::I64(vec![0; values.len()]),
+            TypedBuffer::Bool8(bits) => TypedBuffer::Bool8(vec![0u8; bits.len()]),
+        }
+    }
+}
+
+// Staging ergonomics: numeric payloads convert directly (every bit
+// pattern is a legal value for these dtypes). Bool8 deliberately has NO
+// From impl — caller bytes must pass the validated [`TypedBuffer::bool8`]
+// constructor.
+impl From<Vec<f32>> for TypedBuffer {
+    fn from(values: Vec<f32>) -> Self {
+        TypedBuffer::F32(values)
+    }
+}
+impl From<Vec<i32>> for TypedBuffer {
+    fn from(values: Vec<i32>) -> Self {
+        TypedBuffer::I32(values)
+    }
+}
+impl From<Vec<i64>> for TypedBuffer {
+    fn from(values: Vec<i64>) -> Self {
+        TypedBuffer::I64(values)
     }
 }
 
@@ -177,6 +262,47 @@ impl ReferenceKernelCtx {
         Ok(())
     }
 
+    /// dest0[i] = f(operand0[i], operand1[i]) over i32 values; `f`
+    /// returns Result so checked arithmetic refuses loudly (ints are
+    /// semantically NON-WRAPPING — ruling 2026-08-11; an overflow is a
+    /// loud kernel error, never a wrapped value).
+    pub fn binary_elementwise_i32(
+        &mut self,
+        f: impl Fn(i32, i32) -> Result<i32>,
+    ) -> Result<()> {
+        let lhs = self.operands[0].as_i32()?;
+        let rhs = self.operands[1].as_i32()?;
+        anyhow::ensure!(
+            lhs.len() == rhs.len() && lhs.len() == self.dests[0].len(),
+            "binary kernel length mismatch"
+        );
+        let (lhs, rhs) = (lhs.clone(), rhs.clone());
+        let dest = self.dests[0].as_i32_mut()?;
+        for (index, out) in dest.iter_mut().enumerate() {
+            *out = f(lhs[index], rhs[index])?;
+        }
+        Ok(())
+    }
+
+    /// The i64 twin of [`Self::binary_elementwise_i32`].
+    pub fn binary_elementwise_i64(
+        &mut self,
+        f: impl Fn(i64, i64) -> Result<i64>,
+    ) -> Result<()> {
+        let lhs = self.operands[0].as_i64()?;
+        let rhs = self.operands[1].as_i64()?;
+        anyhow::ensure!(
+            lhs.len() == rhs.len() && lhs.len() == self.dests[0].len(),
+            "binary kernel length mismatch"
+        );
+        let (lhs, rhs) = (lhs.clone(), rhs.clone());
+        let dest = self.dests[0].as_i64_mut()?;
+        for (index, out) in dest.iter_mut().enumerate() {
+            *out = f(lhs[index], rhs[index])?;
+        }
+        Ok(())
+    }
+
     /// Contiguous fold over one axis (zero-based FROM THE END — the house
     /// nth-from-end convention, matching the reduce ops' metadata).
     pub fn reduce_axis(
@@ -206,6 +332,42 @@ impl ReferenceKernelCtx {
                 let mut acc = init;
                 for r in 0..reduced {
                     acc = fold(acc, input[o * reduced * inner + r * inner + i]);
+                }
+                dest[o * inner + i] = acc;
+            }
+        }
+        Ok(())
+    }
+
+    /// The i32 twin of [`Self::reduce_axis`]; the fold returns Result so
+    /// checked accumulation (non-wrapping Int sums) refuses loudly.
+    pub fn reduce_axis_i32(
+        &mut self,
+        axis_from_end: i64,
+        init: i32,
+        fold: impl Fn(i32, i32) -> Result<i32>,
+    ) -> Result<()> {
+        let dims = &self.operand_dims[0];
+        let rank = dims.len();
+        anyhow::ensure!(
+            (axis_from_end as usize) < rank,
+            "reduce axis {axis_from_end} out of rank {rank}"
+        );
+        let axis = rank - 1 - axis_from_end as usize;
+        let reduced = dims[axis];
+        let inner: usize = dims[axis + 1..].iter().product();
+        let outer: usize = dims[..axis].iter().product();
+        let input = self.operands[0].as_i32()?.clone();
+        let dest = self.dests[0].as_i32_mut()?;
+        anyhow::ensure!(
+            dest.len() == outer * inner && input.len() == outer * reduced * inner,
+            "reduce kernel geometry mismatch"
+        );
+        for o in 0..outer {
+            for i in 0..inner {
+                let mut acc = init;
+                for r in 0..reduced {
+                    acc = fold(acc, input[o * reduced * inner + r * inner + i])?;
                 }
                 dest[o * inner + i] = acc;
             }

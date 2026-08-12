@@ -142,7 +142,7 @@ impl SearchTimings {
 pub fn search_implementations(
     egraph: &egraph_serialize::EGraph,
     program: &LogicalProgram,
-    input_data: &FxHashMap<petgraph::graph::NodeIndex, Vec<f32>>,
+    input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
 ) -> Result<SearchOutcome> {
     search_implementations_with_ops(egraph, program, input_data, options, None)
@@ -153,13 +153,13 @@ pub fn search_implementations(
 pub fn search_implementations_with_ops(
     egraph: &egraph_serialize::EGraph,
     program: &LogicalProgram,
-    input_data: &FxHashMap<petgraph::graph::NodeIndex, Vec<f32>>,
+    input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
     allow_override: Option<Vec<&'static str>>,
 ) -> Result<SearchOutcome> {
     // Tensor-keyed at the boundary (the retired-HLIR-keyspace design);
     // buffer-keyed internally via the program's slots.
-    let buffer_data: FxHashMap<i64, Vec<f32>> = input_data
+    let buffer_data: FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer> = input_data
         .iter()
         .map(|(tensor, data)| {
             let slot = program
@@ -484,7 +484,9 @@ pub struct BucketPlan {
 pub fn bucketed_search_implementations(
     graph: &crate::graph::Graph,
     dim_buckets: &BTreeMap<char, Vec<crate::graph::DimBucket>>,
-    input_data: impl Fn(&FxHashMap<char, usize>) -> FxHashMap<petgraph::graph::NodeIndex, Vec<f32>>,
+    input_data: impl Fn(
+        &FxHashMap<char, usize>,
+    ) -> FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
 ) -> Result<Vec<BucketPlan>> {
     ensure!(!dim_buckets.is_empty(), "no dim buckets supplied");
@@ -638,8 +640,8 @@ mod tests {
         let serialized = egraph.serialize(SerializeConfig::default()).egraph;
 
         let mut inputs = FxHashMap::default();
-        inputs.insert(x2.id, x_data.clone());
-        inputs.insert(y2.id, y_data.clone());
+        inputs.insert(x2.id, x_data.clone().into());
+        inputs.insert(y2.id, y_data.clone().into());
         let outcome = search_implementations(
             &serialized,
             &program,
@@ -704,8 +706,8 @@ mod tests {
         let data_for = |rep: &FxHashMap<char, usize>| {
             let n = rep[&'a'] * 2;
             let mut data = FxHashMap::default();
-            data.insert(x.id, (0..n).map(|v| v as f32 + 1.0).collect::<Vec<f32>>());
-            data.insert(y.id, (0..n).map(|v| v as f32 * 0.5).collect());
+            data.insert(x.id, (0..n).map(|v| v as f32 + 1.0).collect::<Vec<f32>>().into());
+            data.insert(y.id, (0..n).map(|v| v as f32 * 0.5).collect::<Vec<f32>>().into());
             data
         };
         let plans = bucketed_search_implementations(

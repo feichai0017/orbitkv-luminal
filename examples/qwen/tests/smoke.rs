@@ -6,6 +6,7 @@
 
 use luminal::dtype::DType;
 use luminal::graph::Graph;
+use luminal::prelude::TypedBuffer;
 use luminal::implementation_search::ImplementationSearchOptions;
 use qwen::model::QwenDims;
 use qwen::{DecodeStep, Decoder, weights};
@@ -65,17 +66,12 @@ fn tiny_decode_loop_is_deterministic_and_advances_the_cache() {
     assert_eq!(rows, rows_again, "decode loop is not deterministic");
 }
 
-/// Vocab-scale gather exactness: the reference runtime stores Int
-/// buffer VALUES in f32 (exact only below 2^24), so a MATERIALIZED
-/// flat index (row·D + col) at embedding scale rounds — and whether it
-/// materializes is a plan decision, which made the flat-sugar
-/// `gather_rows` fail nondeterministically at Qwen3-4B magnitudes
-/// (found by this crate's original probe, 2026-08-11). `gather_rows`
-/// is now COORDINATE-form: per-axis coordinates stay below their axis
-/// extents and never overflow. This test drives it across the 2^24
-/// flat boundary — table (300_000, 64), flat range up to 1.92e7 — with
-/// row-id payloads: any index rounding under any searched plan reads a
-/// neighbouring row and mismatches loudly.
+/// Vocab-scale gather pin: coordinate-form `gather_rows` across what
+/// used to be the 2^24 flat-exactness boundary — table (300_000, 64)
+/// with row-id payloads; any index corruption under any searched plan
+/// reads a neighbouring row and mismatches loudly. (The smuggling this
+/// originally guarded against is gone — typed buffers — but the pin
+/// stays: it exercises the primary gather spelling at scale.)
 #[test]
 fn embedding_scale_row_gather_stays_exact() {
     const ROWS: usize = 300_000;
@@ -93,11 +89,11 @@ fn embedding_scale_row_gather_stays_exact() {
     for (r, chunk) in data.chunks_mut(D).enumerate() {
         chunk.fill(r as f32);
     }
-    let idx_vals: Vec<f32> = picks.iter().map(|r| *r as f32).collect();
+    let idx_vals: Vec<i32> = picks.iter().map(|r| *r as i32).collect();
 
     let rt = luminal::test_support::run_ssa(
         &cx,
-        &[(table.id, data), (idx.id, idx_vals)],
+        &[(table.id, data.into()), (idx.id, idx_vals.into())],
     );
     let out = rt.get_f32(rows.id).expect("gathered rows");
     assert_eq!(out.len(), picks.len() * D);
@@ -109,5 +105,40 @@ fn embedding_scale_row_gather_stays_exact() {
                 "row {row} column {c} read a neighbouring row"
             );
         }
+    }
+}
+
+/// THE RESURRECTED PROBE (typed-buffers acceptance, 2026-08-11): this
+/// exact graph — a MATERIALIZED flat index idx·2560 + col at Qwen3-4B
+/// vocab magnitude (3.9e8) with the base subtracted — is the probe
+/// that exposed the Int-in-f32 smuggling: under f32 storage it failed
+/// nondeterministically (plan-dependent rounding to multiples of 32).
+/// Under typed buffers the arithmetic runs in native i32 (checked,
+/// non-wrapping) and the residuals are exact under EVERY plan. The
+/// probe that found the bug is the proof of the fix.
+#[test]
+fn vocab_scale_flat_index_arithmetic_stays_exact() {
+    const HIDDEN: usize = 2560;
+    const LAST_ROW: usize = 151_935; // Qwen3-4B vocab − 1
+    let base = (LAST_ROW * HIDDEN) as i64; // 388,953,600 — fits i32
+
+    let mut cx = Graph::new();
+    let idx = cx.tensor_dtyped(1, DType::Int);
+    let flat = (idx * HIDDEN).expand_dim(1, HIDDEN)
+        + cx.arange(HIDDEN as i32).expand_dim(0, 1);
+    let base_t = cx.constant(base).expand_dim(0, 1).expand_dim(1, HIDDEN);
+    let residual = (flat - base_t).output();
+
+    let rt = luminal::test_support::run_ssa(
+        &cx,
+        &[(idx.id, TypedBuffer::from(vec![LAST_ROW as i32]))],
+    );
+    let out = rt.get_i32(residual.id).expect("residual");
+    assert_eq!(out.len(), HIDDEN);
+    for (column, value) in out.iter().enumerate() {
+        assert_eq!(
+            *value, column as i32,
+            "flat index arithmetic lost exactness at column {column}"
+        );
     }
 }

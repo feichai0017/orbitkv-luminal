@@ -94,7 +94,7 @@ mod tests {
         let out = model.forward(ids).output();
         assert_eq!(out.dims(), vec![Expression::from(3), Expression::from(4)]);
 
-        let ids_data = vec![1.0f32, 0.0, 2.0];
+        let ids_data = vec![1i32, 0, 2];
         // Hand golden: rows 1, 0, 2 of the table.
         let mut expected = Vec::new();
         for id in [1usize, 0, 2] {
@@ -102,8 +102,8 @@ mod tests {
         }
 
         let mut data = FxHashMap::default();
-        data.insert(ids.id, ids_data.clone());
-        data.insert(model.weight.id, WEIGHT.to_vec());
+        data.insert(ids.id, ids_data.clone().into());
+        data.insert(model.weight.id, WEIGHT.to_vec().into());
         let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
         rt.search(&data, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
@@ -124,15 +124,15 @@ mod tests {
         assert_eq!(out.dims(), vec![Expression::from(2), Expression::from(3), Expression::from(4)]);
 
         let id_ints = [1usize, 0, 2, 1, 0, 1];
-        let ids_data: Vec<f32> = id_ints.iter().map(|v| *v as f32).collect();
+        let ids_data: Vec<i32> = id_ints.iter().map(|v| *v as i32).collect();
         let mut expected = Vec::new();
         for id in id_ints {
             expected.extend_from_slice(&WEIGHT[id * 4..id * 4 + 4]);
         }
 
         let mut data = FxHashMap::default();
-        data.insert(ids.id, ids_data.clone());
-        data.insert(model.weight.id, WEIGHT.to_vec());
+        data.insert(ids.id, ids_data.clone().into());
+        data.insert(model.weight.id, WEIGHT.to_vec().into());
         let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
         rt.search(&data, &ImplementationSearchOptions::default())
             .expect("search finds a plan");

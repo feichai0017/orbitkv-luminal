@@ -98,6 +98,24 @@ impl Graph {
 
 impl GraphTensor {
     pub fn cast(self, dtype: DType) -> GraphTensor {
+        // Cast policy (2026-08-11): float -> int is a REFUSAL — a
+        // rounding/truncation is a lossy read and must be an explicit
+        // op, never a cast (the Bool8 projection rule generalized).
+        // Refused at authoring time so the author sees it, not the
+        // search.
+        let float_source = matches!(
+            self.dtype,
+            DType::F32 | DType::F64 | DType::F16 | DType::Bf16 | DType::TF32
+        );
+        let int_target = matches!(dtype, DType::Int | DType::I64);
+        assert!(
+            !(float_source && int_target),
+            "cast {:?} -> {:?} is refused: a float -> int conversion is a \
+             lossy read and must appear as an explicit op in the model, \
+             never as a cast (typed-buffers ruling 2026-08-11)",
+            self.dtype,
+            dtype
+        );
         if self.dtype == dtype {
             return self;
         }
@@ -219,9 +237,9 @@ mod tests {
         let rt = crate::test_support::run_ssa(
             &cx,
             &[
-                (a.id, a_data.clone()),
-                (b.id, b_data.clone()),
-                (c.id, c_data.clone()),
+                (a.id, a_data.clone().into()),
+                (b.id, b_data.clone().into()),
+                (c.id, c_data.clone().into()),
             ],
         );
 

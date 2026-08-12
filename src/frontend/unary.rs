@@ -53,7 +53,13 @@ impl Neg for GraphTensor {
     type Output = GraphTensor;
 
     fn neg(self) -> Self::Output {
-        self * -1.
+        // Dtype-aware: an Int tensor negates through an Int constant —
+        // the f32 literal would record a refused f32 -> Int cast
+        // (typed-buffers cast policy, 2026-08-11).
+        match self.dtype {
+            DType::Int | DType::I64 => self * Expression::from(-1),
+            _ => self * -1.,
+        }
     }
 }
 
@@ -347,8 +353,11 @@ impl GraphTensor {
         let a = self.expand_dim(axis + 1, ax_size) + 0.0;
         let b = self.expand_dim(axis, ax_size) + 1e-9;
         let cmp = if descending { a.gt(b) } else { a.lt(b) };
-        // ind[j] = rank of element j (how many elements are smaller/larger)
-        let ranks = (cmp.cast(DType::F32) + 0.0).sum(axis).cast(DType::Int);
+        // ind[j] = rank of element j (how many elements are smaller/larger).
+        // Int-native (2026-08-11): the Bool comparison converts through
+        // the exact 0/1 indicator and SUMS in i32 — the old spelling
+        // summed in f32 and cast back, a refused lossy read.
+        let ranks = cmp.cast(DType::Int).sum(axis);
         // Scatter original indices into rank positions to get sort indices
         scatter_ranks_to_sort_indices(ranks, self.dims(), axis, self.graph())
     }
@@ -367,8 +376,8 @@ impl GraphTensor {
         let a_val = self.expand_dim(axis + 1, ax_size) * 1.0;
         let b_val = self.expand_dim(axis, ax_size) * 1.0;
 
-        // Index tensors for tiebreaking
-        let mut iota_a = self.graph().arange(ax_size).cast(DType::F32);
+        // Index tensors for tiebreaking (Int-native comparisons)
+        let mut iota_a = self.graph().arange(ax_size);
         for (i, dim) in exp_dims.iter().take(axis).enumerate() {
             iota_a = iota_a.expand_dim(i, *dim);
         }
@@ -376,7 +385,7 @@ impl GraphTensor {
         for (i, dim) in exp_dims.iter().enumerate().skip(axis + 2) {
             iota_a = iota_a.expand_dim(i, *dim);
         }
-        let mut iota_b = self.graph().arange(ax_size).cast(DType::F32);
+        let mut iota_b = self.graph().arange(ax_size);
         for (i, dim) in exp_dims.iter().take(axis + 1).enumerate() {
             iota_b = iota_b.expand_dim(i, *dim);
         }
@@ -393,13 +402,19 @@ impl GraphTensor {
             a_val.lt(b_val)
         };
         let idx_cmp = iota_a.lt(iota_b);
-        let not_lt = 1.0 - a_val.lt(b_val).cast(DType::F32);
-        let not_gt = 1.0 - a_val.gt(b_val).cast(DType::F32);
-        let val_eq = not_lt * not_gt;
-        let cmp = primary.cast(DType::F32) + val_eq * idx_cmp.cast(DType::F32);
+        // Int-native indicator arithmetic (2026-08-11): every Bool
+        // converts through the exact 0/1 indicator, the counting sum
+        // runs in i32, and no f32 -> Int cast (refused) ever appears.
+        let primary_count = primary.cast(DType::Int);
+        let idx_count = idx_cmp.cast(DType::Int);
+        let lt_count = a_val.lt(b_val).cast(DType::Int);
+        let gt_count = a_val.gt(b_val).cast(DType::Int);
+        let one = self.graph().constant(1).expand_rhs(lt_count.dims());
+        let val_eq = (one - lt_count) * (one - gt_count);
+        let cmp = primary_count + val_eq * idx_count;
 
         // Scatter original indices into rank positions to get sort indices
-        let ranks = cmp.sum(axis).cast(DType::Int);
+        let ranks = cmp.sum(axis);
         scatter_ranks_to_sort_indices(ranks, dims, axis, self.graph())
     }
 
@@ -524,7 +539,7 @@ pub(super) mod tests {
         let b = func(a).output();
 
         let v = random_vec(shape.iter().copied().product());
-        let rt = crate::test_support::run_ssa(&cx, &[(a.id, v.clone())]);
+        let rt = crate::test_support::run_ssa(&cx, &[(a.id, v.clone().into())]);
 
         // Reference
         let device = Device::Cpu;
@@ -694,7 +709,7 @@ pub(super) mod tests {
         //        stable → idx 0 before idx 1
         let x_vals = vec![0.1f32, 3.0, 2.0, -1.0, 5.0, 5.0, 0.0, 7.0];
         let expected = [1.0f32, 2.0, 3.0, 0.0];
-        let rt = crate::test_support::run_ssa(&cx, &[(x.id, x_vals)]);
+        let rt = crate::test_support::run_ssa(&cx, &[(x.id, x_vals.into())]);
         let got = rt.get_f32(out.id).unwrap();
         assert_eq!(got.len(), expected.len());
         for (index, (a, b)) in got.iter().zip(expected).enumerate() {

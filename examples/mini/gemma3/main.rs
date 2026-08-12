@@ -50,13 +50,13 @@ fn main() {
     );
     let logits = logits.output();
 
-    let mut pairs: Vec<(petgraph::graph::NodeIndex, Vec<f32>)> = vec![
-        (ids.id, vec![3.0]),
-        (model.embed.weight.id, weights(VOCAB * D, 199)),
-        (gather_idx.id, vec![0.0, 1.0]),
-        (scatter_idx.id, vec![1.0]),
+    let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
+        (ids.id, vec![3i32].into()),
+        (model.embed.weight.id, weights(VOCAB * D, 199).into()),
+        (gather_idx.id, vec![0i32, 1].into()),
+        (scatter_idx.id, vec![1i32].into()),
         (rope_rot.id, rope_pairing_matrix(HD, false)),
-        (model.final_norm.weight.expect("weighted").id, weights(D, 660)),
+        (model.final_norm.weight.expect("weighted").id, weights(D, 660).into()),
     ];
     for (layer, block) in model.blocks.iter().enumerate() {
         let (cos_table, sin_table) =
@@ -79,8 +79,8 @@ fn main() {
         pairs.push((block.post_ff_norm.weight.expect("weighted").id, weights(D, seed(10))));
         pairs.push((block.q_norm.id, weights(HD, seed(11))));
         pairs.push((block.k_norm.id, weights(HD, seed(12))));
-        pairs.push((caches[layer].0.id, weights(SLOTS * KV_DIM, 300 + layer)));
-        pairs.push((caches[layer].1.id, weights(SLOTS * KV_DIM, 320 + layer)));
+        pairs.push((caches[layer].0.id, weights(SLOTS * KV_DIM, 300 + layer).into()));
+        pairs.push((caches[layer].1.id, weights(SLOTS * KV_DIM, 320 + layer).into()));
     }
     let data = pairs.iter().cloned().collect();
     let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");

@@ -39,17 +39,17 @@ impl MoE {
             }
             acc
         });
-        let routing_flat_idx =
-            (row_offsets.cast(DType::F32) + top_k_indices.cast(DType::F32)).cast(DType::Int);
+        // Int-native flat-index assembly (2026-08-11): both operands are
+        // already Int; the old f32 round trip ended in a refused cast.
+        let routing_flat_idx = row_offsets + top_k_indices;
         let top_k_values = routing_weights.gather1d(routing_flat_idx); // [batch.., k]
 
         // 4. Gather expert weight matrices: [batch.., k, in, out]
         //    flat_idx[.., ki, i, o] = expert_idx[.., ki] * in*out + i * out + o
-        let base = (top_k_indices * io).cast(DType::F32); // [batch.., k]
+        let base = top_k_indices * io; // [batch.., k] (Int)
         let within = activations
             .graph()
-            .iota((in_size, out_size), |c| c[0] * out_size + c[1])
-            .cast(DType::F32); // [in, out] values 0..in*out-1
+            .iota((in_size, out_size), |c| c[0] * out_size + c[1]); // [in, out] (Int)
 
         // Expand base to [batch.., k, in, out]
         let n_base = base.dims().len();
@@ -63,7 +63,7 @@ impl MoE {
             exp_within = exp_within.expand_dim(i, *dim);
         }
 
-        let expert_flat_idx = (exp_base + exp_within).cast(DType::Int);
+        let expert_flat_idx = exp_base + exp_within;
         let gathered = self.expert_weights.gather1d(expert_flat_idx); // [batch.., k, in, out]
 
         // 5. Batched matmul: [batch.., k, 1, in] @ [batch.., k, in, out] → [batch.., k, out]
@@ -144,9 +144,9 @@ mod tests {
         let rt = luminal::test_support::run_ssa(
             &cx,
             &[
-                (x.id, x_vals),
-                (model.router.id, router_vals),
-                (model.expert_weights.id, expert_vals),
+                (x.id, x_vals.into()),
+                (model.router.id, router_vals.into()),
+                (model.expert_weights.id, expert_vals.into()),
             ],
         );
         assert_close(rt.get_f32(out.id).expect("output"), &expected);
