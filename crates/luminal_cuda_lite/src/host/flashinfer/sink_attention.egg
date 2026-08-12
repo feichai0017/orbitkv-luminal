@@ -194,7 +194,7 @@
     )
     (
         (let ?fi (Op (SinkAttention
-            ?nheads (MDiv ?kvdim ?hdim) ?hdim ?input_tokens ?scale_val ?window_val)
+            ?nheads (MDiv ?kvdim ?hdim) ?hdim ?input_tokens ?scale_val ?window_val 1.0)
             (ICons ?q (ICons ?kp (ICons ?vp (ICons ?g
                 (ICons ?qoi (ICons ?kvi (ICons ?s (INil))))))))))
         (union ?out ?fi)

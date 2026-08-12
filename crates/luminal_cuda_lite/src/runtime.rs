@@ -4190,6 +4190,7 @@ impl Runtime for CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &DynMap) -> Self::ExecReturn {
+        crate::host::flashinfer::sink_attention::bump_exec_generation();
         let profile_runtime = std::env::var_os("LUMINAL_CUDA_PROFILE_RECAPTURE").is_some();
         let runtime_profile_start = std::time::Instant::now();
         let mut bucket_dispatch_time = Duration::ZERO;

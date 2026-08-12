@@ -829,6 +829,43 @@ fn build_paged_attention_graph_with_token_dim(
     )
 }
 
+/// Saturate and report whether a SinkAttention e-node was produced — the FA3
+/// (Hopper WGMMA/TMA) op, as opposed to FlashInferAttention which JITs the
+/// FA2-era wrapper.cu. Same saturation, different label.
+fn saturate_and_has_sink_attention(cx: &Graph) -> (bool, Vec<String>) {
+    let (_, op_kinds) = saturate_and_has_flashinfer(cx);
+    (op_kinds.iter().any(|k| k == "SinkAttention"), op_kinds)
+}
+
+/// The sink-FREE FA3 rule (paged_attention.egg) must fire on a plain-softmax
+/// paged GQA graph using the in-graph triu-gather causal mask — the spelling
+/// `examples/llama` uses.
+///
+/// This is what routes such a model from the FA2-era kernel onto FA3. It
+/// asserts the rule MATCHES; it does not assert numerical correctness, and
+/// those are different claims — the q operand must reach the op heads-major,
+/// and a `Mul(q, 1.0)` contiguity barrier silently breaks that for s > 1 while
+/// leaving this test green.
+#[test]
+fn sink_free_rule_fires_on_triu_gather_mask() {
+    if !crate::tests::utilities::gpu_supports_flashinfer() {
+        return;
+    }
+    let (cx, _) = build_paged_attention_graph_with_mask(
+        N_HEADS,
+        N_KV_HEADS,
+        HEAD_DIM,
+        TestMaskKind::TriuGather,
+    );
+    let (has_sink, op_kinds) = saturate_and_has_sink_attention(&cx);
+    assert!(
+        has_sink,
+        "SinkAttention (FA3) was NOT found for the triu-gather causal mask, so \
+         this graph stays on the FA2-era FlashInferAttention op. \
+         OpKinds present: {op_kinds:?}"
+    );
+}
+
 /// Saturate egglog on the graph and report whether a FlashInferAttention
 /// e-node was produced. Helper used by the rule-firing tests.
 fn saturate_and_has_flashinfer(cx: &Graph) -> (bool, Vec<String>) {
