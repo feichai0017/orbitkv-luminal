@@ -1,3 +1,4 @@
+use crate::Linear;
 use luminal::prelude::*;
 
 /// A layer of E experts and a router
@@ -150,5 +151,176 @@ mod tests {
             ],
         );
         assert_close(rt.get_f32(out.id).expect("output"), &expected);
+    }
+}
+
+
+/// The full-fidelity top-k mixture (Qwen3-MoE form, ruling 2026-08-12):
+/// scores = softmax over ALL experts FIRST, then top-k selection, then
+/// the selected probabilities RENORMALIZE to sum 1 (norm_topk_prob).
+/// Expert weights are host-pre-stacked — gate_up [E, 2·I, H] (each
+/// expert's gate rows then up rows) and down [E, H, I] — and fetched
+/// per selected expert by COORDINATE-form gather (the primary; flat
+/// indices at expert-tensor scale would also be provable but the
+/// coordinate spelling never builds them). The in-graph gate/up split
+/// slices a COMPUTE output (no concat downstream — not the divergence
+/// road).
+pub struct MoETopK {
+    /// (E, hidden) router — F32, learned; HF orientation.
+    pub router: Linear,
+    /// (E, 2·intermediate, hidden) stacked gate;up weights.
+    pub gate_up: GraphTensor,
+    /// (E, hidden, intermediate) stacked down weights.
+    pub down: GraphTensor,
+    pub experts: usize,
+    pub top_k: usize,
+    pub hidden: usize,
+    pub intermediate: usize,
+}
+
+impl MoETopK {
+    pub fn new(
+        hidden: usize,
+        intermediate: usize,
+        experts: usize,
+        top_k: usize,
+        cx: &mut Graph,
+    ) -> Self {
+        Self {
+            router: Linear::new_permuted(hidden, experts, false, cx),
+            gate_up: cx.named_tensor("MoeGateUp", (experts, 2 * intermediate, hidden)),
+            down: cx.named_tensor("MoeDown", (experts, hidden, intermediate)),
+            experts,
+            top_k,
+            hidden,
+            intermediate,
+        }
+    }
+
+    /// x (s, hidden) → (s, hidden).
+    pub fn forward(&self, x: GraphTensor) -> GraphTensor {
+        let s = x.dims()[0];
+        let (k, h, i2) = (self.top_k, self.hidden, 2 * self.intermediate);
+        let cx = x.graph();
+
+        // 1. Qwen3 scoring order: softmax over ALL experts, THEN top-k.
+        let probs = self.router.forward(x).softmax(1); // (s, E)
+        let idx = probs.topk_indexes(k, 1); // (s, k) Int
+
+        // 2. Selected probabilities, renormalized to sum 1.
+        let row_of = cx.iota((s, k), |c| c[0]);
+        let picked = probs.gather(&[row_of, idx]); // (s, k)
+        let denom = picked.sum(1).expand_dim(1, k);
+        let weights = picked / denom;
+
+        // 3. Fetch the selected experts' gate_up matrices: (s, k, 2I, H).
+        let e4 = idx.expand_dim(2, i2).expand_dim(3, h);
+        let r4 = cx.iota((s, k, i2, h), |c| c[2]);
+        let c4 = cx.iota((s, k, i2, h), |c| c[3]);
+        let gate_up = self.gate_up.gather(&[e4, r4, c4]);
+
+        // 4. Per-expert projection: (s,k,1,H) @ (s,k,H,2I) → (s,k,2I).
+        let x_e = x.expand_dim(1, k).expand_dim(2, 1);
+        let projected = x_e.matmul(gate_up.permute((0, 1, 3, 2))).squeeze(2);
+
+        // 5. SwiGLU on the fused halves (slices of a compute output).
+        let gate = projected.slice_along(..self.intermediate, 2);
+        let up = projected.slice_along(self.intermediate.., 2);
+        let hidden_states = gate.silu() * up; // (s, k, I)
+
+        // 6. Down projection: (s,k,1,I) @ (s,k,I,H) → (s,k,H).
+        let e_down = idx.expand_dim(2, h).expand_dim(3, self.intermediate);
+        let r_down = cx.iota((s, k, h, self.intermediate), |c| c[2]);
+        let c_down = cx.iota((s, k, h, self.intermediate), |c| c[3]);
+        let down = self.down.gather(&[e_down, r_down, c_down]); // (s,k,H,I)
+        let out_e = hidden_states
+            .expand_dim(2, 1)
+            .matmul(down.permute((0, 1, 3, 2)))
+            .squeeze(2); // (s, k, H)
+
+        // 7. Weighted sum over the k experts.
+        (out_e * weights.expand_dim(2, h)).sum(1)
+    }
+}
+
+#[cfg(test)]
+mod topk_tests {
+    use super::MoETopK;
+    use crate::test_refs::*;
+    use luminal::prelude::*;
+
+    /// The full Qwen3-MoE chain against a scalar reference: softmax over
+    /// ALL experts first, top-k by stable ranking, renormalized picked
+    /// probabilities, per-expert fused gate;up projection, SwiGLU on the
+    /// sliced halves, down projection, weighted sum.
+    #[test]
+    fn moe_topk_matches_scalar_reference() {
+        const S: usize = 2;
+        const H: usize = 4;
+        const I: usize = 3;
+        const E: usize = 4;
+        const K: usize = 2;
+
+        let mut cx = Graph::new();
+        let moe = MoETopK::new(H, I, E, K, &mut cx);
+        let x = cx.tensor((S, H));
+        let out = moe.forward(x).output();
+
+        let x_vals = weights(S * H, 3);
+        let router_vals = weights(E * H, 5); // (E, H) HF orientation
+        let gate_up_vals = weights(E * 2 * I * H, 7);
+        let down_vals = weights(E * H * I, 9);
+
+        // Scalar reference.
+        let mut expected = vec![0f32; S * H];
+        for s_i in 0..S {
+            let xr = &x_vals[s_i * H..(s_i + 1) * H];
+            // Router logits (x @ router.t()) then softmax over E.
+            let mut logits = vec![0f32; E];
+            for (e, logit) in logits.iter_mut().enumerate() {
+                *logit = (0..H).map(|j| xr[j] * router_vals[e * H + j]).sum();
+            }
+            let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = logits.iter().map(|l| (l - max).exp()).collect();
+            let denom: f32 = exps.iter().sum();
+            let probs: Vec<f32> = exps.iter().map(|e| e / denom).collect();
+            // Top-k, largest first, stable (ties by lower index).
+            let mut order: Vec<usize> = (0..E).collect();
+            order.sort_by(|a, b| probs[*b].partial_cmp(&probs[*a]).unwrap().then(a.cmp(b)));
+            let picked: Vec<usize> = order[..K].to_vec();
+            let picked_sum: f32 = picked.iter().map(|e| probs[*e]).sum();
+            for expert in &picked {
+                let weight = probs[*expert] / picked_sum;
+                // Fused gate;up: (2I, H) rows.
+                let w = &gate_up_vals[expert * 2 * I * H..(expert + 1) * 2 * I * H];
+                let mut projected = vec![0f32; 2 * I];
+                for (r, slot) in projected.iter_mut().enumerate() {
+                    *slot = (0..H).map(|j| xr[j] * w[r * H + j]).sum();
+                }
+                let hidden: Vec<f32> = (0..I)
+                    .map(|r| {
+                        let g = projected[r];
+                        let silu = g / (1.0 + (-g).exp());
+                        silu * projected[I + r]
+                    })
+                    .collect();
+                let d = &down_vals[expert * H * I..(expert + 1) * H * I];
+                for r in 0..H {
+                    let v: f32 = (0..I).map(|j| hidden[j] * d[r * I + j]).sum();
+                    expected[s_i * H + r] += weight * v;
+                }
+            }
+        }
+
+        let rt = luminal::test_support::run_ssa(
+            &cx,
+            &[
+                (x.id, x_vals.into()),
+                (moe.router.weight.id, router_vals.into()),
+                (moe.gate_up.id, gate_up_vals.into()),
+                (moe.down.id, down_vals.into()),
+            ],
+        );
+        assert_close(rt.get_f32(out.id).expect("moe out"), &expected);
     }
 }

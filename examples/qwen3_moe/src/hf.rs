@@ -10,19 +10,235 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::model::{HIDDEN, LAYERS, MOE_INTERMEDIATE, NUM_EXPERTS};
-
 /// Index file structure for sharded safetensors models
 #[derive(Deserialize)]
 struct SafetensorsIndex {
     weight_map: HashMap<String, String>,
 }
 
-/// Stored tensor with raw bytes and dtype
+/// Stored tensor data with shape, dtype, and serialized bytes.
 struct StoredTensor {
     shape: Vec<usize>,
-    data: Vec<u8>, // raw bytes in the stored dtype
     dtype: Dtype,
+    data: Vec<u8>,
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.2} GiB", bytes as f64 / GIB)
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.2} MiB", bytes as f64 / MIB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// Convert tensor data to an f32 vec.
+pub(crate) fn tensor_to_f32(tensor: &safetensors::tensor::TensorView) -> Vec<f32> {
+    let dtype = tensor.dtype();
+    let data = tensor.data();
+
+    match dtype {
+        Dtype::F32 => bytemuck::cast_slice::<u8, f32>(data).to_vec(),
+        Dtype::F16 => {
+            let f16_slice: &[f16] = bytemuck::cast_slice(data);
+            f16_slice.iter().map(|x| x.to_f32()).collect()
+        }
+        Dtype::BF16 => {
+            let bf16_slice: &[bf16] = bytemuck::cast_slice(data);
+            bf16_slice.iter().map(|x| x.to_f32()).collect()
+        }
+        other => {
+            panic!("Unsupported dtype for conversion: {other:?}");
+        }
+    }
+}
+
+fn tensor_to_f32_bytes(tensor: &safetensors::tensor::TensorView) -> Vec<u8> {
+    let fp32 = tensor_to_f32(tensor);
+    bytemuck::cast_slice(&fp32).to_vec()
+}
+
+fn tensor_to_bf16_bytes(tensor: &safetensors::tensor::TensorView) -> Vec<u8> {
+    match tensor.dtype() {
+        Dtype::BF16 => tensor.data().to_vec(),
+        _ => tensor_to_f32(tensor)
+            .into_iter()
+            .flat_map(|x| bf16::from_f32(x).to_le_bytes())
+            .collect(),
+    }
+}
+
+/// Norm weights stay F32 in the bf16 pipeline: the model computes norms
+/// (including the per-head QK-norm) in F32 via explicit casts, while the
+/// linear/embedding weights are bf16. `q_norm`/`k_norm` contain "norm", so the
+/// substring check keeps them F32 too.
+fn keep_f32_in_bf16_pipeline(name: &str) -> bool {
+    // The MoE router computes in F32 (Qwen3 scoring fidelity).
+    name.contains("norm") || name.contains("mlp.gate.")
+}
+
+fn stored_tensor_bf16(name: &str, tensor: &safetensors::tensor::TensorView) -> StoredTensor {
+    let shape = tensor.shape().to_vec();
+    if keep_f32_in_bf16_pipeline(name) {
+        StoredTensor {
+            shape,
+            dtype: Dtype::F32,
+            data: tensor_to_f32_bytes(tensor),
+        }
+    } else {
+        StoredTensor {
+            shape,
+            dtype: Dtype::BF16,
+            data: tensor_to_bf16_bytes(tensor),
+        }
+    }
+}
+
+fn model_shard_files(model_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let index_path = model_dir.join("model.safetensors.index.json");
+    let single_shard_path = model_dir.join("model.safetensors");
+
+    if single_shard_path.exists() && !index_path.exists() {
+        Ok(vec![single_shard_path])
+    } else if index_path.exists() {
+        let index_content = std::fs::read_to_string(&index_path)?;
+        let index: SafetensorsIndex = serde_json::from_str(&index_content)?;
+
+        let mut files: Vec<String> = index.weight_map.values().cloned().collect();
+        files.sort();
+        files.dedup();
+
+        Ok(files.into_iter().map(|f| model_dir.join(f)).collect())
+    } else {
+        Err("No model.safetensors or model.safetensors.index.json found".into())
+    }
+}
+
+/// Combines shards into one bf16 file (norms + router F32) and STACKS
+/// the 128 experts per layer: gate;up rows per expert into
+/// mlp.gate_up_weights [E, 2·I, H] and down into mlp.down_weights
+/// [E, H, I]. (The stacking is HOST-side data prep for the MoETopK
+/// construct's coordinate-form fetches — the per-expert gate/up concat
+/// happens here, never in-graph.) Attention projections stay UNFUSED
+/// with original HF names.
+///
+/// Llama-3-8B's lm_head is UNTIED — `lm_head.weight` is a real stored
+/// tensor and combines like any other (bf16).
+pub fn combine_safetensors_to_bf16(
+    model_dir: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let output_path = model_dir.join("model_combined_qwen3moe_v1.safetensors");
+
+    if output_path.exists() {
+        let existing_bytes = std::fs::metadata(&output_path)?.len();
+        println!(
+            "Using existing combined BF16 model at {} ({})",
+            output_path.display(),
+            format_bytes(existing_bytes)
+        );
+        return Ok(output_path);
+    }
+
+    let shard_files = model_shard_files(model_dir)?;
+    println!(
+        "Loading {} shard files (converting to BF16, norms F32)...",
+        shard_files.len()
+    );
+
+    let mut all_tensors: HashMap<String, StoredTensor> = HashMap::new();
+
+    for shard_path in &shard_files {
+        println!(
+            "  Loading {}...",
+            shard_path.file_name().unwrap().to_string_lossy()
+        );
+        let file = File::open(shard_path)?;
+        let mmap = unsafe { MmapOptions::new().map(&file)? };
+        let st = SafeTensors::deserialize(&mmap)?;
+
+        for name in st.names() {
+            let tensor = st.tensor(name)?;
+            all_tensors.insert(name.to_string(), stored_tensor_bf16(name, &tensor));
+        }
+    }
+
+    println!("Extracted {} tensors", all_tensors.len());
+    println!("Saving combined BF16 model to {}...", output_path.display());
+
+    // Stack the per-expert projections (gate;up then down) — see the
+    // module doc. Sizes are read off the tensors themselves.
+    let layer_count = (0..)
+        .take_while(|l| {
+            all_tensors.contains_key(&format!("model.layers.{l}.mlp.experts.0.gate_proj.weight"))
+        })
+        .count();
+    for l in 0..layer_count {
+        let expert_count = (0..)
+            .take_while(|e| {
+                all_tensors
+                    .contains_key(&format!("model.layers.{l}.mlp.experts.{e}.gate_proj.weight"))
+            })
+            .count();
+        let mut gate_up_data = Vec::new();
+        let mut shape_2i_h: Option<Vec<usize>> = None;
+        for e in 0..expert_count {
+            let gate = all_tensors
+                .remove(&format!("model.layers.{l}.mlp.experts.{e}.gate_proj.weight"))
+                .expect("gate_proj present");
+            let up = all_tensors
+                .remove(&format!("model.layers.{l}.mlp.experts.{e}.up_proj.weight"))
+                .expect("up_proj present");
+            assert_eq!(gate.shape, up.shape, "gate/up shapes agree");
+            assert_eq!(gate.dtype, Dtype::BF16);
+            shape_2i_h = Some(vec![expert_count, gate.shape[0] * 2, gate.shape[1]]);
+            gate_up_data.extend_from_slice(&gate.data);
+            gate_up_data.extend_from_slice(&up.data);
+        }
+        all_tensors.insert(
+            format!("model.layers.{l}.mlp.gate_up_weights"),
+            StoredTensor {
+                shape: shape_2i_h.expect("experts existed"),
+                dtype: Dtype::BF16,
+                data: gate_up_data,
+            },
+        );
+        let mut down_data = Vec::new();
+        let mut shape_h_i: Option<Vec<usize>> = None;
+        for e in 0..expert_count {
+            let down = all_tensors
+                .remove(&format!("model.layers.{l}.mlp.experts.{e}.down_proj.weight"))
+                .expect("down_proj present");
+            shape_h_i = Some(vec![expert_count, down.shape[0], down.shape[1]]);
+            down_data.extend_from_slice(&down.data);
+        }
+        all_tensors.insert(
+            format!("model.layers.{l}.mlp.down_weights"),
+            StoredTensor {
+                shape: shape_h_i.expect("experts existed"),
+                dtype: Dtype::BF16,
+                data: down_data,
+            },
+        );
+    }
+
+    let tensor_views: HashMap<String, TensorView<'_>> = all_tensors
+        .iter()
+        .map(|(name, stored)| {
+            let view = TensorView::new(stored.dtype, stored.shape.clone(), &stored.data).unwrap();
+            (name.clone(), view)
+        })
+        .collect();
+
+    let serialized = safetensors::serialize(&tensor_views, None)?;
+
+    let mut file = File::create(&output_path)?;
+    file.write_all(&serialized)?;
+
+    println!("Combined BF16 model saved successfully!");
+    Ok(output_path)
 }
 
 /// Downloads model files from HuggingFace and returns the cache directory path.
@@ -52,247 +268,13 @@ pub fn download_hf_model(repo_id: &str) -> Result<PathBuf, Box<dyn std::error::E
     Ok(model_dir)
 }
 
-/// Convert tensor data to f32 bytes (as raw u8)
-fn tensor_to_f32_bytes(tensor: &safetensors::tensor::TensorView) -> Vec<u8> {
-    let dtype = tensor.dtype();
-    let data = tensor.data();
-
-    let f32_data: Vec<f32> = match dtype {
-        Dtype::F32 => return data.to_vec(), // already F32 bytes
-        Dtype::F16 => {
-            let f16_slice: &[f16] = bytemuck::cast_slice(data);
-            f16_slice.iter().map(|x| x.to_f32()).collect()
-        }
-        Dtype::BF16 => {
-            let bf16_slice: &[bf16] = bytemuck::cast_slice(data);
-            bf16_slice.iter().map(|x| x.to_f32()).collect()
-        }
-        other => {
-            panic!("Unsupported dtype for conversion: {other:?}");
-        }
-    };
-    bytemuck::cast_slice(&f32_data).to_vec()
-}
-
-/// Tensors that stay F32 in the bf16 pipeline: norm weights (norms compute
-/// in F32 via explicit casts) and the MoE router.
-fn keep_f32(name: &str) -> bool {
-    name.contains("norm") || name.ends_with("mlp.gate.weight")
-}
-
-/// Check if a tensor name is an expert weight (large, should be stored as BF16)
-fn is_expert_weight(name: &str) -> bool {
-    name.contains(".mlp.experts.")
-        || name.contains(".mlp.gate_up_weights")
-        || name.contains(".mlp.down_weights")
-}
-
-/// Combines sharded safetensors files into a single mixed-precision file.
-///
-/// Expert weights are stored as BF16 (saves ~60GB), non-expert weights as F32 (~6GB).
-pub fn combine_safetensors(model_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let output_path = model_dir.join("model_combined_bf16_v1.safetensors");
-
-    // Skip if already combined
-    if output_path.exists() {
-        return Ok(output_path);
-    }
-
-    let index_path = model_dir.join("model.safetensors.index.json");
-    let single_shard_path = model_dir.join("model.safetensors");
-
-    // Determine which shard files to load
-    let shard_files: Vec<PathBuf> = if single_shard_path.exists() && !index_path.exists() {
-        println!("Single shard model detected...");
-        vec![single_shard_path]
-    } else if index_path.exists() {
-        let index_content = std::fs::read_to_string(&index_path)?;
-        let index: SafetensorsIndex = serde_json::from_str(&index_content)?;
-
-        let mut files: Vec<String> = index.weight_map.values().cloned().collect();
-        files.sort();
-        files.dedup();
-
-        println!("Loading {} shard files...", files.len());
-        files.into_iter().map(|f| model_dir.join(f)).collect()
-    } else {
-        return Err("No model.safetensors or model.safetensors.index.json found".into());
-    };
-
-    // Load all tensors: expert weights kept as BF16, non-expert converted to F32
-    let mut all_tensors: HashMap<String, StoredTensor> = HashMap::new();
-
-    for shard_path in &shard_files {
-        println!(
-            "  Loading {}...",
-            shard_path.file_name().unwrap().to_string_lossy()
-        );
-        let file = File::open(shard_path)?;
-        let mmap = unsafe { MmapOptions::new().map(&file)? };
-        let st = SafeTensors::deserialize(&mmap)?;
-
-        for name in st.names() {
-            let tensor = st.tensor(name)?;
-            let shape: Vec<usize> = tensor.shape().to_vec();
-
-            if is_expert_weight(name) {
-                // Expert weights as BF16 (saves ~54 GB → ~27 GB)
-                let data = match tensor.dtype() {
-                    Dtype::BF16 => tensor.data().to_vec(),
-                    Dtype::F16 => {
-                        let f16_slice: &[f16] = bytemuck::cast_slice(tensor.data());
-                        let bf16_data: Vec<bf16> = f16_slice
-                            .iter()
-                            .map(|x| bf16::from_f32(x.to_f32()))
-                            .collect();
-                        bytemuck::cast_slice(&bf16_data).to_vec()
-                    }
-                    Dtype::F32 => {
-                        let f32_slice: &[f32] = bytemuck::cast_slice(tensor.data());
-                        let bf16_data: Vec<bf16> =
-                            f32_slice.iter().map(|x| bf16::from_f32(*x)).collect();
-                        bytemuck::cast_slice(&bf16_data).to_vec()
-                    }
-                    other => panic!("Unsupported dtype: {other:?}"),
-                };
-                all_tensors.insert(
-                    name.to_string(),
-                    StoredTensor {
-                        shape,
-                        data,
-                        dtype: Dtype::BF16,
-                    },
-                );
-            } else if keep_f32(name) {
-                // Norm weights and the router stay F32: norms are computed in
-                // F32 per the dtype contract, and routing softmax/top-k
-                // numerics shouldn't shift with the activation dtype.
-                let data = tensor_to_f32_bytes(&tensor);
-                all_tensors.insert(
-                    name.to_string(),
-                    StoredTensor {
-                        shape,
-                        data,
-                        dtype: Dtype::F32,
-                    },
-                );
-            } else {
-                // Everything else (dense projections, embeddings, lm_head)
-                // stores BF16 for the bf16-activation pipeline.
-                let f32_bytes = tensor_to_f32_bytes(&tensor);
-                let f32_slice: &[f32] = bytemuck::cast_slice(&f32_bytes);
-                let bf16_data: Vec<bf16> = f32_slice.iter().map(|x| bf16::from_f32(*x)).collect();
-                all_tensors.insert(
-                    name.to_string(),
-                    StoredTensor {
-                        shape,
-                        data: bytemuck::cast_slice(&bf16_data).to_vec(),
-                        dtype: Dtype::BF16,
-                    },
-                );
-            }
-        }
-    }
-
-    println!("Extracted {} tensors", all_tensors.len());
-
-    // Stack per-expert weights into combined tensors
-    println!("Stacking expert weights (BF16)...");
-    let gate_size_bf16 = MOE_INTERMEDIATE * HIDDEN * 2; // bytes: 768 * 2048 * 2
-    let gate_up_size_bf16 = MOE_INTERMEDIATE * 2 * HIDDEN * 2; // bytes after concat
-    let down_size_bf16 = HIDDEN * MOE_INTERMEDIATE * 2; // bytes: 2048 * 768 * 2
-
-    for l in 0..LAYERS {
-        // Concatenate gate_proj + up_proj per expert, then stack
-        let mut gate_up_data = Vec::with_capacity(NUM_EXPERTS * gate_up_size_bf16);
-        for e in 0..NUM_EXPERTS {
-            let gate_key = format!("model.layers.{l}.mlp.experts.{e}.gate_proj.weight");
-            let up_key = format!("model.layers.{l}.mlp.experts.{e}.up_proj.weight");
-            let gate = all_tensors
-                .remove(&gate_key)
-                .unwrap_or_else(|| panic!("Missing tensor: {gate_key}"));
-            let up = all_tensors
-                .remove(&up_key)
-                .unwrap_or_else(|| panic!("Missing tensor: {up_key}"));
-            assert_eq!(
-                gate.data.len(),
-                gate_size_bf16,
-                "gate_proj size mismatch layer {l} expert {e}"
-            );
-            assert_eq!(
-                up.data.len(),
-                gate_size_bf16,
-                "up_proj size mismatch layer {l} expert {e}"
-            );
-            // Concatenate: gate first, then up
-            gate_up_data.extend_from_slice(&gate.data);
-            gate_up_data.extend_from_slice(&up.data);
-        }
-        all_tensors.insert(
-            format!("model.layers.{l}.mlp.gate_up_weights"),
-            StoredTensor {
-                shape: vec![NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN],
-                data: gate_up_data,
-                dtype: Dtype::BF16,
-            },
-        );
-
-        // Stack down_proj weights
-        let mut down_data = Vec::with_capacity(NUM_EXPERTS * down_size_bf16);
-        for e in 0..NUM_EXPERTS {
-            let key = format!("model.layers.{l}.mlp.experts.{e}.down_proj.weight");
-            let tensor = all_tensors
-                .remove(&key)
-                .unwrap_or_else(|| panic!("Missing tensor: {key}"));
-            assert_eq!(
-                tensor.data.len(),
-                down_size_bf16,
-                "down_proj size mismatch layer {l} expert {e}"
-            );
-            down_data.extend_from_slice(&tensor.data);
-        }
-        all_tensors.insert(
-            format!("model.layers.{l}.mlp.down_weights"),
-            StoredTensor {
-                shape: vec![NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE],
-                data: down_data,
-                dtype: Dtype::BF16,
-            },
-        );
-
-        if (l + 1) % 10 == 0 {
-            println!("  Stacked experts for {}/{} layers", l + 1, LAYERS);
-        }
-    }
-
-    println!(
-        "After stacking: {} tensors in combined file",
-        all_tensors.len()
-    );
-
-    // Serialize to combined file
-    println!("Saving combined model (BF16 experts + F32 rest)...");
-
-    let tensor_views: HashMap<String, TensorView<'_>> = all_tensors
-        .iter()
-        .map(|(name, stored)| {
-            let view = TensorView::new(stored.dtype, stored.shape.clone(), &stored.data).unwrap();
-            (name.clone(), view)
-        })
-        .collect();
-
-    let serialized = safetensors::serialize(&tensor_views, None)?;
-
-    let mut file = File::create(&output_path)?;
-    file.write_all(&serialized)?;
-
-    println!("Combined model saved successfully!");
-    Ok(output_path)
-}
-
 /// Downloads a model from HuggingFace and prepares it for use.
+///
+/// Returns the path to the model directory containing:
+/// - tokenizer.json
+/// - model_combined_qwen3moe_v1.safetensors
 pub fn prepare_hf_model(repo_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let model_dir = download_hf_model(repo_id)?;
-    combine_safetensors(&model_dir)?;
+    combine_safetensors_to_bf16(&model_dir)?;
     Ok(model_dir)
 }
