@@ -61,6 +61,7 @@ members = [
     "examples/llama3",
     "examples/paged_llama3",
     "examples/llama3_1_fp8",
+    "examples/gemma3",
 ]
 
 [patch.crates-io]

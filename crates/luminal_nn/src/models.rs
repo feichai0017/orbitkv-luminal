@@ -502,6 +502,61 @@ impl GemmaBlock {
         let ff = self.down.forward(gated * self.up.forward(ff_in));
         (x + self.post_ff_norm.forward(ff), k_cache, v_cache)
     }
+
+    /// [`Self::forward`] with the query position as DATA (q_pos Int
+    /// input) — the step-invariant decode form; window, dual-theta rope
+    /// tables, folded scale, and sandwich norms all preserved.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_positional(
+        &self,
+        x: GraphTensor,
+        k_cache: GraphTensor,
+        v_cache: GraphTensor,
+        gather_idx: GraphTensor,
+        scatter_idx: GraphTensor,
+        q_pos: GraphTensor,
+        rope_cos: GraphTensor,
+        rope_sin: GraphTensor,
+        rope_rot: GraphTensor,
+    ) -> (GraphTensor, GraphTensor, GraphTensor) {
+        let normed = self.input_norm.forward(x);
+        let scale = 1.0 / (self.head_dim as f32).sqrt();
+        let q = crate::rotary_apply(
+            crate::rms_norm_heads(self.wq.forward(normed), self.head_dim, self.q_norm, 1e-6)
+                * scale,
+            self.head_dim,
+            rope_cos,
+            rope_sin,
+            rope_rot,
+        );
+        let k = crate::rotary_apply(
+            crate::rms_norm_heads(self.wk.forward(normed), self.head_dim, self.k_norm, 1e-6),
+            self.head_dim,
+            rope_cos,
+            rope_sin,
+            rope_rot,
+        );
+        let (attn, k_cache, v_cache) = crate::paged_attention_positional(
+            q,
+            k,
+            self.wv.forward(normed),
+            k_cache,
+            v_cache,
+            gather_idx,
+            scatter_idx,
+            q_pos,
+            self.n_heads,
+            self.n_kv_heads,
+            self.head_dim,
+            self.local.then_some(self.window),
+            1.0, // scale folded into q above
+        );
+        let x = x + self.post_attn_norm.forward(self.wo.forward(attn));
+        let ff_in = self.pre_ff_norm.forward(x);
+        let gated = self.gate.forward(ff_in).gelu_fast_tanh_approximation();
+        let ff = self.down.forward(gated * self.up.forward(ff_in));
+        (x + self.post_ff_norm.forward(ff), k_cache, v_cache)
+    }
 }
 
 #[cfg(test)]
