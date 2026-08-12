@@ -3348,5 +3348,47 @@ mod subst_guard_study {
             }
         }
     }
-}
 
+    /// INTERFACE-SURFACE PIN (Stage 1, 2026-08-12): input_specs
+    /// returns the PRISTINE label plus geometry; output_named surfaces
+    /// through output_specs and the model text; duplicate output names
+    /// poison the graph loudly.
+    #[test]
+    fn interface_specs_report_pristine_labels_and_named_outputs() {
+        use crate::prelude::{DType, Graph};
+        let mut cx = Graph::default();
+        let a = cx.named_tensor("blocks.0.wq.weight", (2usize, 3usize));
+        let b = cx.tensor((2usize, 3usize));
+        let _ = (a + b).output_named("logits");
+
+        let inputs = cx.logical.input_specs();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].label, "blocks.0.wq.weight");
+        assert_eq!(inputs[0].id, a.id, "spec id is the staging key");
+        assert_eq!(
+            inputs[0].dims.iter().map(|d| d.to_usize().unwrap()).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(inputs[0].dtype, DType::F32);
+        assert_eq!(
+            inputs[1].label, "",
+            "anonymous inputs keep an empty pristine label until auto-naming lands"
+        );
+
+        let outputs = cx.logical.output_specs();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].label, "logits");
+        let text = cx.logical.model_text().expect("records clean");
+        assert!(
+            text.contains("(LogicalTensorNamed (LogicalIdLit \"logits\"))"),
+            "authored output name reaches the IR text"
+        );
+
+        let c = cx.tensor((2usize, 3usize));
+        let _ = c.output_named("logits");
+        assert!(
+            cx.logical.model_text().unwrap_err().contains("duplicate output name"),
+            "second \"logits\" poisons loudly"
+        );
+    }
+}

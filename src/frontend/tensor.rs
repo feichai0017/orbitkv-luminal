@@ -86,6 +86,22 @@ impl GraphTensor {
             source.id.index(),
             &(source.logical_value, dims),
             source.id.index(),
+            None,
+        );
+        source
+    }
+
+    /// `.output()` with an authored interface name — the label
+    /// `output_specs()` reports (duplicate names poison the graph;
+    /// unnamed outputs keep the synthesized "out_{key}").
+    pub fn output_named(&self, name: &str) -> GraphTensor {
+        let source = *self;
+        let dims = source.dims();
+        self.graph().logical.output(
+            source.id.index(),
+            &(source.logical_value, dims),
+            source.id.index(),
+            Some(name),
         );
         source
     }

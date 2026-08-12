@@ -20,7 +20,7 @@ fn full_graph_records_cleanly() {
         "conv unfolds record as index-map views"
     );
     // The respelling holds: per-scale anchors exist as separate inputs.
-    let labels: Vec<String> = cx.logical.input_labels().into_iter().map(|(l, _)| l).collect();
+    let labels: Vec<String> = cx.logical.input_specs().into_iter().map(|s| s.label).collect();
     for i in 0..3 {
         assert!(labels.contains(&format!("yolo.anchors.{i}")), "per-scale anchors {i}");
     }
@@ -41,17 +41,24 @@ fn saturation_probe() {
     let _ = (img, yolo);
     let mut pairs: Vec<(petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer)> =
         Vec::new();
-    for (seed, (label, id)) in cx.logical.input_labels().into_iter().enumerate() {
-        let _ = label;
-        // Shapes come from the graph itself; fill deterministic junk.
-        let n: usize = cx
-            .logical
-            .input_static_len(id)
-            .expect("static input extent");
+    for (seed, spec) in cx.logical.input_specs().into_iter().enumerate() {
+        // Geometry comes from the graph itself; fill deterministic junk.
+        assert_eq!(
+            spec.dtype,
+            luminal::prelude::DType::F32,
+            "junk-fill is F32-only; '{}' declares {:?}",
+            spec.label,
+            spec.dtype
+        );
+        let n: usize = spec
+            .dims
+            .iter()
+            .map(|d| d.to_usize().expect("static input extent"))
+            .product();
         let data: Vec<f32> = (0..n)
             .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
             .collect();
-        pairs.push((id, data.into()));
+        pairs.push((spec.id, data.into()));
     }
     let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
     let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();

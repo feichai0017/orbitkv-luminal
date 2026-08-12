@@ -320,7 +320,8 @@ fn main() {
     let tensors = safetensors::SafeTensors::deserialize(&mmap).expect("weights parse");
     let mut pairs: Vec<(petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer)> =
         Vec::new();
-    for (label, id) in cx.logical.input_labels() {
+    for spec in cx.logical.input_specs() {
+        let (label, id) = (spec.label, spec.id);
         if label == "input.image" {
             pairs.push((id, img_data.clone().into()));
         } else if let Some((i, anchors, _)) = scale_data

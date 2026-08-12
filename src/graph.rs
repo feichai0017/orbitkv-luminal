@@ -298,15 +298,47 @@ struct Value {
     /// For inputs: the transitional binding-slot key (HLIR node index —
     /// their set_data keying; dies with the HLIR pipeline).
     input_slot: Option<usize>,
-    /// The input declaration label ("{label}_{slot}").
+    /// The PRISTINE input label — exactly the string the caller passed
+    /// to `named_tensor*` (ruling 2026-08-12: canonical labels are
+    /// stored as data, never re-derived from the rendered
+    /// "{label}_{slot}" identity string).
     input_label: Option<String>,
+}
+
+/// One `.output()` designation: the value, the numeric key (the
+/// frontend tensor id — the readback handle), and the optional
+/// authored name.
+#[derive(Debug)]
+struct OutputRecord {
+    value: ValueId,
+    key: usize,
+    label: Option<String>,
+}
+
+/// One bound input of the recorded model: the pristine label, the
+/// staging id (what set_data/search key on), and the declared
+/// geometry. `dtype` is the AUTHORED dtype — Bool inputs stage as
+/// Bool8 buffers per the Bool8 boundary contract.
+pub struct InputSpec {
+    pub label: String,
+    pub id: petgraph::graph::NodeIndex,
+    pub dims: Vec<Expression>,
+    pub dtype: DType,
+}
+
+/// One output designation: the label (authored via `output_named`,
+/// else the synthesized "out_{key}") and the readback id (the
+/// get_f32-family key).
+pub struct OutputSpec {
+    pub label: String,
+    pub id: petgraph::graph::NodeIndex,
 }
 
 #[derive(Debug, Default)]
 pub struct LogicalGraph {
     values: Vec<Value>,
-    /// (value, output key) pairs in .output() order.
-    outputs: Vec<(ValueId, usize)>,
+    /// Output designations in .output() order.
+    outputs: Vec<OutputRecord>,
     post_checks: String,
     poisoned: Option<String>,
 }
@@ -341,8 +373,8 @@ impl LogicalGraph {
     }
 
     /// The recorded output designations, in .output() order.
-    pub(crate) fn viz_outputs(&self) -> &[(ValueId, usize)] {
-        &self.outputs
+    pub(crate) fn viz_outputs(&self) -> impl Iterator<Item = (ValueId, usize)> + '_ {
+        self.outputs.iter().map(|record| (record.value, record.key))
     }
 
     fn dim_term(expr: &Expression) -> Result<String, String> {
@@ -479,7 +511,7 @@ impl LogicalGraph {
             dims: dims.to_vec(),
             dtype,
             input_slot: Some(slot),
-            input_label: Some(full_label),
+            input_label: Some(label.to_string()),
         });
         if dtype == DType::Bool {
             return self.op(
@@ -494,37 +526,38 @@ impl LogicalGraph {
         Some(lit)
     }
 
-    /// Every bound input's (label, tensor id) — the label the caller
-    /// passed to `named_tensor*`, without the slot suffix. The
-    /// label-keyed twin of the slot tables, for checkpoint-name-driven
-    /// staging (the load_safetensors precedent).
-    pub fn input_labels(&self) -> Vec<(String, petgraph::graph::NodeIndex)> {
+    /// Every bound input, in declaration order — the model's input
+    /// interface, discoverable from the IR alone (checkpoint-name-
+    /// driven staging: match `label` against checkpoint keys, stage by
+    /// `id`). Labels are stored pristine; label uniqueness is an
+    /// authoring obligation until the namespace tripwire lands.
+    pub fn input_specs(&self) -> Vec<InputSpec> {
         self.values
             .iter()
             .filter_map(|value| {
                 let slot = value.input_slot?;
-                let label = value.input_label.as_ref()?;
-                let stripped = label
-                    .strip_suffix(&format!("_{slot}"))
-                    .unwrap_or(label)
-                    .to_string();
-                Some((stripped, petgraph::graph::NodeIndex::new(slot)))
+                Some(InputSpec {
+                    label: value.input_label.clone()?,
+                    id: petgraph::graph::NodeIndex::new(slot),
+                    dims: value.dims.clone(),
+                    dtype: value.dtype,
+                })
             })
             .collect()
     }
 
-    /// Static element count of the input occupying `slot` — None (loudly
-    /// at the caller) on symbolic dims or an unknown slot.
-    pub fn input_static_len(&self, slot: petgraph::graph::NodeIndex) -> Option<usize> {
-        let value = self
-            .values
+    /// Every output designation, in .output() order.
+    pub fn output_specs(&self) -> Vec<OutputSpec> {
+        self.outputs
             .iter()
-            .find(|value| value.input_slot == Some(slot.index()))?;
-        value
-            .dims
-            .iter()
-            .map(|d| d.to_usize())
-            .try_fold(1usize, |acc, d| Some(acc * d?))
+            .map(|record| OutputSpec {
+                label: record
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("out_{}", record.key)),
+                id: petgraph::graph::NodeIndex::new(record.key),
+            })
+            .collect()
     }
 
     /// Record an op over operand values.
@@ -1140,9 +1173,18 @@ impl LogicalGraph {
 
     /// Record an output designation. Phase A: views stay refused until
     /// the native view-output story is proven.
-    pub fn output(&mut self, at: usize, operand: &Operand, key: usize) {
+    pub fn output(&mut self, at: usize, operand: &Operand, key: usize, label: Option<&str>) {
         if self.poisoned.is_some() {
             return;
+        }
+        if let Some(name) = label {
+            if self
+                .outputs
+                .iter()
+                .any(|record| record.label.as_deref() == Some(name))
+            {
+                return self.poison(format!("duplicate output name \"{name}\""));
+            }
         }
         let id = match self.resolve(operand, &format!("output of t{at}")) {
             Ok(id) => id,
@@ -1152,14 +1194,18 @@ impl LogicalGraph {
         // boundary on the value and search prices the materialization.
         // (The genuinely divergent case — their pipeline's non-contiguous
         // materialize path — already poisons via its gather1d.)
-        self.outputs.push((id, key));
+        self.outputs.push(OutputRecord {
+            value: id,
+            key,
+            label: label.map(str::to_string),
+        });
     }
 
     /// The live set: every value transitively reachable from the outputs,
     /// plus every input declaration (bindings enumerate all inputs).
     pub(crate) fn live_set(&self) -> Vec<bool> {
         let mut live = vec![false; self.values.len()];
-        let mut stack: Vec<ValueId> = self.outputs.iter().map(|(id, _)| *id).collect();
+        let mut stack: Vec<ValueId> = self.outputs.iter().map(|record| record.value).collect();
         for (index, value) in self.values.iter().enumerate() {
             if value.input_slot.is_some() {
                 stack.push(ValueId(index as u32));
@@ -1224,10 +1270,14 @@ impl LogicalGraph {
                 text.push_str(&self.render_value(ValueId(index as u32)));
             }
         }
-        for (id, key) in &self.outputs {
+        for record in &self.outputs {
+            let name = match &record.label {
+                Some(label) => label.clone(),
+                None => format!("out_{}", record.key),
+            };
             text.push_str(&format!(
-                "(union v{} (LogicalTensorNamed (LogicalIdLit \"out_{key}\")))\n",
-                id.0
+                "(union v{} (LogicalTensorNamed (LogicalIdLit \"{name}\")))\n",
+                record.value.0
             ));
         }
         Ok(text)
@@ -1280,7 +1330,8 @@ impl LogicalGraph {
         }
         let mut output_slots = Vec::new();
         let mut output_buffer_tensors = Vec::new();
-        for (id, key) in &self.outputs {
+        for record in &self.outputs {
+            let (id, key) = (record.value, record.key);
             let value = &self.values[id.0 as usize];
             let shape = Self::shape_term(&value.dims)?;
             let stem = format!("natout{key}");
@@ -1295,9 +1346,9 @@ impl LogicalGraph {
             ));
             output_buffer_tensors.push(format!("{stem}_buffer_tensor"));
             output_slots.push(OutputSlot {
-                tensor: petgraph::graph::NodeIndex::new(*key),
+                tensor: petgraph::graph::NodeIndex::new(key),
                 buffer,
-                size: *key as u64,
+                size: key as u64,
             });
         }
         text.push_str(&crate::reference_binding::boundary_lists(

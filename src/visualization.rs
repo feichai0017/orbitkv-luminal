@@ -103,7 +103,7 @@ impl ToDot for crate::graph::LogicalGraph {
         let live = self.live_set();
         let mut out_keys: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
         for (id, key) in self.viz_outputs() {
-            out_keys.entry(id.0).or_default().push(*key);
+            out_keys.entry(id.0).or_default().push(key);
         }
         let mut out = String::from("digraph LogicalGraph {\n  node [fontname=\"Helvetica\"];\n  edge [fontname=\"Helvetica\"];\n");
         for (index, (constructor, operands, dims, dtype, input_label)) in
