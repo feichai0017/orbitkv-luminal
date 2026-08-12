@@ -1,0 +1,22 @@
+; Value bounds : LogicalReduceSum — a sum of n elements each in
+; [lo, hi], with n itself in the reduced extent's scalar bounds
+; (n >= 0 always; n_lo = 0 covers the empty-axis sum = 0 case).
+(rule
+  (
+    (= ?out (LogicalReduceSum ?in ?axis))
+    (= ?in_shape (shape-of ?in))
+    (= ?in_shape (ShapeLit ?dims))
+    (= ?extent (expr-list-nth-from-end ?dims ?axis))
+    (= ?n_lower (lower-bound-of ?extent))
+    (= ?n_upper (upper-bound-of ?extent))
+    (>= ?n_lower (bigint 0))
+    (= ?lower (value-lower-bound-of ?in))
+    (= ?upper (value-upper-bound-of ?in))
+  )
+  (
+    (set (value-lower-bound-of ?out)
+      (min (* ?n_lower ?lower) (* ?n_upper ?lower)))
+    (set (value-upper-bound-of ?out)
+      (max (* ?n_lower ?upper) (* ?n_upper ?upper)))
+  )
+)

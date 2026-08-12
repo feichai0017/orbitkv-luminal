@@ -1,0 +1,15 @@
+; Value bounds : LogicalReduceMax — max never leaves the operand range.
+(rule
+  (
+    (= ?out (LogicalReduceMax ?in ?axis))
+    (= ?lower (value-lower-bound-of ?in))
+  )
+  ((set (value-lower-bound-of ?out) ?lower))
+)
+(rule
+  (
+    (= ?out (LogicalReduceMax ?in ?axis))
+    (= ?upper (value-upper-bound-of ?in))
+  )
+  ((set (value-upper-bound-of ?out) ?upper))
+)

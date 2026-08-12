@@ -1,0 +1,16 @@
+; Value bounds : LogicalIndexMapApply — a view/materialization reads
+; elements OF the parent, so the parent's bounds carry over.
+(rule
+  (
+    (= ?out (LogicalIndexMapApply ?parent ?map ?shape))
+    (= ?lower (value-lower-bound-of ?parent))
+  )
+  ((set (value-lower-bound-of ?out) ?lower))
+)
+(rule
+  (
+    (= ?out (LogicalIndexMapApply ?parent ?map ?shape))
+    (= ?upper (value-upper-bound-of ?parent))
+  )
+  ((set (value-upper-bound-of ?out) ?upper))
+)

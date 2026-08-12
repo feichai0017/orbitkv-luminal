@@ -39,6 +39,10 @@ impl LogicalOp for LogicalAdd {
                 text: include_str!("add/dtype.egg"),
             },
             EgglogSnippet {
+                category: SpliceCategory::Rewrites,
+                text: include_str!("add/value_bounds.egg"),
+            },
+            EgglogSnippet {
                 category: SpliceCategory::Shape,
                 text: include_str!("add/shape.egg"),
             },

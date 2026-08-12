@@ -1,0 +1,17 @@
+; Value bounds : LogicalAdd — interval addition.
+(rule
+  (
+    (= ?out (LogicalAdd ?lhs ?rhs))
+    (= ?lhs_lower (value-lower-bound-of ?lhs))
+    (= ?rhs_lower (value-lower-bound-of ?rhs))
+  )
+  ((set (value-lower-bound-of ?out) (+ ?lhs_lower ?rhs_lower)))
+)
+(rule
+  (
+    (= ?out (LogicalAdd ?lhs ?rhs))
+    (= ?lhs_upper (value-upper-bound-of ?lhs))
+    (= ?rhs_upper (value-upper-bound-of ?rhs))
+  )
+  ((set (value-upper-bound-of ?out) (+ ?lhs_upper ?rhs_upper)))
+)

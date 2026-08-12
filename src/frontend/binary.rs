@@ -306,6 +306,69 @@ impl<S: Into<Expression>> Rem<S> for GraphTensor {
 
 // Comparisons, all redurn bools (based on https://github.com/tinygrad/tinygrad/blob/3e0c2d256fe9f4f5f85cd3e4d8733a51d7b4a984/tinygrad/tensor.py#L653)
 impl GraphTensor {
+    /// One strict/trunc binary op recording (typed-buffers landing D).
+    fn int_binary(self, rhs: GraphTensor, constructor: &str) -> GraphTensor {
+        assert_eq!(self.dims(), rhs.dims(), "{constructor}: dims must match");
+        assert_eq!(
+            self.dtype, rhs.dtype,
+            "{constructor}: operands must share one dtype"
+        );
+        assert!(
+            matches!(self.dtype, DType::Int | DType::I64),
+            "{constructor} is an INTEGER op (got {:?})",
+            self.dtype
+        );
+        let new_id = self.graph().mint_id();
+        let logical = self.graph().logical.op(
+            new_id.index(),
+            constructor,
+            &[
+                (self.logical_value, self.dims()),
+                (rhs.logical_value, rhs.dims()),
+            ],
+            "",
+            self.dims(),
+            self.dtype,
+        );
+        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
+            .with_logical(logical)
+    }
+
+    /// Checked Int add (Rust `strict_*` naming, ruling 2026-08-11):
+    /// overflow is a loud kernel panic. The escape hatch for arithmetic
+    /// over caller data the value-bounds analysis cannot bound; plain
+    /// `+` on Int is proof-gated and refuses unproven.
+    pub fn strict_add(self, rhs: GraphTensor) -> GraphTensor {
+        self.int_binary(rhs, "LogicalStrictAdd")
+    }
+
+    /// Checked Int mul; see [`Self::strict_add`].
+    pub fn strict_mul(self, rhs: GraphTensor) -> GraphTensor {
+        self.int_binary(rhs, "LogicalStrictMul")
+    }
+
+    /// Integer truncated division (toward zero) — proof-gated: implements
+    /// only where the divisor's value bounds exclude zero.
+    pub fn trunc_div(self, rhs: GraphTensor) -> GraphTensor {
+        self.int_binary(rhs, "LogicalTruncDiv")
+    }
+
+    /// Integer truncated remainder; see [`Self::trunc_div`].
+    pub fn trunc_rem(self, rhs: GraphTensor) -> GraphTensor {
+        self.int_binary(rhs, "LogicalTruncRem")
+    }
+
+    /// Checked truncated division: zero divisor / MIN÷-1 are loud kernel
+    /// panics; see [`Self::strict_add`].
+    pub fn strict_trunc_div(self, rhs: GraphTensor) -> GraphTensor {
+        self.int_binary(rhs, "LogicalStrictTruncDiv")
+    }
+
+    /// Checked truncated remainder; see [`Self::strict_trunc_div`].
+    pub fn strict_trunc_rem(self, rhs: GraphTensor) -> GraphTensor {
+        self.int_binary(rhs, "LogicalStrictTruncRem")
+    }
+
     /// Less than comparison
     pub fn lt(self, rhs: GraphTensor) -> GraphTensor {
         assert_eq!(self.dims(), rhs.dims(), "Dims must match to lt tensors.");

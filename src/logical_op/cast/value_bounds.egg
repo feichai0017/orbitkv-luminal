@@ -1,0 +1,55 @@
+; Value bounds : LogicalCast. The Bool -> Int indicator is [0, 1];
+; Int <-> Int64 conversions preserve values (the runtime checks
+; narrowing exactness; bounds carry over soundly either way).
+(rule
+  (
+    (= ?out (LogicalCast ?in (Int)))
+    (= (dtype-of ?in) (Bool))
+  )
+  (
+    (set (value-lower-bound-of ?out) (bigint 0))
+    (set (value-upper-bound-of ?out) (bigint 1))
+  )
+)
+(rule
+  (
+    (= ?out (LogicalCast ?in (Int64)))
+    (= (dtype-of ?in) (Bool))
+  )
+  (
+    (set (value-lower-bound-of ?out) (bigint 0))
+    (set (value-upper-bound-of ?out) (bigint 1))
+  )
+)
+(rule
+  (
+    (= ?out (LogicalCast ?in (Int64)))
+    (= (dtype-of ?in) (Int))
+    (= ?lower (value-lower-bound-of ?in))
+  )
+  ((set (value-lower-bound-of ?out) ?lower))
+)
+(rule
+  (
+    (= ?out (LogicalCast ?in (Int64)))
+    (= (dtype-of ?in) (Int))
+    (= ?upper (value-upper-bound-of ?in))
+  )
+  ((set (value-upper-bound-of ?out) ?upper))
+)
+(rule
+  (
+    (= ?out (LogicalCast ?in (Int)))
+    (= (dtype-of ?in) (Int64))
+    (= ?lower (value-lower-bound-of ?in))
+  )
+  ((set (value-lower-bound-of ?out) ?lower))
+)
+(rule
+  (
+    (= ?out (LogicalCast ?in (Int)))
+    (= (dtype-of ?in) (Int64))
+    (= ?upper (value-upper-bound-of ?in))
+  )
+  ((set (value-upper-bound-of ?out) ?upper))
+)

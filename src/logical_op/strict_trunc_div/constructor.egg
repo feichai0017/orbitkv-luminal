@@ -1,0 +1,2 @@
+; The dynamic-checked truncated division: zero divisor or the MIN/-1 corner is a loud kernel panic; see LogicalStrictAdd.
+(constructor LogicalStrictTruncDiv (LogicalTensor LogicalTensor) LogicalTensor)

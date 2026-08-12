@@ -41,6 +41,10 @@ impl LogicalOp for LogicalGather {
                 text: include_str!("gather/dtype.egg"),
             },
             EgglogSnippet {
+                category: SpliceCategory::Rewrites,
+                text: include_str!("gather/value_bounds.egg"),
+            },
+            EgglogSnippet {
                 category: SpliceCategory::Shape,
                 text: include_str!("gather/shape.egg"),
             },

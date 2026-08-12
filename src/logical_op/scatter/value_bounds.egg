@@ -1,0 +1,18 @@
+; Value bounds : LogicalScatter — every output element comes from init
+; or src, so the union interval covers.
+(rule
+  (
+    (= ?out (LogicalScatter ?init ?coords ?src))
+    (= ?init_lower (value-lower-bound-of ?init))
+    (= ?src_lower (value-lower-bound-of ?src))
+  )
+  ((set (value-lower-bound-of ?out) (min ?init_lower ?src_lower)))
+)
+(rule
+  (
+    (= ?out (LogicalScatter ?init ?coords ?src))
+    (= ?init_upper (value-upper-bound-of ?init))
+    (= ?src_upper (value-upper-bound-of ?src))
+  )
+  ((set (value-upper-bound-of ?out) (max ?init_upper ?src_upper)))
+)

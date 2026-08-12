@@ -1242,6 +1242,7 @@ impl LogicalGraph {
                 tensor: petgraph::graph::NodeIndex::new(slot),
                 buffer,
                 size: slot as u64,
+                value_name: format!("v{index}"),
             });
         }
         let mut output_slots = Vec::new();
@@ -1297,6 +1298,9 @@ pub struct InputSlot {
     pub tensor: petgraph::graph::NodeIndex,
     pub buffer: i64,
     pub size: u64,
+    /// The input's SSA value name in the model text (`v{index}`) — the
+    /// handle binding-time seeds (value ranges) attach to.
+    pub value_name: String,
 }
 
 /// One bound output. See [`InputSlot`] for the allocation discipline.

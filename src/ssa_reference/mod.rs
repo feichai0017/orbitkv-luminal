@@ -128,6 +128,34 @@ impl SsaReferenceRuntime {
         Ok(())
     }
 
+    /// BINDING: declare an Int input tensor's VALUE range (typed-buffers
+    /// landing D). Ints are non-wrapping, so plain Int arithmetic only
+    /// implements under value-bounds proofs — for arithmetic over
+    /// caller data the proof starts here, with the caller declaring
+    /// what the data can hold (token ids in [0, vocab), etc.). Bounds
+    /// facts, never pins: the lattice tightens monotonically.
+    pub fn bind_value_range(
+        &mut self,
+        tensor: petgraph::graph::NodeIndex,
+        lower: i64,
+        upper: i64,
+    ) -> Result<()> {
+        let spec = self.native.as_mut().ok_or_else(|| anyhow!("bind before load"))?;
+        anyhow::ensure!(lower <= upper, "empty value range [{lower}, {upper}]");
+        let name = spec
+            .input_slots
+            .iter()
+            .find(|slot| slot.tensor == tensor)
+            .map(|slot| slot.value_name.clone())
+            .ok_or_else(|| anyhow!("tensor {tensor:?} is not a bound input"))?;
+        spec.binding_seeds.push_str(&format!(
+            "(set (value-lower-bound-of {name}) (bigint {lower}))
+             (set (value-upper-bound-of {name}) (bigint {upper}))
+"
+        ));
+        Ok(())
+    }
+
     /// The ALLOWABLE-OPS inventory for this runtime (per-runtime API,
     /// deliberately unstandardized — ruling 2026-07-30).
     pub fn with_ops(&mut self, ops: Vec<&'static str>) -> Result<()> {
@@ -448,6 +476,12 @@ mod tests {
             "LayoutTensorOpScatterFunctionalGeneric",
             "LayoutTensorOpSinFunctionalGeneric",
             "LayoutTensorOpSqrtFunctionalGeneric",
+            "LayoutTensorOpStrictAddFunctionalGeneric",
+            "LayoutTensorOpStrictMulFunctionalGeneric",
+            "LayoutTensorOpStrictTruncDivFunctionalGeneric",
+            "LayoutTensorOpStrictTruncRemFunctionalGeneric",
+            "LayoutTensorOpTruncDivFunctionalGeneric",
+            "LayoutTensorOpTruncRemFunctionalGeneric",
         ];
         assert_eq!(allow, expected, "derived allow list drifted");
         // Registry coherence: no two rows claim one concrete type, and no
@@ -1335,41 +1369,123 @@ mod tests {
         );
     }
 
-    /// Native Int output readback: an Int result reads back through
-    /// get_i32 with NO observe-only cast to F32 — and the values are
-    /// native i32, not rounded floats.
+    /// Native Int output readback through get_i32, with the landing-D
+    /// contract in play: the mul over caller data implements because
+    /// the caller DECLARED the data's range.
     #[test]
     fn differential_int_output_reads_native() {
         let mut cx = crate::graph::Graph::new();
         let idx = cx.tensor_dtyped(5, DType::Int);
         let out = (idx * 3usize).output();
-        let rt = crate::test_support::run_ssa(&cx, &[(idx.id, vec![0i32, 1, 2, 3, 4].into())]);
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        rt.bind_value_range(idx.id, 0, 4).expect("range binds");
+        let mut data = FxHashMap::default();
+        data.insert(idx.id, vec![0i32, 1, 2, 3, 4].into());
+        rt.search(&data, &crate::test_support::harness_search_options())
+            .expect("proven mul implements");
+        rt.set_data(idx.id, vec![0i32, 1, 2, 3, 4]);
+        rt.execute().expect("executes");
         assert_eq!(rt.get_i32(out.id).unwrap(), &vec![0i32, 3, 6, 9, 12]);
     }
 
-    /// Non-wrapping Int arithmetic: an i32 add that overflows is a LOUD
-    /// kernel error at execute, never a wrapped value (ruling
-    /// 2026-08-11; the landing-D bounds proofs will gate this
-    /// statically — this dynamic check is the soundness floor).
+    /// LANDING D, the whole non-wrapping story in three acts.
+    /// (1) A plain Int add over UNBOUNDED caller data is UNPROVABLE —
+    /// no implementation mints and the search refuses loudly.
+    /// (2) `bind_value_range` supplies the caller's contract and the
+    /// SAME graph becomes provable, executes, and reads back exactly.
+    /// (3) The Strict form needs no proof — and an overflow at execute
+    /// is a loud kernel error, never a wrapped value.
     #[test]
-    fn i32_add_overflow_refuses() {
+    fn int_add_proof_gating_three_acts() {
+        // Act 1: unproven plain add refuses at search.
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor_dtyped(1, DType::Int);
         let b = cx.tensor_dtyped(1, DType::Int);
-        let out = (a + b).output();
-        let _ = out;
+        let _out = (a + b).output();
         let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
         let mut data = FxHashMap::default();
         data.insert(a.id, vec![1i32].into());
         data.insert(b.id, vec![2i32].into());
+        let err = rt
+            .search(&data, &crate::test_support::harness_search_options())
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no candidate genome"),
+            "expected the unproven refusal, got: {err:#}"
+        );
+
+        // Act 2: the same graph under declared value ranges proves and runs.
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor_dtyped(1, DType::Int);
+        let b = cx.tensor_dtyped(1, DType::Int);
+        let out = (a + b).output();
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        rt.bind_value_range(a.id, 0, 1000).expect("range binds");
+        rt.bind_value_range(b.id, 0, 1000).expect("range binds");
         rt.search(&data, &crate::test_support::harness_search_options())
-            .expect("search finds a plan");
+            .expect("proven add implements");
+        rt.set_data(a.id, vec![700i32]);
+        rt.set_data(b.id, vec![300i32]);
+        rt.execute().expect("proven add executes");
+        assert_eq!(rt.get_i32(out.id).unwrap(), &vec![1000i32]);
+
+        // Act 3: Strict needs no proof; overflow is loud at execute.
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor_dtyped(1, DType::Int);
+        let b = cx.tensor_dtyped(1, DType::Int);
+        let _out = a.strict_add(b).output();
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        rt.search(&data, &crate::test_support::harness_search_options())
+            .expect("strict add implements without proofs");
         rt.set_data(a.id, vec![i32::MAX]);
         rt.set_data(b.id, vec![1i32]);
         let err = rt.execute().unwrap_err();
         assert!(
             format!("{err:#}").contains("overflow"),
             "expected the checked-add refusal, got: {err:#}"
+        );
+    }
+
+    /// TruncDiv is proof-gated on the divisor excluding zero: with a
+    /// declared positive divisor range it implements and truncates
+    /// toward zero; the Strict form refuses a zero divisor loudly at
+    /// execute.
+    #[test]
+    fn trunc_div_gating_and_strict_zero_divisor() {
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor_dtyped(4, DType::Int);
+        let b = cx.tensor_dtyped(4, DType::Int);
+        let out = a.trunc_div(b).output();
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        rt.bind_value_range(a.id, -100, 100).expect("range binds");
+        rt.bind_value_range(b.id, 2, 4).expect("range binds");
+        let mut data = FxHashMap::default();
+        data.insert(a.id, vec![7i32, -7, 100, -1].into());
+        data.insert(b.id, vec![2i32, 2, 3, 4].into());
+        rt.search(&data, &crate::test_support::harness_search_options())
+            .expect("proven trunc-div implements");
+        rt.set_data(a.id, vec![7i32, -7, 100, -1]);
+        rt.set_data(b.id, vec![2i32, 2, 3, 4]);
+        rt.execute().expect("proven trunc-div executes");
+        assert_eq!(rt.get_i32(out.id).unwrap(), &vec![3i32, -3, 33, 0]);
+
+        // Strict twin: no proof needed, zero divisor loud.
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor_dtyped(1, DType::Int);
+        let b = cx.tensor_dtyped(1, DType::Int);
+        let _out = a.strict_trunc_div(b).output();
+        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut data = FxHashMap::default();
+        data.insert(a.id, vec![7i32].into());
+        data.insert(b.id, vec![2i32].into());
+        rt.search(&data, &crate::test_support::harness_search_options())
+            .expect("strict trunc-div implements");
+        rt.set_data(a.id, vec![7i32]);
+        rt.set_data(b.id, vec![0i32]);
+        let err = rt.execute().unwrap_err();
+        assert!(
+            format!("{err:#}").contains("zero divisor"),
+            "expected the zero-divisor refusal, got: {err:#}"
         );
     }
 }

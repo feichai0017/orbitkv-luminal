@@ -1,0 +1,2 @@
+; The dynamic-checked Int add (Rust strict_* naming, ruling 2026-08-11): overflow is a loud kernel panic. NO ring rewrites — Strict ops are opaque, the escape hatch where bounds proofs cannot reach; plain LogicalAdd is the proof-gated ring citizen.
+(constructor LogicalStrictAdd (LogicalTensor LogicalTensor) LogicalTensor)

@@ -1545,6 +1545,43 @@
   ((set (upper-bound-of ?maximum) (max ?lhs_upper ?rhs_upper)))
 )
 
+; ============================================================
+; TENSOR VALUE BOUNDS (typed-buffers landing D, ruling 2026-08-11)
+; ============================================================
+; Int-dtype LOGICAL TENSORS get optional elementwise value bounds — the
+; same monotone BigInt lattice as the scalar IntExpr bounds above
+; (lower rises :merge max, upper falls :merge min; fail-closed premises:
+; no fact, no fire). PURPOSE: ints are semantically NON-WRAPPING — a
+; plain Int arithmetic op may only be IMPLEMENTED where this analysis
+; proves every element stays in the declared width, so Add/Mul/
+; TruncDiv/TruncRem/ReduceSum mint per-spelling under proofs and refuse
+; otherwise; the Strict* family is the dynamic-checked escape hatch.
+; Per-op propagation rules live in each op module's value_bounds.egg;
+; the seeds below are op-independent. These rules only set lattice
+; facts — never unions.
+(function value-lower-bound-of (LogicalTensor) BigInt :merge (max old new))
+(function value-upper-bound-of (LogicalTensor) BigInt :merge (min old new))
+
+; Iota inheritance: an iota's values ARE its index expression over the
+; shape's coordinates, and the scalar lattice already bounds that
+; expression (CoordVar seeds ride the shape extents) — the tensor
+; simply inherits. This makes every position/coordinate/constant
+; tensor bounded for free.
+(rule
+  (
+    (= ?tensor (LogicalIota ?expr ?shape))
+    (= ?lower (lower-bound-of ?expr))
+  )
+  ((set (value-lower-bound-of ?tensor) ?lower))
+)
+(rule
+  (
+    (= ?tensor (LogicalIota ?expr ?shape))
+    (= ?upper (upper-bound-of ?expr))
+  )
+  ((set (value-upper-bound-of ?tensor) ?upper))
+)
+
 ; BOOL-BRIDGE RULES (Austin's design, 2026-07-29; constructors in the
 ; datatype block). The indicator is always a bit:
 (rule

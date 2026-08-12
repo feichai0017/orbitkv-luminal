@@ -129,10 +129,23 @@ fn vocab_scale_flat_index_arithmetic_stays_exact() {
     let base_t = cx.constant(base).expand_dim(0, 1).expand_dim(1, HIDDEN);
     let residual = (flat - base_t).output();
 
-    let rt = luminal::test_support::run_ssa(
-        &cx,
-        &[(idx.id, TypedBuffer::from(vec![LAST_ROW as i32]))],
-    );
+    // Landing D: the flat products are provable because the caller
+    // DECLARES the index range — the proof chain runs idx ∈ [0, vocab)
+    // through the interval rules to "every partial sum fits i32."
+    let mut rt = luminal::ssa_reference::SsaReferenceRuntime::load(&cx).expect("native load");
+    rt.bind_value_range(idx.id, 0, LAST_ROW as i64).expect("range binds");
+    let mut data = luminal::prelude::FxHashMap::default();
+    data.insert(idx.id, TypedBuffer::from(vec![LAST_ROW as i32]));
+    rt.search(&data, &luminal::implementation_search::ImplementationSearchOptions {
+        generations: 2,
+        generation_size: 4,
+        mutations: 2,
+        trials: 1,
+        seed: 0,
+    })
+    .expect("proven flat-index arithmetic implements");
+    rt.set_data(idx.id, vec![LAST_ROW as i32]);
+    rt.execute().expect("executes");
     let out = rt.get_i32(residual.id).expect("residual");
     assert_eq!(out.len(), HIDDEN);
     for (column, value) in out.iter().enumerate() {

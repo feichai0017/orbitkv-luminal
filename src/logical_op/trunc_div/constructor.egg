@@ -1,0 +1,2 @@
+; Integer truncated division (toward zero) — a DIFFERENT mathematical function from float Div, mirroring the scalar IntTruncDiv (ruling 2026-08-11). Proof-gated: implemented only where the divisor's value bounds exclude zero and the quotient stays in width.
+(constructor LogicalTruncDiv (LogicalTensor LogicalTensor) LogicalTensor)

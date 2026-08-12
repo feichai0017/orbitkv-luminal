@@ -41,6 +41,10 @@ impl LogicalOp for LogicalIndexMapApply {
                 text: include_str!("index_map_apply/dtype.egg"),
             },
             EgglogSnippet {
+                category: SpliceCategory::Rewrites,
+                text: include_str!("index_map_apply/value_bounds.egg"),
+            },
+            EgglogSnippet {
                 category: SpliceCategory::Shape,
                 text: include_str!("index_map_apply/shape.egg"),
             },

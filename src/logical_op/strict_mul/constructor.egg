@@ -1,0 +1,2 @@
+; The dynamic-checked Int mul; see LogicalStrictAdd.
+(constructor LogicalStrictMul (LogicalTensor LogicalTensor) LogicalTensor)

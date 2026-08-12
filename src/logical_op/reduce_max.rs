@@ -39,6 +39,10 @@ impl LogicalOp for LogicalReduceMax {
                 text: include_str!("reduce_max/dtype.egg"),
             },
             EgglogSnippet {
+                category: SpliceCategory::Rewrites,
+                text: include_str!("reduce_max/value_bounds.egg"),
+            },
+            EgglogSnippet {
                 category: SpliceCategory::Shape,
                 text: include_str!("reduce_max/shape.egg"),
             },

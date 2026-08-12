@@ -279,3 +279,61 @@ pub(super) fn add_mul_fused(
     }
     Ok(())
 }
+
+/// Checked Int add/mul bodies shared by the plain (proof-gated) and
+/// Strict (dynamic-checked) forms — under a proof the check is
+/// belt-and-suspenders (a trip means the analysis has a bug; hear it).
+pub(super) fn strict_add(
+    _op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
+    add(_op, ctx)
+}
+
+pub(super) fn strict_mul(
+    _op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
+    mul(_op, ctx)
+}
+
+/// Truncated integer division (toward zero). checked_div covers both
+/// loud cases: zero divisor and the MIN / -1 overflow corner.
+pub(super) fn trunc_div(
+    _op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
+    match &ctx.operands[0] {
+        TypedBuffer::I32(_) => ctx.binary_elementwise_i32(|a, b| {
+            a.checked_div(b).ok_or_else(|| {
+                anyhow::anyhow!("i32 trunc-div refuses: {a} / {b} (zero divisor or MIN/-1)")
+            })
+        }),
+        TypedBuffer::I64(_) => ctx.binary_elementwise_i64(|a, b| {
+            a.checked_div(b).ok_or_else(|| {
+                anyhow::anyhow!("i64 trunc-div refuses: {a} / {b} (zero divisor or MIN/-1)")
+            })
+        }),
+        other => anyhow::bail!("trunc-div has no {} arm (Int only)", other.type_name()),
+    }
+}
+
+/// Truncated integer remainder (sign follows the dividend).
+pub(super) fn trunc_rem(
+    _op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
+    match &ctx.operands[0] {
+        TypedBuffer::I32(_) => ctx.binary_elementwise_i32(|a, b| {
+            a.checked_rem(b).ok_or_else(|| {
+                anyhow::anyhow!("i32 trunc-rem refuses: {a} % {b} (zero divisor or MIN/-1)")
+            })
+        }),
+        TypedBuffer::I64(_) => ctx.binary_elementwise_i64(|a, b| {
+            a.checked_rem(b).ok_or_else(|| {
+                anyhow::anyhow!("i64 trunc-rem refuses: {a} % {b} (zero divisor or MIN/-1)")
+            })
+        }),
+        other => anyhow::bail!("trunc-rem has no {} arm (Int only)", other.type_name()),
+    }
+}

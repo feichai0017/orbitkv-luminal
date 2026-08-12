@@ -251,7 +251,10 @@ impl GraphTensor {
             .constant(axis_dim)
             .expand_rhs(indexes.dims());
         let is_neg = indexes.lt(zero).cast(DType::Int);
-        let idx_normalized = indexes + is_neg * adj;
+        // Caller index data is UNBOUNDED — the value-bounds analysis
+        // cannot prove these sums/products in width, so the assembly
+        // uses the Strict (dynamic-checked) ops (landing D).
+        let idx_normalized = indexes.strict_add(is_neg.strict_mul(adj));
 
         // Non-axis flat contribution as a coordinate function — no
         // flat-index div/mod chain ever enters the model (P1, 2026-08-07).
@@ -266,7 +269,7 @@ impl GraphTensor {
             .graph()
             .constant(strides[axis])
             .expand_rhs(idx_normalized.dims());
-        let flat_idx = non_axis_flat + idx_normalized * stride_tensor;
+        let flat_idx = non_axis_flat.strict_add(idx_normalized.strict_mul(stride_tensor));
 
         self.gather1d(flat_idx)
     }
@@ -315,7 +318,8 @@ impl GraphTensor {
             .constant(axis_dim)
             .expand_rhs(indices.dims());
         let is_neg = indices.lt(zero).cast(DType::Int);
-        let idx_normalized = indices + is_neg * adj;
+        // Strict assembly over caller data — see gather_elements.
+        let idx_normalized = indices.strict_add(is_neg.strict_mul(adj));
 
         // Non-axis flat contribution as a coordinate function (P1).
         let non_axis_flat = self.graph().iota(idx_shape.clone(), |c| {
@@ -329,7 +333,7 @@ impl GraphTensor {
             .graph()
             .constant(strides[axis])
             .expand_rhs(idx_normalized.dims());
-        let flat_dest = non_axis_flat + idx_normalized * stride_tensor;
+        let flat_dest = non_axis_flat.strict_add(idx_normalized.strict_mul(stride_tensor));
 
         // Flatten to 1D using materialize + reshape
         let flat_dest_1d = flat_dest.flatten();
@@ -399,10 +403,11 @@ impl GraphTensor {
             let idx_k = idx_k.squeeze(idx_k.dims().len() - 1);
 
             let stride_tensor = self.graph().constant(stride).expand_rhs(idx_k.dims());
-            let contribution = idx_k * stride_tensor;
+            // Strict assembly over caller data — see gather_elements.
+            let contribution = idx_k.strict_mul(stride_tensor);
 
             flat_base = Some(match flat_base {
-                Some(fb) => fb + contribution,
+                Some(fb) => fb.strict_add(contribution),
                 None => contribution,
             });
         }
@@ -433,7 +438,7 @@ impl GraphTensor {
                     .graph()
                     .constant(data_strides[d])
                     .expand_rhs(ar_flat.dims());
-                base_expanded += ar_flat * stride_tensor;
+                base_expanded = base_expanded.strict_add(ar_flat * stride_tensor);
             }
             base_expanded
         };

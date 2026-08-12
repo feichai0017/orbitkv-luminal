@@ -1,0 +1,1 @@
+(constructor LayoutTensorOpStrictTruncRemFunctionalGeneric (LayoutTensor LayoutTensor Layout) LayoutTensorOp)

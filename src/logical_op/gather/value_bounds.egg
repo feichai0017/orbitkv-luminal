@@ -1,0 +1,16 @@
+; Value bounds : LogicalGather — the output holds elements OF the data
+; tensor, so the data's bounds carry over verbatim.
+(rule
+  (
+    (= ?out (LogicalGather ?data ?coords))
+    (= ?lower (value-lower-bound-of ?data))
+  )
+  ((set (value-lower-bound-of ?out) ?lower))
+)
+(rule
+  (
+    (= ?out (LogicalGather ?data ?coords))
+    (= ?upper (value-upper-bound-of ?data))
+  )
+  ((set (value-upper-bound-of ?out) ?upper))
+)

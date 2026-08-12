@@ -1,0 +1,2 @@
+; Integer truncated remainder, the TruncDiv companion (sign follows the dividend). Proof-gated like TruncDiv.
+(constructor LogicalTruncRem (LogicalTensor LogicalTensor) LogicalTensor)

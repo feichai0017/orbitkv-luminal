@@ -39,6 +39,10 @@ impl LogicalOp for LogicalReduceSum {
                 text: include_str!("reduce_sum/dtype.egg"),
             },
             EgglogSnippet {
+                category: SpliceCategory::Rewrites,
+                text: include_str!("reduce_sum/value_bounds.egg"),
+            },
+            EgglogSnippet {
                 category: SpliceCategory::Shape,
                 text: include_str!("reduce_sum/shape.egg"),
             },

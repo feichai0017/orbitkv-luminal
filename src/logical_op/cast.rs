@@ -39,6 +39,10 @@ impl LogicalOp for LogicalCast {
                 text: include_str!("cast/dtype.egg"),
             },
             EgglogSnippet {
+                category: SpliceCategory::Rewrites,
+                text: include_str!("cast/value_bounds.egg"),
+            },
+            EgglogSnippet {
                 category: SpliceCategory::Shape,
                 text: include_str!("cast/shape.egg"),
             },

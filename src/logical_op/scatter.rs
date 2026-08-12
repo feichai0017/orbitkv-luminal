@@ -42,6 +42,10 @@ impl LogicalOp for LogicalScatter {
                 text: include_str!("scatter/dtype.egg"),
             },
             EgglogSnippet {
+                category: SpliceCategory::Rewrites,
+                text: include_str!("scatter/value_bounds.egg"),
+            },
+            EgglogSnippet {
                 category: SpliceCategory::Shape,
                 text: include_str!("scatter/shape.egg"),
             },
