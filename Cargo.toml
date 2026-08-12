@@ -57,6 +57,8 @@ members = [
     # logical ops on the native ladder — the pattern for the rest of
     # the zoo.
     "examples/qwen",
+    "examples/llama3",
+    "examples/paged_llama3",
 ]
 
 [patch.crates-io]

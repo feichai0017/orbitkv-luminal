@@ -227,6 +227,43 @@ impl PageTable {
     }
 }
 
+impl PageTable {
+    /// One batched tick for the STEP-INVARIANT graph shape: the gather
+    /// range is the WHOLE pool (columns = physical slots), so the
+    /// (total_s, slots) mask alone decides visibility — causality,
+    /// cross-sequence isolation, and unwritten-slot exclusion in one
+    /// predicate: slot j is visible to a query at logical position p of
+    /// sequence q iff j is one of q's slots with logical index <= p.
+    pub fn tick_dense(
+        &mut self,
+        requests: &[(usize, usize)],
+    ) -> anyhow::Result<(TypedBuffer, TypedBuffer, usize)> {
+        let mut scatter: Vec<i32> = Vec::new();
+        let mut new_spans: Vec<(usize, usize)> = Vec::new();
+        for (sequence, n_new) in requests {
+            new_spans.push((*sequence, self.sequences[*sequence].len()));
+            let fresh = self.allocate(*sequence, *n_new)?;
+            scatter.extend(fresh.iter().map(|slot| *slot as i32));
+        }
+        let total_s = scatter.len();
+        let mut mask = vec![-1e9f32; total_s * self.slots];
+        let mut row = 0usize;
+        for (request_index, (sequence, first_pos)) in new_spans.iter().enumerate() {
+            let n_new = requests[request_index].1;
+            for local in 0..n_new {
+                let abs_pos = first_pos + local;
+                for (logical, slot) in self.sequences[*sequence].iter().enumerate() {
+                    if logical <= abs_pos {
+                        mask[row * self.slots + slot] = 0.0;
+                    }
+                }
+                row += 1;
+            }
+        }
+        Ok((scatter.into(), mask.into(), total_s))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PageTable;

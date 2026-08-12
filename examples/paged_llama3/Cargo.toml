@@ -1,0 +1,20 @@
+[package]
+name = "paged_llama3"
+version = "0.2.0"
+edition.workspace = true
+
+[[bin]]
+name = "paged_llama3"
+path = "src/main.rs"
+
+# The PAGE-TABLE cache form of Meta-Llama-3-8B-Instruct (rulings
+# 2026-08-12): same checkpoint and model definition as examples/llama3
+# (a lib dependency — one model, two cache drivers), but the pool is
+# shared by MULTIPLE sequences through luminal_nn::PageTable, batched
+# ticks, and the mask-as-data attention.
+[dependencies]
+luminal = { path = "../.." }
+luminal_nn = { path = "../../crates/luminal_nn" }
+llama3 = { path = "../llama3" }
+rustc-hash = "2.1"
+tokenizers = "0.22.2"

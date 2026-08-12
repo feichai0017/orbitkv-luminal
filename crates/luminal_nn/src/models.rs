@@ -306,6 +306,50 @@ impl LlamaBlock {
         (x + ff, k_cache, v_cache)
     }
 
+    /// [`Self::forward_rope`] with the causal/isolation mask arriving
+    /// as DATA — the page-table batch form ([`crate::paged_attention_masked`]);
+    /// rope tables carry each batch row's own position.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_rope_masked(
+        &self,
+        x: GraphTensor,
+        k_cache: GraphTensor,
+        v_cache: GraphTensor,
+        gather_idx: GraphTensor,
+        scatter_idx: GraphTensor,
+        mask: GraphTensor,
+        rope_cos: GraphTensor,
+        rope_sin: GraphTensor,
+        rope_rot: GraphTensor,
+    ) -> (GraphTensor, GraphTensor, GraphTensor) {
+        let normed = self.attn_norm.forward(x);
+        let mut q = self.wq.forward(normed);
+        let mut k = self.wk.forward(normed);
+        if let Some((q_weight, k_weight)) = self.qk_norm {
+            q = crate::rms_norm_heads(q, self.head_dim, q_weight, 1e-6);
+            k = crate::rms_norm_heads(k, self.head_dim, k_weight, 1e-6);
+        }
+        q = crate::rotary_apply(q, self.head_dim, rope_cos, rope_sin, rope_rot);
+        k = crate::rotary_apply(k, self.head_dim, rope_cos, rope_sin, rope_rot);
+        let (attn, k_cache, v_cache) = crate::paged_attention_masked(
+            q,
+            k,
+            self.wv.forward(normed),
+            k_cache,
+            v_cache,
+            gather_idx,
+            scatter_idx,
+            mask,
+            self.n_heads,
+            self.n_kv_heads,
+            self.head_dim,
+            1.0 / (self.head_dim as f32).sqrt(),
+        );
+        let x = x + self.wo.forward(attn);
+        let ff = self.ffn(x);
+        (x + ff, k_cache, v_cache)
+    }
+
     fn ffn(&self, x: GraphTensor) -> GraphTensor {
         let ff_in = self.ffn_norm.forward(x);
         let gated = match self.ffn_kind {

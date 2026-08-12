@@ -1,0 +1,25 @@
+[package]
+name = "llama3"
+version = "0.2.0"
+edition.workspace = true
+
+[[bin]]
+name = "llama3"
+path = "src/main.rs"
+
+# Pure-logical zoo conversion (rulings 2026-08-12): exactly
+# NousResearch/Meta-Llama-3-8B-Instruct, every feature of that
+# checkpoint, position-slots KV cache form, reference runtime only.
+[dependencies]
+luminal = { path = "../.." }
+luminal_nn = { path = "../../crates/luminal_nn" }
+rustc-hash = "2.1"
+tokenizers = "0.22.2"
+
+hf-hub = { version = "0.4", default-features = false, features = ["rustls-tls", "ureq"] }
+safetensors = "0.7.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+half = { version = "2.7.1", features = ["bytemuck"] }
+bytemuck = "1.24.0"
+memmap2 = "0.9.9"
