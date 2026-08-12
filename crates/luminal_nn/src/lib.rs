@@ -22,3 +22,5 @@ mod moe;
 pub use moe::*;
 mod attention;
 pub use attention::*;
+mod cache;
+pub use cache::*;

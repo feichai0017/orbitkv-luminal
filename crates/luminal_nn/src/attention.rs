@@ -190,6 +190,54 @@ pub fn paged_attention_positional(
     )
 }
 
+/// [`paged_attention_positional`] with the ADDITIVE MASK arriving as
+/// DATA — an (s, ctx) F32 input of 0.0 (visible) / large-negative
+/// (hidden) — instead of deriving from positions in-graph. This is the
+/// PAGE-TABLE cache form's contract (see [`crate::PageTable`]): one
+/// slot pool serves several sequences per tick, and only the host's
+/// table knows which context columns belong to which query row, so
+/// causality AND cross-sequence isolation ride the mask together.
+#[allow(clippy::too_many_arguments)]
+pub fn paged_attention_masked(
+    q: GraphTensor,
+    k_new: GraphTensor,
+    v_new: GraphTensor,
+    k_cache: GraphTensor,
+    v_cache: GraphTensor,
+    gather_idx: GraphTensor,
+    scatter_idx: GraphTensor,
+    mask: GraphTensor,
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    score_scale: f32,
+) -> (GraphTensor, GraphTensor, GraphTensor) {
+    let kv_dim = n_kv_heads * head_dim;
+    let kv_groups = n_heads / n_kv_heads;
+    let s = q.dims()[0];
+    let ctx = gather_idx.dims()[0];
+    assert_eq!(mask.dims(), vec![s, ctx], "mask is (s, ctx)");
+
+    let k_cache = scatter_rows(k_new, scatter_idx, k_cache, kv_dim);
+    let v_cache = scatter_rows(v_new, scatter_idx, v_cache, kv_dim);
+    let k = gather_rows(k_cache, gather_idx, kv_dim);
+    let v = gather_rows(v_cache, gather_idx, kv_dim);
+
+    let q = q
+        .split_dims(1, head_dim)
+        .split_dims(1, kv_groups)
+        .permute((1, 2, 0, 3));
+    let k = k.split_dims(1, head_dim).permute((1, 2, 0)).expand_dim(1, kv_groups);
+    let v = v.split_dims(1, head_dim).permute((1, 0, 2)).expand_dim(1, kv_groups);
+
+    let scores = q.matmul(k) * score_scale;
+    let mask = mask.expand_dim(0, n_kv_heads).expand_dim(1, kv_groups);
+    let weights = (scores + mask).softmax(3);
+    let out = weights.matmul(v);
+    let out = out.permute((2, 0, 1, 3)).merge_dims(1, 2).merge_dims(1, 2);
+    (out, k_cache, v_cache)
+}
+
 /// Shared body: `row_vals` (s, ctx) F32 carries each query row's
 /// absolute position, however the caller sourced it.
 #[allow(clippy::too_many_arguments)]
@@ -658,5 +706,109 @@ mod tests {
         assert_close(rt.get_f32(attn_expr.id).expect("expression attn"), &attn_ref);
         assert_close(rt.get_f32(k_pos_out.id).expect("k cache"), &k_cache_ref);
         assert_close(rt.get_f32(v_pos_out.id).expect("v cache"), &v_cache_ref);
+    }
+}
+
+#[cfg(test)]
+mod masked_tests {
+    use super::paged_attention_masked;
+    use luminal::prelude::*;
+
+    /// The data-mask form against a scalar reference that honors the
+    /// mask array literally — including a hidden slot the positional
+    /// form would have shown (proving the mask, not the positions, is
+    /// in charge).
+    #[test]
+    fn paged_attention_masked_matches_scalar_reference() {
+        const N_HEADS: usize = 2;
+        const N_KV_HEADS: usize = 2;
+        const HEAD_DIM: usize = 2;
+        const HIDDEN: usize = N_HEADS * HEAD_DIM;
+        const SLOTS: usize = 4;
+        const CTX: usize = 3;
+
+        let mut cx = Graph::new();
+        let q = cx.tensor((1, HIDDEN));
+        let k_new = cx.tensor((1, HIDDEN));
+        let v_new = cx.tensor((1, HIDDEN));
+        let k_cache = cx.tensor((SLOTS, HIDDEN));
+        let v_cache = cx.tensor((SLOTS, HIDDEN));
+        let gather_idx = cx.tensor_dtyped(CTX, DType::Int);
+        let scatter_idx = cx.tensor_dtyped(1, DType::Int);
+        let mask = cx.tensor((1, CTX));
+        let (attn, _, _) = paged_attention_masked(
+            q,
+            k_new,
+            v_new,
+            k_cache,
+            v_cache,
+            gather_idx,
+            scatter_idx,
+            mask,
+            N_HEADS,
+            N_KV_HEADS,
+            HEAD_DIM,
+            1.0 / (HEAD_DIM as f32).sqrt(),
+        );
+        let attn = attn.output();
+
+        let q_vals = vec![0.5f32, -0.3, 0.8, 0.1];
+        let k_new_vals = vec![0.2f32, 0.4, -0.1, 0.3];
+        let v_new_vals = vec![1.0f32, -1.0, 0.5, 2.0];
+        let k_cache_vals: Vec<f32> = (0..SLOTS * HIDDEN).map(|v| v as f32 * 0.1).collect();
+        let v_cache_vals: Vec<f32> = (0..SLOTS * HIDDEN).map(|v| v as f32 * 0.2 + 1.0).collect();
+        let gather_vals = vec![0i32, 1, 2];
+        let scatter_vals = vec![1i32];
+        // Column 1 HIDDEN by the mask even though position-wise it
+        // would be visible; column 2 visible.
+        let mask_vals = vec![0.0f32, -1e9, 0.0];
+
+        let mut k_cache_ref = k_cache_vals.clone();
+        let mut v_cache_ref = v_cache_vals.clone();
+        k_cache_ref[HIDDEN..2 * HIDDEN].copy_from_slice(&k_new_vals);
+        v_cache_ref[HIDDEN..2 * HIDDEN].copy_from_slice(&v_new_vals);
+        let scale = 1.0 / (HEAD_DIM as f32).sqrt();
+        let visible: Vec<usize> = vec![0, 2];
+        let mut attn_ref = vec![0.0f32; HIDDEN];
+        for h in 0..N_HEADS {
+            let q_h = &q_vals[h * HEAD_DIM..(h + 1) * HEAD_DIM];
+            let mut scores = Vec::new();
+            for j in &visible {
+                let slot = gather_vals[*j] as usize;
+                let k_row = &k_cache_ref[slot * HIDDEN + h * HEAD_DIM..][..HEAD_DIM];
+                scores.push(q_h.iter().zip(k_row).map(|(a, b)| a * b).sum::<f32>() * scale);
+            }
+            let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+            let denom: f32 = exps.iter().sum();
+            for (index, j) in visible.iter().enumerate() {
+                let slot = gather_vals[*j] as usize;
+                let v_row = &v_cache_ref[slot * HIDDEN + h * HEAD_DIM..][..HEAD_DIM];
+                for (d, v) in v_row.iter().enumerate() {
+                    attn_ref[h * HEAD_DIM + d] += exps[index] / denom * v;
+                }
+            }
+        }
+
+        let rt = luminal::test_support::run_ssa(
+            &cx,
+            &[
+                (q.id, q_vals.into()),
+                (k_new.id, k_new_vals.into()),
+                (v_new.id, v_new_vals.into()),
+                (k_cache.id, k_cache_vals.into()),
+                (v_cache.id, v_cache_vals.into()),
+                (gather_idx.id, gather_vals.into()),
+                (scatter_idx.id, scatter_vals.into()),
+                (mask.id, mask_vals.into()),
+            ],
+        );
+        let ours = rt.get_f32(attn.id).expect("masked attn");
+        for (index, (a, b)) in ours.iter().zip(&attn_ref).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-4 * b.abs().max(1.0),
+                "element {index}: ours {a} vs expected {b}"
+            );
+        }
     }
 }
