@@ -55,30 +55,30 @@ fn main() {
         (model.embed.weight.id, weights(VOCAB * D, 199).into()),
         (gather_idx.id, vec![0i32, 1].into()),
         (scatter_idx.id, vec![1i32].into()),
-        (rope_rot.id, rope_pairing_matrix(HD, false)),
+        (rope_rot.id, rope_pairing_matrix(HD, false).into()),
         (model.final_norm.weight.expect("weighted").id, weights(D, 660).into()),
     ];
     for (layer, block) in model.blocks.iter().enumerate() {
         let (cos_table, sin_table) =
             rope_tables_split_half(&[1.0], HD, block.rope_theta, block.pos_scale);
-        pairs.push((rope_inputs[layer].0.id, cos_table));
-        pairs.push((rope_inputs[layer].1.id, sin_table));
+        pairs.push((rope_inputs[layer].0.id, cos_table.into()));
+        pairs.push((rope_inputs[layer].1.id, sin_table.into()));
     }
     for (layer, block) in model.blocks.iter().enumerate() {
         let seed = |slot: usize| 600 + layer * 20 + slot;
-        pairs.push((block.wq.weight.id, weights(D * Q_DIM, seed(0))));
-        pairs.push((block.wk.weight.id, weights(D * KV_DIM, seed(1))));
-        pairs.push((block.wv.weight.id, weights(D * KV_DIM, seed(2))));
-        pairs.push((block.wo.weight.id, weights(Q_DIM * D, seed(3))));
-        pairs.push((block.gate.weight.id, weights(D * FF, seed(4))));
-        pairs.push((block.up.weight.id, weights(D * FF, seed(5))));
-        pairs.push((block.down.weight.id, weights(FF * D, seed(6))));
-        pairs.push((block.input_norm.weight.expect("weighted").id, weights(D, seed(7))));
-        pairs.push((block.post_attn_norm.weight.expect("weighted").id, weights(D, seed(8))));
-        pairs.push((block.pre_ff_norm.weight.expect("weighted").id, weights(D, seed(9))));
-        pairs.push((block.post_ff_norm.weight.expect("weighted").id, weights(D, seed(10))));
-        pairs.push((block.q_norm.id, weights(HD, seed(11))));
-        pairs.push((block.k_norm.id, weights(HD, seed(12))));
+        pairs.push((block.wq.weight.id, weights(D * Q_DIM, seed(0)).into()));
+        pairs.push((block.wk.weight.id, weights(D * KV_DIM, seed(1)).into()));
+        pairs.push((block.wv.weight.id, weights(D * KV_DIM, seed(2)).into()));
+        pairs.push((block.wo.weight.id, weights(Q_DIM * D, seed(3)).into()));
+        pairs.push((block.gate.weight.id, weights(D * FF, seed(4)).into()));
+        pairs.push((block.up.weight.id, weights(D * FF, seed(5)).into()));
+        pairs.push((block.down.weight.id, weights(FF * D, seed(6)).into()));
+        pairs.push((block.input_norm.weight.expect("weighted").id, weights(D, seed(7)).into()));
+        pairs.push((block.post_attn_norm.weight.expect("weighted").id, weights(D, seed(8)).into()));
+        pairs.push((block.pre_ff_norm.weight.expect("weighted").id, weights(D, seed(9)).into()));
+        pairs.push((block.post_ff_norm.weight.expect("weighted").id, weights(D, seed(10)).into()));
+        pairs.push((block.q_norm.id, weights(HD, seed(11)).into()));
+        pairs.push((block.k_norm.id, weights(HD, seed(12)).into()));
         pairs.push((caches[layer].0.id, weights(SLOTS * KV_DIM, 300 + layer).into()));
         pairs.push((caches[layer].1.id, weights(SLOTS * KV_DIM, 320 + layer).into()));
     }
