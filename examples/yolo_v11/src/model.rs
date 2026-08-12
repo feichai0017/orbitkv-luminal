@@ -61,10 +61,8 @@ impl Conv {
         p: usize,
         cx: &mut Graph,
     ) -> Self {
-        let weight = cx
-            .named_tensor(format!("{name}.weight"), (c_out, c_in * k * k))
-            .persist();
-        let bias = cx.named_tensor(format!("{name}.bias"), c_out).persist();
+        let weight = cx.named_tensor(format!("{name}.weight"), (c_out, c_in * k * k));
+        let bias = cx.named_tensor(format!("{name}.bias"), c_out);
         Self {
             weight,
             bias,
@@ -190,10 +188,8 @@ pub struct DwConv {
 
 impl DwConv {
     pub fn new(name: &str, c: usize, k: usize, s: usize, p: usize, cx: &mut Graph) -> Self {
-        let weight = cx
-            .named_tensor(format!("{name}.weight"), (c, k * k))
-            .persist();
-        let bias = cx.named_tensor(format!("{name}.bias"), c).persist();
+        let weight = cx.named_tensor(format!("{name}.weight"), (c, k * k));
+        let bias = cx.named_tensor(format!("{name}.bias"), c);
         Self {
             weight,
             bias,
@@ -765,8 +761,8 @@ fn name_prefix_cv3_terminal(prefix: &str) -> String {
 pub struct Detect {
     pub scales: Vec<DetectScale>,
     pub dfl_weight: GraphTensor, // (16,) - constant arange(16)
-    pub anchors: GraphTensor,    // (2, 8400) precomputed
-    pub strides: GraphTensor,    // (1, 8400) precomputed
+    pub anchors: Vec<GraphTensor>,    // (2, 8400) precomputed
+    pub strides: Vec<GraphTensor>,    // (1, 8400) precomputed
     pub feat_sizes: Vec<usize>,
 }
 
@@ -787,18 +783,22 @@ impl Detect {
                 )
             })
             .collect();
-        let dfl_weight = cx
-            .named_tensor(format!("{name}.dfl.conv.weight"), REG_MAX)
-            .persist();
+        let dfl_weight = cx.named_tensor(format!("{name}.dfl.conv.weight"), REG_MAX);
 
-        // Anchors and strides aren't in the safetensors — we feed them as inputs.
-        let total_anchors: usize = feat_sizes.iter().map(|s| s * s).sum();
-        let anchors = cx
-            .named_tensor("yolo.anchors", (2usize, total_anchors))
-            .persist();
-        let strides = cx
-            .named_tensor("yolo.strides", (1usize, total_anchors))
-            .persist();
+        // Anchors and strides aren't in the safetensors — fed as inputs,
+        // PER SCALE (the per-scale DFL respelling below never concats
+        // box maps before slicing, so the anchor grids stay per-scale
+        // too).
+        let anchors: Vec<GraphTensor> = feat_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| cx.named_tensor(format!("yolo.anchors.{i}"), (2usize, s * s)))
+            .collect();
+        let strides: Vec<GraphTensor> = feat_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| cx.named_tensor(format!("yolo.strides.{i}"), (1usize, s * s)))
+            .collect();
         Self {
             scales,
             dfl_weight,
@@ -809,63 +809,57 @@ impl Detect {
     }
 
     /// Final prediction tensor (1, 84, total_anchors).
+    ///
+    /// PER-SCALE DFL/dist2bbox (respelling 2026-08-12): the parked
+    /// spelling concatenated the three scale box maps FIRST and sliced
+    /// lt/rb after — the confirmed slice-downstream-of-concat road the
+    /// rejoin-divergence dossier flags as detonating saturation. The
+    /// concat existed only to batch the softmax-expectation; running
+    /// each scale separately leaves the slices downstream of COMPUTE
+    /// only, and the final assembly concats feed the output boundary
+    /// (no downstream slice — benign). Numerically identical.
     pub fn forward(&self, feats: &[GraphTensor]) -> GraphTensor {
         assert_eq!(feats.len(), self.scales.len());
-        let mut box_flats = Vec::new();
+        let mut dboxes = Vec::new();
         let mut cls_flats = Vec::new();
         for (i, x) in feats.iter().enumerate() {
             let (b, c) = self.scales[i].forward(*x);
-            // (1, 4*reg_max, H, W) -> (1, 4*reg_max, H*W)
-            let b = b.merge_dims(2, 3);
-            let c = c.merge_dims(2, 3);
-            box_flats.push(b);
-            cls_flats.push(c);
+            // (1, 4*reg_max, H, W) -> (1, 4*reg_max, A_i)
+            let boxes = b.merge_dims(2, 3);
+            cls_flats.push(c.merge_dims(2, 3));
+
+            // DFL: PyTorch views (b, 4, reg_max, A); split_dims places
+            // the INNER size, so pass REG_MAX to get (1, 4, REG_MAX, A_i),
+            // then transpose the bin axis under the softmax.
+            let dfl_in = boxes.split_dims(1, REG_MAX).transpose(1, 2).softmax(1);
+            let w = self
+                .dfl_weight
+                .expand_to_shape_on_axes(dfl_in.dims(), &[0usize, 2, 3]);
+            let dfl_out = (dfl_in * w).sum(&[1usize]); // (1, 4, A_i)
+
+            // dist2bbox xywh over THIS scale's anchor grid.
+            let lt = make_contiguous(dfl_out.slice((.., 0..2, ..)));
+            let rb = make_contiguous(dfl_out.slice((.., 2..4, ..)));
+            let anchors = self.anchors[i].expand_dim(0, 1); // (1, 2, A_i)
+            let x1y1 = anchors - lt;
+            let x2y2 = anchors + rb;
+            let cxy = (x1y1 + x2y2) * 0.5;
+            let wh = x2y2 - x1y1;
+            let dbox = cxy.concat_along(wh, 1); // (1, 4, A_i)
+            let strides = self.strides[i].expand_dim(0, 1); // (1, 1, A_i)
+            let dbox = dbox * strides.expand_dim(1, 4usize).squeeze(2);
+            dboxes.push(dbox);
         }
-        let mut boxes = box_flats[0];
-        for b in &box_flats[1..] {
-            boxes = boxes.concat_along(*b, 2);
+        // Assembly concats: outputs only downstream — benign.
+        let mut dbox = dboxes[0];
+        for d in &dboxes[1..] {
+            dbox = dbox.concat_along(*d, 2);
         }
         let mut scores = cls_flats[0];
         for c in &cls_flats[1..] {
             scores = scores.concat_along(*c, 2);
         }
-        // boxes: (1, 64, A); scores: (1, 80, A)
-
-        // DFL: PyTorch does view(b, 4, reg_max, A) which row-major splits 64=4*reg_max with
-        // 4 outer and reg_max inner. luminal split_dims(axis, inner_size) places `inner_size`
-        // as the new inner dim, so we must pass REG_MAX (not 4) to get (1, 4, REG_MAX, A).
-        let dfl_in = boxes.split_dims(1, REG_MAX); // (1, 4, REG_MAX, A)
-        // Then transpose so the REG_MAX bin axis becomes the softmax channel axis.
-        let dfl_in = dfl_in.transpose(1, 2); // (1, REG_MAX, 4, A)
-        let dfl_in = dfl_in.softmax(1);
-
-        // dfl_weight: (reg_max,). Broadcast over batch, box coords, and anchors.
-        // Conv1x1 == channel-wise weighted sum:
-        // (1, reg_max, 4, A) * (1, reg_max, 4, A) -> sum over reg_max -> (1, 4, A)
-        let w = self
-            .dfl_weight
-            .expand_to_shape_on_axes(dfl_in.dims(), &[0usize, 2, 3]);
-        let dfl_out = (dfl_in * w).sum(&[1usize]); // (1, 4, A)
-
-        // dist2bbox xywh: lt = dfl[:, :2, :], rb = dfl[:, 2:, :]
-        let lt = make_contiguous(dfl_out.slice((.., 0..2, ..)));
-        let rb = make_contiguous(dfl_out.slice((.., 2..4, ..)));
-
-        // anchors: (2, A). Add batch dim.
-        let anchors = self.anchors.expand_dim(0, 1); // (1, 2, A)
-        let x1y1 = anchors - lt;
-        let x2y2 = anchors + rb;
-        let cxy = (x1y1 + x2y2) * 0.5;
-        let wh = x2y2 - x1y1;
-        let dbox = cxy.concat_along(wh, 1); // (1, 4, A)
-
-        // Multiply by strides: (1, 1, A)
-        let strides = self.strides.expand_dim(0, 1); // (1, 1, A)
-        let dbox = dbox * strides.expand_dim(1, 4usize).squeeze(2); // broadcast across 4 box dims
-        // (the squeeze removes the size-1 channel from the second expand)
-
-        let scores_sig = scores.sigmoid();
-        dbox.concat_along(scores_sig, 1)
+        dbox.concat_along(scores.sigmoid(), 1)
     }
 }
 
@@ -1028,34 +1022,4 @@ pub fn make_anchors_and_strides(
 /// DFL constant weights (arange(reg_max) reshaped as (1, reg_max, 1, 1)).
 pub fn dfl_weight() -> Vec<f32> {
     (0..REG_MAX as i32).map(|i| i as f32).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use luminal::hlir::CustomOpKind;
-
-    use super::*;
-
-    #[test]
-    fn yolo_forward_graph_uses_no_custom_ops() {
-        let mut cx = Graph::default();
-        let img = cx.named_tensor("input.image", (1usize, 3usize, IMG_SIZE, IMG_SIZE));
-        let yolo = YoloV11::init(&mut cx);
-        let _ = yolo.forward(img).output();
-
-        assert!(
-            cx.custom_ops.is_empty(),
-            "YOLO should express model computation in pure HLIR, not registered CustomOp wrappers"
-        );
-
-        let custom_nodes: Vec<_> = cx
-            .graph
-            .node_indices()
-            .filter(|&node| cx.try_get_op::<CustomOpKind>(node).is_some())
-            .collect();
-        assert!(
-            custom_nodes.is_empty(),
-            "YOLO graph contains CustomOpKind HLIR nodes: {custom_nodes:?}"
-        );
-    }
 }

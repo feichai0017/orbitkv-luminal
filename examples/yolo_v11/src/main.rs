@@ -1,12 +1,3 @@
-// glibc malloc degrades into an allocating livelock inside
-// nvrtcCompileProgram after heavy search heap churn (hundreds of
-// thousands of compiles). jemalloc built with unprefixed symbols
-// interposes malloc for the whole process, including dlopened CUDA
-// libraries like libnvrtc — a Rust-only global allocator would not.
-#[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-mod model;
 
 use std::{
     env, fs, io,
@@ -16,11 +7,10 @@ use std::{
 };
 
 use image::{ImageBuffer, ImageReader, Rgb, RgbImage};
+use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
-use luminal_cuda_lite::{cudarc::driver::CudaContext, runtime::CudaRuntime};
-use luminal_tracing::*;
-use model::*;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use luminal::ssa_reference::SsaReferenceRuntime;
+use yolo_v11::model::*;
 
 const ARTIFACT_DIR: &str = "examples/yolo_v11/artifacts";
 const WEIGHTS_URL: &str =
@@ -273,17 +263,12 @@ fn resize_axis(dst_index: u32, scale: f32, src_len: u32) -> (u32, u32, f32) {
 }
 
 fn main() {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(luminal_filter())
-        .init();
-
     let cwd = std::env::current_dir().unwrap();
     let artifact_dir = cwd.join(ARTIFACT_DIR);
     let weights_path = artifact_dir.join("weights.safetensors");
     let cli = cli_args(&artifact_dir);
     let image_path = cli.image_path.clone();
-    let search_graphs = 50usize;
+    let _search_graphs = 50usize;
 
     println!("Using artifact directory: {}", artifact_dir.display());
 
@@ -315,49 +300,85 @@ fn main() {
     let expected_input = 3 * IMG_SIZE * IMG_SIZE;
     assert_eq!(img_data.len(), expected_input, "input size mismatch");
 
-    let ctx = CudaContext::new(0).unwrap();
-    let stream = ctx.default_stream();
-
     // Build graph
     let mut cx = Graph::default();
     let img = cx.named_tensor("input.image", (1usize, 3usize, IMG_SIZE, IMG_SIZE));
     let yolo = YoloV11::init(&mut cx);
     let logits = yolo.forward(img).output();
 
-    println!("Loading weights...");
-    let mut runtime = CudaRuntime::initialize(stream);
-    runtime.load_safetensors(&cx, weights_path.to_str().unwrap());
+    // Per-scale anchors/strides + the DFL arange constant.
+    let feat_sizes = [80usize, 40, 20];
+    let mut scale_data: Vec<(usize, Vec<f32>, Vec<f32>)> = Vec::new();
+    for (i, size) in feat_sizes.iter().enumerate() {
+        let (anchors, strides) = make_anchors_and_strides(&[*size], &[STRIDES[i]]);
+        scale_data.push((i, anchors, strides));
+    }
 
-    // Initialize anchors, strides, and DFL constant.
-    let (anchors_flat, strides_flat) = make_anchors_and_strides(&[80, 40, 20], &STRIDES);
-    runtime.set_data(yolo.detect.anchors, anchors_flat.clone());
-    runtime.set_data(yolo.detect.strides, strides_flat.clone());
-    runtime.set_data(yolo.detect.dfl_weight, dfl_weight());
+    println!("Loading weights + staging (label-keyed)...");
+    let file = std::fs::File::open(&weights_path).expect("weights open");
+    let mmap = unsafe { memmap2::Mmap::map(&file).expect("weights mmap") };
+    let tensors = safetensors::SafeTensors::deserialize(&mmap).expect("weights parse");
+    let mut pairs: Vec<(petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer)> =
+        Vec::new();
+    for (label, id) in cx.logical.input_labels() {
+        if label == "input.image" {
+            pairs.push((id, img_data.clone().into()));
+        } else if let Some((i, anchors, _)) = scale_data
+            .iter()
+            .find(|(i, _, _)| label == format!("yolo.anchors.{i}"))
+        {
+            let _ = i;
+            pairs.push((id, anchors.clone().into()));
+        } else if let Some((i, _, strides)) = scale_data
+            .iter()
+            .find(|(i, _, _)| label == format!("yolo.strides.{i}"))
+        {
+            let _ = i;
+            pairs.push((id, strides.clone().into()));
+        } else if label.ends_with(".dfl.conv.weight") {
+            pairs.push((id, dfl_weight().into()));
+        } else {
+            let view = tensors
+                .tensor(&label)
+                .unwrap_or_else(|e| panic!("checkpoint is missing '{label}': {e}"));
+            let data: Vec<f32> = match view.dtype() {
+                safetensors::Dtype::F32 => bytemuck::cast_slice::<u8, f32>(view.data()).to_vec(),
+                other => panic!("'{label}': unsupported checkpoint dtype {other:?}"),
+            };
+            pairs.push((id, data.into()));
+        }
+    }
 
-    runtime.set_data(img, img_data.clone());
-
-    println!("Compiling (search_graphs={search_graphs})...");
+    println!(
+        "Searching (WARNING: ~2,200-node graph — saturation is heavy; \
+         run attended; see README)..."
+    );
     let t0 = Instant::now();
-    let compile_options = CompileOptions::default().search_graph_limit(search_graphs);
-    runtime = cx.compile(runtime, compile_options);
-    println!("  compile took {:?}", t0.elapsed());
-
-    // Re-set anchors/strides/dfl/img after search (search may consume the inputs)
-    runtime.set_data(yolo.detect.anchors, anchors_flat);
-    runtime.set_data(yolo.detect.strides, strides_flat);
-    runtime.set_data(yolo.detect.dfl_weight, dfl_weight());
-    runtime.set_data(img, img_data);
+    let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+    let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
+    rt.search(
+        &data,
+        &ImplementationSearchOptions {
+            generations: 1,
+            generation_size: 2,
+            mutations: 1,
+            trials: 1,
+            seed: 0,
+        },
+    )
+    .expect("search finds a plan");
+    println!("  search took {:?}", t0.elapsed());
+    for (id, payload) in &pairs {
+        rt.set_data(*id, payload.clone());
+    }
 
     println!("Executing...");
     let t0 = Instant::now();
-    runtime.execute(&cx.dyn_map);
+    rt.execute().expect("winner executes");
     let elapsed = t0.elapsed();
     println!("  forward took {:?}", elapsed);
 
-    // Get output (1, 4 + NC, 8400) — Detect with export=True returns the
-    // DECODED predictions (4 box coords + NC class scores), not the raw
-    // (NC + REG_MAX*4) channels.
-    let out = runtime.get_f32(logits);
+    let out = rt.get_f32(logits.id).expect("output").clone();
     let total_anchors: usize = 80 * 80 + 40 * 40 + 20 * 20;
     let expected_out_len = (4 + NC) * total_anchors;
     println!(

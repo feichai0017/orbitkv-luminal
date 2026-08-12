@@ -1,29 +1,22 @@
 [package]
 name = "yolo_v11"
-version = "0.1.0"
-edition = "2024"
+version = "0.2.0"
+edition.workspace = true
 
 [[bin]]
 name = "yolo_v11"
 path = "src/main.rs"
 
-[features]
-
+# Pure-logical zoo conversion (rulings 2026-08-12): yolo11n from the
+# project's release weights artifact — CSP backbone, SPPF, C2PSA
+# channel attention, per-scale DFL decode (the concat-of-slices road
+# respelled away), host letterbox/NMS.
 [dependencies]
 luminal = { path = "../.." }
-tikv-jemallocator = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }
 luminal_nn = { path = "../../crates/luminal_nn" }
-luminal_cuda_lite = { path = "../../crates/luminal_cuda_lite" }
-luminal_tracing = { path = "../../crates/luminal_tracing" }
-tracing = "0.1.43"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
+rustc-hash = "2.1"
 safetensors = "0.7.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-half = { version = "2.7.1", features = ["bytemuck"] }
 bytemuck = "1.24.0"
 memmap2 = "0.9.9"
-rustc-hash = "2.1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-ureq = "2"
+ureq = { version = "2", default-features = false, features = ["tls"] }

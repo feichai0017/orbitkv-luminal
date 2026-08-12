@@ -494,6 +494,39 @@ impl LogicalGraph {
         Some(lit)
     }
 
+    /// Every bound input's (label, tensor id) — the label the caller
+    /// passed to `named_tensor*`, without the slot suffix. The
+    /// label-keyed twin of the slot tables, for checkpoint-name-driven
+    /// staging (the load_safetensors precedent).
+    pub fn input_labels(&self) -> Vec<(String, petgraph::graph::NodeIndex)> {
+        self.values
+            .iter()
+            .filter_map(|value| {
+                let slot = value.input_slot?;
+                let label = value.input_label.as_ref()?;
+                let stripped = label
+                    .strip_suffix(&format!("_{slot}"))
+                    .unwrap_or(label)
+                    .to_string();
+                Some((stripped, petgraph::graph::NodeIndex::new(slot)))
+            })
+            .collect()
+    }
+
+    /// Static element count of the input occupying `slot` — None (loudly
+    /// at the caller) on symbolic dims or an unknown slot.
+    pub fn input_static_len(&self, slot: petgraph::graph::NodeIndex) -> Option<usize> {
+        let value = self
+            .values
+            .iter()
+            .find(|value| value.input_slot == Some(slot.index()))?;
+        value
+            .dims
+            .iter()
+            .map(|d| d.to_usize())
+            .try_fold(1usize, |acc, d| Some(acc * d?))
+    }
+
     /// Record an op over operand values.
     pub fn op(
         &mut self,
