@@ -453,9 +453,48 @@ pub fn rope_tables_llama3_scaled(
     (cos, sin)
 }
 
+/// Host-side split-half tables for PARTIAL rotary (gemma-4's full
+/// layers: only `rotary_fraction` of the head rotates): frequency
+/// pairs at or beyond floor(fraction·head_dim/2) get angle 0 — under
+/// the pairing form cos=1/sin=0 lanes pass through untouched, so
+/// partial rotary needs no construct change, only these tables.
+pub fn rope_tables_partial(
+    positions: &[f32],
+    head_dim: usize,
+    theta: f32,
+    rotary_fraction: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let half = head_dim / 2;
+    let rotated = ((rotary_fraction * head_dim as f32) as usize) / 2;
+    let (mut cos, mut sin) = (Vec::new(), Vec::new());
+    for &position in positions {
+        let (mut cos_row, mut sin_row) = (vec![1f32; head_dim], vec![0f32; head_dim]);
+        for j in 0..rotated.min(half) {
+            let freq = theta.powf(-2.0 * j as f32 / (2.0 * rotated as f32));
+            let arg = position * freq;
+            cos_row[j] = arg.cos();
+            cos_row[j + half] = arg.cos();
+            sin_row[j] = arg.sin();
+            sin_row[j + half] = arg.sin();
+        }
+        cos.extend(cos_row);
+        sin.extend(sin_row);
+    }
+    (cos, sin)
+}
+
 /// Per-head RMS norm over a flat (s, n_heads·head_dim) projection with a
 /// learned (head_dim,) weight — the QK-norm primitive Qwen3 and the DiT
 /// family apply to q and k before position encoding. No shift, F32.
+/// [`rms_norm_heads`] without a learned weight — gemma-4's VALUE norm
+/// (per-head RMS on V, weightless, no rope).
+pub fn rms_norm_heads_unweighted(x: GraphTensor, head_dim: usize, epsilon: f32) -> GraphTensor {
+    let heads = x.split_dims(1, head_dim);
+    let dims = heads.dims();
+    let inv = ((heads * heads).mean(2) + epsilon).sqrt().reciprocal();
+    (heads * inv.unsqueeze(2).expand(dims)).merge_dims(1, 2)
+}
+
 pub fn rms_norm_heads(
     x: GraphTensor,
     head_dim: usize,

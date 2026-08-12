@@ -10,110 +10,99 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::model::HIDDEN;
-
+/// Index file structure for sharded safetensors models
 #[derive(Deserialize)]
 struct SafetensorsIndex {
     weight_map: HashMap<String, String>,
 }
 
-enum TensorData {
-    F32(Vec<f32>),
-    BF16(Vec<u8>),
-}
-
+/// Stored tensor data with shape, dtype, and serialized bytes.
 struct StoredTensor {
     shape: Vec<usize>,
-    data: TensorData,
+    dtype: Dtype,
+    data: Vec<u8>,
 }
 
-pub fn download_hf_model(repo_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let api = Api::new()?;
-    let repo = api.model(repo_id.to_string());
-
-    let tokenizer_path = repo.get("tokenizer.json")?;
-    let model_dir = tokenizer_path.parent().unwrap().to_path_buf();
-
-    if repo.get("model.safetensors").is_ok() {
-        return Ok(model_dir);
+fn format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.2} GiB", bytes as f64 / GIB)
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.2} MiB", bytes as f64 / MIB)
+    } else {
+        format!("{bytes} bytes")
     }
-
-    let index_path = repo.get("model.safetensors.index.json")?;
-    let index_content = std::fs::read_to_string(&index_path)?;
-    let index: SafetensorsIndex = serde_json::from_str(&index_content)?;
-
-    let mut shard_files: Vec<String> = index.weight_map.values().cloned().collect();
-    shard_files.sort();
-    shard_files.dedup();
-
-    for shard_file in &shard_files {
-        repo.get(shard_file)?;
-    }
-
-    Ok(model_dir)
 }
 
-fn tensor_to_f32(tensor: &safetensors::tensor::TensorView) -> Vec<f32> {
-    match tensor.dtype() {
-        Dtype::F32 => bytemuck::cast_slice::<u8, f32>(tensor.data()).to_vec(),
+/// Convert tensor data to an f32 vec.
+pub(crate) fn tensor_to_f32(tensor: &safetensors::tensor::TensorView) -> Vec<f32> {
+    let dtype = tensor.dtype();
+    let data = tensor.data();
+
+    match dtype {
+        Dtype::F32 => bytemuck::cast_slice::<u8, f32>(data).to_vec(),
         Dtype::F16 => {
-            let f16_slice: &[f16] = bytemuck::cast_slice(tensor.data());
+            let f16_slice: &[f16] = bytemuck::cast_slice(data);
             f16_slice.iter().map(|x| x.to_f32()).collect()
         }
         Dtype::BF16 => {
-            let bf16_slice: &[bf16] = bytemuck::cast_slice(tensor.data());
+            let bf16_slice: &[bf16] = bytemuck::cast_slice(data);
             bf16_slice.iter().map(|x| x.to_f32()).collect()
         }
-        other => panic!("Unsupported dtype for conversion: {other:?}"),
+        other => {
+            panic!("Unsupported dtype for conversion: {other:?}");
+        }
     }
+}
+
+fn tensor_to_f32_bytes(tensor: &safetensors::tensor::TensorView) -> Vec<u8> {
+    let fp32 = tensor_to_f32(tensor);
+    bytemuck::cast_slice(&fp32).to_vec()
 }
 
 fn tensor_to_bf16_bytes(tensor: &safetensors::tensor::TensorView) -> Vec<u8> {
     match tensor.dtype() {
         Dtype::BF16 => tensor.data().to_vec(),
-        Dtype::F16 => {
-            let f16_slice: &[f16] = bytemuck::cast_slice(tensor.data());
-            let bf16_data: Vec<bf16> = f16_slice
-                .iter()
-                .map(|x| bf16::from_f32(x.to_f32()))
-                .collect();
-            bytemuck::cast_slice(&bf16_data).to_vec()
-        }
-        Dtype::F32 => {
-            let f32_slice: &[f32] = bytemuck::cast_slice(tensor.data());
-            let bf16_data: Vec<bf16> = f32_slice.iter().map(|x| bf16::from_f32(*x)).collect();
-            bytemuck::cast_slice(&bf16_data).to_vec()
-        }
-        other => panic!("Unsupported dtype for conversion: {other:?}"),
+        _ => tensor_to_f32(tensor)
+            .into_iter()
+            .flat_map(|x| bf16::from_f32(x).to_le_bytes())
+            .collect(),
     }
 }
 
-fn is_text_weight(name: &str) -> bool {
-    name.starts_with("model.language_model.")
+/// Norm weights stay F32 in the bf16 pipeline: the model computes norms
+/// (including the per-head QK-norm) in F32 via explicit casts, while the
+/// linear/embedding weights are bf16. `q_norm`/`k_norm` contain "norm", so the
+/// substring check keeps them F32 too.
+fn keep_f32_in_bf16_pipeline(name: &str) -> bool {
+    // Router path + learned scalars compute in F32.
+    name.contains("norm") || name.contains("router.") || name.contains("layer_scalar")
 }
 
-fn is_expert_weight(name: &str) -> bool {
-    name.contains(".experts.")
-}
-
-/// Tensors that stay F32 in the bf16 pipeline: norm weights (norms compute
-/// in F32 via explicit casts), the MoE router, and the per-layer scalar.
-fn keep_f32(name: &str) -> bool {
-    name.contains("norm") || name.contains("router") || name.ends_with(".layer_scalar")
-}
-
-pub fn combine_safetensors(model_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let output_path = model_dir.join("model_combined_bf16_v1.safetensors");
-    if output_path.exists() {
-        return Ok(output_path);
+fn stored_tensor_bf16(name: &str, tensor: &safetensors::tensor::TensorView) -> StoredTensor {
+    let shape = tensor.shape().to_vec();
+    if keep_f32_in_bf16_pipeline(name) {
+        StoredTensor {
+            shape,
+            dtype: Dtype::F32,
+            data: tensor_to_f32_bytes(tensor),
+        }
+    } else {
+        StoredTensor {
+            shape,
+            dtype: Dtype::BF16,
+            data: tensor_to_bf16_bytes(tensor),
+        }
     }
+}
 
+fn model_shard_files(model_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let index_path = model_dir.join("model.safetensors.index.json");
     let single_shard_path = model_dir.join("model.safetensors");
 
-    let shard_files: Vec<PathBuf> = if single_shard_path.exists() && !index_path.exists() {
-        println!("Single shard model detected...");
-        vec![single_shard_path]
+    if single_shard_path.exists() && !index_path.exists() {
+        Ok(vec![single_shard_path])
     } else if index_path.exists() {
         let index_content = std::fs::read_to_string(&index_path)?;
         let index: SafetensorsIndex = serde_json::from_str(&index_content)?;
@@ -122,11 +111,43 @@ pub fn combine_safetensors(model_dir: &Path) -> Result<PathBuf, Box<dyn std::err
         files.sort();
         files.dedup();
 
-        println!("Loading {} shard files...", files.len());
-        files.into_iter().map(|f| model_dir.join(f)).collect()
+        Ok(files.into_iter().map(|f| model_dir.join(f)).collect())
     } else {
-        return Err("No model.safetensors or model.safetensors.index.json found".into());
-    };
+        Err("No model.safetensors or model.safetensors.index.json found".into())
+    }
+}
+
+/// Combines the multimodal checkpoint's TEXT TOWER into a single bf16
+/// file (norms F32): strips the `language_model.` prefix, skips the
+/// vision tower, and PRE-ADDS 1.0 to every RMSNorm weight family (the
+/// Gemma (1+w) pattern) so the graph multiplies by a plain weight.
+/// The embedding table stays UNSCALED — the sqrt(hidden) normalizer is
+/// in-graph and the head ties via the same table (matching the HF
+/// config's tie_word_embeddings + normalizer directly; the parked
+/// example pre-scaled + duplicated instead — same math).
+///
+/// Llama-3-8B's lm_head is UNTIED — `lm_head.weight` is a real stored
+/// tensor and combines like any other (bf16).
+pub fn combine_safetensors_to_bf16(
+    model_dir: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let output_path = model_dir.join("model_combined_gemma4moe_text_v1.safetensors");
+
+    if output_path.exists() {
+        let existing_bytes = std::fs::metadata(&output_path)?.len();
+        println!(
+            "Using existing combined BF16 model at {} ({})",
+            output_path.display(),
+            format_bytes(existing_bytes)
+        );
+        return Ok(output_path);
+    }
+
+    let shard_files = model_shard_files(model_dir)?;
+    println!(
+        "Loading {} shard files (converting to BF16, norms F32)...",
+        shard_files.len()
+    );
 
     let mut all_tensors: HashMap<String, StoredTensor> = HashMap::new();
 
@@ -140,110 +161,156 @@ pub fn combine_safetensors(model_dir: &Path) -> Result<PathBuf, Box<dyn std::err
         let st = SafeTensors::deserialize(&mmap)?;
 
         for name in st.names() {
-            if !is_text_weight(name) {
+            // Text tower only; strip the multimodal container prefix.
+            if name.starts_with("vision_tower.") || name.starts_with("multi_modal_projector.") {
                 continue;
             }
-
-            let new_name = name.replacen("model.language_model.", "model.", 1);
+            let stored_name = name
+                .strip_prefix("language_model.")
+                .unwrap_or(name)
+                .to_string();
             let tensor = st.tensor(name)?;
-
-            if new_name.ends_with(".layer_scalar") {
-                let scalar = tensor_to_f32(&tensor);
-                let scalar = *scalar.first().expect("layer_scalar tensor is empty");
-                all_tensors.insert(
-                    new_name,
-                    StoredTensor {
-                        shape: vec![HIDDEN],
-                        data: TensorData::F32(vec![scalar; HIDDEN]),
-                    },
-                );
-                continue;
-            }
-
-            let shape = tensor.shape().to_vec();
-            let data = if is_expert_weight(&new_name) {
-                TensorData::BF16(tensor_to_bf16_bytes(&tensor))
-            } else {
-                TensorData::F32(tensor_to_f32(&tensor))
-            };
-
-            all_tensors.insert(new_name, StoredTensor { shape, data });
+            all_tensors.insert(stored_name.clone(), stored_tensor_bf16(&stored_name, &tensor));
         }
     }
 
-    println!("Extracted {} text tensors", all_tensors.len());
+    println!("Extracted {} tensors", all_tensors.len());
+    println!("Saving combined BF16 model to {}...", output_path.display());
 
-    let embed_key = "model.embed_tokens.weight";
-    if let Some(embed_tensor) = all_tensors.get(embed_key) {
-        let (shape, embed_data) = match &embed_tensor.data {
-            TensorData::F32(data) => (embed_tensor.shape.clone(), data.clone()),
-            TensorData::BF16(_) => unreachable!("Embedding weights should stay in F32"),
-        };
-
+    // Stack the per-expert projections (gate;up then down) and
+    // broadcast each layer_scalar scalar to (hidden,) — data prep for
+    // the coordinate-form MoE fetches and the residual scalar multiply.
+    let layer_count = (0..)
+        .take_while(|l| {
+            all_tensors.contains_key(&format!("model.layers.{l}.mlp.experts.0.gate_proj.weight"))
+        })
+        .count();
+    for l in 0..layer_count {
+        let expert_count = (0..)
+            .take_while(|e| {
+                all_tensors
+                    .contains_key(&format!("model.layers.{l}.mlp.experts.{e}.gate_proj.weight"))
+            })
+            .count();
+        let mut gate_up_data = Vec::new();
+        let mut shape_2i_h: Option<Vec<usize>> = None;
+        for e in 0..expert_count {
+            let gate = all_tensors
+                .remove(&format!("model.layers.{l}.mlp.experts.{e}.gate_proj.weight"))
+                .expect("gate_proj present");
+            let up = all_tensors
+                .remove(&format!("model.layers.{l}.mlp.experts.{e}.up_proj.weight"))
+                .expect("up_proj present");
+            assert_eq!(gate.shape, up.shape);
+            shape_2i_h = Some(vec![expert_count, gate.shape[0] * 2, gate.shape[1]]);
+            gate_up_data.extend_from_slice(&gate.data);
+            gate_up_data.extend_from_slice(&up.data);
+        }
         all_tensors.insert(
-            "lm_head.weight".to_string(),
+            format!("model.layers.{l}.mlp.gate_up_weights"),
             StoredTensor {
-                shape,
-                data: TensorData::F32(embed_data.clone()),
+                shape: shape_2i_h.expect("experts existed"),
+                dtype: Dtype::BF16,
+                data: gate_up_data,
             },
         );
-
-        let embed_scale = (HIDDEN as f32).sqrt();
-        if let Some(stored) = all_tensors.get_mut(embed_key) {
-            match &mut stored.data {
-                TensorData::F32(data) => {
-                    for value in data {
-                        *value *= embed_scale;
-                    }
-                }
-                TensorData::BF16(_) => unreachable!("Embedding weights should stay in F32"),
+        let mut down_data = Vec::new();
+        let mut shape_h_i: Option<Vec<usize>> = None;
+        for e in 0..expert_count {
+            let down = all_tensors
+                .remove(&format!("model.layers.{l}.mlp.experts.{e}.down_proj.weight"))
+                .expect("down_proj present");
+            shape_h_i = Some(vec![expert_count, down.shape[0], down.shape[1]]);
+            down_data.extend_from_slice(&down.data);
+        }
+        all_tensors.insert(
+            format!("model.layers.{l}.mlp.down_weights"),
+            StoredTensor {
+                shape: shape_h_i.expect("experts existed"),
+                dtype: Dtype::BF16,
+                data: down_data,
+            },
+        );
+        // layer_scalar: a checkpoint scalar, broadcast to (hidden,) F32.
+        let scalar_key = format!("model.layers.{l}.layer_scalar");
+        if let Some(stored) = all_tensors.get(&scalar_key) {
+            if stored.shape.iter().product::<usize>() == 1 {
+                let value = f32::from_le_bytes([
+                    stored.data[0],
+                    stored.data[1],
+                    stored.data[2],
+                    stored.data[3],
+                ]);
+                let hidden = all_tensors
+                    .get("model.norm.weight")
+                    .map(|t| t.shape[0])
+                    .expect("final norm sizes hidden");
+                all_tensors.insert(
+                    scalar_key,
+                    StoredTensor {
+                        shape: vec![hidden],
+                        dtype: Dtype::F32,
+                        data: vec![value; hidden]
+                            .iter()
+                            .flat_map(|v| v.to_le_bytes())
+                            .collect(),
+                    },
+                );
             }
         }
     }
 
-    println!("Saving combined model (BF16 weights, F32 norms/router)...");
-    // Convert non-expert F32 tensors to BF16 at serialization time, except
-    // the keep_f32 set (norms, router, layer_scalar).
-    let bf16_converted: HashMap<String, Vec<u8>> = all_tensors
-        .iter()
-        .filter_map(|(name, stored)| match &stored.data {
-            TensorData::F32(data) if !keep_f32(name) => {
-                let bf16_data: Vec<bf16> = data.iter().map(|x| bf16::from_f32(*x)).collect();
-                Some((name.clone(), bytemuck::cast_slice(&bf16_data).to_vec()))
-            }
-            _ => None,
-        })
-        .collect();
     let tensor_views: HashMap<String, TensorView<'_>> = all_tensors
         .iter()
         .map(|(name, stored)| {
-            let view = if let Some(bytes) = bf16_converted.get(name) {
-                TensorView::new(Dtype::BF16, stored.shape.clone(), bytes).unwrap()
-            } else {
-                match &stored.data {
-                    TensorData::F32(data) => {
-                        let bytes: &[u8] = bytemuck::cast_slice(data);
-                        TensorView::new(Dtype::F32, stored.shape.clone(), bytes).unwrap()
-                    }
-                    TensorData::BF16(bytes) => {
-                        TensorView::new(Dtype::BF16, stored.shape.clone(), bytes).unwrap()
-                    }
-                }
-            };
+            let view = TensorView::new(stored.dtype, stored.shape.clone(), &stored.data).unwrap();
             (name.clone(), view)
         })
         .collect();
 
     let serialized = safetensors::serialize(&tensor_views, None)?;
+
     let mut file = File::create(&output_path)?;
     file.write_all(&serialized)?;
 
-    println!("Combined model saved successfully!");
+    println!("Combined BF16 model saved successfully!");
     Ok(output_path)
 }
 
+/// Downloads model files from HuggingFace and returns the cache directory path.
+pub fn download_hf_model(repo_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let api = Api::new()?;
+    let repo = api.model(repo_id.to_string());
+    // Download tokenizer
+    let tokenizer_path = repo.get("tokenizer.json")?;
+    let model_dir = tokenizer_path.parent().unwrap().to_path_buf();
+    // Try to download single shard model first
+    if repo.get("model.safetensors").is_ok() {
+        return Ok(model_dir);
+    }
+    // Otherwise download sharded model
+    let index_path = repo.get("model.safetensors.index.json")?;
+    // Parse index to find shard files
+    let index_content = std::fs::read_to_string(&index_path)?;
+    let index: SafetensorsIndex = serde_json::from_str(&index_content)?;
+    // Get unique shard files
+    let mut shard_files: Vec<String> = index.weight_map.values().cloned().collect();
+    shard_files.sort();
+    shard_files.dedup();
+    // Download each shard
+    for shard_file in &shard_files {
+        repo.get(shard_file)?;
+    }
+    Ok(model_dir)
+}
+
+/// Downloads a model from HuggingFace and prepares it for use.
+///
+/// Returns the path to the model directory containing:
+/// - tokenizer.json
+/// - model_combined_gemma4moe_text_v1.safetensors
 pub fn prepare_hf_model(repo_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let model_dir = download_hf_model(repo_id)?;
-    combine_safetensors(&model_dir)?;
+    combine_safetensors_to_bf16(&model_dir)?;
     Ok(model_dir)
 }
