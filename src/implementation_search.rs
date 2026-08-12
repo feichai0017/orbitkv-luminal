@@ -379,10 +379,13 @@ pub fn search_implementations_with_ops(
                         breakdown.with_dead_ends += 1;
                     }
                     if breakdown.exemplars.len() < 4 {
-                        breakdown.exemplars.push(summary);
+                        breakdown.exemplars.push(summary.clone());
                     }
                     if refusals.len() < 8 {
-                        refusals.push(format!("extract: {err:#}"));
+                        // The breakdown names WHY (dead-end classes carry
+                        // the unproven-Int-op note and its attestation
+                        // door), not just that extraction failed.
+                        refusals.push(format!("extract: {err:#}; {summary}"));
                     }
                     continue;
                 }

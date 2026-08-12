@@ -230,10 +230,66 @@ impl<'a> ExtractionSession<'a> {
                 cycles.push(labels);
             }
         }
+        // Landing D refusal visibility: a dead-end whose logical member
+        // is a proof-gated Int op did not fail for lack of a kernel —
+        // it failed for lack of a PROOF. Name that, and name the door.
+        let bounded: std::collections::HashSet<ClassId> = extractor
+            .egraph
+            .nodes
+            .values()
+            .filter(|node| node.op == "value-lower-bound-of")
+            .filter_map(|node| {
+                node.children
+                    .first()
+                    .and_then(|id| extractor.egraph.nodes.get(id))
+                    .map(|arg| arg.eclass.clone())
+            })
+            .collect();
+        const PROOF_GATED: [&str; 5] = [
+            "LogicalAdd",
+            "LogicalMul",
+            "LogicalReduceSum",
+            "LogicalTruncDiv",
+            "LogicalTruncRem",
+        ];
+        let unproven_note = |class: &ClassId| -> Option<String> {
+            let (logical, _layout) = extractor.layout_tensor_parts(class)?;
+            let gated_op = extractor
+                .class_nodes
+                .get(&logical)?
+                .iter()
+                .filter_map(|id| extractor.egraph.nodes.get(id))
+                .map(|node| node.op.as_str())
+                .find(|op| PROOF_GATED.contains(op))?;
+            let dtype = extractor.with_dtype_index(|index| index.get(&logical).copied())?;
+            if !matches!(
+                dtype,
+                crate::dtype::PlanDtype::Int | crate::dtype::PlanDtype::Int64
+            ) {
+                return None;
+            }
+            Some(if bounded.contains(&logical) {
+                format!(
+                    "{gated_op} on {dtype:?} has value bounds but they do not \
+                     discharge the proof obligations (width, or a divisor \
+                     range admitting zero) — tighten the attested input \
+                     ranges (non-wrapping ruling 2026-08-11)"
+                )
+            } else {
+                format!(
+                    "{gated_op} on {dtype:?} is UNPROVEN — no value-bounds \
+                     fact reached it; attest the input data's range with \
+                     bind_value_range (non-wrapping ruling 2026-08-11)"
+                )
+            })
+        };
         let dead_ends: Vec<String> = extractor
             .no_candidates
             .iter()
-            .map(|class| format!("{} ({class})", class_label(class)))
+            .map(|class| match unproven_note(class) {
+                Some(note) => format!("{} ({class}) — {note}", class_label(class)),
+                None => format!("{} ({class})", class_label(class)),
+            })
             .collect();
         let summary = format!(
             "{} unplanned classes; choice-cycles: {} {:?}; dead-ends: {} {:?}",

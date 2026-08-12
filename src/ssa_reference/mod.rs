@@ -1416,9 +1416,15 @@ mod tests {
         let err = rt
             .search(&data, &crate::test_support::harness_search_options())
             .unwrap_err();
+        let message = format!("{err:#}");
         assert!(
-            format!("{err:#}").contains("no candidate genome"),
-            "expected the unproven refusal, got: {err:#}"
+            message.contains("no candidate genome"),
+            "expected the unproven refusal, got: {message}"
+        );
+        assert!(
+            message.contains("UNPROVEN") && message.contains("bind_value_range"),
+            "the refusal must name the missing proof and the attestation \
+             door, got: {message}"
         );
 
         // Act 2: the same graph under declared value ranges proves and runs.
