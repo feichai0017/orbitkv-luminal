@@ -1,48 +1,76 @@
-use luminal::{dtype::DType, graph::Graph, prelude::GraphTensor, shape::Expression};
-use luminal_nn::LayerNorm;
+//! openai/whisper-tiny.en as pure logical ops — 100% of THIS
+//! checkpoint (ruling 2026-08-12): conv frontend (k3s1 + k3s2, exact
+//! erf GELU), a stored sinusoidal position table on the encoder and a
+//! LEARNED position table on the decoder, torch-style LayerNorm
+//! (mean + std, learned weight AND bias, eps 1e-5), the HF whisper
+//! projection-bias asymmetry (q/v/out biased, k unbiased), plain MHA
+//! 6×64 with 1/8 on the scores, causal cached decoder self-attention
+//! over the slot pool, UNCACHED cross-attention whose K/V recompute
+//! from the encoder output every step (encoder + decoder are ONE
+//! graph — faithful to the parked example), exact-erf GELU MLPs, and
+//! the TIED output head. No rope, no RMSNorm, no GQA.
 
-// whisper-tiny.en hyperparameters
-pub const N_MELS: usize = 80;
-pub const N_AUDIO_CTX: usize = 1500;
-pub const N_AUDIO_STATE: usize = 384;
-pub const N_AUDIO_HEAD: usize = 6;
-pub const N_AUDIO_LAYER: usize = 4;
+use luminal::dtype::DType;
+use luminal::graph::Graph;
+use luminal::prelude::GraphTensor;
+use luminal::shape::Expression;
+use luminal_nn::{Embedding, KvCachePool, LayerNorm, Linear};
 
-pub const N_TEXT_CTX: usize = 448;
-pub const N_TEXT_STATE: usize = 384;
-pub const N_TEXT_HEAD: usize = 6;
-pub const N_TEXT_LAYER: usize = 4;
-
-pub const HEAD_DIM: usize = N_AUDIO_STATE / N_AUDIO_HEAD; // 64
-pub const FF_DIM: usize = 4 * N_AUDIO_STATE; // 1536
-
-pub const N_VOCAB: usize = 51864;
-pub const LAYER_NORM_EPS: f32 = 1e-5;
-
-pub const TOKEN_SOT: u32 = 50257; // <|startoftranscript|>
-pub const TOKEN_NO_TIMESTAMPS: u32 = 50362;
-pub const TOKEN_EOT: u32 = 50256;
-
-fn linear_with_bias(x: GraphTensor, w: GraphTensor, b: GraphTensor) -> GraphTensor {
-    let out = x.matmul(w.t());
-    let prefix: Vec<Expression> = out.dims()[..out.dims().len() - 1].to_vec();
-    out + b.expand_lhs(prefix)
+#[derive(Clone)]
+pub struct WhisperDims {
+    pub n_mels: usize,
+    pub audio_ctx: usize,
+    pub state: usize,
+    pub heads: usize,
+    pub audio_layers: usize,
+    pub text_layers: usize,
+    pub text_ctx: usize,
+    pub vocab: usize,
+    pub ff: usize,
+    pub eps: f32,
 }
 
-fn linear_no_bias(x: GraphTensor, w: GraphTensor) -> GraphTensor {
-    x.matmul(w.t())
+impl WhisperDims {
+    pub fn whisper_tiny_en() -> Self {
+        Self {
+            n_mels: 80,
+            audio_ctx: 1500,
+            state: 384,
+            heads: 6,
+            audio_layers: 4,
+            text_layers: 4,
+            text_ctx: 448,
+            vocab: 51_864,
+            ff: 1536,
+            eps: 1e-5,
+        }
+    }
+
+    pub fn tiny() -> Self {
+        Self {
+            n_mels: 4,
+            audio_ctx: 6,
+            state: 8,
+            heads: 2,
+            audio_layers: 2,
+            text_layers: 2,
+            text_ctx: 8,
+            vocab: 19,
+            ff: 12,
+            eps: 1e-5,
+        }
+    }
+
+    pub fn head_dim(&self) -> usize {
+        self.state / self.heads
+    }
+
+    /// Mel frames before the stride-2 conv halves them.
+    pub fn mel_frames(&self) -> usize {
+        self.audio_ctx * 2
+    }
 }
 
-fn persist(
-    cx: &mut Graph,
-    name: impl ToString,
-    shape: impl luminal::prelude::ToShape,
-) -> GraphTensor {
-    cx.named_tensor(name, shape).persist()
-}
-
-/// 1D convolution with bias. Input: (ch_in, length). Weight: (ch_out, ch_in*kernel)
-/// (HF stores it as (ch_out, ch_in, kernel) which flat-loads identically). Output: (ch_out, out_length).
 fn conv1d_bias(
     x: GraphTensor,
     weight: GraphTensor,
@@ -58,421 +86,256 @@ fn conv1d_bias(
         ],
         0.0,
     );
-    let unfolded = padded.unfold([1usize, kernel], [1usize, stride], [1usize, 1usize]);
-    // unfolded: (ch_in, n_windows, 1, kernel)
-    let unfolded = unfolded.squeeze(2);
-    // (ch_in, n_windows, kernel) -> (n_windows, ch_in, kernel) -> (n_windows, ch_in*kernel)
-    let permuted = unfolded.permute((1, 0, 2));
-    let flat = permuted.merge_dims(1, 2);
-    // (n_windows, ch_in*kernel) @ (ch_in*kernel, ch_out) -> (n_windows, ch_out)
-    let out = flat.matmul(weight.t());
+    let unfolded = padded
+        .unfold([1usize, kernel], [1usize, stride], [1usize, 1usize])
+        .squeeze(2);
+    let flat = unfolded.permute((1, 0, 2)).merge_dims(1, 2);
+    let out = flat.matmul(weight.permute((1, 0)));
     let n_windows = out.dims()[0];
-    let bias_expanded = bias.expand_dim(0, n_windows);
-    let out = out + bias_expanded;
-    // (n_windows, ch_out) -> (ch_out, n_windows)
-    out.transpose(0, 1)
+    (out + bias.expand_dim(0, n_windows)).transpose(0, 1)
 }
 
-/// Standard LayerNorm with mean-norm, std-norm, weight and bias (matches torch.nn.LayerNorm).
-fn standard_layernorm(name: &str, dim: usize, cx: &mut Graph) -> LayerNorm {
-    LayerNorm::new(
-        dim,
-        Some(&format!("{name}.weight")),
-        Some(&format!("{name}.bias")),
-        true,
-        LAYER_NORM_EPS,
-        cx,
-    )
+/// The HF whisper bias asymmetry: q/v/out biased, k unbiased.
+pub struct WhisperAttn {
+    pub q: Linear,
+    pub k: Linear,
+    pub v: Linear,
+    pub out: Linear,
+    heads: usize,
+    head_dim: usize,
 }
 
-struct AttentionWeights {
-    q_proj: GraphTensor,
-    q_bias: GraphTensor,
-    k_proj: GraphTensor,
-    v_proj: GraphTensor,
-    v_bias: GraphTensor,
-    out_proj: GraphTensor,
-    out_bias: GraphTensor,
-}
-
-impl AttentionWeights {
-    fn new(prefix: &str, dim: usize, cx: &mut Graph) -> Self {
+impl WhisperAttn {
+    fn new(prefix: &str, d: &WhisperDims, cx: &mut Graph) -> Self {
+        // Names ride the Linear's own tensors; binding uses weight_bindings.
+        let _ = prefix;
         Self {
-            q_proj: persist(cx, format!("{prefix}.q_proj.weight"), (dim, dim)),
-            q_bias: persist(cx, format!("{prefix}.q_proj.bias"), dim),
-            k_proj: persist(cx, format!("{prefix}.k_proj.weight"), (dim, dim)),
-            v_proj: persist(cx, format!("{prefix}.v_proj.weight"), (dim, dim)),
-            v_bias: persist(cx, format!("{prefix}.v_proj.bias"), dim),
-            out_proj: persist(cx, format!("{prefix}.out_proj.weight"), (dim, dim)),
-            out_bias: persist(cx, format!("{prefix}.out_proj.bias"), dim),
-        }
-    }
-}
-
-fn split_heads(x: GraphTensor) -> GraphTensor {
-    // (seq, dim) -> (n_heads, seq, head_dim)
-    x.split_dims(1, HEAD_DIM).transpose(0, 1)
-}
-
-fn merge_heads(x: GraphTensor) -> GraphTensor {
-    // (n_heads, seq, head_dim) -> (seq, n_heads, head_dim) -> (seq, dim)
-    x.transpose(0, 1).merge_dims(1, 2)
-}
-
-fn embedding_lookup(embedding: GraphTensor, ids: GraphTensor) -> GraphTensor {
-    let seq = ids.dims1();
-    embedding.gather1d(
-        (ids * N_TEXT_STATE).expand_dim(1, N_TEXT_STATE)
-            + ids.graph().arange(N_TEXT_STATE).expand_dim(0, seq),
-    )
-}
-
-/// Encoder self-attention (full, non-causal). Input/output shape (seq, dim).
-fn encoder_self_attention(x: GraphTensor, w: &AttentionWeights) -> GraphTensor {
-    let q = linear_with_bias(x, w.q_proj, w.q_bias);
-    let k = linear_no_bias(x, w.k_proj);
-    let v = linear_with_bias(x, w.v_proj, w.v_bias);
-
-    let q = split_heads(q);
-    let k = split_heads(k);
-    let v = split_heads(v);
-
-    let scale = (HEAD_DIM as f32).sqrt().recip();
-    let scores = q.matmul(k.transpose(1, 2)) * scale;
-    let weights = scores.softmax(2);
-    let attn = weights.matmul(v);
-    let merged = merge_heads(attn);
-    linear_with_bias(merged, w.out_proj, w.out_bias)
-}
-
-/// Decoder self-attention with KV cache. Returns (out, k_cache_out, v_cache_out).
-fn decoder_self_attention(
-    x: GraphTensor,
-    w: &AttentionWeights,
-    k_cache_in: GraphTensor,
-    v_cache_in: GraphTensor,
-    max_seq: usize,
-) -> (GraphTensor, GraphTensor, GraphTensor) {
-    let cx = x.graph();
-    let seq = x.dims()[0];
-    let prev = Expression::from('p');
-    let total = prev + seq;
-
-    let q = linear_with_bias(x, w.q_proj, w.q_bias);
-    let k = linear_no_bias(x, w.k_proj);
-    let v = linear_with_bias(x, w.v_proj, w.v_bias);
-
-    let k_new = split_heads(k); // (n_heads, seq, head_dim)
-    let v_new = split_heads(v);
-
-    // Build flat scatter indices to write new K/V into the cache at positions [prev..prev+seq).
-    let h_offset = cx.arange(N_TEXT_HEAD) * (max_seq * HEAD_DIM);
-    let p_offset = (cx.arange(seq) + prev) * HEAD_DIM;
-    let d_offset = cx.arange(HEAD_DIM);
-    let scatter_idx = h_offset.expand_dim(1, seq).expand_dim(2, HEAD_DIM)
-        + p_offset.expand_dim(0, N_TEXT_HEAD).expand_dim(2, HEAD_DIM)
-        + d_offset.expand_dim(0, N_TEXT_HEAD).expand_dim(1, seq);
-
-    let k_cache_out = k_new.scatter1d(scatter_idx, k_cache_in);
-    let v_cache_out = v_new.scatter1d(scatter_idx, v_cache_in);
-
-    let mut k_full = k_cache_out.slice((.., ..total, ..));
-    let mut v_full = v_cache_out.slice((.., ..total, ..));
-    // LUM-545: model invariant `prev + seq <= max_seq`, but the frontend
-    // cannot yet propagate expression-bound assertions, so `slice` reports
-    // `min(max_seq, p+s)`. Normalize the visible cache axis to `total`.
-    // STEP-4-GATED HATCH (Topic E, 2026-07-31): their frontend cannot
-    // propagate the bound prev + seq <= max_seq, so slice reports
-    // min(max_seq, total) and this normalizes it by hand. On the native
-    // pipeline the model keeps the min and the e-graph's bounds-decided
-    // IntMin collapse proves it equals total from the binding's seeded
-    // ranges — this hack DELETES when the example re-seats at Step 4.
-    k_full.legacy_tracker_mut().dims[1] = total;
-    v_full.legacy_tracker_mut().dims[1] = total;
-
-    let q = split_heads(q);
-
-    let scale = (HEAD_DIM as f32).sqrt().recip();
-    let scores = q.matmul(k_full.transpose(1, 2)) * scale;
-
-    // Causal mask
-    let q_abs = cx.arange(seq).cast(DType::F32) + prev;
-    let k_pos = cx.arange(total).cast(DType::F32);
-    let mask = k_pos.expand_dim(0, seq).gt(q_abs.expand_dim(1, total));
-    let mask_3d = mask.cast(DType::F32).expand_dim(0, N_TEXT_HEAD);
-    let masked = scores + mask_3d * (-1e10f32);
-
-    let weights = masked.softmax(2);
-    let attn = weights.matmul(v_full);
-    let merged = merge_heads(attn);
-    let out = linear_with_bias(merged, w.out_proj, w.out_bias);
-    (out, k_cache_out, v_cache_out)
-}
-
-/// Cross-attention: query from decoder, key/value from encoder output `xa`.
-fn cross_attention(x: GraphTensor, xa: GraphTensor, w: &AttentionWeights) -> GraphTensor {
-    let q = linear_with_bias(x, w.q_proj, w.q_bias);
-    let k = linear_no_bias(xa, w.k_proj);
-    let v = linear_with_bias(xa, w.v_proj, w.v_bias);
-
-    let q = split_heads(q);
-    let k = split_heads(k);
-    let v = split_heads(v);
-
-    let scale = (HEAD_DIM as f32).sqrt().recip();
-    let scores = q.matmul(k.transpose(1, 2)) * scale;
-    let weights = scores.softmax(2);
-    let attn = weights.matmul(v);
-    let merged = merge_heads(attn);
-    linear_with_bias(merged, w.out_proj, w.out_bias)
-}
-
-struct EncoderLayer {
-    self_attn: AttentionWeights,
-    self_attn_ln: LayerNorm,
-    fc1: GraphTensor,
-    fc1_b: GraphTensor,
-    fc2: GraphTensor,
-    fc2_b: GraphTensor,
-    final_ln: LayerNorm,
-}
-
-impl EncoderLayer {
-    fn new(idx: usize, cx: &mut Graph) -> Self {
-        let prefix = format!("model.encoder.layers.{idx}");
-        Self {
-            self_attn: AttentionWeights::new(&format!("{prefix}.self_attn"), N_AUDIO_STATE, cx),
-            self_attn_ln: standard_layernorm(
-                &format!("{prefix}.self_attn_layer_norm"),
-                N_AUDIO_STATE,
-                cx,
-            ),
-            fc1: persist(cx, format!("{prefix}.fc1.weight"), (FF_DIM, N_AUDIO_STATE)),
-            fc1_b: persist(cx, format!("{prefix}.fc1.bias"), FF_DIM),
-            fc2: persist(cx, format!("{prefix}.fc2.weight"), (N_AUDIO_STATE, FF_DIM)),
-            fc2_b: persist(cx, format!("{prefix}.fc2.bias"), N_AUDIO_STATE),
-            final_ln: standard_layernorm(&format!("{prefix}.final_layer_norm"), N_AUDIO_STATE, cx),
+            q: Linear::new_permuted(d.state, d.state, true, cx),
+            k: Linear::new_permuted(d.state, d.state, false, cx),
+            v: Linear::new_permuted(d.state, d.state, true, cx),
+            out: Linear::new_permuted(d.state, d.state, true, cx),
+            heads: d.heads,
+            head_dim: d.head_dim(),
         }
     }
 
-    fn forward(&self, x: GraphTensor) -> GraphTensor {
-        let h = self.self_attn_ln.forward(x);
-        let h = encoder_self_attention(h, &self.self_attn);
-        let x = x + h;
-
-        let h = self.final_ln.forward(x);
-        let h = linear_with_bias(h, self.fc1, self.fc1_b).gelu();
-        let h = linear_with_bias(h, self.fc2, self.fc2_b);
-        x + h
-    }
-}
-
-struct DecoderLayer {
-    self_attn: AttentionWeights,
-    self_attn_ln: LayerNorm,
-    cross_attn: AttentionWeights,
-    cross_attn_ln: LayerNorm,
-    fc1: GraphTensor,
-    fc1_b: GraphTensor,
-    fc2: GraphTensor,
-    fc2_b: GraphTensor,
-    final_ln: LayerNorm,
-}
-
-impl DecoderLayer {
-    fn new(idx: usize, cx: &mut Graph) -> Self {
-        let prefix = format!("model.decoder.layers.{idx}");
-        Self {
-            self_attn: AttentionWeights::new(&format!("{prefix}.self_attn"), N_TEXT_STATE, cx),
-            self_attn_ln: standard_layernorm(
-                &format!("{prefix}.self_attn_layer_norm"),
-                N_TEXT_STATE,
-                cx,
-            ),
-            cross_attn: AttentionWeights::new(&format!("{prefix}.encoder_attn"), N_TEXT_STATE, cx),
-            cross_attn_ln: standard_layernorm(
-                &format!("{prefix}.encoder_attn_layer_norm"),
-                N_TEXT_STATE,
-                cx,
-            ),
-            fc1: persist(cx, format!("{prefix}.fc1.weight"), (FF_DIM, N_TEXT_STATE)),
-            fc1_b: persist(cx, format!("{prefix}.fc1.bias"), FF_DIM),
-            fc2: persist(cx, format!("{prefix}.fc2.weight"), (N_TEXT_STATE, FF_DIM)),
-            fc2_b: persist(cx, format!("{prefix}.fc2.bias"), N_TEXT_STATE),
-            final_ln: standard_layernorm(&format!("{prefix}.final_layer_norm"), N_TEXT_STATE, cx),
-        }
+    /// Bidirectional maskless attention (encoder self / cross): q from
+    /// `x`, k/v from `kv_source`, scale 1/sqrt(head_dim) on scores.
+    fn bidirectional(&self, x: GraphTensor, kv_source: GraphTensor) -> GraphTensor {
+        let attn = luminal_nn::attention(
+            self.q.forward(x),
+            self.k.forward(kv_source),
+            self.v.forward(kv_source),
+            self.heads,
+            self.head_dim,
+        );
+        self.out.forward(attn)
     }
 
-    fn forward(
+    /// Causal cached decoder self-attention over the slot pool.
+    #[allow(clippy::too_many_arguments)]
+    fn causal_cached(
         &self,
         x: GraphTensor,
-        xa: GraphTensor,
-        k_cache_in: GraphTensor,
-        v_cache_in: GraphTensor,
-        max_seq: usize,
+        k_cache: GraphTensor,
+        v_cache: GraphTensor,
+        gather_idx: GraphTensor,
+        scatter_idx: GraphTensor,
+        q_pos: GraphTensor,
     ) -> (GraphTensor, GraphTensor, GraphTensor) {
-        let h = self.self_attn_ln.forward(x);
-        let (h, k_out, v_out) =
-            decoder_self_attention(h, &self.self_attn, k_cache_in, v_cache_in, max_seq);
-        let x = x + h;
-
-        let h = self.cross_attn_ln.forward(x);
-        let h = cross_attention(h, xa, &self.cross_attn);
-        let x = x + h;
-
-        let h = self.final_ln.forward(x);
-        let h = linear_with_bias(h, self.fc1, self.fc1_b).gelu();
-        let h = linear_with_bias(h, self.fc2, self.fc2_b);
-        (x + h, k_out, v_out)
+        let (attn, k_cache, v_cache) = luminal_nn::paged_attention_positional(
+            self.q.forward(x),
+            self.k.forward(x),
+            self.v.forward(x),
+            k_cache,
+            v_cache,
+            gather_idx,
+            scatter_idx,
+            q_pos,
+            self.heads,
+            self.heads, // MHA: no KV grouping
+            self.head_dim,
+            None,
+            1.0 / (self.head_dim as f32).sqrt(),
+        );
+        (self.out.forward(attn), k_cache, v_cache)
     }
 }
 
-pub struct KVCache {
-    pub k_caches: Vec<GraphTensor>,
-    pub v_caches: Vec<GraphTensor>,
-    pub max_seq: usize,
+fn layer_norm(d: &WhisperDims, cx: &mut Graph) -> LayerNorm {
+    // torch LayerNorm: mean-centered, learned weight AND bias.
+    LayerNorm::new(d.state, Some("w"), Some("b"), true, d.eps, cx)
 }
 
-impl KVCache {
-    pub fn new(cx: &mut Graph, max_seq: usize) -> Self {
-        let mut k_caches = Vec::with_capacity(N_TEXT_LAYER);
-        let mut v_caches = Vec::with_capacity(N_TEXT_LAYER);
-        for l in 0..N_TEXT_LAYER {
-            k_caches.push(persist(
-                cx,
-                format!("kv_cache.{l}.k"),
-                (N_TEXT_HEAD, max_seq, HEAD_DIM),
-            ));
-            v_caches.push(persist(
-                cx,
-                format!("kv_cache.{l}.v"),
-                (N_TEXT_HEAD, max_seq, HEAD_DIM),
-            ));
-        }
-        Self {
-            k_caches,
-            v_caches,
-            max_seq,
-        }
-    }
+pub struct EncoderLayer {
+    pub attn_norm: LayerNorm,
+    pub attn: WhisperAttn,
+    pub ff_norm: LayerNorm,
+    pub fc1: Linear,
+    pub fc2: Linear,
 }
 
-pub struct WhisperEncoder {
-    conv1_w: GraphTensor,
-    conv1_b: GraphTensor,
-    conv2_w: GraphTensor,
-    conv2_b: GraphTensor,
-    positional_embedding: GraphTensor,
-    layers: Vec<EncoderLayer>,
-    layer_norm: LayerNorm,
-}
-
-impl WhisperEncoder {
-    pub fn init(cx: &mut Graph) -> Self {
-        Self {
-            conv1_w: persist(
-                cx,
-                "model.encoder.conv1.weight",
-                (N_AUDIO_STATE, N_MELS * 3),
-            ),
-            conv1_b: persist(cx, "model.encoder.conv1.bias", N_AUDIO_STATE),
-            conv2_w: persist(
-                cx,
-                "model.encoder.conv2.weight",
-                (N_AUDIO_STATE, N_AUDIO_STATE * 3),
-            ),
-            conv2_b: persist(cx, "model.encoder.conv2.bias", N_AUDIO_STATE),
-            positional_embedding: persist(
-                cx,
-                "model.encoder.embed_positions.weight",
-                (N_AUDIO_CTX, N_AUDIO_STATE),
-            ),
-            layers: (0..N_AUDIO_LAYER)
-                .map(|i| EncoderLayer::new(i, cx))
-                .collect(),
-            layer_norm: standard_layernorm("model.encoder.layer_norm", N_AUDIO_STATE, cx),
-        }
-    }
-
-    /// Input mel spectrogram: (N_MELS, 3000). Output: (N_AUDIO_CTX=1500, N_AUDIO_STATE).
-    pub fn forward(&self, mel: GraphTensor) -> GraphTensor {
-        let h = conv1d_bias(mel, self.conv1_w, self.conv1_b, 3, 1, 1).gelu();
-        let h = conv1d_bias(h, self.conv2_w, self.conv2_b, 3, 2, 1).gelu();
-        // h: (N_AUDIO_STATE, N_AUDIO_CTX) -> (N_AUDIO_CTX, N_AUDIO_STATE)
-        let mut x = h.transpose(0, 1) + self.positional_embedding;
-        for layer in &self.layers {
-            x = layer.forward(x);
-        }
-        self.layer_norm.forward(x)
-    }
-}
-
-pub struct WhisperDecoder {
-    embed_tokens: GraphTensor,
-    embed_positions: GraphTensor,
-    layers: Vec<DecoderLayer>,
-    layer_norm: LayerNorm,
-}
-
-impl WhisperDecoder {
-    pub fn init(cx: &mut Graph) -> Self {
-        Self {
-            embed_tokens: persist(
-                cx,
-                "model.decoder.embed_tokens.weight",
-                (N_VOCAB, N_TEXT_STATE),
-            ),
-            embed_positions: persist(
-                cx,
-                "model.decoder.embed_positions.weight",
-                (N_TEXT_CTX, N_TEXT_STATE),
-            ),
-            layers: (0..N_TEXT_LAYER)
-                .map(|i| DecoderLayer::new(i, cx))
-                .collect(),
-            layer_norm: standard_layernorm("model.decoder.layer_norm", N_TEXT_STATE, cx),
-        }
-    }
-
-    pub fn forward(
-        &self,
-        token_ids: GraphTensor,
-        pos_ids: GraphTensor,
-        xa: GraphTensor,
-        kv_cache: &KVCache,
-    ) -> (GraphTensor, Vec<(GraphTensor, GraphTensor)>) {
-        let mut x = embedding_lookup(self.embed_tokens, token_ids);
-        x += embedding_lookup(self.embed_positions, pos_ids);
-
-        let mut cache_outputs = Vec::with_capacity(N_TEXT_LAYER);
-        for (i, layer) in self.layers.iter().enumerate() {
-            let (x_new, k_out, v_out) = layer.forward(
-                x,
-                xa,
-                kv_cache.k_caches[i],
-                kv_cache.v_caches[i],
-                kv_cache.max_seq,
-            );
-            x = x_new;
-            cache_outputs.push((k_out, v_out));
-        }
-        let x = self.layer_norm.forward(x);
-        // Tied embeddings: projection to vocab
-        let logits = x.matmul(self.embed_tokens.t());
-        (logits, cache_outputs)
-    }
+pub struct DecoderLayer {
+    pub self_norm: LayerNorm,
+    pub self_attn: WhisperAttn,
+    pub cross_norm: LayerNorm,
+    pub cross_attn: WhisperAttn,
+    pub ff_norm: LayerNorm,
+    pub fc1: Linear,
+    pub fc2: Linear,
 }
 
 pub struct Whisper {
-    pub encoder: WhisperEncoder,
-    pub decoder: WhisperDecoder,
+    pub dims: WhisperDims,
+    pub conv1_w: GraphTensor,
+    pub conv1_b: GraphTensor,
+    pub conv2_w: GraphTensor,
+    pub conv2_b: GraphTensor,
+    pub enc_pos: GraphTensor,
+    pub enc_layers: Vec<EncoderLayer>,
+    pub enc_final_norm: LayerNorm,
+    pub embed: Embedding,
+    pub dec_pos: GraphTensor,
+    pub dec_layers: Vec<DecoderLayer>,
+    pub dec_final_norm: LayerNorm,
 }
 
 impl Whisper {
-    pub fn init(cx: &mut Graph) -> Self {
+    pub fn init(cx: &mut Graph, d: &WhisperDims) -> Self {
+        let enc_layers = (0..d.audio_layers)
+            .map(|_| EncoderLayer {
+                attn_norm: layer_norm(d, cx),
+                attn: WhisperAttn::new("enc", d, cx),
+                ff_norm: layer_norm(d, cx),
+                fc1: Linear::new_permuted(d.state, d.ff, true, cx),
+                fc2: Linear::new_permuted(d.ff, d.state, true, cx),
+            })
+            .collect();
+        let dec_layers = (0..d.text_layers)
+            .map(|_| DecoderLayer {
+                self_norm: layer_norm(d, cx),
+                self_attn: WhisperAttn::new("dec", d, cx),
+                cross_norm: layer_norm(d, cx),
+                cross_attn: WhisperAttn::new("cross", d, cx),
+                ff_norm: layer_norm(d, cx),
+                fc1: Linear::new_permuted(d.state, d.ff, true, cx),
+                fc2: Linear::new_permuted(d.ff, d.state, true, cx),
+            })
+            .collect();
         Self {
-            encoder: WhisperEncoder::init(cx),
-            decoder: WhisperDecoder::init(cx),
+            dims: d.clone(),
+            conv1_w: cx.named_tensor("conv1.weight", (d.state, d.n_mels * 3)),
+            conv1_b: cx.named_tensor("conv1.bias", d.state),
+            conv2_w: cx.named_tensor("conv2.weight", (d.state, d.state * 3)),
+            conv2_b: cx.named_tensor("conv2.bias", d.state),
+            enc_pos: cx.named_tensor("enc.pos", (d.audio_ctx, d.state)),
+            enc_layers,
+            enc_final_norm: layer_norm(d, cx),
+            embed: Embedding::new(d.vocab, d.state, cx),
+            dec_pos: cx.named_tensor("dec.pos", (d.text_ctx, d.state)),
+            dec_layers,
+            dec_final_norm: layer_norm(d, cx),
         }
+    }
+
+    /// mel (n_mels, 2·audio_ctx) → encoder output (audio_ctx, state).
+    pub fn encode(&self, mel: GraphTensor) -> GraphTensor {
+        let x = conv1d_bias(mel, self.conv1_w, self.conv1_b, 3, 1, 1).gelu();
+        let x = conv1d_bias(x, self.conv2_w, self.conv2_b, 3, 2, 1).gelu();
+        let mut x = x.transpose(0, 1) + self.enc_pos;
+        for layer in &self.enc_layers {
+            x = x + layer.attn.bidirectional(layer.attn_norm.forward(x), layer.attn_norm.forward(x));
+            let ff_in = layer.ff_norm.forward(x);
+            x = x + layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
+        }
+        self.enc_final_norm.forward(x)
+    }
+
+    /// One decode step: token (1,) Int at position q_pos, over the
+    /// per-layer self-attention slot pools; cross-attention K/V
+    /// recompute from `xa` (the encoder output) in the same graph.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_step(
+        &self,
+        token: GraphTensor,
+        q_pos: GraphTensor,
+        xa: GraphTensor,
+        pool: &KvCachePool,
+        gather_idx: GraphTensor,
+        scatter_idx: GraphTensor,
+    ) -> (GraphTensor, Vec<(GraphTensor, GraphTensor)>) {
+        assert_eq!(token.dtype, DType::Int);
+        let pos_row = luminal_nn::gather_rows(self.dec_pos, q_pos, self.dims.state);
+        let mut x = self.embed.forward(token) + pos_row;
+        let mut caches_out = Vec::with_capacity(self.dec_layers.len());
+        for (layer_index, layer) in self.dec_layers.iter().enumerate() {
+            let (attn, k_cache, v_cache) = layer.self_attn.causal_cached(
+                layer.self_norm.forward(x),
+                pool.layers[layer_index].0,
+                pool.layers[layer_index].1,
+                gather_idx,
+                scatter_idx,
+                q_pos,
+            );
+            x = x + attn;
+            caches_out.push((k_cache, v_cache));
+            x = x + layer
+                .cross_attn
+                .bidirectional(layer.cross_norm.forward(x), xa);
+            let ff_in = layer.ff_norm.forward(x);
+            x = x + layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
+        }
+        let x = self.dec_final_norm.forward(x);
+        (self.embed.reverse(x), caches_out)
+    }
+
+    pub fn weight_bindings(&self) -> Vec<(String, GraphTensor)> {
+        let mut map = vec![
+            ("model.encoder.conv1.weight".to_string(), self.conv1_w),
+            ("model.encoder.conv1.bias".to_string(), self.conv1_b),
+            ("model.encoder.conv2.weight".to_string(), self.conv2_w),
+            ("model.encoder.conv2.bias".to_string(), self.conv2_b),
+            ("model.encoder.embed_positions.weight".to_string(), self.enc_pos),
+            ("model.decoder.embed_tokens.weight".to_string(), self.embed.weight),
+            ("model.decoder.embed_positions.weight".to_string(), self.dec_pos),
+        ];
+        let mut attn = |prefix: String, a: &WhisperAttn, map: &mut Vec<(String, GraphTensor)>| {
+            map.push((format!("{prefix}.q_proj.weight"), a.q.weight));
+            map.push((format!("{prefix}.q_proj.bias"), a.q.bias.expect("q bias")));
+            map.push((format!("{prefix}.k_proj.weight"), a.k.weight));
+            map.push((format!("{prefix}.v_proj.weight"), a.v.weight));
+            map.push((format!("{prefix}.v_proj.bias"), a.v.bias.expect("v bias")));
+            map.push((format!("{prefix}.out_proj.weight"), a.out.weight));
+            map.push((format!("{prefix}.out_proj.bias"), a.out.bias.expect("out bias")));
+        };
+        let mut norm = |prefix: String, n: &LayerNorm, map: &mut Vec<(String, GraphTensor)>| {
+            map.push((format!("{prefix}.weight"), n.weight.expect("ln weight")));
+            map.push((format!("{prefix}.bias"), n.bias.expect("ln bias")));
+        };
+        for (l, layer) in self.enc_layers.iter().enumerate() {
+            let p = format!("model.encoder.layers.{l}");
+            norm(format!("{p}.self_attn_layer_norm"), &layer.attn_norm, &mut map);
+            attn(format!("{p}.self_attn"), &layer.attn, &mut map);
+            norm(format!("{p}.final_layer_norm"), &layer.ff_norm, &mut map);
+            map.push((format!("{p}.fc1.weight"), layer.fc1.weight));
+            map.push((format!("{p}.fc1.bias"), layer.fc1.bias.expect("fc1 bias")));
+            map.push((format!("{p}.fc2.weight"), layer.fc2.weight));
+            map.push((format!("{p}.fc2.bias"), layer.fc2.bias.expect("fc2 bias")));
+        }
+        norm("model.encoder.layer_norm".to_string(), &self.enc_final_norm, &mut map);
+        for (l, layer) in self.dec_layers.iter().enumerate() {
+            let p = format!("model.decoder.layers.{l}");
+            norm(format!("{p}.self_attn_layer_norm"), &layer.self_norm, &mut map);
+            attn(format!("{p}.self_attn"), &layer.self_attn, &mut map);
+            norm(format!("{p}.encoder_attn_layer_norm"), &layer.cross_norm, &mut map);
+            attn(format!("{p}.encoder_attn"), &layer.cross_attn, &mut map);
+            norm(format!("{p}.final_layer_norm"), &layer.ff_norm, &mut map);
+            map.push((format!("{p}.fc1.weight"), layer.fc1.weight));
+            map.push((format!("{p}.fc1.bias"), layer.fc1.bias.expect("fc1 bias")));
+            map.push((format!("{p}.fc2.weight"), layer.fc2.weight));
+            map.push((format!("{p}.fc2.bias"), layer.fc2.bias.expect("fc2 bias")));
+        }
+        norm("model.decoder.layer_norm".to_string(), &self.dec_final_norm, &mut map);
+        map
     }
 }

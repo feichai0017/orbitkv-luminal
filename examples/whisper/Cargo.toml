@@ -1,31 +1,28 @@
 [package]
 name = "whisper"
-version = "0.1.0"
-edition = "2024"
+version = "0.2.0"
+edition.workspace = true
 
 [[bin]]
 name = "whisper"
 path = "src/main.rs"
 
+# Pure-logical zoo conversion (rulings 2026-08-12): exactly
+# openai/whisper-tiny.en — conv frontend, stored sinusoidal + learned
+# position tables, torch LayerNorm with bias, the HF projection-bias
+# asymmetry, uncached cross-attention; slot-pool decoder self-cache.
 [dependencies]
 luminal = { path = "../.." }
-tikv-jemallocator = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }
 luminal_nn = { path = "../../crates/luminal_nn" }
-luminal_cuda_lite = { path = "../../crates/luminal_cuda_lite" }
-luminal_tracing = { path = "../../crates/luminal_tracing" }
-tokenizers = "0.15.2"
-tracing = "0.1.43"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustc-hash = "2.1"
+tokenizers = "0.22.2"
 
-# HuggingFace model download
 hf-hub = { version = "0.4", default-features = false, features = ["rustls-tls", "ureq"] }
 safetensors = "0.7.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 half = { version = "2.7.1", features = ["bytemuck"] }
 bytemuck = "1.24.0"
 memmap2 = "0.9.9"
 
-# Audio + signal processing
+# Host audio pipeline (WAV decode + log-mel)
 hound = "3.5"
 rustfft = "6.2"

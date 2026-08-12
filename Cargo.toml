@@ -64,6 +64,7 @@ members = [
     "examples/gemma3",
     "examples/qwen3_moe",
     "examples/gemma4_moe",
+    "examples/whisper",
 ]
 
 [patch.crates-io]
