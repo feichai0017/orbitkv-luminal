@@ -279,6 +279,12 @@ impl SsaReferenceRuntime {
                     TypedBuffer::I64(values.clone())
                 }
                 (PlanDtype::Int64, None) => TypedBuffer::I64(vec![0; numel]),
+                (PlanDtype::F8E4M3, Some(TypedBuffer::F8E4M3(codes))) => {
+                    TypedBuffer::F8E4M3(codes.clone())
+                }
+                (PlanDtype::F8E4M3, None) => {
+                    TypedBuffer::F8E4M3(vec![float8::F8E4M3::from_bits(0); numel])
+                }
                 // 1-bit logical Bool and byte-code Bool8 both live as
                 // Bool8 codes in reference storage; staged codes were
                 // validated at the TypedBuffer::bool8 door.

@@ -91,6 +91,11 @@ pub enum TypedBuffer {
     I32(Vec<i32>),
     I64(Vec<i64>),
     Bool8(Vec<u8>),
+    /// E4M3FN codes (the ML fp8: no infinities, saturate ±448, only
+    /// 0x7F/0xFF NaN) — quantization is MODEL DEFINITION (ruling
+    /// 2026-08-12), so checkpoint fp8 weights stage and store in their
+    /// own dtype; arithmetic happens after an explicit widening cast.
+    F8E4M3(Vec<float8::F8E4M3>),
 }
 
 impl TypedBuffer {
@@ -116,6 +121,7 @@ impl TypedBuffer {
             TypedBuffer::I32(values) => values.len(),
             TypedBuffer::I64(values) => values.len(),
             TypedBuffer::Bool8(bits) => bits.len(),
+            TypedBuffer::F8E4M3(codes) => codes.len(),
         }
     }
 
@@ -129,6 +135,7 @@ impl TypedBuffer {
             TypedBuffer::I32(_) => "i32",
             TypedBuffer::I64(_) => "i64",
             TypedBuffer::Bool8(_) => "bool8",
+            TypedBuffer::F8E4M3(_) => "f8e4m3",
         }
     }
 
@@ -174,6 +181,20 @@ impl TypedBuffer {
         }
     }
 
+    pub fn as_f8e4m3(&self) -> Result<&Vec<float8::F8E4M3>> {
+        match self {
+            TypedBuffer::F8E4M3(codes) => Ok(codes),
+            other => anyhow::bail!("expected an f8e4m3 buffer, found {}", other.type_name()),
+        }
+    }
+
+    pub fn as_f8e4m3_mut(&mut self) -> Result<&mut Vec<float8::F8E4M3>> {
+        match self {
+            TypedBuffer::F8E4M3(codes) => Ok(codes),
+            other => anyhow::bail!("expected an f8e4m3 buffer, found {}", other.type_name()),
+        }
+    }
+
     pub fn as_bool8(&self) -> Result<&Vec<u8>> {
         match self {
             TypedBuffer::Bool8(bits) => Ok(bits),
@@ -196,6 +217,9 @@ impl TypedBuffer {
             TypedBuffer::I32(values) => TypedBuffer::I32(vec![0; values.len()]),
             TypedBuffer::I64(values) => TypedBuffer::I64(vec![0; values.len()]),
             TypedBuffer::Bool8(bits) => TypedBuffer::Bool8(vec![0u8; bits.len()]),
+            TypedBuffer::F8E4M3(codes) => {
+                TypedBuffer::F8E4M3(vec![float8::F8E4M3::from_bits(0); codes.len()])
+            }
         }
     }
 }
@@ -217,6 +241,11 @@ impl From<Vec<i32>> for TypedBuffer {
 impl From<Vec<i64>> for TypedBuffer {
     fn from(values: Vec<i64>) -> Self {
         TypedBuffer::I64(values)
+    }
+}
+impl From<Vec<float8::F8E4M3>> for TypedBuffer {
+    fn from(codes: Vec<float8::F8E4M3>) -> Self {
+        TypedBuffer::F8E4M3(codes)
     }
 }
 
@@ -2119,5 +2148,126 @@ mod tests {
         data(&mut dag, f, sink, "v");
         let err = validate(&graph(dag)).unwrap_err();
         assert!(err.to_string().contains("outgoing edge"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod f8e4m3_semantics {
+    //! THE E4M3FN AGREEMENT PIN (2026-08-12): the float8 crate is our
+    //! fp8 backend (use-a-library ruling), and the nvidia checkpoint's
+    //! bytes are E4M3FN — this module proves, exhaustively, that the
+    //! crate's bit interpretation and our clamp-then-convert quantize
+    //! agree with the checkpoint codec (ported verbatim from the parked
+    //! llama example's tested hf.rs). If this ever breaks on a crate
+    //! upgrade, the kernels' conversion story is wrong — loudly.
+
+    /// The checkpoint codec, ported verbatim (reference only).
+    fn f8e4m3_decode(b: u8) -> f32 {
+        let sign = if b & 0x80 != 0 { -1.0f32 } else { 1.0 };
+        let exp = ((b >> 3) & 0xF) as i32;
+        let man = (b & 0x7) as f32;
+        if exp == 0xF && (b & 0x7) == 0x7 {
+            return f32::NAN;
+        }
+        if exp == 0 {
+            sign * (man / 8.0) * 2f32.powi(-6)
+        } else {
+            sign * (1.0 + man / 8.0) * 2f32.powi(exp - 7)
+        }
+    }
+
+    fn f8e4m3_encode(v: f32) -> u8 {
+        if v.is_nan() {
+            return 0x7F;
+        }
+        let bits = v.to_bits();
+        let sign = ((bits >> 24) & 0x80) as u8;
+        if bits & 0x7FFF_FFFF == 0 {
+            return sign;
+        }
+        let mut exp = ((bits >> 23) & 0xFF) as i32 - 127;
+        let man = (bits & 0x7F_FFFF) | 0x80_0000;
+        let mut shift = 20;
+        if exp < -6 {
+            shift += -6 - exp;
+            exp = -6;
+        }
+        if shift >= 32 {
+            return sign;
+        }
+        let half = 1u32 << (shift - 1);
+        let low = man & ((1u32 << shift) - 1);
+        let mut q = man >> shift;
+        if low > half || (low == half && q & 1 == 1) {
+            q += 1;
+        }
+        if q >= 16 {
+            q >>= 1;
+            exp += 1;
+        }
+        if exp > 8 || (exp == 8 && q == 15) {
+            return sign | 0x7E;
+        }
+        if q < 8 {
+            return sign | q as u8;
+        }
+        sign | (((exp + 7) as u8) << 3) | (q as u8 - 8)
+    }
+
+    /// The kernel's quantize spelling (must mirror the cast arm).
+    fn kernel_quantize(value: f32) -> float8::F8E4M3 {
+        if value.is_nan() {
+            float8::F8E4M3::from_bits(0x7F)
+        } else {
+            float8::F8E4M3::from_f32(value.clamp(-448.0, 448.0))
+        }
+    }
+
+    /// Every one of the 256 codes decodes identically (NaN ↔ NaN).
+    #[test]
+    fn all_256_codes_decode_like_the_checkpoint_codec() {
+        for byte in 0u16..=255 {
+            let byte = byte as u8;
+            let ours = float8::F8E4M3::from_bits(byte).to_f32();
+            let reference = f8e4m3_decode(byte);
+            assert!(
+                (ours.is_nan() && reference.is_nan()) || ours == reference,
+                "code {byte:#04x}: crate decodes {ours}, checkpoint codec {reference}"
+            );
+        }
+    }
+
+    /// A dense sweep of quantize inputs (every code's midpoint
+    /// neighborhood, the saturation region, subnormals, negative zero)
+    /// encodes identically.
+    #[test]
+    fn quantize_matches_the_checkpoint_codec() {
+        let mut probes: Vec<f32> = Vec::new();
+        for byte in 0u16..=255 {
+            let center = f8e4m3_decode(byte as u8);
+            if center.is_nan() {
+                continue;
+            }
+            for delta in [-1.001, -1.0, -0.999, -0.5, 0.0, 0.5, 0.999, 1.0, 1.001] {
+                probes.push(center + delta as f32 * center.abs().max(1e-9) * 0.03);
+            }
+        }
+        probes.extend_from_slice(&[
+            447.9, 448.0, 448.1, 500.0, 1e9, -447.9, -448.0, -448.1, -500.0, -1e9,
+            1e-12, -1e-12, 0.0, -0.0, f32::NAN,
+        ]);
+        for value in probes {
+            let ours = kernel_quantize(value).to_bits();
+            let reference = f8e4m3_encode(value);
+            let ours_value = f8e4m3_decode(ours);
+            let reference_value = f8e4m3_decode(reference);
+            assert!(
+                ours == reference
+                    || (ours_value.is_nan() && reference_value.is_nan())
+                    || ours_value == reference_value,
+                "quantize({value}): crate {ours:#04x} ({ours_value}), \
+                 checkpoint codec {reference:#04x} ({reference_value})"
+            );
+        }
     }
 }

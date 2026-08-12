@@ -61,6 +61,11 @@ fn move_gathered(
                 dest[flat] = data[*index];
             }
         }
+        (TypedBuffer::F8E4M3(data), TypedBuffer::F8E4M3(dest)) => {
+            for (flat, index) in index_of.iter().enumerate() {
+                dest[flat] = data[*index];
+            }
+        }
         (source, dest) => anyhow::bail!(
             "payload move between {} and {} buffers",
             source.type_name(),
@@ -177,6 +182,12 @@ pub(super) fn scatter_checked(
             }
         }
         (TypedBuffer::Bool8(init), TypedBuffer::Bool8(src), TypedBuffer::Bool8(dest)) => {
+            dest.copy_from_slice(init);
+            for (i, target) in target_of.iter().enumerate() {
+                dest[*target] = src[i];
+            }
+        }
+        (TypedBuffer::F8E4M3(init), TypedBuffer::F8E4M3(src), TypedBuffer::F8E4M3(dest)) => {
             dest.copy_from_slice(init);
             for (i, target) in target_of.iter().enumerate() {
                 dest[*target] = src[i];

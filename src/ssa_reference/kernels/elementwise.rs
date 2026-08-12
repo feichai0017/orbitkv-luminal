@@ -232,6 +232,32 @@ pub(super) fn cast(_op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> 
                 })?;
             }
         }
+        // fp8: the QUANTIZE direction is the model's own explicit
+        // step (quantization is model definition, ruling 2026-08-12) —
+        // E4M3FN semantics: round-to-nearest-even, SATURATE to ±448
+        // (the clamp handles the crate's non-FN overflow behavior;
+        // agreement with the checkpoint codec is pinned exhaustively
+        // by test). Widening back is exact.
+        (TypedBuffer::F32(input), TypedBuffer::F8E4M3(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, value) in dest.iter_mut().zip(input) {
+                *out = if value.is_nan() {
+                    float8::F8E4M3::from_bits(0x7F)
+                } else {
+                    float8::F8E4M3::from_f32(value.clamp(-448.0, 448.0))
+                };
+            }
+        }
+        (TypedBuffer::F8E4M3(input), TypedBuffer::F32(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, code) in dest.iter_mut().zip(input) {
+                *out = code.to_f32();
+            }
+        }
+        (TypedBuffer::F8E4M3(input), TypedBuffer::F8E4M3(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            dest.copy_from_slice(input);
+        }
         // Float -> int is a REFUSAL: rounding/truncation is a lossy
         // read and must be an explicit op with ruled semantics, never
         // a cast (the F32 -> Bool8 projection rule generalized).
