@@ -5146,3 +5146,4 @@ mod arena_plan_tests {
         assert_eq!(conflicting.arena_slots.len(), 2);
     }
 }
+
