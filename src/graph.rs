@@ -61,7 +61,7 @@ impl DimBucket {
 #[derive(Default)]
 pub struct Graph {
     /// A map of dynamic dimensions to concrete dimension sizes
-    pub dyn_map: FxHashMap<char, usize>,
+    pub dyn_map: crate::shape::DynMap,
     /// The logical-model recorder — GraphTensor methods emit their
     /// logical ops here; it IS the graph (absorbed into this struct at
     /// M3 Step 4e).
@@ -85,8 +85,8 @@ impl Graph {
         id
     }
 
-    pub fn set_dim(&mut self, dimension: char, val: usize) {
-        self.dyn_map.insert(dimension, val);
+    pub fn set_dim(&mut self, dimension: impl Into<crate::shape::Symbol>, val: usize) {
+        self.dyn_map.insert(dimension.into(), val);
     }
 
     pub fn tensor(&mut self, shape: impl ToShape) -> GraphTensor {

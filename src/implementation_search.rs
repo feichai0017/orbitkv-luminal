@@ -468,8 +468,8 @@ pub fn search_implementations_with_ops(
 /// representative pins it was searched at, and the winning plan.
 #[derive(Debug)]
 pub struct BucketPlan {
-    pub ranges: BTreeMap<char, (usize, usize)>,
-    pub representative: FxHashMap<char, usize>,
+    pub ranges: BTreeMap<crate::shape::Symbol, (usize, usize)>,
+    pub representative: crate::shape::DynMap,
     pub program: LogicalProgram,
     pub outcome: SearchOutcome,
 }
@@ -486,9 +486,9 @@ pub struct BucketPlan {
 /// re-renders — genome transfer across renders is future work.
 pub fn bucketed_search_implementations(
     graph: &crate::graph::Graph,
-    dim_buckets: &BTreeMap<char, Vec<crate::graph::DimBucket>>,
+    dim_buckets: &BTreeMap<crate::shape::Symbol, Vec<crate::graph::DimBucket>>,
     input_data: impl Fn(
-        &FxHashMap<char, usize>,
+        &crate::shape::DynMap,
     ) -> FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
 ) -> Result<Vec<BucketPlan>> {
@@ -502,7 +502,7 @@ pub fn bucketed_search_implementations(
         .logical
         .native_parts()
         .map_err(|reason| anyhow!("native load refused: {reason}"))?;
-    let seeds_text = |seeds: &BTreeMap<char, (u64, u64)>| {
+    let seeds_text = |seeds: &BTreeMap<crate::shape::Symbol, (u64, u64)>| {
         let mut text = String::new();
         for (var, (lower, upper)) in seeds {
             text.push_str(&format!(
@@ -512,7 +512,7 @@ pub fn bucketed_search_implementations(
         }
         text
     };
-    let assemble = |seeds: &BTreeMap<char, (u64, u64)>| crate::graph::LogicalProgram {
+    let assemble = |seeds: &BTreeMap<crate::shape::Symbol, (u64, u64)>| crate::graph::LogicalProgram {
         text: format!(
             "{pre}{}{}{post}",
             seeds_text(seeds),
@@ -523,7 +523,7 @@ pub fn bucketed_search_implementations(
     };
 
     // Cartesian combinations, dims in sorted order (their bucket_combinations).
-    let dims: Vec<&char> = dim_buckets.keys().collect();
+    let dims: Vec<&crate::shape::Symbol> = dim_buckets.keys().collect();
     let mut combos: Vec<Vec<usize>> = vec![Vec::new()];
     for dim in &dims {
         let count = dim_buckets[*dim].len();
@@ -551,7 +551,7 @@ pub fn bucketed_search_implementations(
 
         // Bucket-wide soundness: the range-seeded render must run its whole
         // fixpoint (authoring-contract checks included) over the interval.
-        let mut validation_seeds: BTreeMap<char, (u64, u64)> = BTreeMap::new();
+        let mut validation_seeds: BTreeMap<crate::shape::Symbol, (u64, u64)> = BTreeMap::new();
         for (dim, value) in &representative {
             validation_seeds.insert(*dim, (*value as u64, *value as u64));
         }
@@ -569,7 +569,7 @@ pub fn bucketed_search_implementations(
             .map_err(|err| anyhow!("bucket {ranges:?} fails bucket-wide validation: {err}"))?;
 
         // Representative render: pinned via tight bounds, searched, profiled.
-        let mut pin_seeds: BTreeMap<char, (u64, u64)> = BTreeMap::new();
+        let mut pin_seeds: BTreeMap<crate::shape::Symbol, (u64, u64)> = BTreeMap::new();
         for (dim, value) in &representative {
             pin_seeds.insert(*dim, (*value as u64, *value as u64));
         }
@@ -594,7 +594,7 @@ pub fn bucketed_search_implementations(
 /// The covering bucket plan for a concrete dim assignment, if any.
 pub fn select_bucket<'a>(
     plans: &'a [BucketPlan],
-    dims: &FxHashMap<char, usize>,
+    dims: &crate::shape::DynMap,
 ) -> Option<&'a BucketPlan> {
     plans.iter().find(|plan| {
         plan.ranges.iter().all(|(dim, (min, max))| {
@@ -697,8 +697,7 @@ mod tests {
             (cx, x, y, out)
         };
 
-        let buckets: BTreeMap<char, Vec<DimBucket>> = [(
-            'a',
+        let buckets: BTreeMap<crate::shape::Symbol, Vec<DimBucket>> = [(crate::shape::Symbol::from('a'),
             vec![DimBucket::new(2, 4), DimBucket::new(5, 9)],
         )]
         .into();
@@ -706,8 +705,8 @@ mod tests {
         // The graph used for SEARCH: built at any pin (per-bucket renders
         // re-pin), sharing the same HLIR shape.
         let (cx, x, y, _out) = build(3);
-        let data_for = |rep: &FxHashMap<char, usize>| {
-            let n = rep[&'a'] * 2;
+        let data_for = |rep: &crate::shape::DynMap| {
+            let n = rep[&crate::shape::Symbol::from('a')] * 2;
             let mut data = FxHashMap::default();
             data.insert(x.id, (0..n).map(|v| v as f32 + 1.0).collect::<Vec<f32>>().into());
             data.insert(y.id, (0..n).map(|v| v as f32 * 0.5).collect::<Vec<f32>>().into());
@@ -724,16 +723,16 @@ mod tests {
 
         // Selection covers each bucket; out-of-range dims select nothing.
         let mut dims = FxHashMap::default();
-        dims.insert('a', 3usize);
-        assert!(select_bucket(&plans, &dims).unwrap().ranges[&'a'] == (2, 4));
-        dims.insert('a', 7usize);
-        assert!(select_bucket(&plans, &dims).unwrap().ranges[&'a'] == (5, 9));
-        dims.insert('a', 20usize);
+        dims.insert(crate::shape::Symbol::from('a'), 3usize);
+        assert!(select_bucket(&plans, &dims).unwrap().ranges[&crate::shape::Symbol::from('a')] == (2, 4));
+        dims.insert(crate::shape::Symbol::from('a'), 7usize);
+        assert!(select_bucket(&plans, &dims).unwrap().ranges[&crate::shape::Symbol::from('a')] == (5, 9));
+        dims.insert(crate::shape::Symbol::from('a'), 20usize);
         assert!(select_bucket(&plans, &dims).is_none());
 
         // Numeric agreement at each bucket's representative.
         for plan in &plans {
-            let rep = plan.representative[&'a'];
+            let rep = plan.representative[&crate::shape::Symbol::from('a')];
             // GOLDEN (computed: out = x * y with x[i] = i+1, y[i] = i*0.5
             // — the data_for closure's values at this representative).
             let n = rep * 2;

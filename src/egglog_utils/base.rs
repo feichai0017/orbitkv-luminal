@@ -433,14 +433,14 @@ pub fn dtype(e: Term) -> Term {
 
 pub fn interval_facts_egglog(
     intervals: &shape::DynDimIntervals,
-    vars: impl IntoIterator<Item = char>,
+    vars: impl IntoIterator<Item = crate::shape::Symbol>,
 ) -> String {
     let mut all_vars = FxHashSet::default();
     all_vars.extend(intervals.keys().copied());
     all_vars.extend(vars);
 
     let mut all_vars = all_vars.into_iter().collect::<Vec<_>>();
-    all_vars.sort_unstable();
+    all_vars.sort_unstable(); // Symbol Ord = by name — deterministic fact order
 
     let mut out = String::new();
     for var in all_vars {

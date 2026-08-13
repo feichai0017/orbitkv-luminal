@@ -119,7 +119,8 @@ impl SsaReferenceRuntime {
     }
 
     /// BINDING: seed a dynamic dim's range (bounds-on-vars — never a pin).
-    pub fn bind_dyn_range(&mut self, var: char, lower: u64, upper: u64) -> Result<()> {
+    pub fn bind_dyn_range(&mut self, var: impl Into<crate::shape::Symbol>, lower: u64, upper: u64) -> Result<()> {
+        let var = var.into();
         let spec = self.native.as_mut().ok_or_else(|| anyhow!("bind before load"))?;
         spec.binding_seeds.push_str(&format!(
             "(set (lower-bound-of (IntVar \"{var}\")) (bigint {lower}))\n\

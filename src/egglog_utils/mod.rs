@@ -218,8 +218,14 @@ pub fn extract_expr<'a>(
             }
             "MIter" => Expression::from('z'),
             op if op.starts_with("Boxed(\"") => {
-                let name = op.replace("Boxed(\"", "").replace("\")", "");
-                Expression::from(name.chars().next().unwrap())
+                // Anchored strip, full name — the old chars().next()
+                // TRUNCATED multi-char names ("s77" -> 's', a silent
+                // collision; the PR #396 headline bug, killed here too).
+                let name = op
+                    .strip_prefix("Boxed(\"")
+                    .and_then(|rest| rest.strip_suffix("\")"))
+                    .unwrap_or_else(|| panic!("malformed boxed M-var {op:?}"));
+                Expression::from(crate::shape::Symbol::new(name))
             }
             op if op.starts_with("\"#") => {
                 // The coordinate atom's M-var spelling (see expr_to_term).

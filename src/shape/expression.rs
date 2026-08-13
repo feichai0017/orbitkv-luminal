@@ -50,15 +50,15 @@ impl DimInterval {
     }
 }
 
-pub type DynDimIntervals = FxHashMap<char, DimInterval>;
+pub type DynDimIntervals = FxHashMap<crate::shape::Symbol, DimInterval>;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct IntervalSimplifyKey {
     expr: Expression,
-    intervals: Vec<(char, DimInterval)>,
+    intervals: Vec<(crate::shape::Symbol, DimInterval)>,
 }
 
-fn canonical_intervals(intervals: &DynDimIntervals) -> Vec<(char, DimInterval)> {
+fn canonical_intervals(intervals: &DynDimIntervals) -> Vec<(crate::shape::Symbol, DimInterval)> {
     let mut intervals = intervals.iter().map(|(&c, &i)| (c, i)).collect::<Vec<_>>();
     intervals.sort_by_key(|(c, _)| *c);
     intervals
@@ -161,7 +161,7 @@ impl Default for Expression {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Term {
     Num(i64),
-    Var(char),
+    Var(crate::shape::Symbol),
     /// A structural per-axis COORDINATE atom (P1 ruling 2026-08-07):
     /// `Coord(k)` is "coordinate of axis k of the iota being recorded" —
     /// positional, de-Bruijn-style, so an Expression holding coords means
@@ -522,7 +522,8 @@ impl Expression {
         Expression::new(terms)
     }
     /// Substitute an expression for a variable
-    pub fn substitute(self, var: char, expr: impl Into<Expression>) -> Self {
+    pub fn substitute(self, var: impl Into<crate::shape::Symbol>, expr: impl Into<Expression>) -> Self {
+        let var = var.into();
         let mut new_terms = vec![];
         let t = expr.into().terms.read();
         for term in self.terms.read().iter() {
@@ -580,13 +581,13 @@ impl Expression {
         stack.pop().unwrap() as usize
     }
     /// Evaluate the expression given variables.
-    pub fn exec(&self, variables: &FxHashMap<char, usize>) -> Option<usize> {
+    pub fn exec(&self, variables: &crate::shape::DynMap) -> Option<usize> {
         self.exec_stack(variables, &mut Vec::new())
     }
     /// Evaluate the expression given variables. This function requires a stack to be given for use as storage
     pub fn exec_stack(
         &self,
-        variables: &FxHashMap<char, usize>,
+        variables: &crate::shape::DynMap,
         stack: &mut Vec<i64>,
     ) -> Option<usize> {
         for term in self.terms.read().iter() {
@@ -603,7 +604,7 @@ impl Expression {
         stack.pop().map(|i| i as usize)
     }
     /// Retrieve all symbols in the expression.
-    pub fn to_symbols(&self) -> Vec<char> {
+    pub fn to_symbols(&self) -> Vec<crate::shape::Symbol> {
         self.terms
             .read()
             .iter()
@@ -614,7 +615,7 @@ impl Expression {
             .collect()
     }
     /// Resolve all known variables from dyn map into real values
-    pub fn resolve_vars(&self, dyn_map: &FxHashMap<char, usize>) -> Expression {
+    pub fn resolve_vars(&self, dyn_map: &crate::shape::DynMap) -> Expression {
         let new_terms: Vec<Term> = self
             .terms
             .read()
@@ -704,15 +705,27 @@ impl From<Term> for Expression {
     }
 }
 
+impl From<crate::shape::Symbol> for Expression {
+    fn from(value: crate::shape::Symbol) -> Self {
+        Expression::new(vec![Term::Var(value)])
+    }
+}
+
+impl From<&str> for Expression {
+    fn from(value: &str) -> Self {
+        Expression::new(vec![Term::Var(crate::shape::Symbol::new(value))])
+    }
+}
+
 impl From<char> for Expression {
     fn from(value: char) -> Self {
-        Expression::new(vec![Term::Var(value)])
+        Expression::new(vec![Term::Var(crate::shape::Symbol::from(value))])
     }
 }
 
 impl From<&char> for Expression {
     fn from(value: &char) -> Self {
-        Expression::new(vec![Term::Var(*value)])
+        Expression::new(vec![Term::Var(crate::shape::Symbol::from(*value))])
     }
 }
 
@@ -1267,7 +1280,7 @@ mod tests {
         assert_eq!(((a * 1) + 0) / 1 + (1 - 1), a);
         // Evaluation after simplification
         let n = (x + (256 - (x % 256))).simplify();
-        assert_eq!(n.exec(&[('x', 767)].into_iter().collect()).unwrap(), 768);
+        assert_eq!(n.exec(&[(crate::shape::Symbol::from('x'), 767)].into_iter().collect()).unwrap(), 768);
     }
 
     #[test]
@@ -1292,7 +1305,7 @@ mod tests {
     #[test]
     fn test_interval_simplifications() {
         let s = expr('s');
-        let intervals = [('s', DimInterval::new(0, 127))].into_iter().collect();
+        let intervals = [(crate::shape::Symbol::from('s'), DimInterval::new(0, 127))].into_iter().collect();
 
         assert_eq!((s % 128).simplify_with_intervals(&intervals), s);
         assert_eq!((s / 128).simplify_with_intervals(&intervals), expr(0));
@@ -1319,7 +1332,7 @@ mod tests {
     #[test]
     fn test_singleton_interval_substitutes_dynamic_var() {
         let s = expr('s');
-        let intervals = [('s', DimInterval::new(1, 1))].into_iter().collect();
+        let intervals = [(crate::shape::Symbol::from('s'), DimInterval::new(1, 1))].into_iter().collect();
 
         assert_eq!((s + 127).simplify_with_intervals(&intervals), expr(128));
         assert_eq!((s.lt(2)).simplify_with_intervals(&intervals), expr(1));
@@ -1328,7 +1341,7 @@ mod tests {
     #[test]
     fn test_interval_simplification_requires_proof() {
         let s = expr('s');
-        let intervals = [('s', DimInterval::new(0, 256))].into_iter().collect();
+        let intervals = [(crate::shape::Symbol::from('s'), DimInterval::new(0, 256))].into_iter().collect();
 
         assert_ne!((s % 128).simplify_with_intervals(&intervals), s);
         assert_ne!(s.lt(128).simplify_with_intervals(&intervals), expr(1));
@@ -1410,12 +1423,12 @@ mod tests {
             let (x, y, z) = (expr('x'), expr('y'), expr('z'));
             // Simplification preserves evaluation
             let expr = ((x + 3) * 2) - (x * 2) + (y % 5);
-            let env = [('x', x_val), ('y', y_val)].into_iter().collect();
+            let env = [(crate::shape::Symbol::from('x'), x_val), (crate::shape::Symbol::from('y'), y_val)].into_iter().collect();
             assert_eq!(expr.exec(&env).unwrap(), expr.simplify().exec(&env).unwrap());
             // Substitution + simplification preserves evaluation
             let expr = (x + y) * (y - x);
             let substituted = expr.substitute('x', z + 1).substitute('y', z - 1);
-            let env = [('z', z_val)].into_iter().collect();
+            let env = [(crate::shape::Symbol::from('z'), z_val)].into_iter().collect();
             assert_eq!(substituted.exec(&env).unwrap(), substituted.simplify().exec(&env).unwrap());
         }
     }
@@ -1424,7 +1437,9 @@ mod tests {
     fn test_hash_consing() {
         // Creating identical expressions should return the same underlying storage
         // Use unique variable names to avoid interference from other tests
-        let unique_var = '\u{E000}'; // Private use area character unlikely to conflict
+        // A fresh interned symbol cannot collide by construction —
+        // replaces the old private-use-area char trick (Symbol landing).
+        let unique_var = crate::shape::Symbol::fresh("hashcons_probe");
 
         // Create expression with unique var + 42
         let x1 = expr(unique_var) + 42;
@@ -1444,7 +1459,7 @@ mod tests {
         );
 
         // Different expression should create new entry
-        let unique_var2 = '\u{E001}';
+        let unique_var2 = crate::shape::Symbol::fresh("hashcons_probe");
         let y = expr(unique_var2) + 43;
         assert_ne!(
             x1.terms.id(),
