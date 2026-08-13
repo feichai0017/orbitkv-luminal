@@ -14,7 +14,7 @@
 
 use super::expect_op;
 use crate::buffer_tensor_ir::{BufferTensorIrOp, ReferenceKernelCtx, TypedBuffer};
-use crate::ssa_reference::ops::{GatherDps, IndexMapApplyMaterializeDps, ScatterFunctionalDps};
+use crate::reference::ops::{GatherDps, IndexMapApplyMaterializeDps, ScatterFunctionalDps};
 
 /// Read a rank of coordinate operands as native i32, promoted to i64
 /// for index arithmetic.

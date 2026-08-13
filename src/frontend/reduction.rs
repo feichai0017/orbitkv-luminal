@@ -20,6 +20,17 @@ impl GraphTensor {
         for dim in 0..axes.len() {
             let operand_dims = dims.clone();
             id = self.graph().mint_id();
+            if constructor == "LogicalReduceMax" {
+                // The empty max has no value (extent-0 ruling
+                // 2026-08-13): the reduced axis contracts to >= 1 —
+                // static extents discharge trivially; symbolic ones
+                // refuse unless the binding's range excludes 0.
+                let extent = operand_dims[axes[dim]];
+                let at = id.index();
+                self.graph()
+                    .logical
+                    .require_extent_at_least(at, &extent, 1, "reduce_max axis");
+            }
             let rank = operand_dims.len();
             let axis_from_end = rank - 1 - axes[dim];
             let mut out_dims = operand_dims.clone();

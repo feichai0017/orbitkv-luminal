@@ -422,10 +422,10 @@ pub trait OpMatcher: std::fmt::Debug {
 // The op INVENTORY does not live here (ruling 2026-08-06): layout_ir
 // defines the IR framework — the traits, extraction machinery, and plan
 // types — and stays distant from where ops are implemented. The
-// reference runtime's inventory is `crate::ssa_reference::ops`; a future
+// reference runtime's inventory is `crate::reference::ops`; a future
 // runtime crate brings its own. (Remaining crate-split coupling: the
 // extractor and egglog assembly still call
-// ssa_reference::ops::built_in_matchers directly — the plugin registry
+// reference::ops::built_in_matchers directly — the plugin registry
 // parameter is the next seam.)
 
 /// The petgraph carrying the dataflow DAG.

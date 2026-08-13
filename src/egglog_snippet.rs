@@ -136,7 +136,7 @@ pub fn assembled_program() -> &'static str {
         for op in crate::logical_op::built_in_logical_ops() {
             snippets.extend(op.snippets());
         }
-        for matcher in crate::ssa_reference::ops::built_in_matchers() {
+        for matcher in crate::reference::ops::built_in_matchers() {
             snippets.extend(matcher.snippets());
         }
         assemble(core, &snippets)

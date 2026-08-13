@@ -1315,7 +1315,7 @@ pub fn bufferize(graph: &ExtractedGraph) -> Result<BufferIrGraph> {
 
 /// Thread the extraction's literal geometry (dims, element bits) and the
 /// boundary `BufferLit` keys onto the plan's buffers — the sizing/binding
-/// surface the `SsaReferenceRuntime` executes from. Purely additive; `None`
+/// surface the `ReferenceRuntime` executes from. Purely additive; `None`
 /// stays `None` for symbolic geometry, and numeric consumers bail loudly.
 fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) -> Result<()> {
     use std::collections::HashMap as Map;
@@ -2318,7 +2318,7 @@ mod tests {
     /// (never op-internal allocations), and never undefined contents.
     #[test]
     fn builtin_ops_declare_out_of_place_defaults() {
-        use crate::ssa_reference::ops::{AddFunctional, IndexMapApplyMaterialize, ReduceSum, SqrtFunctional};
+        use crate::reference::ops::{AddFunctional, IndexMapApplyMaterialize, ReduceSum, SqrtFunctional};
         let ops: Vec<Box<dyn LayoutIrOp>> = vec![
             Box::new(AddFunctional),
             Box::new(SqrtFunctional),
@@ -2771,7 +2771,7 @@ mod tests {
     /// blanket permit the engine would have to trust.
     #[test]
     fn builtin_ops_declare_no_unconditional_permits() {
-        use crate::ssa_reference::ops::{AddFunctional, AddMulFused, AddMutating, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax, ReduceSum, SqrtFunctional, SqrtMutating};
+        use crate::reference::ops::{AddFunctional, AddMulFused, AddMutating, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax, ReduceSum, SqrtFunctional, SqrtMutating};
         let ops: Vec<Box<dyn LayoutIrOp>> = vec![
             Box::new(SqrtFunctional),
             Box::new(ExpFunctional),
@@ -2798,7 +2798,7 @@ mod tests {
         // layouts equal, discharging the permit's precondition at match time.
         // rhs may share the mutated storage; the reverse direction (reading
         // the mutated operand against... nothing ties operand 1) is no permit.
-        let alias_safe = crate::ssa_reference::ops::AddMutatingInputAliasSafe;
+        let alias_safe = crate::reference::ops::AddMutatingInputAliasSafe;
         assert!(permits_sharing(&alias_safe, 1, 0));
         assert!(!permits_sharing(&alias_safe, 0, 1));
     }

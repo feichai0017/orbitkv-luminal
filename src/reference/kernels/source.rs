@@ -6,7 +6,7 @@
 
 use super::expect_op;
 use crate::buffer_tensor_ir::{BufferTensorIrOp, ReferenceKernelCtx, TypedBuffer};
-use crate::ssa_reference::ops::{ConstantDps, IotaDps};
+use crate::reference::ops::{ConstantDps, IotaDps};
 
 pub(super) fn constant(
     op: &dyn BufferTensorIrOp,

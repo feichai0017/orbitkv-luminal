@@ -18,7 +18,7 @@ pub mod extractor;
 pub mod layout_ir;
 pub mod logical_op;
 pub mod implementation_search;
-pub mod ssa_reference;
+pub mod reference;
 pub mod test_support;
 pub mod visualization;
 

@@ -69,7 +69,7 @@ mod tests {
     use super::Embedding;
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
-    use luminal::ssa_reference::SsaReferenceRuntime;
+    use luminal::reference::ReferenceRuntime;
     use luminal::shape::IntExpr;
     use rustc_hash::FxHashMap;
 
@@ -104,7 +104,7 @@ mod tests {
         let mut data = FxHashMap::default();
         data.insert(ids.id, ids_data.clone().into());
         data.insert(model.weight.id, WEIGHT.to_vec().into());
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         rt.search(&data, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
         rt.set_data(ids.id, ids_data);
@@ -133,7 +133,7 @@ mod tests {
         let mut data = FxHashMap::default();
         data.insert(ids.id, ids_data.clone().into());
         data.insert(model.weight.id, WEIGHT.to_vec().into());
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         rt.search(&data, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
         rt.set_data(ids.id, ids_data);

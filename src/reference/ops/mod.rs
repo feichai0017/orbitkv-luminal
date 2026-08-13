@@ -83,7 +83,7 @@ pub use sin::{SinFunctional, SinMutating};
 pub use sqrt::{SqrtFunctional, SqrtMutating};
 
 // DPS forms, re-exported for the reference runtime's kernel registry
-// (ssa_reference::kernels downcasts plan ops to these concrete types —
+// (reference::kernels downcasts plan ops to these concrete types —
 // ops carry no execution of their own, ruling 2026-08-06).
 pub use add::AddFunctionalDps;
 pub use add_mul_fused::AddMulFusedDps;

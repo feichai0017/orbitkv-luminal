@@ -1,5 +1,5 @@
 //! The REFERENCE RUNTIME's kernel inventory — the single home of every
-//! reference implementation (ruling 2026-08-06). Ops in `ssa_reference::ops`
+//! reference implementation (ruling 2026-08-06). Ops in `reference::ops`
 //! carry NO execution: they are semantics + matching + bufferization
 //! contracts. A kernel exists in this folder or the op is simply not
 //! implemented on this runtime — and because [`super::reference_allow_list`]
@@ -52,7 +52,7 @@ fn entry<T: 'static>(
 /// only if two executable types legitimately share one (none do today —
 /// functional forms are not executable and have no entries).
 pub fn reference_kernels() -> &'static [ReferenceKernel] {
-    use crate::ssa_reference::ops::*;
+    use crate::reference::ops::*;
     static KERNELS: std::sync::OnceLock<Vec<ReferenceKernel>> = std::sync::OnceLock::new();
     KERNELS.get_or_init(|| {
         vec![

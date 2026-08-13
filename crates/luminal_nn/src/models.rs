@@ -581,7 +581,7 @@ mod tests {
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
     use luminal::shape::IntExpr;
-    use luminal::ssa_reference::SsaReferenceRuntime;
+    use luminal::reference::ReferenceRuntime;
     use rustc_hash::FxHashMap;
     use crate::test_refs::*;
 
@@ -636,7 +636,7 @@ mod tests {
             data.insert(layer.weight.id, w.clone().into());
             data.insert(layer.bias.unwrap().id, b.clone().into());
         }
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         let outcome = rt
             .search(&data, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
@@ -744,7 +744,7 @@ mod tests {
         let expected: Vec<f32> = x1.iter().zip(&ff).map(|(a, b)| a + b).collect();
 
         let data: FxHashMap<_, _> = pairs.iter().cloned().collect();
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         let outcome = rt
             .search(&data, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
@@ -842,7 +842,7 @@ mod tests {
                 pairs.push((caches[layer].1.id, weights(SLOTS6 * kv_dim, 99 + layer).into()));
             }
             let data: FxHashMap<_, _> = pairs.iter().cloned().collect();
-            let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+            let mut rt = ReferenceRuntime::load(&cx).expect("native load");
             let chosen = if default_budget {
                 ImplementationSearchOptions::default()
             } else {
@@ -922,7 +922,7 @@ mod tests {
         let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
         for seed in 0..16 {
             let mut rt =
-                luminal::ssa_reference::SsaReferenceRuntime::load(&cx).expect("native load");
+                luminal::reference::ReferenceRuntime::load(&cx).expect("native load");
             let outcome = rt.search(
                 &data,
                 &luminal::implementation_search::ImplementationSearchOptions {
@@ -949,7 +949,7 @@ mod tests {
                     egraph.parse_and_run_program(None, &text).expect("runs");
                     let serialized =
                         egraph.serialize(egglog::SerializeConfig::default()).egraph;
-                    let allow = luminal::ssa_reference::reference_allow_list();
+                    let allow = luminal::reference::reference_allow_list();
                     let mut session = luminal::extractor::ExtractionSession::new(
                         &serialized,
                         Some(&allow),
@@ -1122,7 +1122,7 @@ mod tests {
         let (data, pairs) = block_data(&fx);
         let (ref_logits, ref_kc, ref_vc) = block_reference(&fx);
 
-        let mut rt = SsaReferenceRuntime::load(&fx.cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&fx.cx).expect("native load");
         let outcome = rt
             .search(&data, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
@@ -1299,7 +1299,7 @@ mod tests {
             // budget's 8 genomes all hit choice-cycle discards, so this
             // model runs the DEFAULT budget (64 genomes).
             let data: FxHashMap<_, _> = pairs.iter().cloned().collect();
-            let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+            let mut rt = ReferenceRuntime::load(&cx).expect("native load");
             rt.search(&data, &ImplementationSearchOptions::default())
                 .expect("search finds a plan");
             for (id, values) in &pairs {

@@ -81,7 +81,7 @@ fn mini_moe_family() {
     // embed + block + tied logits is deep enough that the 8-genome
     // harness budget usually cycles out — default budget.
     let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
-    let mut rt = luminal::ssa_reference::SsaReferenceRuntime::load(&cx).expect("native load");
+    let mut rt = luminal::reference::ReferenceRuntime::load(&cx).expect("native load");
     rt.search(
         &data,
         &luminal::implementation_search::ImplementationSearchOptions::default(),

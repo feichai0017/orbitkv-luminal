@@ -1,7 +1,7 @@
 //! Shared numeric test helpers. The their-pipeline integration tests
 //! that lived here (search/compile/custom-op/fuzz) died with that
 //! pipeline at M3 Step 4b — differential coverage lives beside the ops
-//! (frontend candle harnesses on the native ladder + ssa_reference).
+//! (frontend candle harnesses on the native ladder + reference).
 
 use std::fmt::Debug;
 

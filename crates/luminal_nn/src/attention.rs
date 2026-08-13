@@ -538,7 +538,7 @@ mod tests {
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
     use luminal::shape::IntExpr;
-    use luminal::ssa_reference::SsaReferenceRuntime;
+    use luminal::reference::ReferenceRuntime;
     use rustc_hash::FxHashMap;
 
     fn assert_close(ours: &[f32], expected: &[f32]) {
@@ -566,7 +566,7 @@ mod tests {
         let mut inputs = FxHashMap::default();
         inputs.insert(data.id, data_vals.clone().into());
         inputs.insert(idx.id, idx_vals.clone().into());
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         rt.search(&inputs, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
         rt.set_data(data.id, data_vals);
@@ -597,7 +597,7 @@ mod tests {
         inputs.insert(src.id, src_vals.clone().into());
         inputs.insert(idx.id, idx_vals.clone().into());
         inputs.insert(dest.id, dest_vals.clone().into());
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         rt.search(&inputs, &ImplementationSearchOptions::default())
             .expect("search finds a plan");
         rt.set_data(src.id, src_vals);

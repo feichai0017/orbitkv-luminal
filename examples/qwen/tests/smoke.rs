@@ -132,7 +132,7 @@ fn vocab_scale_flat_index_arithmetic_stays_exact() {
     // Landing D: the flat products are provable because the caller
     // DECLARES the index range — the proof chain runs idx ∈ [0, vocab)
     // through the interval rules to "every partial sum fits i32."
-    let mut rt = luminal::ssa_reference::SsaReferenceRuntime::load(&cx).expect("native load");
+    let mut rt = luminal::reference::ReferenceRuntime::load(&cx).expect("native load");
     rt.bind_value_range(idx.id, 0, LAST_ROW as i64).expect("range binds");
     let mut data = luminal::prelude::FxHashMap::default();
     data.insert(idx.id, TypedBuffer::from(vec![LAST_ROW as i32]));

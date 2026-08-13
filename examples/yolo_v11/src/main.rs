@@ -9,7 +9,7 @@ use std::{
 use image::{ImageBuffer, ImageReader, Rgb, RgbImage};
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
-use luminal::ssa_reference::SsaReferenceRuntime;
+use luminal::reference::ReferenceRuntime;
 use yolo_v11::model::*;
 
 const ARTIFACT_DIR: &str = "examples/yolo_v11/artifacts";
@@ -355,7 +355,7 @@ fn main() {
          run attended; see README)..."
     );
     let t0 = Instant::now();
-    let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+    let mut rt = ReferenceRuntime::load(&cx).expect("native load");
     let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
     rt.search(
         &data,

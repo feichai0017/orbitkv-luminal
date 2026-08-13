@@ -8,7 +8,7 @@
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use luminal::ssa_reference::SsaReferenceRuntime;
+use luminal::reference::ReferenceRuntime;
 use luminal_nn::{rope_pairing_matrix, rope_tables_split_half};
 use mini_gemma3::MiniGemma3;
 
@@ -84,7 +84,7 @@ fn main() {
         pairs.push((caches[layer].1.id, weights(SLOTS * KV_DIM, 320 + layer).into()));
     }
     let data = pairs.iter().cloned().collect();
-    let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+    let mut rt = ReferenceRuntime::load(&cx).expect("native load");
     let outcome = rt
         .search(&data, &ImplementationSearchOptions::default())
         .expect("search finds a plan");

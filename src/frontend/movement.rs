@@ -197,11 +197,22 @@ impl GraphTensor {
 
     /// remove a dimension of size 1
     pub fn squeeze(mut self, axis: usize) -> GraphTensor {
-        assert_eq!(
-            self.dims()[axis],
-            IntExpr::from(1),
-            "Only dimensions of size 1 can be squeezed!"
-        );
+        let extent = self.dims()[axis];
+        match extent.to_usize() {
+            Some(1) => {}
+            Some(n) => panic!("Only dimensions of size 1 can be squeezed! (got {n})"),
+            // A SYMBOLIC extent: squeeze is a CONTRACT that this axis
+            // is 1 (a data-dependent rank is unrepresentable). Recorded
+            // unconditionally; a post-saturation invariant refuses any
+            // binding/bucket that admits values other than 1 (ruling
+            // 2026-08-13, option 3 — bucket the dim to [1,1] to pass).
+            None => {
+                let at = self.id.index();
+                self.graph()
+                    .logical
+                    .require_extent_eq_one(at, &extent, "squeeze");
+            }
+        }
         let current_dims = self.dims();
         self.logical_value = self.graph().logical.apply_movement(
             self.id.index(),
@@ -1177,7 +1188,7 @@ mod tests {
     // B-TAIL-GATED (Step 4b). They exercised gather1d/scatter1d — the
     // flat pair the recorder still poisons — through the deleted their-
     // pipeline. Coordinate-form gather/scatter carry the native
-    // differential coverage (ssa_reference); the flat sugar's tests
+    // differential coverage (reference); the flat sugar's tests
     // return with the B-tail recordings.
 
     #[test]

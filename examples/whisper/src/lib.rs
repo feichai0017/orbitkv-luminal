@@ -15,7 +15,7 @@ use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, Ns, TypedBuffer};
-use luminal::ssa_reference::SsaReferenceRuntime;
+use luminal::reference::ReferenceRuntime;
 use luminal_nn::{CacheState, KvCachePool, PositionSlots};
 use model::{Whisper, WhisperDims};
 use std::error::Error;
@@ -78,7 +78,7 @@ impl TranscribeStep {
 
 pub struct Transcriber {
     step: TranscribeStep,
-    rt: SsaReferenceRuntime,
+    rt: ReferenceRuntime,
     pub state: CacheState,
     pub slots: PositionSlots,
 }
@@ -106,7 +106,7 @@ impl Transcriber {
             search_data.insert(v.id, state.v[layer].clone().into());
         }
 
-        let mut rt = SsaReferenceRuntime::load(&step.cx)?;
+        let mut rt = ReferenceRuntime::load(&step.cx)?;
         let outcome = rt.search(&search_data, options)?;
         println!(
             "search: {} plans profiled, best {:.1} ms",

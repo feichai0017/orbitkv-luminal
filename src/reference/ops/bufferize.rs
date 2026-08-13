@@ -1309,7 +1309,7 @@ pub fn bufferize(graph: &ExtractedGraph) -> Result<BufferIrGraph> {
 
 /// Thread the extraction's literal geometry (dims, element bits) and the
 /// boundary `BufferLit` keys onto the plan's buffers — the sizing/binding
-/// surface the `SsaReferenceRuntime` executes from. Purely additive; `None`
+/// surface the `ReferenceRuntime` executes from. Purely additive; `None`
 /// stays `None` for symbolic geometry, and numeric consumers bail loudly.
 fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) {
     use std::collections::HashMap as Map;

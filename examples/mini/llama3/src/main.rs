@@ -6,7 +6,7 @@
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use luminal::ssa_reference::SsaReferenceRuntime;
+use luminal::reference::ReferenceRuntime;
 use mini_llama3::MiniLlama3;
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {
@@ -45,7 +45,7 @@ fn main() {
         (scatter_idx.id, vec![1i32].into()),
     ];
     let data = pairs.iter().cloned().collect();
-    let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+    let mut rt = ReferenceRuntime::load(&cx).expect("native load");
     let outcome = rt
         .search(&data, &ImplementationSearchOptions::default())
         .expect("search finds a plan");

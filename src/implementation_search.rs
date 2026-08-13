@@ -4,7 +4,7 @@
 //! candidate by executing its bufferized plan on the runtime.
 //!
 //! A mutation-only hill climb over
-//! per-value producer genomes, profiled on the real `SsaReferenceRuntime` —
+//! per-value producer genomes, profiled on the real `ReferenceRuntime` —
 //! luminal's search shape (no cost models, profile the real thing, keep the
 //! best, mutate) over our genome representation.
 //!
@@ -25,7 +25,7 @@ use rustc_hash::FxHashMap;
 use crate::bufferize::BufferIrGraph;
 use crate::extractor::{self, Genome};
 use crate::graph::LogicalProgram;
-use crate::ssa_reference::SsaReferenceRuntime;
+use crate::reference::ReferenceRuntime;
 
 #[derive(Debug, Clone)]
 pub struct ImplementationSearchOptions {
@@ -171,7 +171,7 @@ pub fn search_implementations_with_ops(
         })
         .collect();
     let input_data = &buffer_data;
-    let allow = allow_override.unwrap_or_else(crate::ssa_reference::reference_allow_list);
+    let allow = allow_override.unwrap_or_else(crate::reference::reference_allow_list);
     let mut timings = SearchTimings::default();
     let analysis_start = Instant::now();
     let mut session = extractor::ExtractionSession::new(egraph, Some(&allow));
@@ -323,7 +323,7 @@ pub fn search_implementations_with_ops(
     let mut best: Option<(u128, Genome, BufferIrGraph)> = None;
 
     let profile_plan = |plan: &BufferIrGraph, trials: usize| -> Result<u128> {
-        let mut runtime = SsaReferenceRuntime::default();
+        let mut runtime = ReferenceRuntime::default();
         runtime.load_plan(plan.clone());
         for (id, data) in input_data {
             runtime.set_data_buffer(*id, data.clone());
@@ -661,7 +661,7 @@ mod tests {
             outcome.fingerprint_hits
         );
 
-        let mut runtime = SsaReferenceRuntime::default();
+        let mut runtime = ReferenceRuntime::default();
         runtime.stage_slots(&program.input_slots, &program.output_slots);
         runtime.load_plan(outcome.best_plan.clone());
         runtime.set_data(x2.id, x_data);
@@ -739,7 +739,7 @@ mod tests {
             let expected: Vec<f32> = (0..n).map(|v| (v as f32 + 1.0) * (v as f32 * 0.5)).collect();
             let data = data_for(&plan.representative);
 
-            let mut runtime = SsaReferenceRuntime::default();
+            let mut runtime = ReferenceRuntime::default();
             runtime.stage_slots(&plan.program.input_slots, &plan.program.output_slots);
             runtime.load_plan(plan.outcome.best_plan.clone());
             for (id, values) in &data {

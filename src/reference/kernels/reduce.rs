@@ -5,7 +5,7 @@
 
 use super::expect_op;
 use crate::buffer_tensor_ir::{BufferTensorIrOp, ReferenceKernelCtx, TypedBuffer};
-use crate::ssa_reference::ops::{ReduceMaxDps, ReduceSumDps};
+use crate::reference::ops::{ReduceMaxDps, ReduceSumDps};
 
 pub(super) fn sum(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
     let op = expect_op::<ReduceSumDps>(op)?;

@@ -17,7 +17,7 @@
 
 use egraph_serialize::ClassId;
 
-use crate::ssa_reference::ops::Poison;
+use crate::reference::ops::Poison;
 use crate::layout_ir::{
     ExtractedEdge, ExtractedGraph, ExtractedNode, LayoutTensorInfo, LogicalInfo, OpInput, OpNode,
     Provenance,

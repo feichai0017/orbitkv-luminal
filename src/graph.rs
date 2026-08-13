@@ -1051,7 +1051,7 @@ impl LogicalGraph {
                 (replacement, new_dims)
             }
             Movement::RemoveDim { axis } => {
-                if axis >= prev_rank || prev_dims[axis].to_usize() != Some(1) {
+                if axis >= prev_rank || prev_dims[axis].to_usize().is_some_and(|d| d != 1) {
                     self.poison(format!(
                         "remove_dim axis {axis} of dims {prev_dims:?} (must be a size-1 axis)"
                     ));
@@ -1198,6 +1198,41 @@ impl LogicalGraph {
     }
 
     /// Append post-schedule authoring checks (iota bounds pairs).
+    /// SHAPE-CONTRACT INVARIANTS (ruling 2026-08-13, squeeze "option
+    /// 3"): record always; validity is a POST-SATURATION check against
+    /// the bounds lattice, so the BINDING decides per bucket — a
+    /// runtime that pins/buckets the extent appropriately passes (the
+    /// [n,n] pin-collapse discharges the check), any other bucket
+    /// refuses loudly. Static extents discharge trivially.
+    pub(crate) fn require_extent_eq_one(&mut self, at: usize, dim: &IntExpr, what: &str) {
+        match Self::dim_term(dim) {
+            Ok(term) => self.post_check(&format!(
+                "; {what} at t{at}: the axis extent is CONTRACTED to 1\n\
+                 (check (= {term} (IntLit 1)))\n"
+            )),
+            Err(reason) => self.poison(format!("{what} at t{at}: {reason}")),
+        }
+    }
+
+    /// The ≥-form of the same contract (empty-axis refusals:
+    /// reduce_max/argmax need at least one element; unfold windows need
+    /// a positive count).
+    pub(crate) fn require_extent_at_least(
+        &mut self,
+        at: usize,
+        dim: &IntExpr,
+        min: i64,
+        what: &str,
+    ) {
+        match Self::dim_term(dim) {
+            Ok(term) => self.post_check(&format!(
+                "; {what} at t{at}: extent lower bound must reach {min}\n\
+                 (check (>= (lower-bound-of {term}) (bigint {min})))\n"
+            )),
+            Err(reason) => self.poison(format!("{what} at t{at}: {reason}")),
+        }
+    }
+
     pub fn post_check(&mut self, text: &str) {
         self.post_checks.push_str(text);
     }

@@ -11,7 +11,7 @@ use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, Ns, TypedBuffer};
-use luminal::ssa_reference::SsaReferenceRuntime;
+use luminal::reference::ReferenceRuntime;
 use luminal_nn::{CacheState, KvCachePool, PositionSlots};
 use model::{Fp8Dims, Llama31Fp8};
 use std::error::Error;
@@ -115,7 +115,7 @@ impl DecodeStep {
 
 pub struct Decoder {
     step: DecodeStep,
-    rt: SsaReferenceRuntime,
+    rt: ReferenceRuntime,
     cos_table: Vec<f32>,
     sin_table: Vec<f32>,
     pub state: CacheState,
@@ -161,7 +161,7 @@ impl Decoder {
             search_data.insert(v.id, state.v[layer].clone().into());
         }
 
-        let mut rt = SsaReferenceRuntime::load(&step.cx)?;
+        let mut rt = ReferenceRuntime::load(&step.cx)?;
         let outcome = rt.search(&search_data, options)?;
         println!(
             "search: {} plans profiled, best {:.1} ms\n{}",

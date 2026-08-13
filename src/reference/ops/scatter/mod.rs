@@ -3,7 +3,7 @@
 //! everywhere else `out = init`. One Int coordinate tensor per INIT axis,
 //! all sharing SRC's shape. Out-of-bounds coordinate VALUES are undefined
 //! behavior (user ruling 2026-07-22). Duplicate coordinates: the FUNCTIONAL
-//! reference kernel (ssa_reference::kernels) deterministically detects the
+//! reference kernel (reference::kernels) deterministically detects the
 //! conflicting writes and panics (ruling 2026-08-06, superseding the
 //! earlier duplicate-UB ruling for the reference path); the mutating form
 //! has NO reference kernel — the reference runtime is out-of-place only.

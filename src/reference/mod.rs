@@ -1,4 +1,4 @@
-//! `SsaReferenceRuntime`: the CPU reference executor for logical-SSA
+//! `ReferenceRuntime`: the CPU reference executor for logical-SSA
 //! bufferized plans (ruling 2026-07-28: lives in luminal; once the path is
 //! COMPLETE it replaces `ReferenceRuntime` — not before).
 //!
@@ -34,7 +34,7 @@ pub fn reference_allow_list() -> Vec<&'static str> {
         .iter()
         .map(|kernel| kernel.label)
         .collect();
-    crate::ssa_reference::ops::built_in_matchers()
+    crate::reference::ops::built_in_matchers()
         .iter()
         .map(|matcher| matcher.egglog_constructor())
         .filter(|constructor| {
@@ -58,7 +58,7 @@ struct NativeSpec {
 }
 
 #[derive(Default)]
-pub struct SsaReferenceRuntime {
+pub struct ReferenceRuntime {
     plan: Option<BufferIrGraph>,
     /// Caller-staged data by numeric `BufferLit` id, consumed at `execute`.
     staged: FxHashMap<i64, TypedBuffer>,
@@ -77,7 +77,7 @@ pub struct SsaReferenceRuntime {
     native: Option<NativeSpec>,
 }
 
-impl SsaReferenceRuntime {
+impl ReferenceRuntime {
     /// Register the tensor→buffer role maps from a program's slots.
     pub fn stage_slots(
         &mut self,
@@ -447,7 +447,7 @@ mod tests {
     use crate::buffer_tensor_ir::TypedBuffer;
     use crate::dtype::DType;
     use crate::graph::Graph;
-    use crate::ssa_reference::SsaReferenceRuntime;
+    use crate::reference::ReferenceRuntime;
     use crate::test_support::run_ssa;
     use rustc_hash::FxHashMap;
 
@@ -458,7 +458,7 @@ mod tests {
     /// over-claim the old hardcoded filter hid.)
     #[test]
     fn allow_list_matches_the_kernel_registry() {
-        let mut allow = crate::ssa_reference::reference_allow_list();
+        let mut allow = crate::reference::reference_allow_list();
         allow.sort_unstable();
         let expected = vec![
             "LayoutTensorOpAddFunctionalGeneric",
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(allow, expected, "derived allow list drifted");
         // Registry coherence: no two rows claim one concrete type, and no
         // Mutating/View label carries a kernel.
-        let table = crate::ssa_reference::kernels::reference_kernels();
+        let table = crate::reference::kernels::reference_kernels();
         let mut seen = std::collections::HashSet::new();
         for kernel in table {
             assert!(seen.insert(kernel.op_type), "duplicate registry row for {}", kernel.label);
@@ -514,7 +514,7 @@ mod tests {
     /// THE DIFFERENTIAL: their `simple`-test graph (a = b*c + g and
     /// d = sin(b*c / e)) through BOTH pipelines — their egglog search +
     /// ReferenceRuntime vs our translation + saturation + extraction +
-    /// bufferization + SsaReferenceRuntime — must agree numerically.
+    /// bufferization + ReferenceRuntime — must agree numerically.
     #[test]
     fn differential_simple_elementwise_against_reference_runtime() {
         let build = || {
@@ -1094,13 +1094,13 @@ mod tests {
         let mut egraph = crate::egglog_snippet::new_egraph();
         egraph.parse_and_run_program(None, &text).expect("program runs");
         let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
-        let allow = crate::ssa_reference::reference_allow_list();
+        let allow = crate::reference::reference_allow_list();
         let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))
             .expect("extracts")
             .expect("plan");
         let plan =
             crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted)).expect("bufferizes");
-        let mut rt = crate::ssa_reference::SsaReferenceRuntime::default();
+        let mut rt = crate::reference::ReferenceRuntime::default();
         rt.stage_slots(&program.input_slots, &program.output_slots);
         rt.load_plan(plan);
         rt.set_data(dest.id, (0..6).map(|v| v as f32).collect::<Vec<f32>>());
@@ -1368,7 +1368,7 @@ mod tests {
         let x2 = cx2.tensor(4);
         let out2 = (mask2.cast(DType::F32) * x2).output();
         let _ = out2;
-        let mut rt2 = SsaReferenceRuntime::load(&cx2).expect("native load");
+        let mut rt2 = ReferenceRuntime::load(&cx2).expect("native load");
         let mut data = FxHashMap::default();
         data.insert(mask2.id, TypedBuffer::bool8(vec![1u8, 0, 1, 0]).unwrap());
         data.insert(x2.id, x_vals.clone().into());
@@ -1391,7 +1391,7 @@ mod tests {
         let mut cx = crate::graph::Graph::new();
         let idx = cx.tensor_dtyped(5, DType::Int);
         let out = (idx * 3usize).output();
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         rt.bind_value_range(idx.id, 0, 4).expect("range binds");
         let mut data = FxHashMap::default();
         data.insert(idx.id, vec![0i32, 1, 2, 3, 4].into());
@@ -1416,7 +1416,7 @@ mod tests {
         let a = cx.tensor_dtyped(1, DType::Int);
         let b = cx.tensor_dtyped(1, DType::Int);
         let _out = (a + b).output();
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         let mut data = FxHashMap::default();
         data.insert(a.id, vec![1i32].into());
         data.insert(b.id, vec![2i32].into());
@@ -1439,7 +1439,7 @@ mod tests {
         let a = cx.tensor_dtyped(1, DType::Int);
         let b = cx.tensor_dtyped(1, DType::Int);
         let out = (a + b).output();
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         rt.bind_value_range(a.id, 0, 1000).expect("range binds");
         rt.bind_value_range(b.id, 0, 1000).expect("range binds");
         rt.search(&data, &crate::test_support::harness_search_options())
@@ -1460,7 +1460,7 @@ mod tests {
         let a = cx.tensor_dtyped(4, DType::Int);
         let b = cx.tensor_dtyped(4, DType::Int);
         let out = a.trunc_div(b).output();
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         rt.bind_value_range(a.id, -100, 100).expect("range binds");
         rt.bind_value_range(b.id, 2, 4).expect("range binds");
         let mut data = FxHashMap::default();
@@ -1479,7 +1479,7 @@ mod tests {
         let a = cx.tensor_dtyped(1, DType::Int);
         let b = cx.tensor_dtyped(1, DType::Int);
         let _out = a.trunc_div(b).output();
-        let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
         let mut data = FxHashMap::default();
         data.insert(a.id, vec![7i32].into());
         data.insert(b.id, vec![2i32].into());

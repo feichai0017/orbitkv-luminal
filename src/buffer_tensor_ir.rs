@@ -406,7 +406,7 @@ impl ReferenceKernelCtx {
 }
 
 /// Blanket downcast access for kernel dispatch: the reference runtime's
-/// registry (`ssa_reference::kernels`) keys kernels by CONCRETE op type.
+/// registry (`reference::kernels`) keys kernels by CONCRETE op type.
 /// Ops themselves carry no execution (ruling 2026-08-06) — a runtime that
 /// implements an op holds its kernel in that runtime's own folder.
 pub trait AsAnyOp {
@@ -420,7 +420,7 @@ impl<T: 'static> AsAnyOp for T {
 }
 
 pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + AsAnyOp + Debug {
-    /// The op's IR name (see the label policy in [`crate::ssa_reference::ops`]).
+    /// The op's IR name (see the label policy in [`crate::reference::ops`]).
     fn label(&self) -> &str;
 
     /// Is this operand's buffer read? (Inputs are read.)

@@ -17,7 +17,7 @@ use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, TypedBuffer};
-use luminal::ssa_reference::SsaReferenceRuntime;
+use luminal::reference::ReferenceRuntime;
 use model::{Qwen, QwenDims};
 use std::error::Error;
 use std::io::Write as _;
@@ -141,7 +141,7 @@ impl DecodeStep {
 /// the per-layer cache state; `step(token)` returns the logits row.
 pub struct Decoder {
     step: DecodeStep,
-    rt: SsaReferenceRuntime,
+    rt: ReferenceRuntime,
     cos_table: Vec<f32>,
     sin_table: Vec<f32>,
     pub k_state: Vec<Vec<f32>>,
@@ -181,7 +181,7 @@ impl Decoder {
             search_data.insert(v.id, zero_cache.clone().into());
         }
 
-        let mut rt = SsaReferenceRuntime::load(&step.cx)?;
+        let mut rt = ReferenceRuntime::load(&step.cx)?;
         let outcome = rt.search(&search_data, options)?;
         println!(
             "search: {} plans profiled, best {:.1} ms\n{}",

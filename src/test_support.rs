@@ -1214,7 +1214,7 @@ mod harness_tests {
 
     /// Numeric geometry rides extraction: literal dims and bit widths are
     /// walked off the e-graph terms onto every value info — the surface the
-    /// SsaReferenceRuntime sizes its buffers from.
+    /// ReferenceRuntime sizes its buffers from.
     #[test]
     fn extraction_carries_numeric_dims_and_bits() {
         use crate::layout_ir::ExtractedNode;
@@ -1991,7 +1991,7 @@ mod harness_tests {
     #[test]
     fn real_view_op_feeds_compute_with_zero_plan_nodes() {
         use crate::bufferize::BufferNode;
-        use crate::ssa_reference::ops::IndexMapApplyView;
+        use crate::reference::ops::IndexMapApplyView;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2037,7 +2037,7 @@ mod harness_tests {
     #[test]
     fn real_view_op_to_output_slot_pays_a_boundary_copy() {
         use crate::bufferize::BufferNode;
-        use crate::ssa_reference::ops::IndexMapApplyView;
+        use crate::reference::ops::IndexMapApplyView;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2442,7 +2442,7 @@ mod harness_tests {
     #[test]
     fn multi_destination_pairs_get_distinct_allocations() {
         use crate::bufferize::BufferNode;
-        use crate::ssa_reference::ops::AddMulFused;
+        use crate::reference::ops::AddMulFused;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2484,7 +2484,7 @@ mod harness_tests {
     /// span, and both results must dock at their tie rows' east sides.
     #[test]
     fn slot_tables_render_ties_as_spanning_rows() {
-        use crate::ssa_reference::ops::AddMulFused;
+        use crate::reference::ops::AddMulFused;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2728,7 +2728,7 @@ pub fn plain_plan_exists(cx: &crate::graph::Graph) -> anyhow::Result<()> {
         serialized.nodes.len(),
         serialized.classes().len()
     );
-    let allow = crate::ssa_reference::reference_allow_list();
+    let allow = crate::reference::reference_allow_list();
     let start = std::time::Instant::now();
     let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))?
         .ok_or_else(|| anyhow::anyhow!("no output boundary reached"))?;
@@ -2743,13 +2743,13 @@ pub fn plain_plan_exists(cx: &crate::graph::Graph) -> anyhow::Result<()> {
 /// binding + dyn pins as tight [n,n] bounds seeds, saturated, then the
 /// GENETIC IMPLEMENTATION SEARCH picks the winning plan (executing every
 /// candidate with the given data), which executes and stays loaded for
-/// output reads. The frontend candle differentials and the ssa_reference
+/// output reads. The frontend candle differentials and the reference
 /// differentials both run through here — the same load → bind → search →
 /// execute ladder as the nn module tests, on the harness budget above.
 pub fn run_ssa(
     cx: &crate::graph::Graph,
     inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
-) -> crate::ssa_reference::SsaReferenceRuntime {
+) -> crate::reference::ReferenceRuntime {
     run_ssa_with_ranges(cx, inputs, &[])
 }
 
@@ -2763,8 +2763,8 @@ pub fn run_ssa_with_ranges(
     cx: &crate::graph::Graph,
     inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
     ranges: &[(petgraph::graph::NodeIndex, i64, i64)],
-) -> crate::ssa_reference::SsaReferenceRuntime {
-    let mut rt = crate::ssa_reference::SsaReferenceRuntime::load(cx)
+) -> crate::reference::ReferenceRuntime {
+    let mut rt = crate::reference::ReferenceRuntime::load(cx)
         .expect("recorder clean for a covered graph");
     let mut vars: Vec<_> = cx.dyn_map.iter().collect();
     vars.sort();
@@ -3447,5 +3447,41 @@ mod subst_guard_study {
         for (i, v) in out_mixed.iter().enumerate() {
             assert_eq!(*v, x_vals[i] + y_vals[i]);
         }
+    }
+
+    /// SHAPE-CONTRACT PIN (squeeze option 3, ruling 2026-08-13): a
+    /// symbolic-extent squeeze records unconditionally and the
+    /// post-saturation invariant decides per binding — the [1,1] pin
+    /// discharges it; a [2,2] pin refuses at saturation.
+    #[test]
+    fn squeeze_contract_discharges_at_one_and_refuses_otherwise() {
+        use crate::prelude::{DType, Graph};
+        let mut cx = Graph::default();
+        cx.set_dim('s', 1);
+        let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
+        let out = (x.squeeze(0) * 2.0).output();
+        let rt = crate::test_support::run_ssa(&cx, &[(x.id, vec![1.0f32, 2.0, 3.0].into())]);
+        assert_eq!(rt.get_f32(out.id).unwrap(), &[2.0, 4.0, 6.0]);
+
+        let mut cx = Graph::default();
+        cx.set_dim('s', 2);
+        let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
+        let _ = (x.squeeze(0) * 2.0).output();
+        let mut rt = crate::reference::ReferenceRuntime::load(&cx).expect("records + loads");
+        let data: rustc_hash::FxHashMap<_, _> =
+            [(x.id, crate::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 6]))]
+                .into_iter()
+                .collect();
+        rt.bind_dyn_range('s', 2, 2).expect("bind");
+        let err = rt
+            .search(
+                &data,
+                &crate::implementation_search::ImplementationSearchOptions::default(),
+            )
+            .expect_err("extent 2 violates the squeeze contract");
+        assert!(
+            format!("{err:#}").contains("saturation"),
+            "refusal surfaces through the check: {err:#}"
+        );
     }
 }

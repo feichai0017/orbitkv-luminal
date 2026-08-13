@@ -33,7 +33,7 @@ fn full_graph_records_cleanly() {
 #[ignore = "heavy — 3GB-watchdog kill after ~4min on 2026-08-12 (parked-era: >10min/30GB); run by name under an RSS watchdog"]
 fn saturation_probe() {
     use luminal::implementation_search::ImplementationSearchOptions;
-    use luminal::ssa_reference::SsaReferenceRuntime;
+    use luminal::reference::ReferenceRuntime;
     let mut cx = Graph::default();
     let img = cx.named_tensor("input.image", (1usize, 3usize, IMG_SIZE, IMG_SIZE));
     let yolo = YoloV11::init(&mut cx);
@@ -60,7 +60,7 @@ fn saturation_probe() {
             .collect();
         pairs.push((spec.id, data.into()));
     }
-    let mut rt = SsaReferenceRuntime::load(&cx).expect("native load");
+    let mut rt = ReferenceRuntime::load(&cx).expect("native load");
     let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
     rt.search(
         &data,
