@@ -3391,4 +3391,41 @@ mod subst_guard_study {
             "second \"logits\" poisons loudly"
         );
     }
+
+    /// COMPOUND-DIM PROBE (2026-08-12, Austin's challenge: "do we
+    /// actually know that to be true?"): a dim of `a + b` — an
+    /// arbitrary IntExpr, not an atom — records, saturates, and
+    /// EXECUTES under pins. Two spellings (`a + b` and `b + a`) live in
+    /// one graph: each pins to [5,5] via interval arithmetic and the
+    /// [n,n] collapse unions BOTH with (IntLit 5) — the spellings
+    /// unify through the bounds lattice, no ring axioms involved.
+    #[test]
+    fn compound_dim_extents_record_saturate_and_run() {
+        use crate::prelude::{DType, Graph};
+        use crate::shape::Expression;
+        let mut cx = Graph::default();
+        cx.set_dim('a', 2);
+        cx.set_dim('b', 3);
+        let ab = Expression::from('a') + Expression::from('b');
+        let ba = Expression::from('b') + Expression::from('a');
+        let x = cx.named_tensor_dtyped("x", (ab,), DType::F32);
+        let y = cx.named_tensor_dtyped("y", (ba,), DType::F32);
+        let doubled = (x + x).output();
+        let summed = (y * y).output();
+
+        let x_vals = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let y_vals = vec![2.0f32, 3.0, 4.0, 5.0, 6.0];
+        let rt = crate::test_support::run_ssa(
+            &cx,
+            &[(x.id, x_vals.clone().into()), (y.id, y_vals.clone().into())],
+        );
+        let out_x = rt.get_f32(doubled.id).expect("compound-dim output runs");
+        let out_y = rt.get_f32(summed.id).expect("second spelling runs");
+        for (i, v) in out_x.iter().enumerate() {
+            assert_eq!(*v, x_vals[i] * 2.0);
+        }
+        for (i, v) in out_y.iter().enumerate() {
+            assert_eq!(*v, y_vals[i] * y_vals[i]);
+        }
+    }
 }

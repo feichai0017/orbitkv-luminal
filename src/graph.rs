@@ -384,7 +384,13 @@ impl LogicalGraph {
             // Symbolic dims stay IntVar unconditionally — pins are
             // BINDING-side bounds seeds, never model content.
             [Term::Var(c)] => Ok(format!("(IntVar \"{c}\")")),
-            other => Err(format!("arithmetic dim expression {other:?}")),
+            // Compound dims render as full IntExpr trees (ruling
+            // 2026-08-12: dims are any arbitrary IntExpr — extents are
+            // structure, not identity; spellings that stall a
+            // structural match surface as fail-closed refusals, never
+            // as unsoundness). Coord atoms have no meaning in a shape
+            // position and stay refused inside int_expr_term.
+            _ => int_expr_term(expr, &[], "dim").map_err(|e| format!("dim render: {e:#}")),
         }
     }
 
