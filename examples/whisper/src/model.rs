@@ -12,7 +12,7 @@
 
 use luminal::dtype::DType;
 use luminal::graph::Graph;
-use luminal::prelude::GraphTensor;
+use luminal::prelude::{GraphTensor, Ns};
 use luminal::shape::Expression;
 use luminal_nn::{Embedding, KvCachePool, LayerNorm, Linear};
 
@@ -106,14 +106,12 @@ pub struct WhisperAttn {
 }
 
 impl WhisperAttn {
-    fn new(prefix: &str, d: &WhisperDims, cx: &mut Graph) -> Self {
-        // Names ride the Linear's own tensors; binding uses weight_bindings.
-        let _ = prefix;
+    fn new(ns: &Ns, d: &WhisperDims, cx: &mut Graph) -> Self {
         Self {
-            q: Linear::new_permuted(d.state, d.state, true, cx),
-            k: Linear::new_permuted(d.state, d.state, false, cx),
-            v: Linear::new_permuted(d.state, d.state, true, cx),
-            out: Linear::new_permuted(d.state, d.state, true, cx),
+            q: Linear::new_permuted(d.state, d.state, true, &ns.child("q_proj"), cx),
+            k: Linear::new_permuted(d.state, d.state, false, &ns.child("k_proj"), cx),
+            v: Linear::new_permuted(d.state, d.state, true, &ns.child("v_proj"), cx),
+            out: Linear::new_permuted(d.state, d.state, true, &ns.child("out_proj"), cx),
             heads: d.heads,
             head_dim: d.head_dim(),
         }
@@ -162,9 +160,9 @@ impl WhisperAttn {
     }
 }
 
-fn layer_norm(d: &WhisperDims, cx: &mut Graph) -> LayerNorm {
+fn layer_norm(d: &WhisperDims, ns: &Ns, cx: &mut Graph) -> LayerNorm {
     // torch LayerNorm: mean-centered, learned weight AND bias.
-    LayerNorm::new(d.state, Some("w"), Some("b"), true, d.eps, cx)
+    LayerNorm::new(d.state, true, true, true, d.eps, ns, cx)
 }
 
 pub struct EncoderLayer {
@@ -202,39 +200,53 @@ pub struct Whisper {
 
 impl Whisper {
     pub fn init(cx: &mut Graph, d: &WhisperDims) -> Self {
+        let enc = Ns::root().child("model").child("encoder");
+        let dec = Ns::root().child("model").child("decoder");
         let enc_layers = (0..d.audio_layers)
-            .map(|_| EncoderLayer {
-                attn_norm: layer_norm(d, cx),
-                attn: WhisperAttn::new("enc", d, cx),
-                ff_norm: layer_norm(d, cx),
-                fc1: Linear::new_permuted(d.state, d.ff, true, cx),
-                fc2: Linear::new_permuted(d.ff, d.state, true, cx),
+            .map(|l| {
+                let ns = enc.child("layers").index(l);
+                EncoderLayer {
+                    attn_norm: layer_norm(d, &ns.child("self_attn_layer_norm"), cx),
+                    attn: WhisperAttn::new(&ns.child("self_attn"), d, cx),
+                    ff_norm: layer_norm(d, &ns.child("final_layer_norm"), cx),
+                    fc1: Linear::new_permuted(d.state, d.ff, true, &ns.child("fc1"), cx),
+                    fc2: Linear::new_permuted(d.ff, d.state, true, &ns.child("fc2"), cx),
+                }
             })
             .collect();
         let dec_layers = (0..d.text_layers)
-            .map(|_| DecoderLayer {
-                self_norm: layer_norm(d, cx),
-                self_attn: WhisperAttn::new("dec", d, cx),
-                cross_norm: layer_norm(d, cx),
-                cross_attn: WhisperAttn::new("cross", d, cx),
-                ff_norm: layer_norm(d, cx),
-                fc1: Linear::new_permuted(d.state, d.ff, true, cx),
-                fc2: Linear::new_permuted(d.ff, d.state, true, cx),
+            .map(|l| {
+                let ns = dec.child("layers").index(l);
+                DecoderLayer {
+                    self_norm: layer_norm(d, &ns.child("self_attn_layer_norm"), cx),
+                    self_attn: WhisperAttn::new(&ns.child("self_attn"), d, cx),
+                    cross_norm: layer_norm(d, &ns.child("encoder_attn_layer_norm"), cx),
+                    cross_attn: WhisperAttn::new(&ns.child("encoder_attn"), d, cx),
+                    ff_norm: layer_norm(d, &ns.child("final_layer_norm"), cx),
+                    fc1: Linear::new_permuted(d.state, d.ff, true, &ns.child("fc1"), cx),
+                    fc2: Linear::new_permuted(d.ff, d.state, true, &ns.child("fc2"), cx),
+                }
             })
             .collect();
         Self {
             dims: d.clone(),
-            conv1_w: cx.named_tensor("conv1.weight", (d.state, d.n_mels * 3)),
-            conv1_b: cx.named_tensor("conv1.bias", d.state),
-            conv2_w: cx.named_tensor("conv2.weight", (d.state, d.state * 3)),
-            conv2_b: cx.named_tensor("conv2.bias", d.state),
-            enc_pos: cx.named_tensor("enc.pos", (d.audio_ctx, d.state)),
+            conv1_w: cx.named_tensor(enc.child("conv1").leaf("weight"), (d.state, d.n_mels * 3)),
+            conv1_b: cx.named_tensor(enc.child("conv1").leaf("bias"), d.state),
+            conv2_w: cx.named_tensor(enc.child("conv2").leaf("weight"), (d.state, d.state * 3)),
+            conv2_b: cx.named_tensor(enc.child("conv2").leaf("bias"), d.state),
+            enc_pos: cx.named_tensor(
+                enc.child("embed_positions").leaf("weight"),
+                (d.audio_ctx, d.state),
+            ),
             enc_layers,
-            enc_final_norm: layer_norm(d, cx),
-            embed: Embedding::new(d.vocab, d.state, cx),
-            dec_pos: cx.named_tensor("dec.pos", (d.text_ctx, d.state)),
+            enc_final_norm: layer_norm(d, &enc.child("layer_norm"), cx),
+            embed: Embedding::new(d.vocab, d.state, &dec.child("embed_tokens"), cx),
+            dec_pos: cx.named_tensor(
+                dec.child("embed_positions").leaf("weight"),
+                (d.text_ctx, d.state),
+            ),
             dec_layers,
-            dec_final_norm: layer_norm(d, cx),
+            dec_final_norm: layer_norm(d, &dec.child("layer_norm"), cx),
         }
     }
 

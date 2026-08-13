@@ -14,7 +14,7 @@ pub mod weights;
 use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
-use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, TypedBuffer};
+use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, Ns, TypedBuffer};
 use luminal::ssa_reference::SsaReferenceRuntime;
 use luminal_nn::{CacheState, KvCachePool, PositionSlots};
 use model::{Whisper, WhisperDims};
@@ -46,7 +46,13 @@ impl TranscribeStep {
         let q_pos = cx.tensor_dtyped(1, DType::Int);
         let gather_idx = cx.tensor_dtyped(dims.text_ctx, DType::Int);
         let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-        let pool = KvCachePool::new(&mut cx, dims.text_layers, dims.text_ctx, dims.state);
+        let pool = KvCachePool::new(
+            &mut cx,
+            dims.text_layers,
+            dims.text_ctx,
+            dims.state,
+            &Ns::root().child("cache"),
+        );
         let xa = model.encode(mel);
         let (logits, cache_outs) =
             model.decode_step(token, q_pos, xa, &pool, gather_idx, scatter_idx);

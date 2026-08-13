@@ -12,7 +12,7 @@ pub mod weights;
 use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
-use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, TypedBuffer};
+use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, Ns, TypedBuffer};
 use luminal::ssa_reference::SsaReferenceRuntime;
 use luminal_nn::{CacheState, KvCachePool, PositionSlots};
 use model::{Gemma4Dims, Gemma4Moe};
@@ -89,7 +89,12 @@ impl DecodeStep {
         );
         let gather_idx = cx.tensor_dtyped(max_seq, DType::Int);
         let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-        let pool = KvCachePool::new_heterogeneous(&mut cx, max_seq, &dims.kv_dims());
+        let pool = KvCachePool::new_heterogeneous(
+            &mut cx,
+            max_seq,
+            &dims.kv_dims(),
+            &Ns::root().child("cache"),
+        );
         let (logits, cache_outs) = model.forward(
             token,
             q_pos,

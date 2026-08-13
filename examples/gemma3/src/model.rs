@@ -15,7 +15,7 @@
 
 use luminal::dtype::DType;
 use luminal::graph::Graph;
-use luminal::prelude::GraphTensor;
+use luminal::prelude::{GraphTensor, Ns};
 use luminal_nn::{Embedding, GemmaBlock, KvCachePool, LayerNorm, Linear};
 
 #[derive(Clone)]
@@ -86,14 +86,20 @@ impl Gemma3 {
             .collect();
         Self {
             dims: dims.clone(),
-            embed: Embedding::new(dims.vocab, dims.hidden, cx),
+            embed: Embedding::new(
+                dims.vocab,
+                dims.hidden,
+                &Ns::root().child("model").child("embed_tokens"),
+                cx,
+            ),
             blocks,
             final_norm: LayerNorm::new(
                 dims.hidden,
-                Some("model.norm.weight"),
-                None,
+                true,
+                false,
                 false,
                 dims.rms_eps,
+                &Ns::root().child("model").child("norm"),
                 cx,
             )
             .with_unit_offset(),
@@ -102,25 +108,38 @@ impl Gemma3 {
 
     fn block(l: usize, d: &Gemma3Dims, cx: &mut Graph) -> GemmaBlock {
         let local = d.is_local(l);
-        let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
-        let rms = |suffix: &str, cx: &mut Graph| {
-            LayerNorm::new(d.hidden, Some(&name(suffix)), None, false, d.rms_eps, cx)
-                .with_unit_offset()
+        let ns = Ns::root().child("model").child("layers").index(l);
+        let attn = ns.child("self_attn");
+        let mlp = ns.child("mlp");
+        let rms = |ns: &Ns, cx: &mut Graph| {
+            LayerNorm::new(d.hidden, true, false, false, d.rms_eps, ns, cx).with_unit_offset()
         };
         GemmaBlock {
-            input_norm: rms("input_layernorm.weight", cx),
-            post_attn_norm: rms("post_attention_layernorm.weight", cx),
-            pre_ff_norm: rms("pre_feedforward_layernorm.weight", cx),
-            post_ff_norm: rms("post_feedforward_layernorm.weight", cx),
-            wq: Linear::new_permuted(d.hidden, d.n_heads * d.head_dim, false, cx),
-            wk: Linear::new_permuted(d.hidden, d.kv_dim(), false, cx),
-            wv: Linear::new_permuted(d.hidden, d.kv_dim(), false, cx),
-            wo: Linear::new_permuted(d.n_heads * d.head_dim, d.hidden, false, cx),
-            q_norm: cx.named_tensor(name("self_attn.q_norm.weight"), d.head_dim),
-            k_norm: cx.named_tensor(name("self_attn.k_norm.weight"), d.head_dim),
-            gate: Linear::new_permuted(d.hidden, d.intermediate, false, cx),
-            up: Linear::new_permuted(d.hidden, d.intermediate, false, cx),
-            down: Linear::new_permuted(d.intermediate, d.hidden, false, cx),
+            input_norm: rms(&ns.child("input_layernorm"), cx),
+            post_attn_norm: rms(&ns.child("post_attention_layernorm"), cx),
+            pre_ff_norm: rms(&ns.child("pre_feedforward_layernorm"), cx),
+            post_ff_norm: rms(&ns.child("post_feedforward_layernorm"), cx),
+            wq: Linear::new_permuted(
+                d.hidden,
+                d.n_heads * d.head_dim,
+                false,
+                &attn.child("q_proj"),
+                cx,
+            ),
+            wk: Linear::new_permuted(d.hidden, d.kv_dim(), false, &attn.child("k_proj"), cx),
+            wv: Linear::new_permuted(d.hidden, d.kv_dim(), false, &attn.child("v_proj"), cx),
+            wo: Linear::new_permuted(
+                d.n_heads * d.head_dim,
+                d.hidden,
+                false,
+                &attn.child("o_proj"),
+                cx,
+            ),
+            q_norm: cx.named_tensor(attn.child("q_norm").leaf("weight"), d.head_dim),
+            k_norm: cx.named_tensor(attn.child("k_norm").leaf("weight"), d.head_dim),
+            gate: Linear::new_permuted(d.hidden, d.intermediate, false, &mlp.child("gate_proj"), cx),
+            up: Linear::new_permuted(d.hidden, d.intermediate, false, &mlp.child("up_proj"), cx),
+            down: Linear::new_permuted(d.intermediate, d.hidden, false, &mlp.child("down_proj"), cx),
             local,
             window: d.window,
             rope_theta: if local { 10_000.0 } else { 1_000_000.0 },

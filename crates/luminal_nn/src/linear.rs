@@ -8,11 +8,11 @@ pub struct Linear {
 }
 
 impl Linear {
-    pub fn new(inp: usize, out: usize, bias: bool, cx: &mut Graph) -> Self {
+    pub fn new(inp: usize, out: usize, bias: bool, ns: &Ns, cx: &mut Graph) -> Self {
         Self {
-            weight: cx.named_tensor("Weight", (inp, out)),
+            weight: cx.named_tensor(ns.leaf("weight"), (inp, out)),
             bias: if bias {
-                Some(cx.named_tensor("Bias", out))
+                Some(cx.named_tensor(ns.leaf("bias"), out))
             } else {
                 None
             },
@@ -20,11 +20,11 @@ impl Linear {
         }
     }
 
-    pub fn new_permuted(inp: usize, out: usize, bias: bool, cx: &mut Graph) -> Self {
+    pub fn new_permuted(inp: usize, out: usize, bias: bool, ns: &Ns, cx: &mut Graph) -> Self {
         Self {
-            weight: cx.named_tensor("Weight", (out, inp)),
+            weight: cx.named_tensor(ns.leaf("weight"), (out, inp)),
             bias: if bias {
-                Some(cx.named_tensor("Bias", out))
+                Some(cx.named_tensor(ns.leaf("bias"), out))
             } else {
                 None
             },
@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn linear_forward_matches_hand_reference() {
         let mut cx = Graph::new();
-        let model = Linear::new(3, 4, false, &mut cx);
+        let model = Linear::new(3, 4, false, &Ns::root().child("fc"), &mut cx);
         let x = cx.tensor((2, 3));
         let out = model.forward(x).output();
 
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn linear_bias_broadcasts_over_the_batch() {
         let mut cx = Graph::new();
-        let model = Linear::new(2, 3, true, &mut cx);
+        let model = Linear::new(2, 3, true, &Ns::root().child("fc"), &mut cx);
         let x = cx.tensor((2, 2));
         let out = model.forward(x).output();
 
@@ -156,11 +156,11 @@ pub struct Fp8Linear {
 }
 
 impl Fp8Linear {
-    pub fn new(inp: usize, out: usize, cx: &mut Graph) -> Self {
+    pub fn new(inp: usize, out: usize, ns: &Ns, cx: &mut Graph) -> Self {
         Self {
-            weight: cx.named_tensor_dtyped("Fp8Weight", (out, inp), DType::F8E4M3),
-            input_scale: cx.named_tensor("InputScale", ()),
-            weight_scale: cx.named_tensor("WeightScale", ()),
+            weight: cx.named_tensor_dtyped(ns.leaf("weight"), (out, inp), DType::F8E4M3),
+            input_scale: cx.named_tensor(ns.leaf("input_scale"), ()),
+            weight_scale: cx.named_tensor(ns.leaf("weight_scale"), ()),
             inp,
             out,
         }
@@ -208,7 +208,7 @@ mod fp8_tests {
         const IN: usize = 3;
         const OUT: usize = 2;
         let mut cx = Graph::new();
-        let layer = Fp8Linear::new(IN, OUT, &mut cx);
+        let layer = Fp8Linear::new(IN, OUT, &Ns::root().child("fc"), &mut cx);
         let x = cx.tensor((1, IN));
         let out = layer.forward(x).output();
 

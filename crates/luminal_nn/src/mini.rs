@@ -52,16 +52,18 @@ fn gqa_lm_new(
     qk_norm: bool,
     cx: &mut Graph,
 ) -> (Embedding, Vec<LlamaBlock>, crate::LayerNorm) {
+    let model = Ns::root().child("model");
     let blocks = (0..layers)
-        .map(|_| {
-            let block = LlamaBlock::new_with_ffn(d, ff, n_heads, n_kv_heads, ffn, cx);
-            if qk_norm { block.with_qk_norm(cx) } else { block }
+        .map(|l| {
+            let layer_ns = model.child("layers").index(l);
+            let block = LlamaBlock::new_with_ffn(d, ff, n_heads, n_kv_heads, ffn, &layer_ns, cx);
+            if qk_norm { block.with_qk_norm(&layer_ns, cx) } else { block }
         })
         .collect();
     (
-        Embedding::new(vocab, d, cx),
+        Embedding::new(vocab, d, &model.child("embed_tokens"), cx),
         blocks,
-        crate::LayerNorm::new(d, None, None, false, 1e-5, cx),
+        crate::LayerNorm::new(d, false, false, false, 1e-5, &model.child("norm"), cx),
     )
 }
 
@@ -200,15 +202,20 @@ impl MiniGemma3 {
         cx: &mut Graph,
     ) -> Self {
         Self {
-            embed: Embedding::new(vocab, d, cx),
+            embed: Embedding::new(vocab, d, &Ns::root().child("model").child("embed_tokens"), cx),
             blocks: (0..layers)
                 .map(|layer| {
                     let local = (layer + 1) % pattern != 0;
-                    crate::GemmaBlock::new(d, ff, n_heads, n_kv_heads, head_dim, local, window, cx)
+                    let layer_ns = Ns::root().child("model").child("layers").index(layer);
+                    crate::GemmaBlock::new(
+                        d, ff, n_heads, n_kv_heads, head_dim, local, window, &layer_ns, cx,
+                    )
                 })
                 .collect(),
-            final_norm: crate::LayerNorm::new(d, Some("NormWeight"), None, false, 1e-6, cx)
-                .with_unit_offset(),
+            final_norm: crate::LayerNorm::new(
+                d, true, false, false, 1e-6, &Ns::root().child("model").child("norm"), cx,
+            )
+            .with_unit_offset(),
             d,
         }
     }
@@ -263,25 +270,30 @@ fn moe_lm_new(
     layers: usize,
     cx: &mut Graph,
 ) -> (Embedding, Vec<DecoderBlock>, crate::LayerNorm) {
+    let model = Ns::root().child("model");
     (
-        Embedding::new(vocab, d, cx),
+        Embedding::new(vocab, d, &model.child("embed_tokens"), cx),
         (0..layers)
-            .map(|_| DecoderBlock {
-                wq: Linear::new(d, d, false, cx),
-                wk: Linear::new(d, d, false, cx),
-                wv: Linear::new(d, d, false, cx),
-                wo: Linear::new(d, d, false, cx),
-                ff: FeedForward::Moe(MoE {
-                    expert_weights: cx.named_tensor("Experts", (experts, d, d)),
-                    router: cx.named_tensor("Router", (d, experts)),
-                    k: top_k,
-                }),
-                n_heads,
-                n_kv_heads: n_heads,
-                head_dim: d / n_heads,
+            .map(|l| {
+                let a = model.child("layers").index(l).child("self_attn");
+                let mlp_ns = model.child("layers").index(l).child("mlp");
+                DecoderBlock {
+                    wq: Linear::new(d, d, false, &a.child("q_proj"), cx),
+                    wk: Linear::new(d, d, false, &a.child("k_proj"), cx),
+                    wv: Linear::new(d, d, false, &a.child("v_proj"), cx),
+                    wo: Linear::new(d, d, false, &a.child("o_proj"), cx),
+                    ff: FeedForward::Moe(MoE {
+                        expert_weights: cx.named_tensor(mlp_ns.leaf("experts"), (experts, d, d)),
+                        router: cx.named_tensor(mlp_ns.leaf("router"), (d, experts)),
+                        k: top_k,
+                    }),
+                    n_heads,
+                    n_kv_heads: n_heads,
+                    head_dim: d / n_heads,
+                }
             })
             .collect(),
-        crate::LayerNorm::new(d, None, None, true, 1e-5, cx),
+        crate::LayerNorm::new(d, false, false, true, 1e-5, &model.child("norm"), cx),
     )
 }
 
@@ -434,22 +446,24 @@ pub struct MiniWhisper {
 
 impl MiniWhisper {
     pub fn new(d: usize, ff: usize, n_heads: usize, cx: &mut Graph) -> Self {
-        let linear = |a, b, cx: &mut Graph| Linear::new(a, b, false, cx);
+        let ns = Ns::root();
+        let linear =
+            |a, b, seg: &str, cx: &mut Graph| Linear::new(a, b, false, &Ns::root().child(seg), cx);
         Self {
-            enc_norm: crate::LayerNorm::new(d, None, None, true, 1e-5, cx),
-            enc_wq: linear(d, d, cx),
-            enc_wk: linear(d, d, cx),
-            enc_wv: linear(d, d, cx),
-            enc_wo: linear(d, d, cx),
-            enc_up: linear(d, ff, cx),
-            enc_down: linear(ff, d, cx),
-            dec_norm: crate::LayerNorm::new(d, None, None, true, 1e-5, cx),
-            dec_wq: linear(d, d, cx),
-            dec_wk: linear(d, d, cx),
-            dec_wv: linear(d, d, cx),
-            dec_wo: linear(d, d, cx),
-            dec_up: linear(d, ff, cx),
-            dec_down: linear(ff, d, cx),
+            enc_norm: crate::LayerNorm::new(d, false, false, true, 1e-5, &ns.child("enc_norm"), cx),
+            enc_wq: linear(d, d, "enc_wq", cx),
+            enc_wk: linear(d, d, "enc_wk", cx),
+            enc_wv: linear(d, d, "enc_wv", cx),
+            enc_wo: linear(d, d, "enc_wo", cx),
+            enc_up: linear(d, ff, "enc_up", cx),
+            enc_down: linear(ff, d, "enc_down", cx),
+            dec_norm: crate::LayerNorm::new(d, false, false, true, 1e-5, &ns.child("dec_norm"), cx),
+            dec_wq: linear(d, d, "dec_wq", cx),
+            dec_wk: linear(d, d, "dec_wk", cx),
+            dec_wv: linear(d, d, "dec_wv", cx),
+            dec_wo: linear(d, d, "dec_wo", cx),
+            dec_up: linear(d, ff, "dec_up", cx),
+            dec_down: linear(ff, d, "dec_down", cx),
             n_heads,
             head_dim: d / n_heads,
         }
@@ -502,9 +516,9 @@ impl MiniConvNet {
     /// Input (ch_in, h, w) with h = w = 5 and 3×3 valid convs: 5→3→1.
     pub fn new(ch_in: usize, c1: usize, c2: usize, classes: usize, cx: &mut Graph) -> Self {
         Self {
-            conv1: ConvND::new(ch_in, c1, [3, 3], [1, 1], [1, 1], [0, 0], false, cx),
-            conv2: ConvND::new(c1, c2, [3, 3], [1, 1], [1, 1], [0, 0], false, cx),
-            head: Linear::new(c2, classes, false, cx),
+            conv1: ConvND::new(ch_in, c1, [3, 3], [1, 1], [1, 1], [0, 0], false, &Ns::root().child("conv1"), cx),
+            conv2: ConvND::new(c1, c2, [3, 3], [1, 1], [1, 1], [0, 0], false, &Ns::root().child("conv2"), cx),
+            head: Linear::new(c2, classes, false, &Ns::root().child("head"), cx),
             classes,
         }
     }
@@ -592,39 +606,39 @@ impl MiniDit {
     ) -> Self {
         let head_dim = d / n_heads;
         Self {
-            x_embed: Linear::new(in_channels, d, false, cx),
-            ctx_embed: Linear::new(txt_dim, d, false, cx),
-            t_mlp1: Linear::new(2 * t_half, d, false, cx),
-            t_mlp2: Linear::new(d, d, false, cx),
-            g_mlp1: Linear::new(2 * t_half, d, false, cx),
-            g_mlp2: Linear::new(d, d, false, cx),
-            mod_img: Linear::new(d, 6 * d, false, cx),
-            mod_txt: Linear::new(d, 6 * d, false, cx),
-            mod_single: Linear::new(d, 3 * d, false, cx),
-            norm_out: Linear::new(d, 2 * d, false, cx),
-            proj_out: Linear::new(d, in_channels, false, cx),
-            img_q: Linear::new(d, d, false, cx),
-            img_k: Linear::new(d, d, false, cx),
-            img_v: Linear::new(d, d, false, cx),
-            img_out: Linear::new(d, d, false, cx),
-            txt_q: Linear::new(d, d, false, cx),
-            txt_k: Linear::new(d, d, false, cx),
-            txt_v: Linear::new(d, d, false, cx),
-            txt_out: Linear::new(d, d, false, cx),
+            x_embed: Linear::new(in_channels, d, false, &Ns::root().child("x_embed"), cx),
+            ctx_embed: Linear::new(txt_dim, d, false, &Ns::root().child("ctx_embed"), cx),
+            t_mlp1: Linear::new(2 * t_half, d, false, &Ns::root().child("t_mlp1"), cx),
+            t_mlp2: Linear::new(d, d, false, &Ns::root().child("t_mlp2"), cx),
+            g_mlp1: Linear::new(2 * t_half, d, false, &Ns::root().child("g_mlp1"), cx),
+            g_mlp2: Linear::new(d, d, false, &Ns::root().child("g_mlp2"), cx),
+            mod_img: Linear::new(d, 6 * d, false, &Ns::root().child("mod_img"), cx),
+            mod_txt: Linear::new(d, 6 * d, false, &Ns::root().child("mod_txt"), cx),
+            mod_single: Linear::new(d, 3 * d, false, &Ns::root().child("mod_single"), cx),
+            norm_out: Linear::new(d, 2 * d, false, &Ns::root().child("norm_out"), cx),
+            proj_out: Linear::new(d, in_channels, false, &Ns::root().child("proj_out"), cx),
+            img_q: Linear::new(d, d, false, &Ns::root().child("img_q"), cx),
+            img_k: Linear::new(d, d, false, &Ns::root().child("img_k"), cx),
+            img_v: Linear::new(d, d, false, &Ns::root().child("img_v"), cx),
+            img_out: Linear::new(d, d, false, &Ns::root().child("img_out"), cx),
+            txt_q: Linear::new(d, d, false, &Ns::root().child("txt_q"), cx),
+            txt_k: Linear::new(d, d, false, &Ns::root().child("txt_k"), cx),
+            txt_v: Linear::new(d, d, false, &Ns::root().child("txt_v"), cx),
+            txt_out: Linear::new(d, d, false, &Ns::root().child("txt_out"), cx),
             img_qnorm: cx.named_tensor("ImgQNorm", head_dim),
             img_knorm: cx.named_tensor("ImgKNorm", head_dim),
             txt_qnorm: cx.named_tensor("TxtQNorm", head_dim),
             txt_knorm: cx.named_tensor("TxtKNorm", head_dim),
-            ff_in: Linear::new(d, 2 * mlp, false, cx),
-            ff_out: Linear::new(mlp, d, false, cx),
-            ctx_ff_in: Linear::new(d, 2 * mlp, false, cx),
-            ctx_ff_out: Linear::new(mlp, d, false, cx),
-            single_proj: Linear::new(d, 3 * d + 2 * mlp, false, cx),
-            single_out_attn: Linear::new(d, d, false, cx),
-            single_out_mlp: Linear::new(mlp, d, false, cx),
+            ff_in: Linear::new(d, 2 * mlp, false, &Ns::root().child("ff_in"), cx),
+            ff_out: Linear::new(mlp, d, false, &Ns::root().child("ff_out"), cx),
+            ctx_ff_in: Linear::new(d, 2 * mlp, false, &Ns::root().child("ctx_ff_in"), cx),
+            ctx_ff_out: Linear::new(mlp, d, false, &Ns::root().child("ctx_ff_out"), cx),
+            single_proj: Linear::new(d, 3 * d + 2 * mlp, false, &Ns::root().child("single_proj"), cx),
+            single_out_attn: Linear::new(d, d, false, &Ns::root().child("single_out_attn"), cx),
+            single_out_mlp: Linear::new(mlp, d, false, &Ns::root().child("single_out_mlp"), cx),
             single_qnorm: cx.named_tensor("SglQNorm", head_dim),
             single_knorm: cx.named_tensor("SglKNorm", head_dim),
-            ln: crate::LayerNorm::new(d, None, None, true, 1e-6, cx),
+            ln: crate::LayerNorm::new(d, false, false, true, 1e-6, &Ns::root().child("ln"), cx),
             d,
             n_heads,
             head_dim,
@@ -2089,8 +2103,8 @@ mod tests {
             let mut cx = Graph::new();
             let x = cx.tensor((1, 6));
             let w = cx.tensor((6, 6));
-            let pre = crate::LayerNorm::new(6, Some("Pre"), None, false, 1e-6, &mut cx);
-            let post = crate::LayerNorm::new(6, Some("Post"), None, false, 1e-6, &mut cx);
+            let pre = crate::LayerNorm::new(6, true, false, false, 1e-6, &Ns::root().child("pre"), &mut cx);
+            let post = crate::LayerNorm::new(6, true, false, false, 1e-6, &Ns::root().child("post"), &mut cx);
             let out = (x + post.forward(pre.forward(x).matmul(w))).output();
             let _ = out;
             let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
@@ -2258,7 +2272,7 @@ mod tests {
             let rope_sin = cx.tensor((S, HD));
             let rope_rot = cx.tensor((HD, HD));
             let joint_base = cx.tensor((S, D));
-            let ln = crate::LayerNorm::new(D, None, None, true, 1e-6, &mut cx);
+            let ln = crate::LayerNorm::new(D, false, false, true, 1e-6, &Ns::root().child("ln"), &mut cx);
 
             // ---- partial forward, mirroring MiniDit::forward ----
             let temb = model

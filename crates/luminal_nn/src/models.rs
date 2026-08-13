@@ -19,11 +19,12 @@ pub struct Mlp {
 impl Mlp {
     /// `dims` = [in, hidden.., out]; a relu follows every layer but the
     /// last.
-    pub fn new(dims: &[usize], cx: &mut Graph) -> Self {
+    pub fn new(dims: &[usize], ns: &Ns, cx: &mut Graph) -> Self {
         assert!(dims.len() >= 2, "an MLP needs at least in and out dims");
         let layers = dims
             .windows(2)
-            .map(|pair| Linear::new(pair[0], pair[1], true, cx))
+            .enumerate()
+            .map(|(i, pair)| Linear::new(pair[0], pair[1], true, &ns.child("layers").index(i), cx))
             .collect();
         Self { layers }
     }
@@ -177,8 +178,8 @@ pub struct LlamaBlock {
 }
 
 impl LlamaBlock {
-    pub fn new(d: usize, ff: usize, n_heads: usize, n_kv_heads: usize, cx: &mut Graph) -> Self {
-        Self::new_with_ffn(d, ff, n_heads, n_kv_heads, GatedFfn::SwiGlu, cx)
+    pub fn new(d: usize, ff: usize, n_heads: usize, n_kv_heads: usize, ns: &Ns, cx: &mut Graph) -> Self {
+        Self::new_with_ffn(d, ff, n_heads, n_kv_heads, GatedFfn::SwiGlu, ns, cx)
     }
 
     pub fn new_with_ffn(
@@ -187,22 +188,29 @@ impl LlamaBlock {
         n_heads: usize,
         n_kv_heads: usize,
         ffn_kind: GatedFfn,
+        ns: &Ns,
         cx: &mut Graph,
     ) -> Self {
         let head_dim = d / n_heads;
         let kv_dim = n_kv_heads * head_dim;
+        let attn = ns.child("self_attn");
+        let mlp = ns.child("mlp");
         Self {
             ffn_kind,
-            attn_norm: crate::LayerNorm::new(d, None, None, false, 1e-5, cx),
-            wq: Linear::new(d, d, false, cx),
-            wk: Linear::new(d, kv_dim, false, cx),
-            wv: Linear::new(d, kv_dim, false, cx),
-            wo: Linear::new(d, d, false, cx),
+            attn_norm: crate::LayerNorm::new(
+                d, false, false, false, 1e-5, &ns.child("input_layernorm"), cx,
+            ),
+            wq: Linear::new(d, d, false, &attn.child("q_proj"), cx),
+            wk: Linear::new(d, kv_dim, false, &attn.child("k_proj"), cx),
+            wv: Linear::new(d, kv_dim, false, &attn.child("v_proj"), cx),
+            wo: Linear::new(d, d, false, &attn.child("o_proj"), cx),
             qk_norm: None,
-            ffn_norm: crate::LayerNorm::new(d, None, None, false, 1e-5, cx),
-            gate: Linear::new(d, ff, false, cx),
-            up: Linear::new(d, ff, false, cx),
-            down: Linear::new(ff, d, false, cx),
+            ffn_norm: crate::LayerNorm::new(
+                d, false, false, false, 1e-5, &ns.child("post_attention_layernorm"), cx,
+            ),
+            gate: Linear::new(d, ff, false, &mlp.child("gate_proj"), cx),
+            up: Linear::new(d, ff, false, &mlp.child("up_proj"), cx),
+            down: Linear::new(ff, d, false, &mlp.child("down_proj"), cx),
             n_heads,
             n_kv_heads,
             head_dim,
@@ -211,10 +219,11 @@ impl LlamaBlock {
 
     /// Mint the QK-norm weights (Qwen3 anatomy) — builder form so the
     /// existing constructors stay unchanged.
-    pub fn with_qk_norm(mut self, cx: &mut Graph) -> Self {
+    pub fn with_qk_norm(mut self, ns: &Ns, cx: &mut Graph) -> Self {
+        let attn = ns.child("self_attn");
         self.qk_norm = Some((
-            cx.named_tensor("QNorm", self.head_dim),
-            cx.named_tensor("KNorm", self.head_dim),
+            cx.named_tensor(attn.child("q_norm").leaf("weight"), self.head_dim),
+            cx.named_tensor(attn.child("k_norm").leaf("weight"), self.head_dim),
         ));
         self
     }
@@ -413,27 +422,31 @@ impl GemmaBlock {
         head_dim: usize,
         local: bool,
         window: usize,
+        ns: &Ns,
         cx: &mut Graph,
     ) -> Self {
         let q_dim = n_heads * head_dim;
         let kv_dim = n_kv_heads * head_dim;
-        let rms = |cx: &mut Graph| {
-            crate::LayerNorm::new(d, Some("NormWeight"), None, false, 1e-6, cx).with_unit_offset()
+        let attn = ns.child("self_attn");
+        let mlp = ns.child("mlp");
+        let rms = |segment: &str, cx: &mut Graph| {
+            crate::LayerNorm::new(d, true, false, false, 1e-6, &ns.child(segment), cx)
+                .with_unit_offset()
         };
         Self {
-            input_norm: rms(cx),
-            post_attn_norm: rms(cx),
-            pre_ff_norm: rms(cx),
-            post_ff_norm: rms(cx),
-            wq: Linear::new(d, q_dim, false, cx),
-            wk: Linear::new(d, kv_dim, false, cx),
-            wv: Linear::new(d, kv_dim, false, cx),
-            wo: Linear::new(q_dim, d, false, cx),
-            q_norm: cx.named_tensor("QNorm", head_dim),
-            k_norm: cx.named_tensor("KNorm", head_dim),
-            gate: Linear::new(d, ff, false, cx),
-            up: Linear::new(d, ff, false, cx),
-            down: Linear::new(ff, d, false, cx),
+            input_norm: rms("input_layernorm", cx),
+            post_attn_norm: rms("post_attention_layernorm", cx),
+            pre_ff_norm: rms("pre_feedforward_layernorm", cx),
+            post_ff_norm: rms("post_feedforward_layernorm", cx),
+            wq: Linear::new(d, q_dim, false, &attn.child("q_proj"), cx),
+            wk: Linear::new(d, kv_dim, false, &attn.child("k_proj"), cx),
+            wv: Linear::new(d, kv_dim, false, &attn.child("v_proj"), cx),
+            wo: Linear::new(q_dim, d, false, &attn.child("o_proj"), cx),
+            q_norm: cx.named_tensor(attn.child("q_norm").leaf("weight"), head_dim),
+            k_norm: cx.named_tensor(attn.child("k_norm").leaf("weight"), head_dim),
+            gate: Linear::new(d, ff, false, &mlp.child("gate_proj"), cx),
+            up: Linear::new(d, ff, false, &mlp.child("up_proj"), cx),
+            down: Linear::new(ff, d, false, &mlp.child("down_proj"), cx),
             local,
             window,
             rope_theta: if local { 10_000.0 } else { 1_000_000.0 },
@@ -583,7 +596,7 @@ mod tests {
         const BATCH: usize = 2;
 
         let mut cx = Graph::new();
-        let model = Mlp::new(&DIMS, &mut cx);
+        let model = Mlp::new(&DIMS, &Ns::root(), &mut cx);
         let x = cx.tensor((BATCH, DIMS[0]));
         let out = model.forward(x).output();
 
@@ -664,7 +677,7 @@ mod tests {
         const EPS: f32 = 1e-5;
 
         let mut cx = Graph::new();
-        let block = LlamaBlock::new(D5, FF5, N_H, N_KV, &mut cx);
+        let block = LlamaBlock::new(D5, FF5, N_H, N_KV, &Ns::root().child("blk"), &mut cx);
         let x = cx.tensor((1, D5));
         let k_cache = cx.tensor((SLOTS5, KV_DIM));
         let v_cache = cx.tensor((SLOTS5, KV_DIM));
@@ -789,7 +802,7 @@ mod tests {
             let start = std::time::Instant::now();
             let mut cx = Graph::new();
             let blocks: Vec<LlamaBlock> =
-                (0..layers).map(|_| LlamaBlock::new(d, ff, n_heads, n_kv, &mut cx)).collect();
+                (0..layers).map(|l| LlamaBlock::new(d, ff, n_heads, n_kv, &Ns::root().child("layers").index(l), &mut cx)).collect();
             let x = cx.tensor((1, d));
             let caches: Vec<_> = (0..layers)
                 .map(|_| (cx.tensor((SLOTS6, kv_dim)), cx.tensor((SLOTS6, kv_dim))))
@@ -865,7 +878,7 @@ mod tests {
     fn probe_deadlock_anatomy() {
         let mut cx = Graph::new();
         let blocks: Vec<LlamaBlock> =
-            (0..2).map(|_| LlamaBlock::new(8, 12, 4, 2, &mut cx)).collect();
+            (0..2).map(|l| LlamaBlock::new(8, 12, 4, 2, &Ns::root().child("layers").index(l), &mut cx)).collect();
         let x = cx.tensor((1, 8));
         let caches: Vec<_> = (0..2)
             .map(|_| (cx.tensor((4, 4)), cx.tensor((4, 4))))
@@ -994,12 +1007,13 @@ mod tests {
 
     fn block_fixture(ff: fn(&mut Graph) -> FeedForward) -> (BlockFixture, GraphTensor, GraphTensor, GraphTensor) {
         let mut cx = Graph::new();
-        let embed = Embedding::new(VOCAB, D, &mut cx);
+        let embed = Embedding::new(VOCAB, D, &Ns::root().child("embed"), &mut cx);
+        let a = Ns::root().child("attn");
         let block = DecoderBlock {
-            wq: Linear::new(D, D, false, &mut cx),
-            wk: Linear::new(D, D, false, &mut cx),
-            wv: Linear::new(D, D, false, &mut cx),
-            wo: Linear::new(D, D, false, &mut cx),
+            wq: Linear::new(D, D, false, &a.child("q"), &mut cx),
+            wk: Linear::new(D, D, false, &a.child("k"), &mut cx),
+            wv: Linear::new(D, D, false, &a.child("v"), &mut cx),
+            wo: Linear::new(D, D, false, &a.child("o"), &mut cx),
             ff: ff(&mut cx),
             n_heads: N_HEADS,
             n_kv_heads: N_HEADS,
@@ -1102,8 +1116,8 @@ mod tests {
     #[test]
     fn decoder_block_matches_scalar_reference() {
         let (fx, logits, kc, vc) = block_fixture(|cx| FeedForward::Dense {
-            up: Linear::new(D, FF_HIDDEN, false, cx),
-            down: Linear::new(FF_HIDDEN, D, false, cx),
+            up: Linear::new(D, FF_HIDDEN, false, &Ns::root().child("up"), cx),
+            down: Linear::new(FF_HIDDEN, D, false, &Ns::root().child("down"), cx),
         });
         let (data, pairs) = block_data(&fx);
         let (ref_logits, ref_kc, ref_vc) = block_reference(&fx);
@@ -1167,19 +1181,20 @@ mod tests {
             let prev_seq = step; // tokens already in the cache
             let ctx = step + 1; // slots visible this step
             let mut cx = Graph::new();
-            let embed = Embedding::new(VOCAB, D, &mut cx);
+            let embed = Embedding::new(VOCAB, D, &Ns::root().child("embed"), &mut cx);
             let mut norms = Vec::new();
             let mut blocks = Vec::new();
-            for _ in 0..LAYERS {
-                norms.push(crate::LayerNorm::new(D, None, None, true, EPS, &mut cx));
+            for l in 0..LAYERS {
+                let lns = Ns::root().child("layers").index(l);
+                norms.push(crate::LayerNorm::new(D, false, false, true, EPS, &lns.child("norm"), &mut cx));
                 blocks.push(DecoderBlock {
-                    wq: Linear::new(D, D, false, &mut cx),
-                    wk: Linear::new(D, D, false, &mut cx),
-                    wv: Linear::new(D, D, false, &mut cx),
-                    wo: Linear::new(D, D, false, &mut cx),
+                    wq: Linear::new(D, D, false, &lns.child("q"), &mut cx),
+                    wk: Linear::new(D, D, false, &lns.child("k"), &mut cx),
+                    wv: Linear::new(D, D, false, &lns.child("v"), &mut cx),
+                    wo: Linear::new(D, D, false, &lns.child("o"), &mut cx),
                     ff: FeedForward::Dense {
-                        up: Linear::new(D, FF_HIDDEN, false, &mut cx),
-                        down: Linear::new(FF_HIDDEN, D, false, &mut cx),
+                        up: Linear::new(D, FF_HIDDEN, false, &lns.child("up"), &mut cx),
+                        down: Linear::new(FF_HIDDEN, D, false, &lns.child("down"), &mut cx),
                     },
                     n_heads: N_HEADS,
                     n_kv_heads: N_HEADS,
@@ -1190,7 +1205,7 @@ mod tests {
                 embed,
                 norms,
                 blocks,
-                final_norm: crate::LayerNorm::new(D, None, None, true, EPS, &mut cx),
+                final_norm: crate::LayerNorm::new(D, false, false, true, EPS, &Ns::root().child("final_norm"), &mut cx),
             };
             let ids = cx.tensor_dtyped(1, DType::Int);
             let cache_inputs: Vec<(GraphTensor, GraphTensor)> = (0..LAYERS)
@@ -1331,7 +1346,8 @@ mod forward_rope_tests {
         let position = 1usize;
 
         let mut cx = Graph::new();
-        let block = LlamaBlock::new(D, FF, N_HEADS, N_KV_HEADS, &mut cx).with_qk_norm(&mut cx);
+        let block = LlamaBlock::new(D, FF, N_HEADS, N_KV_HEADS, &Ns::root().child("blk"), &mut cx)
+            .with_qk_norm(&Ns::root().child("blk"), &mut cx);
         let x = cx.tensor((1, D));
         let k_cache = cx.tensor((SLOTS, KV_DIM));
         let v_cache = cx.tensor((SLOTS, KV_DIM));

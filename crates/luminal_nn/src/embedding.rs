@@ -13,17 +13,17 @@ pub struct Embedding {
 }
 
 impl Embedding {
-    pub fn new(n_embeddings: usize, embedding_dim: usize, cx: &mut Graph) -> Self {
+    pub fn new(n_embeddings: usize, embedding_dim: usize, ns: &Ns, cx: &mut Graph) -> Self {
         Self {
-            weight: cx.named_tensor("Embedding Weight", (n_embeddings, embedding_dim)),
+            weight: cx.named_tensor(ns.leaf("weight"), (n_embeddings, embedding_dim)),
             permute: false,
             embedding_dim,
         }
     }
 
-    pub fn new_permuted(n_embeddings: usize, embedding_dim: usize, cx: &mut Graph) -> Self {
+    pub fn new_permuted(n_embeddings: usize, embedding_dim: usize, ns: &Ns, cx: &mut Graph) -> Self {
         Self {
-            weight: cx.named_tensor("Embedding Weight", (embedding_dim, n_embeddings)),
+            weight: cx.named_tensor(ns.leaf("weight"), (embedding_dim, n_embeddings)),
             permute: true,
             embedding_dim,
         }
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn embedding_looks_up_rows() {
         let mut cx = Graph::new();
-        let model = Embedding::new(3, 4, &mut cx);
+        let model = Embedding::new(3, 4, &Ns::root().child("embed"), &mut cx);
         let ids = cx.tensor_dtyped(3, DType::Int);
         let out = model.forward(ids).output();
         assert_eq!(out.dims(), vec![Expression::from(3), Expression::from(4)]);
@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn embedding_batches_rebuild_shape() {
         let mut cx = Graph::new();
-        let model = Embedding::new(3, 4, &mut cx);
+        let model = Embedding::new(3, 4, &Ns::root().child("embed"), &mut cx);
         let ids = cx.tensor_dtyped((2, 3), DType::Int);
         let out = model.forward(ids).output();
         assert_eq!(out.dims(), vec![Expression::from(2), Expression::from(3), Expression::from(4)]);

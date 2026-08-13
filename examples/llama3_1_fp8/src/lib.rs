@@ -10,7 +10,7 @@ pub mod weights;
 use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
-use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, TypedBuffer};
+use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, Ns, TypedBuffer};
 use luminal::ssa_reference::SsaReferenceRuntime;
 use luminal_nn::{CacheState, KvCachePool, PositionSlots};
 use model::{Fp8Dims, Llama31Fp8};
@@ -81,7 +81,13 @@ impl DecodeStep {
         let rope_rot = cx.tensor((dims.head_dim, dims.head_dim));
         let gather_idx = cx.tensor_dtyped(max_seq, DType::Int);
         let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-        let pool = KvCachePool::new(&mut cx, dims.layers, max_seq, dims.kv_dim());
+        let pool = KvCachePool::new(
+            &mut cx,
+            dims.layers,
+            max_seq,
+            dims.kv_dim(),
+            &Ns::root().child("kv_cache"),
+        );
         let (logits, cache_outs) = model.forward(
             token, q_pos, rope_cos, rope_sin, rope_rot, &pool, gather_idx, scatter_idx,
         );

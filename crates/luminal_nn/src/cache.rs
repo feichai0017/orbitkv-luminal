@@ -13,6 +13,7 @@
 //! the [`PositionSlots`] / [`PageTable`] drivers below.
 
 use luminal::prelude::anyhow;
+use luminal::prelude::Ns;
 use luminal::graph::Graph;
 use luminal::prelude::{GraphTensor, TypedBuffer};
 use luminal::ssa_reference::SsaReferenceRuntime;
@@ -27,19 +28,21 @@ pub struct KvCachePool {
 }
 
 impl KvCachePool {
-    pub fn new(cx: &mut Graph, layers: usize, slots: usize, kv_dim: usize) -> Self {
-        Self::new_heterogeneous(cx, slots, &vec![kv_dim; layers])
+    pub fn new(cx: &mut Graph, layers: usize, slots: usize, kv_dim: usize, ns: &Ns) -> Self {
+        Self::new_heterogeneous(cx, slots, &vec![kv_dim; layers], ns)
     }
 
     /// Per-layer kv dims (heterogeneous pools — gemma-4's role-split
     /// layers).
-    pub fn new_heterogeneous(cx: &mut Graph, slots: usize, kv_dims: &[usize]) -> Self {
+    pub fn new_heterogeneous(cx: &mut Graph, slots: usize, kv_dims: &[usize], ns: &Ns) -> Self {
         let layers = kv_dims
             .iter()
-            .map(|kv_dim| {
+            .enumerate()
+            .map(|(l, kv_dim)| {
+                let layer_ns = ns.index(l);
                 (
-                    cx.tensor((slots, *kv_dim)),
-                    cx.tensor((slots, *kv_dim)),
+                    cx.named_tensor(layer_ns.leaf("k_cache"), (slots, *kv_dim)),
+                    cx.named_tensor(layer_ns.leaf("v_cache"), (slots, *kv_dim)),
                 )
             })
             .collect();

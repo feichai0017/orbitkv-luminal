@@ -16,15 +16,16 @@ pub struct LayerNorm {
 impl LayerNorm {
     pub fn new(
         dim: usize,
-        weight: Option<&str>,
-        bias: Option<&str>,
+        weight: bool,
+        bias: bool,
         mean_norm: bool,
         epsilon: f32,
+        ns: &Ns,
         cx: &mut Graph,
     ) -> Self {
         Self {
-            weight: weight.map(|w| cx.named_tensor(w, dim)),
-            bias: bias.map(|b| cx.named_tensor(b, dim)),
+            weight: weight.then(|| cx.named_tensor(ns.leaf("weight"), dim)),
+            bias: bias.then(|| cx.named_tensor(ns.leaf("bias"), dim)),
             mean_norm,
             epsilon,
             unit_offset: false,

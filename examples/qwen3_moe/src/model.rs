@@ -8,7 +8,7 @@
 
 use luminal::dtype::DType;
 use luminal::graph::Graph;
-use luminal::prelude::GraphTensor;
+use luminal::prelude::{GraphTensor, Ns};
 use luminal_nn::{Embedding, KvCachePool, LayerNorm, Linear, MoETopK};
 
 #[derive(Clone)]
@@ -88,20 +88,24 @@ pub struct Qwen3MoeBlock {
 
 impl Qwen3MoeBlock {
     fn new(l: usize, d: &Qwen3MoeDims, cx: &mut Graph) -> Self {
-        let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
+        let ns = Ns::root().child("model").child("layers").index(l);
+        let attn = ns.child("self_attn");
+        let mlp = ns.child("mlp");
+        let experts = mlp.child("experts");
         let expert_parts: Vec<(GraphTensor, GraphTensor, GraphTensor)> = (0..d.experts)
             .map(|e| {
+                let expert = experts.index(e);
                 (
                     cx.named_tensor(
-                        name(&format!("mlp.experts.{e}.gate_proj.weight")),
+                        expert.child("gate_proj").leaf("weight"),
                         (d.moe_intermediate, d.hidden),
                     ),
                     cx.named_tensor(
-                        name(&format!("mlp.experts.{e}.up_proj.weight")),
+                        expert.child("up_proj").leaf("weight"),
                         (d.moe_intermediate, d.hidden),
                     ),
                     cx.named_tensor(
-                        name(&format!("mlp.experts.{e}.down_proj.weight")),
+                        expert.child("down_proj").leaf("weight"),
                         (d.hidden, d.moe_intermediate),
                     ),
                 )
@@ -110,28 +114,30 @@ impl Qwen3MoeBlock {
         Self {
             attn_norm: LayerNorm::new(
                 d.hidden,
-                Some(&name("input_layernorm.weight")),
-                None,
+                true,
+                false,
                 false,
                 d.rms_eps,
+                &ns.child("input_layernorm"),
                 cx,
             ),
-            wq: Linear::new_permuted(d.hidden, d.q_dim(), false, cx),
-            wk: Linear::new_permuted(d.hidden, d.kv_dim(), false, cx),
-            wv: Linear::new_permuted(d.hidden, d.kv_dim(), false, cx),
-            wo: Linear::new_permuted(d.q_dim(), d.hidden, false, cx),
-            q_norm: cx.named_tensor(name("self_attn.q_norm.weight"), d.head_dim),
-            k_norm: cx.named_tensor(name("self_attn.k_norm.weight"), d.head_dim),
+            wq: Linear::new_permuted(d.hidden, d.q_dim(), false, &attn.child("q_proj"), cx),
+            wk: Linear::new_permuted(d.hidden, d.kv_dim(), false, &attn.child("k_proj"), cx),
+            wv: Linear::new_permuted(d.hidden, d.kv_dim(), false, &attn.child("v_proj"), cx),
+            wo: Linear::new_permuted(d.q_dim(), d.hidden, false, &attn.child("o_proj"), cx),
+            q_norm: cx.named_tensor(attn.child("q_norm").leaf("weight"), d.head_dim),
+            k_norm: cx.named_tensor(attn.child("k_norm").leaf("weight"), d.head_dim),
             ffn_norm: LayerNorm::new(
                 d.hidden,
-                Some(&name("post_attention_layernorm.weight")),
-                None,
+                true,
+                false,
                 false,
                 d.rms_eps,
+                &ns.child("post_attention_layernorm"),
                 cx,
             ),
             moe: MoETopK::from_per_expert(
-                Linear::new_permuted(d.hidden, d.experts, false, cx),
+                Linear::new_permuted(d.hidden, d.experts, false, &mlp.child("gate"), cx),
                 &expert_parts,
                 d.top_k,
             ),
@@ -206,17 +212,29 @@ impl Qwen3Moe {
             .collect();
         Self {
             dims: dims.clone(),
-            embed: Embedding::new(dims.vocab, dims.hidden, cx),
+            embed: Embedding::new(
+                dims.vocab,
+                dims.hidden,
+                &Ns::root().child("model").child("embed_tokens"),
+                cx,
+            ),
             blocks,
             final_norm: LayerNorm::new(
                 dims.hidden,
-                Some("model.norm.weight"),
-                None,
+                true,
+                false,
                 false,
                 dims.rms_eps,
+                &Ns::root().child("model").child("norm"),
                 cx,
             ),
-            lm_head: Linear::new_permuted(dims.hidden, dims.vocab, false, cx),
+            lm_head: Linear::new_permuted(
+                dims.hidden,
+                dims.vocab,
+                false,
+                &Ns::root().child("lm_head"),
+                cx,
+            ),
         }
     }
 

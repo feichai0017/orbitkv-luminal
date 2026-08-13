@@ -15,7 +15,7 @@
 
 use luminal::dtype::DType;
 use luminal::graph::Graph;
-use luminal::prelude::GraphTensor;
+use luminal::prelude::{GraphTensor, Ns};
 use luminal_nn::{Embedding, GatedFfn, LayerNorm, Linear, LlamaBlock};
 
 /// Architecture hyperparameters. `qwen3_4b` is the real model;
@@ -93,14 +93,20 @@ impl Qwen {
             dims: dims.clone(),
             // HF stores embed_tokens as (vocab, hidden) — the natural
             // Embedding orientation; `reverse` is the tied lm head.
-            embed: Embedding::new(dims.vocab, dims.hidden, cx),
+            embed: Embedding::new(
+                dims.vocab,
+                dims.hidden,
+                &Ns::root().child("model").child("embed_tokens"),
+                cx,
+            ),
             blocks,
             final_norm: LayerNorm::new(
                 dims.hidden,
-                Some("model.norm.weight"),
-                None,
+                true,
+                false,
                 false,
                 dims.rms_eps,
+                &Ns::root().child("model").child("norm"),
                 cx,
             ),
         }
@@ -112,36 +118,40 @@ impl Qwen {
     /// pub for exactly this. HF linears are (out, in) — `new_permuted`
     /// binds them without host transposition.
     fn block(l: usize, d: &QwenDims, cx: &mut Graph) -> LlamaBlock {
-        let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
+        let ns = Ns::root().child("model").child("layers").index(l);
+        let attn = ns.child("self_attn");
+        let mlp = ns.child("mlp");
         LlamaBlock {
             ffn_kind: GatedFfn::SwiGlu,
             attn_norm: LayerNorm::new(
                 d.hidden,
-                Some(&name("input_layernorm.weight")),
-                None,
+                true,
+                false,
                 false,
                 d.rms_eps,
+                &ns.child("input_layernorm"),
                 cx,
             ),
-            wq: Linear::new_permuted(d.hidden, d.q_dim(), false, cx),
-            wk: Linear::new_permuted(d.hidden, d.kv_dim(), false, cx),
-            wv: Linear::new_permuted(d.hidden, d.kv_dim(), false, cx),
-            wo: Linear::new_permuted(d.q_dim(), d.hidden, false, cx),
+            wq: Linear::new_permuted(d.hidden, d.q_dim(), false, &attn.child("q_proj"), cx),
+            wk: Linear::new_permuted(d.hidden, d.kv_dim(), false, &attn.child("k_proj"), cx),
+            wv: Linear::new_permuted(d.hidden, d.kv_dim(), false, &attn.child("v_proj"), cx),
+            wo: Linear::new_permuted(d.q_dim(), d.hidden, false, &attn.child("o_proj"), cx),
             qk_norm: Some((
-                cx.named_tensor(name("self_attn.q_norm.weight"), d.head_dim),
-                cx.named_tensor(name("self_attn.k_norm.weight"), d.head_dim),
+                cx.named_tensor(attn.child("q_norm").leaf("weight"), d.head_dim),
+                cx.named_tensor(attn.child("k_norm").leaf("weight"), d.head_dim),
             )),
             ffn_norm: LayerNorm::new(
                 d.hidden,
-                Some(&name("post_attention_layernorm.weight")),
-                None,
+                true,
+                false,
                 false,
                 d.rms_eps,
+                &ns.child("post_attention_layernorm"),
                 cx,
             ),
-            gate: Linear::new_permuted(d.hidden, d.intermediate, false, cx),
-            up: Linear::new_permuted(d.hidden, d.intermediate, false, cx),
-            down: Linear::new_permuted(d.intermediate, d.hidden, false, cx),
+            gate: Linear::new_permuted(d.hidden, d.intermediate, false, &mlp.child("gate_proj"), cx),
+            up: Linear::new_permuted(d.hidden, d.intermediate, false, &mlp.child("up_proj"), cx),
+            down: Linear::new_permuted(d.intermediate, d.hidden, false, &mlp.child("down_proj"), cx),
             n_heads: d.n_heads,
             n_kv_heads: d.n_kv_heads,
             head_dim: d.head_dim,

@@ -30,6 +30,7 @@ impl ConvND {
         dilation: impl AsRef<[usize]>,
         padding: impl AsRef<[usize]>,
         bias: bool,
+        ns: &Ns,
         cx: &mut Graph,
     ) -> Self {
         let kernel = kernel.as_ref().to_vec();
@@ -64,10 +65,10 @@ impl ConvND {
 
         Self {
             weight: cx
-                .named_tensor("ConvWeight", (ch_out, ch_in * kernel_product))
+                .named_tensor(ns.leaf("weight"), (ch_out, ch_in * kernel_product))
                 ,
             bias: if bias {
-                Some(cx.named_tensor("ConvBias", ch_out))
+                Some(cx.named_tensor(ns.leaf("bias"), ch_out))
             } else {
                 None
             },
@@ -234,6 +235,7 @@ impl ConvND {
 #[cfg(test)]
 mod tests {
     use super::ConvND;
+    use luminal::prelude::Ns;
     use candle_core::{Device, Tensor};
 
     fn assert_close(a: &[f32], b: &[f32]) {
@@ -341,7 +343,7 @@ mod tests {
     #[test]
     fn conv1d_values_match_expected_window_sums() -> candle_core::Result<()> {
         let mut cx = luminal::graph::Graph::new();
-        let conv = ConvND::new(1, 1, vec![3], vec![1], vec![1], vec![1], true, &mut cx);
+        let conv = ConvND::new(1, 1, vec![3], vec![1], vec![1], vec![1], true, &Ns::root().child("conv"), &mut cx);
 
         let input = [1., 2., 3., 4., 5.];
         let weight = [1., 1., 1.];
@@ -364,6 +366,7 @@ mod tests {
             vec![1, 1],
             vec![0, 0],
             true,
+            &Ns::root().child("conv"),
             &mut cx,
         );
 
@@ -383,7 +386,7 @@ mod tests {
     #[test]
     fn conv1d_shapes_follow_stride_and_padding() {
         let mut cx = luminal::graph::Graph::new();
-        let conv = ConvND::new(1, 1, vec![3], vec![2], vec![1], vec![1], false, &mut cx);
+        let conv = ConvND::new(1, 1, vec![3], vec![2], vec![1], vec![1], false, &Ns::root().child("conv"), &mut cx);
 
         // expected length: floor((padded_len - dilation*(k-1) -1)/stride +1)
         // padded_len = 7 + 2 = 9
@@ -404,6 +407,7 @@ mod tests {
             vec![1, 1],
             vec![0, 1],
             true,
+            &Ns::root().child("conv"),
             &mut cx,
         );
 
@@ -442,6 +446,7 @@ mod forward_tests {
             vec![1, 1],
             vec![0, 0],
             false,
+            &Ns::root().child("conv"),
             &mut cx,
         );
         let out = conv.forward(x).output();

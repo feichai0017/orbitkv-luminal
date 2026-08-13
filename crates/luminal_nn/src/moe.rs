@@ -184,12 +184,13 @@ impl MoETopK {
         intermediate: usize,
         experts: usize,
         top_k: usize,
+        ns: &Ns,
         cx: &mut Graph,
     ) -> Self {
         Self {
-            router: Linear::new_permuted(hidden, experts, false, cx),
-            gate_up: cx.named_tensor("MoeGateUp", (experts, 2 * intermediate, hidden)),
-            down: cx.named_tensor("MoeDown", (experts, hidden, intermediate)),
+            router: Linear::new_permuted(hidden, experts, false, &ns.child("gate"), cx),
+            gate_up: cx.named_tensor(ns.leaf("gate_up_weights"), (experts, 2 * intermediate, hidden)),
+            down: cx.named_tensor(ns.leaf("down_weights"), (experts, hidden, intermediate)),
             experts,
             top_k,
             hidden,
@@ -301,7 +302,7 @@ mod topk_tests {
         const K: usize = 2;
 
         let mut cx = Graph::new();
-        let moe = MoETopK::new(H, I, E, K, &mut cx);
+        let moe = MoETopK::new(H, I, E, K, &Ns::root().child("mlp"), &mut cx);
         let x = cx.tensor((S, H));
         let out = moe.forward(x).output();
 
@@ -389,7 +390,7 @@ mod topk_tests {
                 )
             })
             .collect();
-        let router = crate::Linear::new_permuted(H, E, false, &mut cx);
+        let router = crate::Linear::new_permuted(H, E, false, &Ns::root().child("gate"), &mut cx);
         let moe = MoETopK::from_per_expert(router, &per_expert, K);
         let x = cx.tensor((S, H));
         let out = moe.forward(x).output();

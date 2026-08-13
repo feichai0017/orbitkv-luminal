@@ -18,7 +18,7 @@
 
 use luminal::dtype::DType;
 use luminal::graph::Graph;
-use luminal::prelude::GraphTensor;
+use luminal::prelude::{GraphTensor, Ns};
 use luminal_nn::{Embedding, KvCachePool, LayerNorm, Linear};
 
 pub const SLIDING_WINDOW: usize = 1024;
@@ -126,18 +126,19 @@ pub struct Gemma4MoeFfn {
 }
 
 impl Gemma4MoeFfn {
-    fn new(l: usize, d: &Gemma4Dims, cx: &mut Graph) -> Self {
-        let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
+    fn new(ns: &Ns, d: &Gemma4Dims, cx: &mut Graph) -> Self {
+        let router = ns.child("router");
+        let mlp = ns.child("mlp");
         Self {
-            router_proj: Linear::new_permuted(d.hidden, d.experts, false, cx),
-            router_scale: cx.named_tensor(name("router.scale"), d.hidden),
-            per_expert_scale: cx.named_tensor(name("router.per_expert_scale"), d.experts),
+            router_proj: Linear::new_permuted(d.hidden, d.experts, false, &router.child("proj"), cx),
+            router_scale: cx.named_tensor(router.leaf("scale"), d.hidden),
+            per_expert_scale: cx.named_tensor(router.leaf("per_expert_scale"), d.experts),
             gate_up: cx.named_tensor(
-                name("mlp.gate_up_weights"),
+                mlp.leaf("gate_up_weights"),
                 (d.experts, 2 * d.moe_intermediate, d.hidden),
             ),
             down: cx.named_tensor(
-                name("mlp.down_weights"),
+                mlp.leaf("down_weights"),
                 (d.experts, d.hidden, d.moe_intermediate),
             ),
             hidden: d.hidden,
@@ -226,29 +227,32 @@ impl Gemma4Block {
         let kv_heads = d.kv_heads(l);
         let q_dim = d.n_heads * head_dim;
         let kv_dim = head_dim * kv_heads;
-        let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
-        let rms = |suffix: &str, cx: &mut Graph| {
-            LayerNorm::new(d.hidden, Some(&name(suffix)), None, false, d.rms_eps, cx)
+        let ns = Ns::root().child("model").child("layers").index(l);
+        let attn = ns.child("self_attn");
+        let mlp = ns.child("mlp");
+        let rms = |segment: &str, cx: &mut Graph| {
+            LayerNorm::new(d.hidden, true, false, false, d.rms_eps, &ns.child(segment), cx)
         };
         Self {
-            input_norm: rms("input_layernorm.weight", cx),
-            post_attn_norm: rms("post_attention_layernorm.weight", cx),
-            pre_ff_norm: rms("pre_feedforward_layernorm.weight", cx),
-            post_ff_norm: rms("post_feedforward_layernorm.weight", cx),
-            post_ff_norm_1: rms("post_feedforward_layernorm_1.weight", cx),
-            pre_ff_norm_2: rms("pre_feedforward_layernorm_2.weight", cx),
-            post_ff_norm_2: rms("post_feedforward_layernorm_2.weight", cx),
-            layer_scalar: cx.named_tensor(name("layer_scalar"), d.hidden),
-            wq: Linear::new_permuted(d.hidden, q_dim, false, cx),
-            wk: Linear::new_permuted(d.hidden, kv_dim, false, cx),
-            wv: sliding.then(|| Linear::new_permuted(d.hidden, kv_dim, false, cx)),
-            wo: Linear::new_permuted(q_dim, d.hidden, false, cx),
-            q_norm: cx.named_tensor(name("self_attn.q_norm.weight"), head_dim),
-            k_norm: cx.named_tensor(name("self_attn.k_norm.weight"), head_dim),
-            gate: Linear::new_permuted(d.hidden, d.dense_intermediate, false, cx),
-            up: Linear::new_permuted(d.hidden, d.dense_intermediate, false, cx),
-            down: Linear::new_permuted(d.dense_intermediate, d.hidden, false, cx),
-            moe: Gemma4MoeFfn::new(l, d, cx),
+            input_norm: rms("input_layernorm", cx),
+            post_attn_norm: rms("post_attention_layernorm", cx),
+            pre_ff_norm: rms("pre_feedforward_layernorm", cx),
+            post_ff_norm: rms("post_feedforward_layernorm", cx),
+            post_ff_norm_1: rms("post_feedforward_layernorm_1", cx),
+            pre_ff_norm_2: rms("pre_feedforward_layernorm_2", cx),
+            post_ff_norm_2: rms("post_feedforward_layernorm_2", cx),
+            layer_scalar: cx.named_tensor(ns.leaf("layer_scalar"), d.hidden),
+            wq: Linear::new_permuted(d.hidden, q_dim, false, &attn.child("q_proj"), cx),
+            wk: Linear::new_permuted(d.hidden, kv_dim, false, &attn.child("k_proj"), cx),
+            wv: sliding
+                .then(|| Linear::new_permuted(d.hidden, kv_dim, false, &attn.child("v_proj"), cx)),
+            wo: Linear::new_permuted(q_dim, d.hidden, false, &attn.child("o_proj"), cx),
+            q_norm: cx.named_tensor(attn.child("q_norm").leaf("weight"), head_dim),
+            k_norm: cx.named_tensor(attn.child("k_norm").leaf("weight"), head_dim),
+            gate: Linear::new_permuted(d.hidden, d.dense_intermediate, false, &mlp.child("gate_proj"), cx),
+            up: Linear::new_permuted(d.hidden, d.dense_intermediate, false, &mlp.child("up_proj"), cx),
+            down: Linear::new_permuted(d.dense_intermediate, d.hidden, false, &mlp.child("down_proj"), cx),
+            moe: Gemma4MoeFfn::new(&ns, d, cx),
             sliding,
             head_dim,
             kv_heads,
@@ -337,14 +341,20 @@ impl Gemma4Moe {
             .collect();
         Self {
             dims: dims.clone(),
-            embed: Embedding::new(dims.vocab, dims.hidden, cx),
+            embed: Embedding::new(
+                dims.vocab,
+                dims.hidden,
+                &Ns::root().child("model").child("embed_tokens"),
+                cx,
+            ),
             blocks,
             final_norm: LayerNorm::new(
                 dims.hidden,
-                Some("model.norm.weight"),
-                None,
+                true,
+                false,
                 false,
                 dims.rms_eps,
+                &Ns::root().child("model").child("norm"),
                 cx,
             ),
         }

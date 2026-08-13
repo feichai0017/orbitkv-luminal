@@ -10,6 +10,7 @@
 //! tick, each row carrying any sequence's next token.
 
 pub use llama3::model::{Llama3, Llama3Dims};
+use luminal::prelude::Ns;
 pub use llama3::{hf, weights};
 
 use luminal::dtype::DType;
@@ -49,7 +50,7 @@ impl BatchStep {
         let gather_idx = cx.tensor_dtyped(slots, DType::Int);
         let scatter_idx = cx.tensor_dtyped(ROWS, DType::Int);
         let mask = cx.tensor((ROWS, slots));
-        let pool = KvCachePool::new(&mut cx, dims.layers, slots, dims.kv_dim());
+        let pool = KvCachePool::new(&mut cx, dims.layers, slots, dims.kv_dim(), &Ns::root().child("cache"));
 
         let mut x = model.embed.forward(tokens);
         let mut cache_outs = Vec::with_capacity(model.blocks.len());

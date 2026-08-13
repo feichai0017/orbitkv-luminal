@@ -12,7 +12,7 @@
 
 use luminal::dtype::DType;
 use luminal::graph::Graph;
-use luminal::prelude::GraphTensor;
+use luminal::prelude::{GraphTensor, Ns};
 use luminal_nn::{Embedding, Fp8Linear, KvCachePool, LayerNorm, Linear};
 
 #[derive(Clone)]
@@ -99,31 +99,35 @@ pub struct Fp8Block {
 
 impl Fp8Block {
     fn new(l: usize, d: &Fp8Dims, cx: &mut Graph) -> Self {
-        let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
+        let ns = Ns::root().child("model").child("layers").index(l);
+        let attn = ns.child("self_attn");
+        let mlp = ns.child("mlp");
         Self {
             attn_norm: LayerNorm::new(
                 d.hidden,
-                Some(&name("input_layernorm.weight")),
-                None,
+                true,
+                false,
                 false,
                 d.rms_eps,
+                &ns.child("input_layernorm"),
                 cx,
             ),
-            wq: Fp8Linear::new(d.hidden, d.q_dim(), cx),
-            wk: Fp8Linear::new(d.hidden, d.kv_dim(), cx),
-            wv: Fp8Linear::new(d.hidden, d.kv_dim(), cx),
-            wo: Fp8Linear::new(d.q_dim(), d.hidden, cx),
+            wq: Fp8Linear::new(d.hidden, d.q_dim(), &attn.child("q_proj"), cx),
+            wk: Fp8Linear::new(d.hidden, d.kv_dim(), &attn.child("k_proj"), cx),
+            wv: Fp8Linear::new(d.hidden, d.kv_dim(), &attn.child("v_proj"), cx),
+            wo: Fp8Linear::new(d.q_dim(), d.hidden, &attn.child("o_proj"), cx),
             ffn_norm: LayerNorm::new(
                 d.hidden,
-                Some(&name("post_attention_layernorm.weight")),
-                None,
+                true,
+                false,
                 false,
                 d.rms_eps,
+                &ns.child("post_attention_layernorm"),
                 cx,
             ),
-            gate: Fp8Linear::new(d.hidden, d.intermediate, cx),
-            up: Fp8Linear::new(d.hidden, d.intermediate, cx),
-            down: Fp8Linear::new(d.intermediate, d.hidden, cx),
+            gate: Fp8Linear::new(d.hidden, d.intermediate, &mlp.child("gate_proj"), cx),
+            up: Fp8Linear::new(d.hidden, d.intermediate, &mlp.child("up_proj"), cx),
+            down: Fp8Linear::new(d.intermediate, d.hidden, &mlp.child("down_proj"), cx),
             n_heads: d.n_heads,
             n_kv_heads: d.n_kv_heads,
             head_dim: d.head_dim,
@@ -197,17 +201,29 @@ impl Llama31Fp8 {
             .collect();
         Self {
             dims: dims.clone(),
-            embed: Embedding::new(dims.vocab, dims.hidden, cx),
+            embed: Embedding::new(
+                dims.vocab,
+                dims.hidden,
+                &Ns::root().child("model").child("embed_tokens"),
+                cx,
+            ),
             blocks,
             final_norm: LayerNorm::new(
                 dims.hidden,
-                Some("model.norm.weight"),
-                None,
+                true,
+                false,
                 false,
                 dims.rms_eps,
+                &Ns::root().child("model").child("norm"),
                 cx,
             ),
-            lm_head: Linear::new_permuted(dims.hidden, dims.vocab, false, cx),
+            lm_head: Linear::new_permuted(
+                dims.hidden,
+                dims.vocab,
+                false,
+                &Ns::root().child("lm_head"),
+                cx,
+            ),
         }
     }
 
