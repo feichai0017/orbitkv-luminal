@@ -22,11 +22,11 @@ pub type Ops = (KernelMeanReduce, KernelScatterNoCopy);
 #[derive(Default, Debug, Clone)]
 
 pub struct KernelMeanReduce {
-    out_shape: Vec<Expression>,
-    iters: Expression,
-    in_stride: Vec<Expression>,
-    iter_stride: Expression,
-    out_stride: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    iters: IntExpr,
+    in_stride: Vec<IntExpr>,
+    iter_stride: IntExpr,
+    out_stride: Vec<IntExpr>,
     dtype: DType,
 }
 impl EgglogOp for KernelMeanReduce {
@@ -65,8 +65,8 @@ impl EgglogOp for KernelMeanReduce {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             {
@@ -102,9 +102,9 @@ impl KernelOp for KernelMeanReduce {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let vars = self
@@ -119,7 +119,7 @@ impl KernelOp for KernelMeanReduce {
 
         let dtype = cuda_dtype(self.dtype);
         let includes = dtype_includes(&[self.dtype]);
-        let n_outputs: Expression = self.out_shape.iter().copied().product();
+        let n_outputs: IntExpr = self.out_shape.iter().copied().product();
         let threads_per_block: usize = 256; // 8 warps per block
         let n_warps = threads_per_block / 32;
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
@@ -169,7 +169,7 @@ extern \"C\" {{
             iters = self.iters.to_kernel(),
             iter_stride = self
                 .iter_stride
-                .substitute('z', Expression::from(1))
+                .substitute('z', IntExpr::from(1))
                 .simplify()
                 .to_kernel(),
             threads_per_block = threads_per_block,
@@ -197,25 +197,25 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
-        (self.out_shape.iter().copied().product::<Expression>() * self.iters * self.dtype.bits())
+    fn bytes_loaded(&self) -> IntExpr {
+        (self.out_shape.iter().copied().product::<IntExpr>() * self.iters * self.dtype.bits())
             .ceil_div(8)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
-        let n_outputs: Expression = self.out_shape.iter().copied().product();
+    fn flops(&self) -> IntExpr {
+        let n_outputs: IntExpr = self.out_shape.iter().copied().product();
         n_outputs * self.iters + n_outputs
     }
 
@@ -235,12 +235,12 @@ extern \"C\" {{
 
 #[derive(Debug, Clone)]
 pub struct KernelScatterNoCopy {
-    pub(crate) dest_shape: Vec<Expression>,
-    pub(crate) dest_strides: Vec<Expression>,
-    pub(crate) index_shape: Vec<Expression>,
-    pub(crate) index_strides: Vec<Expression>,
-    pub(crate) src_strides: Vec<Expression>,
-    pub(crate) out_strides: Vec<Expression>,
+    pub(crate) dest_shape: Vec<IntExpr>,
+    pub(crate) dest_strides: Vec<IntExpr>,
+    pub(crate) index_shape: Vec<IntExpr>,
+    pub(crate) index_strides: Vec<IntExpr>,
+    pub(crate) src_strides: Vec<IntExpr>,
+    pub(crate) out_strides: Vec<IntExpr>,
     pub(crate) dtype: DType,
 }
 
@@ -350,8 +350,8 @@ impl EgglogOp for KernelScatterNoCopy {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -383,9 +383,9 @@ impl KernelOp for KernelScatterNoCopy {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let all_vars: FxHashSet<char> = self
@@ -411,13 +411,13 @@ impl KernelOp for KernelScatterNoCopy {
             .index_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .to_kernel();
         let n_dest_elements = self
             .dest_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .to_kernel();
         let scatter_idx_idx = flatten_strides(&self.index_shape, &self.index_strides).to_kernel();
         let scatter_src_idx = flatten_strides(&self.index_shape, &self.src_strides).to_kernel();
@@ -445,7 +445,7 @@ extern \"C\" {{
             compile_cache.insert(scatter_kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let n_src: Expression = self.index_shape.iter().copied().product();
+        let n_src: IntExpr = self.index_shape.iter().copied().product();
         (
             func,
             module,
@@ -457,7 +457,7 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.dest_shape.iter().copied().product()
     }
 
@@ -473,8 +473,8 @@ extern \"C\" {{
             .collect()
     }
 
-    fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
+    fn output_bytes(&self) -> IntExpr {
+        let elem_size: IntExpr = match self.dtype {
             DType::F64 | DType::I64 => 8,
             DType::F32 | DType::Int => 4,
             DType::F16 | DType::Bf16 | DType::I16 | DType::U16 => 2,
@@ -507,8 +507,8 @@ extern \"C\" {{
         params
     }
 
-    fn bytes_loaded(&self) -> Expression {
-        let data_elem_size: Expression = match self.dtype {
+    fn bytes_loaded(&self) -> IntExpr {
+        let data_elem_size: IntExpr = match self.dtype {
             DType::F64 | DType::I64 => 8,
             DType::F32 | DType::Int => 4,
             DType::F16 | DType::Bf16 | DType::I16 | DType::U16 => 2,
@@ -521,13 +521,13 @@ extern \"C\" {{
             other => panic!("Unsupported dtype for scatter bytes_loaded: {other:?}"),
         }
         .into();
-        let n_src: Expression = self.index_shape.iter().copied().product();
+        let n_src: IntExpr = self.index_shape.iter().copied().product();
         // Only load indices + src (no dest copy!)
         n_src * 4 + n_src * data_elem_size
     }
 
-    fn bytes_stored(&self) -> Expression {
-        let data_elem_size: Expression = match self.dtype {
+    fn bytes_stored(&self) -> IntExpr {
+        let data_elem_size: IntExpr = match self.dtype {
             DType::F64 | DType::I64 => 8,
             DType::F32 | DType::Int => 4,
             DType::F16 | DType::Bf16 | DType::I16 | DType::U16 => 2,
@@ -540,12 +540,12 @@ extern \"C\" {{
             other => panic!("Unsupported dtype for scatter bytes_stored: {other:?}"),
         }
         .into();
-        let n_src: Expression = self.index_shape.iter().copied().product();
+        let n_src: IntExpr = self.index_shape.iter().copied().product();
         // Only store the scattered elements
         n_src * data_elem_size
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         0.into()
     }
 

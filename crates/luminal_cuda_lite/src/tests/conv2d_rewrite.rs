@@ -53,8 +53,8 @@ fn conv2d_bias_padded_hlir(
     kernel: usize,
     padding: usize,
 ) -> GraphTensor {
-    let zero = Expression::from(0);
-    let pad = Expression::from(padding);
+    let zero = IntExpr::from(0);
+    let pad = IntExpr::from(padding);
     let padded = x.pad(vec![(zero, zero), (pad, pad), (pad, pad)], 0.0);
     conv2d_bias_hlir(padded, weight, bias, kernel, kernel)
 }
@@ -150,10 +150,10 @@ fn conv2d_bias_same_shape_wrong_indices(
 
     // Same shape, range and contiguous index layout as unfold, but a cyclic
     // linear mapping instead of the sliding-window address expression.
-    let input_elements = dims.iter().copied().product::<Expression>();
+    let input_elements = dims.iter().copied().product::<IntExpr>();
     let indexes = x
         .graph()
-        .iota(Expression::from('z') % input_elements, index_shape);
+        .iota(IntExpr::from('z') % input_elements, index_shape);
     let gathered = x.gather(indexes);
 
     let mut patches = gathered.squeeze(3).permute(&[1, 2, 0, 3, 4]);

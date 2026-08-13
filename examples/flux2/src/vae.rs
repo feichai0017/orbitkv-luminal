@@ -93,8 +93,8 @@ fn conv2d_bias(
         return out + bias.expand_dim(1, h).expand_dim(2, w);
     }
 
-    let zero = Expression::from(0);
-    let pad = Expression::from(padding);
+    let zero = IntExpr::from(0);
+    let pad = IntExpr::from(padding);
     let padded = if padding > 0 {
         x.pad(vec![(zero, zero), (pad, pad), (pad, pad)], 0.0)
     } else {

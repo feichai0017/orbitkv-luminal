@@ -83,7 +83,7 @@ fn lower_dynamic_consts(mut code: String) -> String {
     code
 }
 
-pub(crate) fn lower_expression_for_metal(expr: &Expression, index_var: &str) -> String {
+pub(crate) fn lower_expression_for_metal(expr: &IntExpr, index_var: &str) -> String {
     lower_dynamic_consts(expr.to_kernel().replace("const_z", index_var))
 }
 
@@ -240,9 +240,9 @@ macro_rules! metal_unary_op {
     ($name:ident, $op_name:expr, $expr_builder:expr) => {
         #[derive(Debug, Default, Clone)]
         pub struct $name {
-            shape: Vec<Expression>,
-            input_strides: Vec<Expression>,
-            output_strides: Vec<Expression>,
+            shape: Vec<IntExpr>,
+            input_strides: Vec<IntExpr>,
+            output_strides: Vec<IntExpr>,
         }
 
         impl EgglogOp for $name {
@@ -265,8 +265,8 @@ macro_rules! metal_unary_op {
                 egraph: &'a SerializedEGraph,
                 kind_children: &[&'a ENodeId],
                 input_enodes: Vec<&'a ENodeId>,
-                list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-                expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+                list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+                expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
             ) -> (LLIROp, Vec<&'a ENodeId>) {
                 use luminal::egglog_utils::extract_expr_list;
                 (
@@ -341,12 +341,12 @@ macro_rules! metal_unary_op {
                 Some(compile_shader(device, &source, "mkernel"))
             }
 
-            fn output_size(&self) -> Expression {
+            fn output_size(&self) -> IntExpr {
                 self.shape
                     .iter()
                     .cloned()
-                    .product::<Expression>()
-                    .max(Expression::from(1))
+                    .product::<IntExpr>()
+                    .max(IntExpr::from(1))
             }
 
             fn encode_compute(
@@ -387,10 +387,10 @@ metal_unary_op!(MetalRecip, "MetalRecip", |x: &str| format!("1.0f / ({x})"));
 
 #[derive(Debug, Default, Clone)]
 pub struct MetalAdd {
-    shape: Vec<Expression>,
-    a_strides: Vec<Expression>,
-    b_strides: Vec<Expression>,
-    output_strides: Vec<Expression>,
+    shape: Vec<IntExpr>,
+    a_strides: Vec<IntExpr>,
+    b_strides: Vec<IntExpr>,
+    output_strides: Vec<IntExpr>,
 }
 
 impl EgglogOp for MetalAdd {
@@ -423,8 +423,8 @@ impl EgglogOp for MetalAdd {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
@@ -494,12 +494,12 @@ impl MetalKernelOp for MetalAdd {
         Some(compile_shader(device, &source, "mkernel"))
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.shape
             .iter()
             .cloned()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn encode_compute(
@@ -533,10 +533,10 @@ impl MetalKernelOp for MetalAdd {
 
 #[derive(Debug, Default, Clone)]
 pub struct MetalMul {
-    shape: Vec<Expression>,
-    a_strides: Vec<Expression>,
-    b_strides: Vec<Expression>,
-    output_strides: Vec<Expression>,
+    shape: Vec<IntExpr>,
+    a_strides: Vec<IntExpr>,
+    b_strides: Vec<IntExpr>,
+    output_strides: Vec<IntExpr>,
 }
 
 impl EgglogOp for MetalMul {
@@ -557,8 +557,8 @@ impl EgglogOp for MetalMul {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
@@ -626,12 +626,12 @@ impl MetalKernelOp for MetalMul {
         Some(compile_shader(device, &source, "mkernel"))
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.shape
             .iter()
             .cloned()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn encode_compute(
@@ -675,10 +675,10 @@ impl MetalKernelOp for MetalMul {
 // MetalMod: a % b using fmod
 #[derive(Debug, Default, Clone)]
 pub struct MetalMod {
-    shape: Vec<Expression>,
-    a_strides: Vec<Expression>,
-    b_strides: Vec<Expression>,
-    output_strides: Vec<Expression>,
+    shape: Vec<IntExpr>,
+    a_strides: Vec<IntExpr>,
+    b_strides: Vec<IntExpr>,
+    output_strides: Vec<IntExpr>,
 }
 
 impl EgglogOp for MetalMod {
@@ -699,8 +699,8 @@ impl EgglogOp for MetalMod {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
@@ -773,12 +773,12 @@ impl MetalKernelOp for MetalMod {
         Some(compile_shader(device, &source, "mkernel"))
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.shape
             .iter()
             .cloned()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn encode_compute(
@@ -813,10 +813,10 @@ impl MetalKernelOp for MetalMod {
 // MetalLessThan: a < b ? 1.0 : 0.0
 #[derive(Debug, Default, Clone)]
 pub struct MetalLessThan {
-    shape: Vec<Expression>,
-    a_strides: Vec<Expression>,
-    b_strides: Vec<Expression>,
-    output_strides: Vec<Expression>,
+    shape: Vec<IntExpr>,
+    a_strides: Vec<IntExpr>,
+    b_strides: Vec<IntExpr>,
+    output_strides: Vec<IntExpr>,
 }
 
 impl EgglogOp for MetalLessThan {
@@ -840,8 +840,8 @@ impl EgglogOp for MetalLessThan {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
@@ -918,12 +918,12 @@ impl MetalKernelOp for MetalLessThan {
         DType::F32
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.shape
             .iter()
             .cloned()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn encode_compute(
@@ -961,11 +961,11 @@ impl MetalKernelOp for MetalLessThan {
 
 #[derive(Debug, Default, Clone)]
 pub struct MetalSumReduce {
-    out_shape: Vec<Expression>,
-    iters: Expression,
-    in_stride: Vec<Expression>,
-    iter_stride: Expression,
-    out_stride: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    iters: IntExpr,
+    in_stride: Vec<IntExpr>,
+    iter_stride: IntExpr,
+    out_stride: Vec<IntExpr>,
 }
 
 impl EgglogOp for MetalSumReduce {
@@ -989,8 +989,8 @@ impl EgglogOp for MetalSumReduce {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr;
         use luminal::egglog_utils::extract_expr_list;
@@ -1084,12 +1084,12 @@ impl MetalKernelOp for MetalSumReduce {
         Some(compile_shader(device, &source, "mkernel"))
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape
             .iter()
             .cloned()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn encode_compute(
@@ -1132,11 +1132,11 @@ impl MetalKernelOp for MetalSumReduce {
 
 #[derive(Debug, Default, Clone)]
 pub struct MetalMaxReduce {
-    out_shape: Vec<Expression>,
-    iters: Expression,
-    in_stride: Vec<Expression>,
-    iter_stride: Expression,
-    out_stride: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    iters: IntExpr,
+    in_stride: Vec<IntExpr>,
+    iter_stride: IntExpr,
+    out_stride: Vec<IntExpr>,
 }
 
 impl EgglogOp for MetalMaxReduce {
@@ -1160,8 +1160,8 @@ impl EgglogOp for MetalMaxReduce {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr;
         use luminal::egglog_utils::extract_expr_list;
@@ -1256,12 +1256,12 @@ impl MetalKernelOp for MetalMaxReduce {
         Some(compile_shader(device, &source, "mkernel"))
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape
             .iter()
             .cloned()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn encode_compute(
@@ -1294,12 +1294,12 @@ impl MetalKernelOp for MetalMaxReduce {
 
 #[derive(Debug, Default, Clone)]
 pub struct MPSMatmul {
-    pub m: Expression,
-    pub n: Expression,
-    pub k: Expression,
-    pub lhs_row_stride: Expression,
-    pub rhs_row_stride: Expression,
-    pub out_row_stride: Expression,
+    pub m: IntExpr,
+    pub n: IntExpr,
+    pub k: IntExpr,
+    pub lhs_row_stride: IntExpr,
+    pub rhs_row_stride: IntExpr,
+    pub out_row_stride: IntExpr,
     pub transpose_lhs: bool,
     pub transpose_rhs: bool,
 }
@@ -1472,8 +1472,8 @@ impl EgglogOp for MPSMatmul {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr;
         let extract_flag = |node: &'a ENodeId| -> bool {
@@ -1501,9 +1501,9 @@ impl EgglogOp for MPSMatmul {
 }
 
 impl MPSMatmul {
-    fn row_bytes(row_stride: Expression, dtype: DType, dyn_map: &FxHashMap<char, usize>) -> u64 {
+    fn row_bytes(row_stride: IntExpr, dtype: DType, dyn_map: &FxHashMap<char, usize>) -> u64 {
         let elems = row_stride
-            .substitute('z', Expression::from(1))
+            .substitute('z', IntExpr::from(1))
             .exec(dyn_map)
             .unwrap();
         (elems * dtype.bits().div_ceil(8)) as u64
@@ -1547,7 +1547,7 @@ impl MetalKernelOp for MPSMatmul {
         input_dtypes.first().copied().unwrap_or(DType::F32)
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.m * self.n
     }
 
@@ -1663,16 +1663,16 @@ impl MetalKernelOp for MPSMatmul {
 
 #[derive(Debug, Default, Clone)]
 pub struct MPSBatchedMatmul {
-    pub batch: Expression,
-    pub m: Expression,
-    pub n: Expression,
-    pub k: Expression,
-    pub lhs_batch_stride: Expression,
-    pub lhs_row_stride: Expression,
-    pub rhs_batch_stride: Expression,
-    pub rhs_row_stride: Expression,
-    pub out_batch_stride: Expression,
-    pub out_row_stride: Expression,
+    pub batch: IntExpr,
+    pub m: IntExpr,
+    pub n: IntExpr,
+    pub k: IntExpr,
+    pub lhs_batch_stride: IntExpr,
+    pub lhs_row_stride: IntExpr,
+    pub rhs_batch_stride: IntExpr,
+    pub rhs_row_stride: IntExpr,
+    pub out_batch_stride: IntExpr,
+    pub out_row_stride: IntExpr,
     pub transpose_lhs: bool,
     pub transpose_rhs: bool,
 }
@@ -1884,8 +1884,8 @@ impl EgglogOp for MPSBatchedMatmul {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr;
         let extract_flag = |node: &'a ENodeId| -> bool {
@@ -1930,7 +1930,7 @@ impl MetalKernelOp for MPSBatchedMatmul {
         input_dtypes.first().copied().unwrap_or(DType::F32)
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.batch * self.m * self.n
     }
 
@@ -1996,7 +1996,7 @@ impl MetalKernelOp for MPSBatchedMatmul {
 
         unsafe {
             for batch_idx in 0..batch {
-                let batch_expr = Expression::from(batch_idx as i64);
+                let batch_expr = IntExpr::from(batch_idx as i64);
                 let lhs_offset = self
                     .lhs_batch_stride
                     .substitute('z', batch_expr)
@@ -2063,14 +2063,14 @@ impl MetalKernelOp for MPSBatchedMatmul {
 
 #[derive(Debug, Default, Clone)]
 pub struct GenericMatmul {
-    pub out_shape: Vec<Expression>,
-    pub mul_shape: Vec<Expression>,
-    pub k: Expression,
-    pub lhs_strides: Vec<Expression>,
-    pub rhs_strides: Vec<Expression>,
-    pub sum_input_strides: Vec<Expression>,
-    pub sum_iter_stride: Expression,
-    pub out_strides: Vec<Expression>,
+    pub out_shape: Vec<IntExpr>,
+    pub mul_shape: Vec<IntExpr>,
+    pub k: IntExpr,
+    pub lhs_strides: Vec<IntExpr>,
+    pub rhs_strides: Vec<IntExpr>,
+    pub sum_input_strides: Vec<IntExpr>,
+    pub sum_iter_stride: IntExpr,
+    pub out_strides: Vec<IntExpr>,
 }
 
 impl EgglogOp for GenericMatmul {
@@ -2168,8 +2168,8 @@ impl EgglogOp for GenericMatmul {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::{extract_expr, extract_expr_list};
         (
@@ -2290,12 +2290,12 @@ impl MetalKernelOp for GenericMatmul {
         input_dtypes.first().copied().unwrap_or(DType::F32)
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape
             .iter()
             .copied()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn encode_compute(
@@ -2379,8 +2379,8 @@ impl EgglogOp for MetalConstant {
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        _: &mut FxHashMap<&'a ENodeId, Expression>,
+        _: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        _: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
@@ -2430,8 +2430,8 @@ impl MetalKernelOp for MetalConstant {
         Some(compile_shader(device, &source, "mkernel"))
     }
 
-    fn output_size(&self) -> Expression {
-        Expression::from(1)
+    fn output_size(&self) -> IntExpr {
+        IntExpr::from(1)
     }
 
     fn infer_output_dtype(&self, _input_dtypes: &[DType]) -> DType {
@@ -2458,8 +2458,8 @@ impl MetalKernelOp for MetalConstant {
 // MetalIota: generates sequence [expr(0), expr(1), ..., expr(range-1)]
 #[derive(Debug, Default, Clone)]
 pub struct MetalIota {
-    expr: Expression,
-    range: Expression,
+    expr: IntExpr,
+    range: IntExpr,
 }
 
 impl EgglogOp for MetalIota {
@@ -2491,8 +2491,8 @@ impl EgglogOp for MetalIota {
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr;
         (
@@ -2538,7 +2538,7 @@ impl MetalKernelOp for MetalIota {
         Some(compile_shader(device, &source, "mkernel"))
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.range
     }
 
@@ -2573,11 +2573,11 @@ impl MetalKernelOp for MetalIota {
 // MetalGather: indexed lookup - out[i] = data[indexes[i]]
 #[derive(Debug, Default, Clone)]
 pub struct MetalGather {
-    out_shape: Vec<Expression>,
-    index_stride: Vec<Expression>,
-    data_shape: Vec<Expression>,
-    data_stride: Vec<Expression>,
-    out_stride: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    index_stride: Vec<IntExpr>,
+    data_shape: Vec<IntExpr>,
+    data_stride: Vec<IntExpr>,
+    out_stride: Vec<IntExpr>,
 }
 
 impl EgglogOp for MetalGather {
@@ -2638,8 +2638,8 @@ impl EgglogOp for MetalGather {
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
@@ -2707,12 +2707,12 @@ impl MetalKernelOp for MetalGather {
         Some(compile_shader(device, &source, "mkernel"))
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape
             .iter()
             .cloned()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn infer_output_dtype(&self, input_dtypes: &[DType]) -> DType {
@@ -2767,12 +2767,12 @@ impl MetalKernelOp for MetalGather {
 // Uses two sequential dispatches: copy then scatter. Metal guarantees order within an encoder.
 #[derive(Debug, Clone)]
 pub struct MetalScatter {
-    dest_shape: Vec<Expression>,
-    dest_strides: Vec<Expression>,
-    index_shape: Vec<Expression>,
-    index_strides: Vec<Expression>,
-    src_strides: Vec<Expression>,
-    out_strides: Vec<Expression>,
+    dest_shape: Vec<IntExpr>,
+    dest_strides: Vec<IntExpr>,
+    index_shape: Vec<IntExpr>,
+    index_strides: Vec<IntExpr>,
+    src_strides: Vec<IntExpr>,
+    out_strides: Vec<IntExpr>,
     copy_pipeline: std::sync::OnceLock<ComputePipelineState>,
 }
 
@@ -2858,8 +2858,8 @@ impl EgglogOp for MetalScatter {
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
@@ -2961,12 +2961,12 @@ impl MetalKernelOp for MetalScatter {
         Some(compile_shader(device, &scatter_source, "scatter_kernel"))
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.dest_shape
             .iter()
             .cloned()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn encode_compute(
@@ -2981,14 +2981,14 @@ impl MetalKernelOp for MetalScatter {
             .dest_shape
             .iter()
             .cloned()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .exec(dyn_map)
             .unwrap() as u32;
         let n_src = self
             .index_shape
             .iter()
             .cloned()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .exec(dyn_map)
             .unwrap() as u32;
 
@@ -3033,7 +3033,7 @@ impl MetalKernelOp for MetalScatter {
             .index_shape
             .iter()
             .cloned()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .exec(dyn_map)
             .unwrap_or(0);
         n_dest * std::mem::size_of::<f32>()
@@ -3054,12 +3054,12 @@ impl MetalKernelOp for MetalScatter {
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 pub struct MetalScatterNoCopy {
-    dest_shape: Vec<Expression>,
-    dest_strides: Vec<Expression>,
-    index_shape: Vec<Expression>,
-    index_strides: Vec<Expression>,
-    src_strides: Vec<Expression>,
-    out_strides: Vec<Expression>,
+    dest_shape: Vec<IntExpr>,
+    dest_strides: Vec<IntExpr>,
+    index_shape: Vec<IntExpr>,
+    index_strides: Vec<IntExpr>,
+    src_strides: Vec<IntExpr>,
+    out_strides: Vec<IntExpr>,
 }
 
 impl EgglogOp for MetalScatterNoCopy {
@@ -3170,8 +3170,8 @@ impl EgglogOp for MetalScatterNoCopy {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
@@ -3241,12 +3241,12 @@ impl MetalKernelOp for MetalScatterNoCopy {
         input_dtypes.first().copied().unwrap_or(DType::F32)
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.dest_shape
             .iter()
             .copied()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn encode_compute(
@@ -3261,7 +3261,7 @@ impl MetalKernelOp for MetalScatterNoCopy {
             .index_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .exec(dyn_map)
             .unwrap() as u32;
 
@@ -3286,7 +3286,7 @@ impl MetalKernelOp for MetalScatterNoCopy {
             .index_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .exec(dyn_map)
             .unwrap_or(0);
         n_src * std::mem::size_of::<i32>() + n_src * std::mem::size_of::<f32>()
@@ -3297,7 +3297,7 @@ impl MetalKernelOp for MetalScatterNoCopy {
             .index_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .exec(dyn_map)
             .unwrap_or(0);
         n_src * std::mem::size_of::<f32>()
@@ -3320,7 +3320,7 @@ impl MetalKernelOp for MetalScatterNoCopy {
 // This is a pure element-wise operation with no data movement or reshaping.
 #[derive(Debug, Default, Clone)]
 pub struct MetalCast {
-    size: Expression,
+    size: IntExpr,
     target_dtype: DType,
 }
 
@@ -3353,8 +3353,8 @@ impl EgglogOp for MetalCast {
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        _expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        _expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::{extract_dtype, extract_expr};
         (
@@ -3417,7 +3417,7 @@ impl MetalKernelOp for MetalCast {
         Some(compile_shader(device, &source, "mkernel"))
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.size
     }
 

@@ -58,24 +58,24 @@ fn parse_cublas_op(s: &str) -> cublasOperation_t {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct CuBlasLt {
-    m: Expression,
-    n: Expression,
-    k: Expression,
+    m: IntExpr,
+    n: IntExpr,
+    k: IntExpr,
     a_layout: cublasOperation_t,
     b_layout: cublasOperation_t,
     a_order: cublasLtOrder_t,
     b_order: cublasLtOrder_t,
     c_order: cublasLtOrder_t,
     d_order: cublasLtOrder_t,
-    lda: Expression,
-    ldb: Expression,
-    ldc: Expression,
-    ldd: Expression,
-    batch_count: Expression,
-    stride_a: Expression,
-    stride_b: Expression,
-    stride_c: Expression,
-    stride_d: Expression,
+    lda: IntExpr,
+    ldb: IntExpr,
+    ldc: IntExpr,
+    ldd: IntExpr,
+    batch_count: IntExpr,
+    stride_a: IntExpr,
+    stride_b: IntExpr,
+    stride_c: IntExpr,
+    stride_d: IntExpr,
     a_dtype: DType,
     b_dtype: DType,
     c_dtype: DType,
@@ -94,19 +94,19 @@ pub struct CuBlasLt {
 impl Default for CuBlasLt {
     fn default() -> Self {
         Self {
-            m: Expression::default(),
-            n: Expression::default(),
-            k: Expression::default(),
+            m: IntExpr::default(),
+            n: IntExpr::default(),
+            k: IntExpr::default(),
             a_layout: cublasOperation_t::CUBLAS_OP_N,
             b_layout: cublasOperation_t::CUBLAS_OP_T,
             a_order: cublasLtOrder_t::CUBLASLT_ORDER_COL,
             b_order: cublasLtOrder_t::CUBLASLT_ORDER_COL,
             c_order: cublasLtOrder_t::CUBLASLT_ORDER_COL,
             d_order: cublasLtOrder_t::CUBLASLT_ORDER_COL,
-            lda: Expression::default(),
-            ldb: Expression::default(),
-            ldc: Expression::default(),
-            ldd: Expression::default(),
+            lda: IntExpr::default(),
+            ldb: IntExpr::default(),
+            ldc: IntExpr::default(),
+            ldd: IntExpr::default(),
             batch_count: 1.into(),
             stride_a: 0.into(),
             stride_b: 0.into(),
@@ -224,8 +224,8 @@ impl EgglogOp for CuBlasLt {
         egraph: &'a luminal::egglog_utils::SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         // Extract dimensions from egglog
         let m = extract_expr(egraph, kind_children[0], expr_cache).unwrap();
@@ -330,8 +330,8 @@ impl EgglogOp for CuBlasLtScaled {
         egraph: &'a luminal::egglog_utils::SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let m = extract_expr(egraph, kind_children[0], expr_cache).unwrap();
         let n = extract_expr(egraph, kind_children[1], expr_cache).unwrap();
@@ -1445,9 +1445,9 @@ impl CuBlasLt {
         &self,
         dyn_map: &FxHashMap<char, usize>,
     ) -> anyhow::Result<LtMatmulSpec> {
-        let resolve = |expression: &Expression, name: &str| -> anyhow::Result<usize> {
+        let resolve = |expression: &IntExpr, name: &str| -> anyhow::Result<usize> {
             expression
-                .substitute('z', Expression::from(1))
+                .substitute('z', IntExpr::from(1))
                 .exec(dyn_map)
                 .ok_or_else(|| anyhow::anyhow!("unresolved cuBLASLt dimension {name}"))
         };
@@ -1685,7 +1685,7 @@ impl CuBlasLt {
 
     #[cfg(test)]
     pub(crate) fn c_d_layouts_match(&self) -> bool {
-        let normalize = |expr: Expression| expr.substitute('z', Expression::from(1)).simplify();
+        let normalize = |expr: IntExpr| expr.substitute('z', IntExpr::from(1)).simplify();
         normalize(self.ldc) == normalize(self.ldd)
             && normalize(self.stride_c) == normalize(self.stride_d)
             && self.c_order == self.d_order
@@ -1746,12 +1746,12 @@ impl HostOp for CuBlasLt {
         Ok(())
     }
 
-    fn output_size(&self) -> Expression {
-        let resolve = |e: &Expression| -> Expression { e.substitute('z', Expression::from(1)) };
+    fn output_size(&self) -> IntExpr {
+        let resolve = |e: &IntExpr| -> IntExpr { e.substitute('z', IntExpr::from(1)) };
         resolve(&self.batch_count) * resolve(&self.m) * resolve(&self.n)
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.d_dtype.bits()).ceil_div(8)
     }
 
@@ -1782,14 +1782,14 @@ mod tests {
     #[test]
     fn matmul_spec_resolution_is_shared_with_resource_prepare_key() {
         let op = CuBlasLt {
-            m: Expression::from('m'),
-            n: Expression::from(5),
-            k: Expression::from(7),
+            m: IntExpr::from('m'),
+            n: IntExpr::from(5),
+            k: IntExpr::from(7),
             a_order: cublasLtOrder_t::CUBLASLT_ORDER_ROW,
-            lda: Expression::from(1),
-            ldb: Expression::from(1),
-            ldc: Expression::from(1),
-            ldd: Expression::from(1),
+            lda: IntExpr::from(1),
+            ldb: IntExpr::from(1),
+            ldc: IntExpr::from(1),
+            ldd: IntExpr::from(1),
             ..Default::default()
         };
         let dyn_map = FxHashMap::from_iter([('m', 3)]);
@@ -1811,7 +1811,7 @@ mod tests {
     #[test]
     fn matmul_spec_resolution_reports_missing_dynamic_dimension() {
         let op = CuBlasLt {
-            m: Expression::from('m'),
+            m: IntExpr::from('m'),
             ..Default::default()
         };
 

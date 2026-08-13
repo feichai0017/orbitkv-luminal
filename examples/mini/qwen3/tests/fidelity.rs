@@ -3,7 +3,7 @@
 //! 2026-08-13). Reference helpers live in luminal_nn::test_refs.
 
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal_nn::test_refs::*;
 use mini_qwen3::*;
 
@@ -36,7 +36,7 @@ fn mini_gqa_family(family: &str, gate_act: &dyn Fn(&[f32]) -> Vec<f32>) {
         .collect();
     let gather_idx = cx.tensor_dtyped(CTX, DType::Int);
     let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-    let step = Expression::from(1usize);
+    let step = IntExpr::from(1usize);
     let (logits, caches_out, embed, blocks) = match family {
         "qwen3" => {
             let model = MiniQwen3::new(VOCAB, D, FF, NH, NKV, LAYERS, &mut cx);

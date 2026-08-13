@@ -129,7 +129,7 @@ fn attention(
 ) -> GraphTensor {
     let cx = q_rope.graph();
     let seq = q_rope.dims()[0];
-    let prev = Expression::from('p');
+    let prev = IntExpr::from('p');
     let total_seq = prev + seq;
 
     let k_new = k_rope.split_dims(1, HEAD_DIM).transpose(0, 1);
@@ -171,7 +171,7 @@ fn gather_experts(top_k_indices: GraphTensor, weights: GraphTensor) -> GraphTens
     let (_, d1, d2) = weights.dims3();
     let io = d1 * d2;
     let base = top_k_indices * io;
-    let within = weights.graph().iota(Expression::from('z'), (d1, d2));
+    let within = weights.graph().iota(IntExpr::from('z'), (d1, d2));
     let n_base = base.dims().len();
     let exp_base = base.expand_dim(n_base, d1).expand_dim(n_base + 1, d2);
     let mut exp_within = within;
@@ -189,13 +189,13 @@ fn moe(
 ) -> GraphTensor {
     let n = x.dims().len();
     let e_dim = *router.dims().first().unwrap();
-    let k_expr = Expression::from(TOP_K);
+    let k_expr = IntExpr::from(TOP_K);
 
     let routing_weights = x.matmul(router.t()).softmax(n - 1);
     let top_k_indices = routing_weights.topk_indexes(TOP_K, n - 1);
     let row_offsets = x
         .graph()
-        .iota(Expression::from('z') / k_expr * e_dim, top_k_indices.dims());
+        .iota(IntExpr::from('z') / k_expr * e_dim, top_k_indices.dims());
     let routing_flat_idx = row_offsets + top_k_indices;
     let top_k_values = routing_weights.gather(routing_flat_idx);
     let top_k_values = top_k_values / top_k_values.sum(n - 1).expand_dim(n - 1, TOP_K);

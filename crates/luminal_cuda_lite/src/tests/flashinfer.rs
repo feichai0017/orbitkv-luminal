@@ -151,7 +151,7 @@ fn run_flashinfer(
         num_kv_heads: N_KV_HEADS,
         head_dim: HEAD_DIM,
         page_size: 1,
-        batch_dim: Expression::from('s'),
+        batch_dim: IntExpr::from('s'),
         dtype: luminal::dtype::DType::F32,
         sm_scale: 0.0,
         window_left: -1,
@@ -225,7 +225,7 @@ fn run_flashinfer_with_compact_decode_indices(
         num_kv_heads: N_KV_HEADS,
         head_dim: HEAD_DIM,
         page_size: 1,
-        batch_dim: Expression::from('s'),
+        batch_dim: IntExpr::from('s'),
         dtype: luminal::dtype::DType::F32,
         sm_scale: 0.0,
         window_left: -1,
@@ -280,7 +280,7 @@ fn resolve_flashinfer_decode_for_signature_test(
         num_kv_heads: N_KV_HEADS,
         head_dim: HEAD_DIM,
         page_size: 1,
-        batch_dim: Expression::from('s'),
+        batch_dim: IntExpr::from('s'),
         dtype: luminal::dtype::DType::F32,
         sm_scale: 0.0,
         window_left: -1,
@@ -557,7 +557,7 @@ fn flashinfer_jit_head_dim_assertion() {
 fn test_indptr_to_request_idx(
     graph: &mut Graph,
     indptr: GraphTensor,
-    n: Expression,
+    n: IntExpr,
 ) -> GraphTensor {
     let r = indptr.dims1();
     let indices = graph.arange(n).expand_dim(1, r);
@@ -571,7 +571,7 @@ fn test_compute_attn_mask(
     q_pos: GraphTensor,
     qo_indptr: GraphTensor,
     kv_indptr: GraphTensor,
-    c: Expression,
+    c: IntExpr,
 ) -> GraphTensor {
     let s = q_pos.dims1();
     let q_request = test_indptr_to_request_idx(graph, qo_indptr, s);
@@ -592,7 +592,7 @@ fn test_compute_attn_mask(
 fn test_compute_triu_gather_mask(
     graph: &mut Graph,
     q_pos: GraphTensor,
-    c: Expression,
+    c: IntExpr,
 ) -> GraphTensor {
     let s = q_pos.dims1();
     let causal_square = graph.triu(c, 1).cast(luminal::dtype::DType::F32) * -1e10;
@@ -604,7 +604,7 @@ fn test_compute_triu_gather_mask(
 fn test_compute_direct_causal_mask(
     graph: &mut Graph,
     q_pos: GraphTensor,
-    c: Expression,
+    c: IntExpr,
 ) -> GraphTensor {
     let s = q_pos.dims1();
     let q_pos = q_pos.expand_dim(1, c);
@@ -752,7 +752,7 @@ fn build_paged_attention_graph_with_mask_and_cache_provenance(
     let k = gather_rows(k_cache_out, gather_idx, kv_dim);
     let v_ctx = gather_rows(v_cache_out, gather_idx, kv_dim);
 
-    let c: Expression = 'c'.into();
+    let c: IntExpr = 'c'.into();
     let attn_mask = match mask_kind {
         TestMaskKind::Indptr => test_compute_attn_mask(&mut cx, q_pos, qo_indptr, kv_indptr, c),
         TestMaskKind::TriuGather => test_compute_triu_gather_mask(&mut cx, q_pos, c),
@@ -1431,7 +1431,7 @@ fn run_flashinfer_bf16(
         num_kv_heads: N_KV_HEADS,
         head_dim: HEAD_DIM,
         page_size: 1,
-        batch_dim: Expression::from('s'),
+        batch_dim: IntExpr::from('s'),
         dtype: luminal::dtype::DType::Bf16,
         sm_scale: 0.0,
         window_left: -1,
@@ -1696,7 +1696,7 @@ fn gemma_mini_paged_attention(
     let k = k.expand_dim(1, kv_groups).merge_dims(0, 1) * 1.0;
     let v_ctx = v_ctx.expand_dim(1, kv_groups).merge_dims(0, 1) * 1.0;
     let scores = q.matmul(k);
-    let ctx = Expression::from('c');
+    let ctx = IntExpr::from('c');
     let seq = q_rope.dims()[0];
     let causal_square = scores.graph().triu(ctx, 1).cast(scores.dtype) * -1e10;
     let row_offsets = (q_pos * ctx).expand_dim(1, ctx);

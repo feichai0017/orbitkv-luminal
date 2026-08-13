@@ -13,12 +13,12 @@ use crate::DecodeStep;
 use crate::hf::tensor_to_f32;
 use luminal::dtype::DType;
 use luminal::graph::Graph;
-use luminal::prelude::{Expression, NodeIndex, TypedBuffer};
+use luminal::prelude::{IntExpr, NodeIndex, TypedBuffer};
 use safetensors::SafeTensors;
 use std::error::Error;
 use std::path::Path;
 
-fn spec_len(label: &str, dims: &[Expression]) -> usize {
+fn spec_len(label: &str, dims: &[IntExpr]) -> usize {
     dims.iter()
         .map(|d| {
             d.to_usize()

@@ -17,7 +17,7 @@ use std::error::Error;
 use std::path::Path;
 
 /// Element count a spec's declared dims demand (all static here).
-fn spec_numel(dims: &[luminal::prelude::Expression]) -> usize {
+fn spec_numel(dims: &[luminal::prelude::IntExpr]) -> usize {
     dims.iter()
         .map(|d| d.to_usize().expect("model dims are static"))
         .product()

@@ -129,14 +129,14 @@ impl SemanticRelation {
 
 #[derive(Clone, Copy)]
 struct FusionLayout<'a> {
-    shape: &'a [Expression],
-    strides: &'a [Expression],
+    shape: &'a [IntExpr],
+    strides: &'a [IntExpr],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OwnedFusionLayout {
-    shape: Vec<Expression>,
-    strides: Vec<Expression>,
+    shape: Vec<IntExpr>,
+    strides: Vec<IntExpr>,
 }
 
 impl From<FusionLayout<'_>> for OwnedFusionLayout {
@@ -150,8 +150,8 @@ impl From<FusionLayout<'_>> for OwnedFusionLayout {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ExpressionProofKey {
-    lhs: Expression,
-    rhs: Expression,
+    lhs: IntExpr,
+    rhs: IntExpr,
     z_witnesses: Vec<usize>,
     exhaustive: bool,
 }
@@ -159,7 +159,7 @@ struct ExpressionProofKey {
 #[derive(Default)]
 struct FusionValidationCache {
     expressions: FxHashMap<ExpressionProofKey, SemanticRelation>,
-    symbolic_expressions: FxHashMap<(Expression, Expression), bool>,
+    symbolic_expressions: FxHashMap<(IntExpr, IntExpr), bool>,
     layouts: FxHashMap<(OwnedFusionLayout, OwnedFusionLayout), SemanticRelation>,
 }
 
@@ -208,7 +208,7 @@ fn append_associative_operand(
     }
 }
 
-fn canonical_semantic_expression(expression: Expression) -> Option<CanonicalSemanticExpression> {
+fn canonical_semantic_expression(expression: IntExpr) -> Option<CanonicalSemanticExpression> {
     let terms = expression.terms.read();
     let mut stack = Vec::with_capacity(terms.len());
     for &term in terms.iter() {
@@ -216,7 +216,7 @@ fn canonical_semantic_expression(expression: Expression) -> Option<CanonicalSema
             Term::Num(number) => stack.push(CanonicalSemanticExpression::Number(number)),
             Term::Var(variable) => stack.push(CanonicalSemanticExpression::Variable(variable)),
             operator => {
-                // Expression RPN stores rhs before lhs, so the first pop is
+                // IntExpr RPN stores rhs before lhs, so the first pop is
                 // the source-level left operand.
                 let lhs = stack.pop()?;
                 let rhs = stack.pop()?;
@@ -343,8 +343,8 @@ fn fusion_unary_dtype_supported(op: &str, dtype: DType) -> bool {
 }
 
 fn expression_relation(
-    lhs: Expression,
-    rhs: Expression,
+    lhs: IntExpr,
+    rhs: IntExpr,
     dyn_map: Option<&FxHashMap<char, usize>>,
     z_witnesses: &[usize],
     exhaustive: bool,
@@ -462,7 +462,7 @@ fn expression_relation(
     relation
 }
 
-fn eval_expression(expression: Expression, values: &FxHashMap<char, usize>) -> Option<usize> {
+fn eval_expression(expression: IntExpr, values: &FxHashMap<char, usize>) -> Option<usize> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| expression.exec(values)))
         .ok()
         .flatten()
@@ -482,8 +482,8 @@ fn layout_relation(
         return relation;
     }
 
-    let lhs_elements = lhs.shape.iter().copied().product::<Expression>();
-    let rhs_elements = rhs.shape.iter().copied().product::<Expression>();
+    let lhs_elements = lhs.shape.iter().copied().product::<IntExpr>();
+    let rhs_elements = rhs.shape.iter().copied().product::<IntExpr>();
     let element_relation =
         expression_relation(lhs_elements, rhs_elements, dyn_map, &[], false, cache);
     if element_relation == SemanticRelation::Different {
@@ -580,7 +580,7 @@ fn incoming_nodes(llir: &LLIRGraph, node: NodeIndex) -> Vec<NodeIndex> {
     edges.into_iter().map(|(_, source)| source).collect()
 }
 
-/// Validate only contracts that region codegen actually relies on. Expression
+/// Validate only contracts that region codegen actually relies on. IntExpr
 /// relations are tri-state: structural/concrete/semantic equality is accepted,
 /// concrete inequality is rejected as malformed, and an unproved relation is
 /// rejected as an unsupported layout because codegen erases that metadata.
@@ -1194,7 +1194,7 @@ fn region_structural_hashes(
     let fe_struct: &FusionEnd = (***fe_op)
         .downcast_ref::<FusionEnd>()
         .expect("region root must be FusionEnd");
-    let out_shape: &[Expression] = &fe_struct.shape;
+    let out_shape: &[IntExpr] = &fe_struct.shape;
 
     let mut hashes: FxHashMap<NodeIndex, u64> = FxHashMap::default();
     for &fs in fs_nodes {
@@ -1426,9 +1426,9 @@ pub(crate) struct CompiledRegion {
     pub function: CudaFunction,
     pub module: Arc<CudaModule>,
     pub kernel_str: String,
-    pub grid: (Expression, Expression, Expression),
-    pub block: (Expression, Expression, Expression),
-    pub shared_mem: Expression,
+    pub grid: (IntExpr, IntExpr, IntExpr),
+    pub block: (IntExpr, IntExpr, IntExpr),
+    pub shared_mem: IntExpr,
     pub constants: FxHashMap<char, CudaSlice<u8>>,
 }
 
@@ -1439,7 +1439,7 @@ pub(crate) struct CompiledRegion {
 pub(crate) fn region_kernel_source(
     region: &RegionUnit,
     llir_graph: &LLIRGraph,
-) -> (String, Expression) {
+) -> (String, IntExpr) {
     // Resolve FE: shape, strides (for the write), dtype.
     let fe_op = llir_graph[region.fe_node]
         .to_dialect::<dyn KernelOp>()
@@ -1447,8 +1447,8 @@ pub(crate) fn region_kernel_source(
     let fe_struct: &FusionEnd = (***fe_op)
         .downcast_ref::<FusionEnd>()
         .expect("region root must be FusionEnd");
-    let out_shape: &[Expression] = &fe_struct.shape;
-    let out_strides: &[Expression] = &fe_struct.strides;
+    let out_shape: &[IntExpr] = &fe_struct.shape;
+    let out_strides: &[IntExpr] = &fe_struct.strides;
     let dtype: DType = fe_struct.dtype;
 
     // Aggregate all dynamic vars used anywhere in the region (FS strides,
@@ -1507,7 +1507,7 @@ pub(crate) fn region_kernel_source(
     let n_elements = out_shape
         .iter()
         .copied()
-        .product::<Expression>()
+        .product::<IntExpr>()
         .to_kernel();
 
     // Build kernel signature: out, then one input per FS leaf in
@@ -1619,7 +1619,7 @@ pub(crate) fn region_kernel_source(
          }}"
     );
 
-    let out_size = out_shape.iter().copied().product::<Expression>();
+    let out_size = out_shape.iter().copied().product::<IntExpr>();
     (kernel, out_size)
 }
 
@@ -1695,7 +1695,7 @@ mod tests {
         }))
     }
 
-    fn start(shape: Vec<Expression>, strides: Vec<Expression>, dtype: DType) -> LLIROp {
+    fn start(shape: Vec<IntExpr>, strides: Vec<IntExpr>, dtype: DType) -> LLIROp {
         llir_of(FusionStart {
             shape,
             strides,
@@ -1705,9 +1705,9 @@ mod tests {
 
     fn unary(
         op: &str,
-        shape: Vec<Expression>,
-        in_strides: Vec<Expression>,
-        out_strides: Vec<Expression>,
+        shape: Vec<IntExpr>,
+        in_strides: Vec<IntExpr>,
+        out_strides: Vec<IntExpr>,
         dtype: DType,
     ) -> LLIROp {
         llir_of(CudaUnaryElementwise {
@@ -1719,7 +1719,7 @@ mod tests {
         })
     }
 
-    fn end(shape: Vec<Expression>, strides: Vec<Expression>, dtype: DType) -> LLIROp {
+    fn end(shape: Vec<IntExpr>, strides: Vec<IntExpr>, dtype: DType) -> LLIROp {
         llir_of(FusionEnd {
             shape,
             strides,
@@ -1729,7 +1729,7 @@ mod tests {
 
     fn valid_unary_region(op: &str, input_dtype: DType, output_dtype: DType) -> LLIRGraph {
         let shape = vec![16.into()];
-        let strides = vec![Expression::from('z')];
+        let strides = vec![IntExpr::from('z')];
         let mut llir = LLIRGraph::default();
         let input = llir.add_node(input_op(input_dtype));
         let fs = llir.add_node(start(shape.clone(), strides.clone(), input_dtype));
@@ -1760,7 +1760,7 @@ mod tests {
         validate_fusion_regions(&scalar, Some(&FxHashMap::default())).unwrap();
 
         let shape = vec![16.into()];
-        let strides = vec![Expression::from('z')];
+        let strides = vec![IntExpr::from('z')];
         let mut split = LLIRGraph::default();
         let input = split.add_node(input_op(DType::F32));
         let fs0 = split.add_node(start(shape.clone(), strides.clone(), DType::F32));
@@ -1792,14 +1792,14 @@ mod tests {
 
     #[test]
     fn fusion_validation_accepts_semantically_equal_unified_layouts() {
-        let a = Expression::from('a');
-        let b = Expression::from('b');
-        let c = Expression::from('c');
+        let a = IntExpr::from('a');
+        let b = IntExpr::from('b');
+        let c = IntExpr::from('c');
         let assoc_l = (a + b) + c;
         let assoc_r = a + (b + c);
         assert_ne!(assoc_l, assoc_r, "test requires distinct expression ASTs");
 
-        let stride = vec![Expression::from('z')];
+        let stride = vec![IntExpr::from('z')];
         let mut llir = LLIRGraph::default();
         let input = llir.add_node(input_op(DType::F32));
         let fs = llir.add_node(start(vec![assoc_l], stride.clone(), DType::F32));
@@ -1822,7 +1822,7 @@ mod tests {
     #[test]
     fn fusion_validation_accepts_exact_fixed_domain_layout_equivalence() {
         let shape = vec![4.into()];
-        let z = Expression::from('z');
+        let z = IntExpr::from('z');
         let wrapped_z = z % 4;
         assert!(!wrapped_z.egglog_equal(z));
 
@@ -1840,9 +1840,9 @@ mod tests {
 
     #[test]
     fn fusion_validation_does_not_promote_representative_equality_to_symbolic_equality() {
-        let a = Expression::from('a');
-        let b = Expression::from('b');
-        let z = Expression::from('z');
+        let a = IntExpr::from('a');
+        let b = IntExpr::from('b');
+        let z = IntExpr::from('z');
         let mut llir = LLIRGraph::default();
         let input = llir.add_node(input_op(DType::F32));
         let fs = llir.add_node(start(vec![a], vec![z], DType::F32));
@@ -1867,7 +1867,7 @@ mod tests {
         assert!(wrong_layout.remove_node(fe).is_some());
         let wrong_fe = wrong_layout.add_node(end(
             vec![17.into()],
-            vec![Expression::from('z')],
+            vec![IntExpr::from('z')],
             DType::F32,
         ));
         let producer = wrong_layout
@@ -1884,20 +1884,20 @@ mod tests {
         let input = wrong_rank.add_node(input_op(DType::F32));
         let fs = wrong_rank.add_node(start(
             shape.clone(),
-            vec![Expression::from('z'), Expression::from('z')],
+            vec![IntExpr::from('z'), IntExpr::from('z')],
             DType::F32,
         ));
         let binary = wrong_rank.add_node(llir_of(CudaBinaryElementwise {
             op: "Add".to_string(),
             out_shape: shape.clone(),
-            a_stride: vec![Expression::from('z')],
-            b_stride: vec![Expression::from('z'), Expression::from('z')],
-            out_stride: vec![Expression::from('z'), Expression::from('z')],
+            a_stride: vec![IntExpr::from('z')],
+            b_stride: vec![IntExpr::from('z'), IntExpr::from('z')],
+            out_stride: vec![IntExpr::from('z'), IntExpr::from('z')],
             dtype: DType::F32,
         }));
         let fe = wrong_rank.add_node(end(
             shape,
-            vec![Expression::from('z'), Expression::from('z')],
+            vec![IntExpr::from('z'), IntExpr::from('z')],
             DType::F32,
         ));
         wrong_rank.add_edge(input, fs, ());
@@ -1917,7 +1917,7 @@ mod tests {
             .unwrap();
         let outer = nested.add_node(end(
             vec![16.into()],
-            vec![Expression::from('z')],
+            vec![IntExpr::from('z')],
             DType::F32,
         ));
         nested.add_edge(inner, outer, ());
@@ -1959,8 +1959,8 @@ mod tests {
     /// operand-edge insertion order, so the two graphs differ in every
     /// NodeIndex and edge id while being structurally identical.
     fn build_test_region(reversed: bool) -> (LLIRGraph, Vec<NodeIndex>) {
-        let shape: Vec<Expression> = vec![8.into()];
-        let z: Vec<Expression> = vec![Expression::from('z')];
+        let shape: Vec<IntExpr> = vec![8.into()];
+        let z: Vec<IntExpr> = vec![IntExpr::from('z')];
         let fs = |dt: DType| FusionStart {
             shape: shape.clone(),
             strides: z.clone(),

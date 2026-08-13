@@ -6,7 +6,7 @@
 //! place.
 
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal_nn::{DecoderBlock, Embedding, FeedForward, LayerNorm, Linear, MoE};
 
 /// Shared MoE-decoder assembly (the [`MoE`] layer itself lives in
@@ -56,7 +56,7 @@ fn moe_lm_forward(
     caches: &[(GraphTensor, GraphTensor)],
     gather_idx: GraphTensor,
     scatter_idx: GraphTensor,
-    prev_seq: Expression,
+    prev_seq: IntExpr,
 ) -> (GraphTensor, Vec<(GraphTensor, GraphTensor)>) {
     let mut x = embed.forward(ids);
     let mut caches_out = Vec::with_capacity(blocks.len());
@@ -109,7 +109,7 @@ impl MiniGemma4Moe {
         caches: &[(GraphTensor, GraphTensor)],
         gather_idx: GraphTensor,
         scatter_idx: GraphTensor,
-        prev_seq: Expression,
+        prev_seq: IntExpr,
     ) -> (GraphTensor, Vec<(GraphTensor, GraphTensor)>) {
         let (logits, caches_out) = moe_lm_forward(
             &self.embed,

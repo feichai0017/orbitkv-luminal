@@ -73,11 +73,11 @@ struct CompiledKernel {
     /// The compiled CUDA function
     function: CudaFunction,
     /// Launch grid dimensions (blocks)
-    grid: (Expression, Expression, Expression),
+    grid: (IntExpr, IntExpr, IntExpr),
     /// Launch block dimensions (threads)
-    block: (Expression, Expression, Expression),
+    block: (IntExpr, IntExpr, IntExpr),
     /// Shared memory size
-    shared_mem: Expression,
+    shared_mem: IntExpr,
     /// Input node indices (for buffer lookup)
     inputs: Vec<NodeIndex>,
     /// Human-readable labels for input nodes, for launch diagnostics.
@@ -343,9 +343,9 @@ impl CompiledKernel {
     fn new(
         node: NodeIndex,
         function: CudaFunction,
-        grid: (Expression, Expression, Expression),
-        block: (Expression, Expression, Expression),
-        shared_mem: Expression,
+        grid: (IntExpr, IntExpr, IntExpr),
+        block: (IntExpr, IntExpr, IntExpr),
+        shared_mem: IntExpr,
         inputs: Vec<NodeIndex>,
         input_labels: Vec<String>,
         kernel_op: Arc<Box<dyn KernelOp>>,
@@ -490,7 +490,7 @@ pub struct CudaGraphOp {
     /// All nodes that this graph needs buffers for (kernels + their inputs)
     buffer_nodes: Vec<NodeIndex>,
     /// Buffer size requirements for extra nodes (node -> size in elements)
-    buffer_sizes: FxHashMap<NodeIndex, Expression>,
+    buffer_sizes: FxHashMap<NodeIndex, IntExpr>,
     /// Dynamic dimensions used by this graph (sorted alphabetically)
     dyn_dims_order: Vec<char>,
     /// The CUDA stream (needed for operations)
@@ -504,7 +504,7 @@ pub struct CudaGraphOp {
 impl CudaGraphOp {
     fn new(
         buffer_nodes: Vec<NodeIndex>,
-        buffer_sizes: FxHashMap<NodeIndex, Expression>,
+        buffer_sizes: FxHashMap<NodeIndex, IntExpr>,
         dyn_dims_order: Vec<char>,
         stream: Arc<CudaStream>,
         capture_stream: Option<Arc<CudaStream>>,
@@ -799,8 +799,8 @@ impl EgglogOp for CudaGraphOp {
         _egraph: &'a luminal::egglog_utils::SerializedEGraph,
         _kind_children: &[&'a luminal::prelude::ENodeId],
         _input_enodes: Vec<&'a luminal::prelude::ENodeId>,
-        _list_cache: &mut FxHashMap<&'a luminal::prelude::ENodeId, Vec<Expression>>,
-        _expr_cache: &mut FxHashMap<&'a luminal::prelude::ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a luminal::prelude::ENodeId, Vec<IntExpr>>,
+        _expr_cache: &mut FxHashMap<&'a luminal::prelude::ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a luminal::prelude::ENodeId>) {
         panic!("CudaGraphOp should not be extracted from egglog")
     }
@@ -822,12 +822,12 @@ impl HostOp for CudaGraphOp {
         self.execute_internal(stream, buffers, dyn_map)
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         // CudaGraphOp doesn't have a single output - individual kernels have outputs
         0.into()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         // CudaGraphOp doesn't have a single output - individual kernels have outputs
         0.into()
     }
@@ -1029,7 +1029,7 @@ impl HostOp for CudaGraphOp {
         Some(conflicts)
     }
 
-    fn extra_buffer_sizes(&self) -> FxHashMap<NodeIndex, Expression> {
+    fn extra_buffer_sizes(&self) -> FxHashMap<NodeIndex, IntExpr> {
         self.buffer_sizes.clone()
     }
 
@@ -2788,7 +2788,7 @@ pub fn kernel_to_host(
 
         let mut all_dyn_dims = FxHashSet::default();
         let mut all_buffer_nodes = FxHashSet::default();
-        let mut all_buffer_sizes: FxHashMap<NodeIndex, Expression> = FxHashMap::default();
+        let mut all_buffer_sizes: FxHashMap<NodeIndex, IntExpr> = FxHashMap::default();
         let mut external_inputs = FxHashSet::default();
 
         // Pre-scan: collect all dynamic vars from all kernel ops without compiling.

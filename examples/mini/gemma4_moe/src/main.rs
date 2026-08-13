@@ -3,7 +3,7 @@
 //! Run: cargo run --release -p mini_gemma4_moe
 
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal_nn::FeedForward;
 use mini_gemma4_moe::MiniGemma4Moe;
 
@@ -23,7 +23,7 @@ fn main() {
     let scatter_idx = cx.tensor_dtyped(1, DType::Int);
     let caches = vec![(k_cache, v_cache)];
     let (logits, _) =
-        model.forward(ids, &caches, gather_idx, scatter_idx, Expression::from(1usize));
+        model.forward(ids, &caches, gather_idx, scatter_idx, IntExpr::from(1usize));
     let logits = logits.output();
     let block = &model.blocks[0];
     let FeedForward::Moe(moe) = &block.ff else { unreachable!() };

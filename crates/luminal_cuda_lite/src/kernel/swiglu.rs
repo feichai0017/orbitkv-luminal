@@ -12,7 +12,7 @@ use std::sync::Arc;
 use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream};
 use luminal::{
     dtype::DType, op::CustomOp, op::LLIROp, prelude::FxHashMap, prelude::GraphTensor,
-    shape::Expression,
+    shape::IntExpr,
 };
 
 use crate::compile_module_image_for_current_device;
@@ -22,7 +22,7 @@ const TPB: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct SwigluKernel {
-    pub rows: Expression,
+    pub rows: IntExpr,
     pub intermediate: usize,
     pub dtype: DType,
 }
@@ -36,9 +36,9 @@ impl KernelOp for SwigluKernel {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let i = self.intermediate;
@@ -83,24 +83,24 @@ extern "C" __global__ void swiglu_k(
             kernel,
             (
                 self.rows,
-                Expression::from(col_tiles),
-                Expression::from(1usize),
+                IntExpr::from(col_tiles),
+                IntExpr::from(1usize),
             ),
             (
-                Expression::from(TPB),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(TPB),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.rows * self.intermediate
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
@@ -108,15 +108,15 @@ extern "C" __global__ void swiglu_k(
         self.dtype
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         (self.rows * self.intermediate * 2 * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.rows * self.intermediate * 6
     }
 
@@ -172,7 +172,7 @@ pub fn fused_swiglu(x: GraphTensor, intermediate: usize) -> GraphTensor {
 
 #[derive(Debug, Clone)]
 pub struct SwigluQuantKernel {
-    pub rows: Expression,
+    pub rows: IntExpr,
     pub intermediate: usize,
     /// Input dtype (16-bit); output is always F8E4M3.
     pub dtype: DType,
@@ -187,9 +187,9 @@ impl KernelOp for SwigluQuantKernel {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let i = self.intermediate;
@@ -232,24 +232,24 @@ extern "C" __global__ void swiglu_quant_k(
             kernel,
             (
                 self.rows,
-                Expression::from(col_tiles),
-                Expression::from(1usize),
+                IntExpr::from(col_tiles),
+                IntExpr::from(1usize),
             ),
             (
-                Expression::from(TPB),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(TPB),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.rows * self.intermediate
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size()
     }
 
@@ -257,15 +257,15 @@ extern "C" __global__ void swiglu_quant_k(
         DType::F8E4M3
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         (self.rows * self.intermediate * 2 * self.dtype.bits()).ceil_div(8) + 4
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.rows * self.intermediate * 7
     }
 
@@ -384,7 +384,7 @@ fn swiglu_chain_atoms() -> &'static str {
 #[derive(Default, Debug, Clone)]
 pub struct KernelSwiglu {
     /// Output shape `(rows, intermediate)`; rows may be dynamic.
-    out_shape: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
 }
 
 impl EgglogOp for KernelSwiglu {
@@ -422,8 +422,8 @@ impl EgglogOp for KernelSwiglu {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let out_shape =
             extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();
@@ -441,7 +441,7 @@ impl EgglogOp for KernelSwiglu {
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelSwigluQuant {
-    out_shape: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
 }
 
 impl EgglogOp for KernelSwigluQuant {
@@ -487,8 +487,8 @@ impl EgglogOp for KernelSwigluQuant {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let out_shape =
             extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();

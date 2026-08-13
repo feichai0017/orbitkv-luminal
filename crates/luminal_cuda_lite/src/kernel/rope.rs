@@ -20,7 +20,7 @@ use luminal::{
     egglog_utils::list_to_egglog,
     op::{CustomOp, HLIROp, LLIROp},
     prelude::{FxHashMap, FxHashSet, GraphTensor, NodeIndex, ShapeTracker},
-    shape::Expression,
+    shape::IntExpr,
 };
 
 use crate::compile_module_image_for_current_device;
@@ -44,9 +44,9 @@ impl KernelOp for RoPEKernel {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let s = self.s;
@@ -104,25 +104,25 @@ extern "C" __global__ void rope_kernel(
             module,
             kernel,
             (
-                Expression::from(s * h),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(s * h),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
             (
-                Expression::from(TPB),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(TPB),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
 
-    fn output_size(&self) -> Expression {
-        Expression::from(self.s * self.h * self.d)
+    fn output_size(&self) -> IntExpr {
+        IntExpr::from(self.s * self.h * self.d)
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size() * 4
     }
 
@@ -130,18 +130,18 @@ extern "C" __global__ void rope_kernel(
         DType::F32
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         // x: full (S,H,D); cos/sin: (S,D) read H times each but cached.
-        Expression::from(self.s * self.h * self.d * 4 + self.s * self.d * 4 * 2)
+        IntExpr::from(self.s * self.h * self.d * 4 + self.s * self.d * 4 * 2)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_size() * 4
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         // 4 per output element (mul, neg/load, mul, add).
-        Expression::from(self.s * self.h * self.d * 4)
+        IntExpr::from(self.s * self.h * self.d * 4)
     }
 
     fn kernel_name(&self) -> &'static str {
@@ -208,7 +208,7 @@ pub fn apply_rope(x: GraphTensor, cos: GraphTensor, sin: GraphTensor) -> GraphTe
 
 #[derive(Debug, Clone)]
 pub struct RoPEHalfKernel {
-    pub s: Expression,
+    pub s: IntExpr,
     pub h: usize,
     pub d: usize,
     /// Input row stride in elements (e.g. 6144 for a fused QKV row).
@@ -243,11 +243,11 @@ impl HLIROp for RoPEHalfKernel {
         format!(
             "(Op (KernelRoPEHalf {} {} {} {} {} {} ({:?})) {})",
             self.s.to_egglog(),
-            Expression::from(self.h).to_egglog(),
-            Expression::from(self.d).to_egglog(),
-            Expression::from(self.h * self.d).to_egglog(),
-            Expression::from(self.pitch).to_egglog(),
-            Expression::from(self.offset).to_egglog(),
+            IntExpr::from(self.h).to_egglog(),
+            IntExpr::from(self.d).to_egglog(),
+            IntExpr::from(self.h * self.d).to_egglog(),
+            IntExpr::from(self.pitch).to_egglog(),
+            IntExpr::from(self.offset).to_egglog(),
             self.dtype,
             list_to_egglog(&[&inputs[0].1, &inputs[1].1, &inputs[2].1], "ICons", "INil"),
         )
@@ -295,8 +295,8 @@ impl EgglogOp for RoPEHalfKernel {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let s = extract_expr(egraph, kind_children[0], expr_cache).unwrap();
         let h = extract_expr(egraph, kind_children[1], expr_cache)
@@ -338,9 +338,9 @@ impl KernelOp for RoPEHalfKernel {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let h = self.h;
@@ -400,24 +400,24 @@ extern "C" __global__ void rope_half_kernel(
             kernel,
             (
                 self.s * self.h,
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
             (
-                Expression::from(TPB),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(TPB),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.s * self.h * self.d
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
@@ -425,15 +425,15 @@ extern "C" __global__ void rope_half_kernel(
         self.dtype
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         (self.s * self.h * self.d * self.dtype.bits()).ceil_div(8) + self.s * self.d * 4
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.s * self.h * self.d * 4
     }
 
@@ -503,10 +503,10 @@ pub fn apply_rope_half(
 pub struct RoPEScatterKernel {
     pub rope: RoPEHalfKernel,
     /// Total element count of the scatter destination (the cache pool).
-    dest_size: Expression,
+    dest_size: IntExpr,
     /// Flattened scatter-index expression over `z`, where `z` is the element
     /// position in the rope output's contiguous (s, h·d) layout.
-    idx_flat: Expression,
+    idx_flat: IntExpr,
 }
 
 impl Default for RoPEScatterKernel {
@@ -514,7 +514,7 @@ impl Default for RoPEScatterKernel {
         Self {
             rope: RoPEHalfKernel::default(),
             dest_size: 1.into(),
-            idx_flat: Expression::from('z'),
+            idx_flat: IntExpr::from('z'),
         }
     }
 }
@@ -592,8 +592,8 @@ impl EgglogOp for RoPEScatterKernel {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let s = extract_expr(egraph, kind_children[0], expr_cache).unwrap();
         let h = extract_expr(egraph, kind_children[1], expr_cache)
@@ -645,9 +645,9 @@ impl KernelOp for RoPEScatterKernel {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let h = self.rope.h;
@@ -736,15 +736,15 @@ extern "C" __global__ void rope_scatter_kernel(
             kernel,
             (
                 self.rope.s * self.rope.h,
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
             (
-                Expression::from(TPB),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(TPB),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
@@ -789,11 +789,11 @@ extern "C" __global__ void rope_scatter_kernel(
             .collect()
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.dest_size
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.dest_size * self.rope.dtype.bits()).ceil_div(8)
     }
 
@@ -801,16 +801,16 @@ extern "C" __global__ void rope_scatter_kernel(
         self.rope.dtype
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         let rotated = self.rope.s * self.rope.h * self.rope.d;
         (rotated * self.rope.dtype.bits()).ceil_div(8) + rotated * 4 + self.rope.s * self.rope.d * 4
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         (self.rope.s * self.rope.h * self.rope.d * self.rope.dtype.bits()).ceil_div(8)
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.rope.s * self.rope.h * self.rope.d * 4
     }
 
@@ -843,7 +843,7 @@ extern "C" __global__ void rope_scatter_kernel(
 #[derive(Default, Debug, Clone)]
 pub struct KernelRoPE {
     /// `(heads, seq, head_dim)` — seq may be dynamic.
-    out_shape: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
     /// Row stride of the x input in elements (the projection width).
     width: usize,
     ln_theta: f64,
@@ -891,7 +891,7 @@ impl EgglogOp for KernelRoPE {
         let angle_stage: &str = "
             (relation rope_invf (IR f64 f64))
             (relation rope_angles (IR IR IR f64 f64))
-            (relation rope_rotated (IR IR IR IR Expression Expression Expression Expression f64 f64))
+            (relation rope_rotated (IR IR IR IR IntExpr IntExpr IntExpr IntExpr f64 f64))
             (rule
                 (
                     ; inv_freq = recip(exp2(((2i x 1/hd) x ln theta) x log2 e))
@@ -1074,8 +1074,8 @@ impl EgglogOp for KernelRoPE {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let out_shape =
             extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();
@@ -1114,9 +1114,9 @@ impl KernelOp for KernelRoPE {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let heads = self.out_shape[0].to_usize().expect("RoPE heads is static");
@@ -1193,25 +1193,25 @@ extern \"C\" {{
             module,
             kernel,
             (
-                Expression::from(hd.div_ceil(tpb)),
+                IntExpr::from(hd.div_ceil(tpb)),
                 seq,
-                Expression::from(heads),
+                IntExpr::from(heads),
             ),
             (
-                Expression::from(tpb),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(tpb),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size() * 2
     }
 
@@ -1223,15 +1223,15 @@ extern \"C\" {{
         self.out_shape[1].dyn_vars().into_iter().collect()
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         self.output_size() * 2 + self.out_shape[1] * 4
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.output_size() * 16
     }
 
@@ -1250,10 +1250,10 @@ extern \"C\" {{
 pub struct KernelRoPEScatterFused {
     rope: KernelRoPE,
     /// Total element count of the scatter destination (the cache pool).
-    dest_size: Expression,
+    dest_size: IntExpr,
     /// Flattened scatter-index expression over `z`, where `z` is the element
     /// position in the (s, heads·hd) deinterleaved index grid.
-    idx_flat: Expression,
+    idx_flat: IntExpr,
 }
 
 impl Default for KernelRoPEScatterFused {
@@ -1261,7 +1261,7 @@ impl Default for KernelRoPEScatterFused {
         Self {
             rope: KernelRoPE::default(),
             dest_size: 1.into(),
-            idx_flat: Expression::from('z'),
+            idx_flat: IntExpr::from('z'),
         }
     }
 }
@@ -1343,8 +1343,8 @@ impl EgglogOp for KernelRoPEScatterFused {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let out_shape =
             extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();
@@ -1390,9 +1390,9 @@ impl KernelOp for KernelRoPEScatterFused {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let heads = self.rope.out_shape[0]
@@ -1475,16 +1475,16 @@ extern \"C\" {{
             module,
             kernel,
             (
-                Expression::from(hd.div_ceil(tpb)),
+                IntExpr::from(hd.div_ceil(tpb)),
                 seq,
-                Expression::from(heads),
+                IntExpr::from(heads),
             ),
             (
-                Expression::from(tpb),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(tpb),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
@@ -1523,11 +1523,11 @@ extern \"C\" {{
             .collect()
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.dest_size
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.dest_size * 2
     }
 
@@ -1535,17 +1535,17 @@ extern \"C\" {{
         DType::Bf16
     }
 
-    fn bytes_loaded(&self) -> Expression {
-        let rotated: Expression = self.rope.out_shape.iter().copied().product();
+    fn bytes_loaded(&self) -> IntExpr {
+        let rotated: IntExpr = self.rope.out_shape.iter().copied().product();
         rotated * 2 + rotated * 4 + self.rope.out_shape[1] * 4
     }
 
-    fn bytes_stored(&self) -> Expression {
-        self.rope.out_shape.iter().copied().product::<Expression>() * 2
+    fn bytes_stored(&self) -> IntExpr {
+        self.rope.out_shape.iter().copied().product::<IntExpr>() * 2
     }
 
-    fn flops(&self) -> Expression {
-        self.rope.out_shape.iter().copied().product::<Expression>() * 16
+    fn flops(&self) -> IntExpr {
+        self.rope.out_shape.iter().copied().product::<IntExpr>() * 16
     }
 
     fn kernel_name(&self) -> &'static str {

@@ -1,6 +1,6 @@
 use luminal::prelude::*;
 
-fn same_dim(lhs: Expression, rhs: Expression) -> bool {
+fn same_dim(lhs: IntExpr, rhs: IntExpr) -> bool {
     lhs == rhs || lhs.simplify() == rhs.simplify() || lhs.egglog_equal(rhs)
 }
 
@@ -32,9 +32,9 @@ pub fn normalize_dim(dim: i64, ndim: usize) -> usize {
     }
 }
 
-pub fn normalize_slice_bound(bound: Expression, dim_size: Expression) -> Expression {
+pub fn normalize_slice_bound(bound: IntExpr, dim_size: IntExpr) -> IntExpr {
     match bound.as_num() {
-        Some(n) if n < 0 => (dim_size + Expression::from(n as i32)).simplify(),
+        Some(n) if n < 0 => (dim_size + IntExpr::from(n as i32)).simplify(),
         _ => bound,
     }
 }
@@ -68,10 +68,10 @@ pub fn broadcast_binary(mut a: GraphTensor, mut b: GraphTensor) -> (GraphTensor,
 
         if a_dim.to_usize() == Some(1) {
             a.legacy_tracker_mut().dims[i] = b_dim;
-            a.legacy_tracker_mut().strides[i] = Expression::from(0usize);
+            a.legacy_tracker_mut().strides[i] = IntExpr::from(0usize);
         } else if b_dim.to_usize() == Some(1) {
             b.legacy_tracker_mut().dims[i] = a_dim;
-            b.legacy_tracker_mut().strides[i] = Expression::from(0usize);
+            b.legacy_tracker_mut().strides[i] = IntExpr::from(0usize);
         }
     }
 
@@ -98,7 +98,7 @@ pub fn ensure_same_dtype(a: GraphTensor, b: GraphTensor) -> (GraphTensor, GraphT
 /// wholesale tracker replacement goes through the A2 escape hatch and
 /// clears any recorder view handle (the recorder path is not maintained
 /// by this translator).
-pub fn reshape_tensor(t: GraphTensor, shape: Vec<Expression>) -> GraphTensor {
+pub fn reshape_tensor(t: GraphTensor, shape: Vec<IntExpr>) -> GraphTensor {
     let mut out = t;
     *out.legacy_tracker_mut() = ShapeTracker::new(shape);
     out.logical_view = None;
@@ -106,7 +106,7 @@ pub fn reshape_tensor(t: GraphTensor, shape: Vec<Expression>) -> GraphTensor {
 }
 
 /// Resolve -1 in a reshape target shape.
-pub fn resolve_neg1_dim(target: &[i64], current_dims: &[Expression]) -> Vec<Expression> {
+pub fn resolve_neg1_dim(target: &[i64], current_dims: &[IntExpr]) -> Vec<IntExpr> {
     let mut neg1_idx = None;
     let mut known_product: i64 = 1;
     let mut result = Vec::with_capacity(target.len());
@@ -114,10 +114,10 @@ pub fn resolve_neg1_dim(target: &[i64], current_dims: &[Expression]) -> Vec<Expr
     for (i, &s) in target.iter().enumerate() {
         if s == -1 {
             neg1_idx = Some(i);
-            result.push(Expression::from(0usize)); // placeholder
+            result.push(IntExpr::from(0usize)); // placeholder
         } else {
             known_product *= s;
-            result.push(Expression::from(s as usize));
+            result.push(IntExpr::from(s as usize));
         }
     }
 
@@ -127,10 +127,10 @@ pub fn resolve_neg1_dim(target: &[i64], current_dims: &[Expression]) -> Vec<Expr
             .map(|d| d.to_usize())
             .collect::<Option<Vec<_>>>()
         {
-            Some(vs) => Expression::from(vs.iter().product::<usize>() / known_product as usize),
+            Some(vs) => IntExpr::from(vs.iter().product::<usize>() / known_product as usize),
             None => {
                 crate::dim_arith::product_of_dims(current_dims.iter().copied())
-                    / Expression::from(known_product as usize)
+                    / IntExpr::from(known_product as usize)
             }
         };
     }
@@ -138,19 +138,19 @@ pub fn resolve_neg1_dim(target: &[i64], current_dims: &[Expression]) -> Vec<Expr
     result
 }
 
-/// Resolve -1 in a reshape target shape that contains Expression values.
+/// Resolve -1 in a reshape target shape that contains IntExpr values.
 pub fn resolve_neg1_dim_exprs(
-    target: &[Expression],
-    current_dims: &[Expression],
-) -> Vec<Expression> {
-    let neg1_expr = Expression::from(-1i32);
+    target: &[IntExpr],
+    current_dims: &[IntExpr],
+) -> Vec<IntExpr> {
+    let neg1_expr = IntExpr::from(-1i32);
     let neg1_idx = target.iter().position(|e| *e == neg1_expr);
 
     if let Some(idx) = neg1_idx {
         let mut result = target.to_vec();
 
         let mut input_concrete: i64 = 1;
-        let mut input_symbolic: Vec<Expression> = Vec::new();
+        let mut input_symbolic: Vec<IntExpr> = Vec::new();
         for d in current_dims {
             if let Some(v) = d.to_usize() {
                 input_concrete *= v as i64;
@@ -160,7 +160,7 @@ pub fn resolve_neg1_dim_exprs(
         }
 
         let mut target_concrete: i64 = 1;
-        let mut target_symbolic: Vec<Expression> = Vec::new();
+        let mut target_symbolic: Vec<IntExpr> = Vec::new();
         for (i, e) in target.iter().enumerate() {
             if i == idx {
                 continue;
@@ -179,10 +179,10 @@ pub fn resolve_neg1_dim_exprs(
         }
 
         if input_symbolic.is_empty() {
-            result[idx] = Expression::from((input_concrete / target_concrete) as usize);
+            result[idx] = IntExpr::from((input_concrete / target_concrete) as usize);
         } else {
-            let mut operands: Vec<Expression> = Vec::with_capacity(input_symbolic.len() + 1);
-            operands.push(Expression::from(
+            let mut operands: Vec<IntExpr> = Vec::with_capacity(input_symbolic.len() + 1);
+            operands.push(IntExpr::from(
                 (input_concrete / target_concrete) as usize,
             ));
             operands.extend(input_symbolic.iter().copied());

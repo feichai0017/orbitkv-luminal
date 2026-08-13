@@ -22,7 +22,7 @@ use luminal::{
     egglog_utils::{SerializedEGraph, extract_expr},
     op::{EgglogOp, LLIROp},
     prelude::*,
-    shape::Expression,
+    shape::IntExpr,
 };
 
 use crate::cudarc::driver::{CudaStream, DevicePtr, result};
@@ -46,7 +46,7 @@ pub struct SinkAttention {
     pub num_kv_heads: usize,
     pub head_dim: usize,
     /// The 's' (batch tokens) dimension expression.
-    pub batch_dim: Expression,
+    pub batch_dim: IntExpr,
     /// Softmax scale; 0.0 = default `1/sqrt(head_dim)`.
     pub sm_scale: f64,
     /// FlashInfer window_left convention (visible previous positions);
@@ -60,7 +60,7 @@ impl Default for SinkAttention {
             num_qo_heads: 0,
             num_kv_heads: 0,
             head_dim: 0,
-            batch_dim: Expression::default(),
+            batch_dim: IntExpr::default(),
             sm_scale: 0.0,
             window_left: -1,
         }
@@ -102,8 +102,8 @@ impl EgglogOp for SinkAttention {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let num_qo_heads = extract_expr(egraph, kind_children[0], expr_cache)
             .unwrap()
@@ -341,11 +341,11 @@ impl HostOp for SinkAttention {
         Ok(())
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.batch_dim * self.num_qo_heads * self.head_dim
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size() * 4 // F32 output
     }
 

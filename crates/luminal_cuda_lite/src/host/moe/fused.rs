@@ -40,7 +40,7 @@ use luminal::{
     },
     op::{EgglogOp, LLIROp},
     prelude::*,
-    shape::Expression,
+    shape::IntExpr,
 };
 
 use crate::{
@@ -70,9 +70,9 @@ fn ensure_kernels_compiled() {
 
 #[derive(Debug, Clone, Default)]
 pub struct FusedMoE {
-    hidden: Expression,
-    intermediate: Expression,
-    top_k: Expression,
+    hidden: IntExpr,
+    intermediate: IntExpr,
+    top_k: IntExpr,
 }
 
 impl EgglogOp for FusedMoE {
@@ -114,8 +114,8 @@ impl EgglogOp for FusedMoE {
         egraph: &'a luminal::egglog_utils::SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let hidden = extract_expr(egraph, kind_children[0], expr_cache).unwrap();
         let intermediate = extract_expr(egraph, kind_children[1], expr_cache).unwrap();
@@ -317,13 +317,13 @@ impl HostOp for FusedMoE {
         Ok(())
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         // [seq, hidden] F32; 's' is the seq dim by model convention (GLUMoE
         // does the same).
-        Expression::from('s') * self.hidden
+        IntExpr::from('s') * self.hidden
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size() * 4 // F32
     }
 

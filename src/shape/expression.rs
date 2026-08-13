@@ -19,14 +19,14 @@ use egglog::{ast::Span, prelude::RustSpan, var};
 type ExprBox = GenerationalBox<Vec<Term>, SyncStorage>;
 
 pub static EXPR_OWNER: OnceLock<Owner<SyncStorage>> = OnceLock::new();
-static SIMPLIFY_CACHE: OnceLock<Mutex<LruCache<Expression, Expression>>> = OnceLock::new();
-static INTERVAL_SIMPLIFY_CACHE: OnceLock<Mutex<LruCache<IntervalSimplifyKey, Expression>>> =
+static SIMPLIFY_CACHE: OnceLock<Mutex<LruCache<IntegerExpression, IntegerExpression>>> = OnceLock::new();
+static INTERVAL_SIMPLIFY_CACHE: OnceLock<Mutex<LruCache<IntervalSimplifyKey, IntegerExpression>>> =
     OnceLock::new();
 static EXPRESSION_INTERNER: OnceLock<RwLock<FxHashMap<Vec<Term>, ExprBox>>> = OnceLock::new();
 
 const MAX_CACHED_SIMPLIFICATIONS: usize = 10_000;
 
-pub fn expr(e: impl Into<Expression>) -> Expression {
+pub fn expr(e: impl Into<IntegerExpression>) -> IntegerExpression {
     e.into()
 }
 
@@ -54,7 +54,7 @@ pub type DynDimIntervals = FxHashMap<crate::shape::Symbol, DimInterval>;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct IntervalSimplifyKey {
-    expr: Expression,
+    expr: IntegerExpression,
     intervals: Vec<(crate::shape::Symbol, DimInterval)>,
 }
 
@@ -65,11 +65,16 @@ fn canonical_intervals(intervals: &DynDimIntervals) -> Vec<(crate::shape::Symbol
 }
 
 #[derive(Copy, Clone)]
-pub struct Expression {
+pub struct IntegerExpression {
     pub terms: ExprBox,
 }
 
-impl Serialize for Expression {
+/// The convenience alias (ruling 2026-08-13): `IntegerExpression` is
+/// the official name — the Rust mirror of the egglog `IntExpr`
+/// datatype — and `IntExpr` is the short form for call sites.
+pub type IntExpr = IntegerExpression;
+
+impl Serialize for IntegerExpression {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -79,17 +84,17 @@ impl Serialize for Expression {
     }
 }
 
-impl<'de> Deserialize<'de> for Expression {
+impl<'de> Deserialize<'de> for IntegerExpression {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let terms = Vec::<Term>::deserialize(deserializer)?;
-        Ok(Expression::new(terms))
+        Ok(IntegerExpression::new(terms))
     }
 }
 
-impl Expression {
+impl IntegerExpression {
     pub fn new(terms: Vec<Term>) -> Self {
         let interner = EXPRESSION_INTERNER.get_or_init(|| RwLock::new(FxHashMap::default()));
 
@@ -118,7 +123,7 @@ impl Expression {
 
     /// Clear all interned expressions. Call this between major operations
     /// (like search iterations) when no expressions are expected to be in use.
-    /// WARNING: Any existing Expression handles will become invalid after this call.
+    /// WARNING: Any existing IntegerExpression handles will become invalid after this call.
     pub fn clear_interner() {
         if let Some(interner) = EXPRESSION_INTERNER.get() {
             let mut write_guard = interner.write().unwrap();
@@ -126,7 +131,7 @@ impl Expression {
                 box_.recycle();
             }
         }
-        // Also clear the simplify cache since it contains Expression keys
+        // Also clear the simplify cache since it contains IntegerExpression keys
         if let Some(cache) = SIMPLIFY_CACHE.get() {
             cache.lock().unwrap().clear();
         }
@@ -145,15 +150,15 @@ impl Expression {
 
 }
 
-impl Hash for Expression {
+impl Hash for IntegerExpression {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.terms.read().hash(state);
     }
 }
 
-impl Default for Expression {
+impl Default for IntegerExpression {
     fn default() -> Self {
-        Expression::new(vec![])
+        IntegerExpression::new(vec![])
     }
 }
 
@@ -164,9 +169,9 @@ pub enum Term {
     Var(crate::shape::Symbol),
     /// A structural per-axis COORDINATE atom (P1 ruling 2026-08-07):
     /// `Coord(k)` is "coordinate of axis k of the iota being recorded" —
-    /// positional, de-Bruijn-style, so an Expression holding coords means
+    /// positional, de-Bruijn-style, so an IntegerExpression holding coords means
     /// exactly what it says wherever it is used as an iota value function.
-    /// Only `Graph::iota`'s closure mints these (via `Expression::coord`);
+    /// Only `Graph::iota`'s closure mints these (via `IntegerExpression::coord`);
     /// they are structurally disjoint from named symbols (`Var`), so no
     /// character is ever reserved and no collision is possible. Coords
     /// lower to `CoordVar` in the recorded model; named symbols lower to
@@ -252,9 +257,9 @@ impl Term {
     }
 }
 
-impl<T> PartialEq<T> for Expression
+impl<T> PartialEq<T> for IntegerExpression
 where
-    for<'a> &'a T: Into<Expression>,
+    for<'a> &'a T: Into<IntegerExpression>,
 {
     fn eq(&self, other: &T) -> bool {
         // Equals-approximation. For proper equality checking, use .egglog_equals (more expensive)
@@ -262,15 +267,15 @@ where
     }
 }
 
-impl From<&Expression> for Expression {
-    fn from(value: &Expression) -> Self {
+impl From<&IntegerExpression> for IntegerExpression {
+    fn from(value: &IntegerExpression) -> Self {
         *value
     }
 }
 
-impl Eq for Expression {}
+impl Eq for IntegerExpression {}
 
-impl Debug for Expression {
+impl Debug for IntegerExpression {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut symbols = vec![];
         for term in self.terms.read().iter() {
@@ -300,13 +305,13 @@ impl Debug for Expression {
     }
 }
 
-impl std::fmt::Display for Expression {
+impl std::fmt::Display for IntegerExpression {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
 
-impl Expression {
+impl IntegerExpression {
     /// Mint the coordinate atom for axis `k` — only `Graph::iota`'s
     /// closure hands these out (P1 ruling 2026-08-07). Positional: the
     /// atom means "axis k of whichever iota value function it appears
@@ -314,7 +319,7 @@ impl Expression {
     /// wherever it is used.
     pub(crate) fn coord(axis: usize) -> Self {
         assert!(axis < 256, "iota rank is capped at 256 axes");
-        Expression::new(vec![Term::Coord(axis as u8)])
+        IntegerExpression::new(vec![Term::Coord(axis as u8)])
     }
 
     /// Does this expression contain any coordinate atoms?
@@ -411,10 +416,10 @@ impl Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Min);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
     /// Maximum
-    pub fn max<E: Into<Expression>>(self, rhs: E) -> Self {
+    pub fn max<E: Into<IntegerExpression>>(self, rhs: E) -> Self {
         let rhs = rhs.into();
         if rhs == self || self == i64::MAX {
             return self;
@@ -428,10 +433,10 @@ impl Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Max);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
     /// Greater than or equals
-    pub fn gte<E: Into<Expression>>(self, rhs: E) -> Self {
+    pub fn gte<E: Into<IntegerExpression>>(self, rhs: E) -> Self {
         let rhs = rhs.into();
         if rhs == self {
             return true.into();
@@ -445,18 +450,18 @@ impl Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Gte);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
     /// Ceil Division
-    pub fn ceil_div<E: Into<Expression>>(self, rhs: E) -> Self {
+    pub fn ceil_div<E: Into<IntegerExpression>>(self, rhs: E) -> Self {
         let rhs = rhs.into();
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::CeilDiv);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
     /// Floor Division
-    pub fn floor_div<E: Into<Expression>>(self, rhs: E) -> Self {
+    pub fn floor_div<E: Into<IntegerExpression>>(self, rhs: E) -> Self {
         let rhs = rhs.into();
         if rhs == 1 {
             return self;
@@ -478,10 +483,10 @@ impl Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Div);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
     /// Less than
-    pub fn lt<E: Into<Expression>>(self, rhs: E) -> Self {
+    pub fn lt<E: Into<IntegerExpression>>(self, rhs: E) -> Self {
         let rhs = rhs.into();
         if rhs == self {
             return false.into();
@@ -502,10 +507,10 @@ impl Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Lt);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
     /// Substitute an expression for a variable
-    pub fn substitute(self, var: impl Into<crate::shape::Symbol>, expr: impl Into<Expression>) -> Self {
+    pub fn substitute(self, var: impl Into<crate::shape::Symbol>, expr: impl Into<IntegerExpression>) -> Self {
         let var = var.into();
         let mut new_terms = vec![];
         let t = expr.into().terms.read();
@@ -521,7 +526,7 @@ impl Expression {
                 }
             }
         }
-        Expression::new(new_terms)
+        IntegerExpression::new(new_terms)
     }
     /// Evaluate the expression with no variables. Returns Some(value) if no variables are required, otherwise returns None.
     pub fn to_usize(&self) -> Option<usize> {
@@ -598,7 +603,7 @@ impl Expression {
             .collect()
     }
     /// Resolve all known variables from dyn map into real values
-    pub fn resolve_vars(&self, dyn_map: &crate::shape::DynMap) -> Expression {
+    pub fn resolve_vars(&self, dyn_map: &crate::shape::DynMap) -> IntegerExpression {
         let new_terms: Vec<Term> = self
             .terms
             .read()
@@ -613,11 +618,11 @@ impl Expression {
                 }
             })
             .collect();
-        Expression::new(new_terms)
+        IntegerExpression::new(new_terms)
     }
     /// Run proper equality check inside egglog
     #[tracing::instrument(skip_all)]
-    pub fn egglog_equal(self, rhs: impl Into<Expression>) -> bool {
+    pub fn egglog_equal(self, rhs: impl Into<IntegerExpression>) -> bool {
         let lhs_expr = self.to_egglog();
         let rhs_expr = rhs.into().to_egglog();
         let mut program = String::new();
@@ -682,184 +687,184 @@ fn floor_div_i64(a: i64, b: i64) -> Option<i64> {
     }
 }
 
-impl From<Term> for Expression {
+impl From<Term> for IntegerExpression {
     fn from(value: Term) -> Self {
-        Expression::new(vec![value])
+        IntegerExpression::new(vec![value])
     }
 }
 
-impl From<crate::shape::Symbol> for Expression {
+impl From<crate::shape::Symbol> for IntegerExpression {
     fn from(value: crate::shape::Symbol) -> Self {
-        Expression::new(vec![Term::Var(value)])
+        IntegerExpression::new(vec![Term::Var(value)])
     }
 }
 
-impl From<&str> for Expression {
+impl From<&str> for IntegerExpression {
     fn from(value: &str) -> Self {
-        Expression::new(vec![Term::Var(crate::shape::Symbol::new(value))])
+        IntegerExpression::new(vec![Term::Var(crate::shape::Symbol::new(value))])
     }
 }
 
-impl From<char> for Expression {
+impl From<char> for IntegerExpression {
     fn from(value: char) -> Self {
-        Expression::new(vec![Term::Var(crate::shape::Symbol::from(value))])
+        IntegerExpression::new(vec![Term::Var(crate::shape::Symbol::from(value))])
     }
 }
 
-impl From<&char> for Expression {
+impl From<&char> for IntegerExpression {
     fn from(value: &char) -> Self {
-        Expression::new(vec![Term::Var(crate::shape::Symbol::from(*value))])
+        IntegerExpression::new(vec![Term::Var(crate::shape::Symbol::from(*value))])
     }
 }
 
-impl From<usize> for Expression {
+impl From<usize> for IntegerExpression {
     fn from(value: usize) -> Self {
-        Expression::new(vec![Term::Num(value as i64)])
+        IntegerExpression::new(vec![Term::Num(value as i64)])
     }
 }
 
-impl From<&usize> for Expression {
+impl From<&usize> for IntegerExpression {
     fn from(value: &usize) -> Self {
-        Expression::new(vec![Term::Num(*value as i64)])
+        IntegerExpression::new(vec![Term::Num(*value as i64)])
     }
 }
 
-impl From<i32> for Expression {
+impl From<i32> for IntegerExpression {
     fn from(value: i32) -> Self {
-        Expression::new(vec![Term::Num(value as i64)])
+        IntegerExpression::new(vec![Term::Num(value as i64)])
     }
 }
 
-impl From<&i32> for Expression {
+impl From<&i32> for IntegerExpression {
     fn from(value: &i32) -> Self {
-        Expression::new(vec![Term::Num(*value as i64)])
+        IntegerExpression::new(vec![Term::Num(*value as i64)])
     }
 }
 
-impl From<i64> for Expression {
+impl From<i64> for IntegerExpression {
     fn from(value: i64) -> Self {
-        Expression::new(vec![Term::Num(value)])
+        IntegerExpression::new(vec![Term::Num(value)])
     }
 }
 
-impl From<&i64> for Expression {
+impl From<&i64> for IntegerExpression {
     fn from(value: &i64) -> Self {
-        Expression::new(vec![Term::Num(*value)])
+        IntegerExpression::new(vec![Term::Num(*value)])
     }
 }
 
-impl From<bool> for Expression {
+impl From<bool> for IntegerExpression {
     fn from(value: bool) -> Self {
-        Expression::new(vec![Term::Num(value as i64)])
+        IntegerExpression::new(vec![Term::Num(value as i64)])
     }
 }
 
-impl From<&bool> for Expression {
+impl From<&bool> for IntegerExpression {
     fn from(value: &bool) -> Self {
-        Expression::new(vec![Term::Num(*value as i64)])
+        IntegerExpression::new(vec![Term::Num(*value as i64)])
     }
 }
 
-impl Add<Expression> for usize {
-    type Output = Expression;
-    fn add(self, rhs: Expression) -> Self::Output {
+impl Add<IntegerExpression> for usize {
+    type Output = IntegerExpression;
+    fn add(self, rhs: IntegerExpression) -> Self::Output {
         rhs + self
     }
 }
 
-impl Sub<Expression> for usize {
-    type Output = Expression;
-    fn sub(self, rhs: Expression) -> Self::Output {
+impl Sub<IntegerExpression> for usize {
+    type Output = IntegerExpression;
+    fn sub(self, rhs: IntegerExpression) -> Self::Output {
         expr(self) - rhs
     }
 }
 
-impl Mul<Expression> for usize {
-    type Output = Expression;
-    fn mul(self, rhs: Expression) -> Self::Output {
+impl Mul<IntegerExpression> for usize {
+    type Output = IntegerExpression;
+    fn mul(self, rhs: IntegerExpression) -> Self::Output {
         rhs * self
     }
 }
 
-impl Div<Expression> for usize {
-    type Output = Expression;
-    fn div(self, rhs: Expression) -> Self::Output {
+impl Div<IntegerExpression> for usize {
+    type Output = IntegerExpression;
+    fn div(self, rhs: IntegerExpression) -> Self::Output {
         expr(self) / rhs
     }
 }
 
-impl Rem<Expression> for usize {
-    type Output = Expression;
-    fn rem(self, rhs: Expression) -> Self::Output {
+impl Rem<IntegerExpression> for usize {
+    type Output = IntegerExpression;
+    fn rem(self, rhs: IntegerExpression) -> Self::Output {
         expr(self) % rhs
     }
 }
 
-impl BitAnd<Expression> for usize {
-    type Output = Expression;
-    fn bitand(self, rhs: Expression) -> Self::Output {
+impl BitAnd<IntegerExpression> for usize {
+    type Output = IntegerExpression;
+    fn bitand(self, rhs: IntegerExpression) -> Self::Output {
         rhs & self
     }
 }
 
-impl BitOr<Expression> for usize {
-    type Output = Expression;
-    fn bitor(self, rhs: Expression) -> Self::Output {
+impl BitOr<IntegerExpression> for usize {
+    type Output = IntegerExpression;
+    fn bitor(self, rhs: IntegerExpression) -> Self::Output {
         rhs | self
     }
 }
 
-impl Add<Expression> for i32 {
-    type Output = Expression;
-    fn add(self, rhs: Expression) -> Self::Output {
+impl Add<IntegerExpression> for i32 {
+    type Output = IntegerExpression;
+    fn add(self, rhs: IntegerExpression) -> Self::Output {
         rhs + self
     }
 }
 
-impl Sub<Expression> for i32 {
-    type Output = Expression;
-    fn sub(self, rhs: Expression) -> Self::Output {
+impl Sub<IntegerExpression> for i32 {
+    type Output = IntegerExpression;
+    fn sub(self, rhs: IntegerExpression) -> Self::Output {
         expr(self) - rhs
     }
 }
 
-impl Mul<Expression> for i32 {
-    type Output = Expression;
-    fn mul(self, rhs: Expression) -> Self::Output {
+impl Mul<IntegerExpression> for i32 {
+    type Output = IntegerExpression;
+    fn mul(self, rhs: IntegerExpression) -> Self::Output {
         rhs * self
     }
 }
 
-impl Div<Expression> for i32 {
-    type Output = Expression;
-    fn div(self, rhs: Expression) -> Self::Output {
+impl Div<IntegerExpression> for i32 {
+    type Output = IntegerExpression;
+    fn div(self, rhs: IntegerExpression) -> Self::Output {
         expr(self) / rhs
     }
 }
 
-impl Rem<Expression> for i32 {
-    type Output = Expression;
-    fn rem(self, rhs: Expression) -> Self::Output {
+impl Rem<IntegerExpression> for i32 {
+    type Output = IntegerExpression;
+    fn rem(self, rhs: IntegerExpression) -> Self::Output {
         expr(self) % rhs
     }
 }
 
-impl BitAnd<Expression> for i32 {
-    type Output = Expression;
-    fn bitand(self, rhs: Expression) -> Self::Output {
+impl BitAnd<IntegerExpression> for i32 {
+    type Output = IntegerExpression;
+    fn bitand(self, rhs: IntegerExpression) -> Self::Output {
         rhs & self
     }
 }
 
-impl BitOr<Expression> for i32 {
-    type Output = Expression;
-    fn bitor(self, rhs: Expression) -> Self::Output {
+impl BitOr<IntegerExpression> for i32 {
+    type Output = IntegerExpression;
+    fn bitor(self, rhs: IntegerExpression) -> Self::Output {
         rhs | self
     }
 }
 
-impl Neg for Expression {
-    type Output = Expression;
+impl Neg for IntegerExpression {
+    type Output = IntegerExpression;
     fn neg(self) -> Self::Output {
         self * -1
     }
@@ -890,7 +895,7 @@ fn leading_num_is_top_add_operand(body: &[Term]) -> bool {
     bare.len() == 2 && bare[0]
 }
 
-impl<E: Into<Expression>> Add<E> for Expression {
+impl<E: Into<IntegerExpression>> Add<E> for IntegerExpression {
     type Output = Self;
     fn add(self, rhs: E) -> Self::Output {
         let rhs = rhs.into();
@@ -921,7 +926,7 @@ impl<E: Into<Expression>> Add<E> for Expression {
                         if let Some(folded) = n.checked_add(z) {
                             let mut new_terms = self_terms.clone();
                             new_terms[0] = Term::Num(folded);
-                            return Expression::new(new_terms);
+                            return IntegerExpression::new(new_terms);
                         }
                     }
                 }
@@ -931,11 +936,11 @@ impl<E: Into<Expression>> Add<E> for Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Add);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
 }
 
-impl<E: Into<Expression>> Sub<E> for Expression {
+impl<E: Into<IntegerExpression>> Sub<E> for IntegerExpression {
     type Output = Self;
     fn sub(self, rhs: E) -> Self::Output {
         let rhs = rhs.into();
@@ -951,11 +956,11 @@ impl<E: Into<Expression>> Sub<E> for Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Sub);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
 }
 
-impl<E: Into<Expression>> Mul<E> for Expression {
+impl<E: Into<IntegerExpression>> Mul<E> for IntegerExpression {
     type Output = Self;
     fn mul(self, rhs: E) -> Self::Output {
         let rhs = rhs.into();
@@ -976,11 +981,11 @@ impl<E: Into<Expression>> Mul<E> for Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Mul);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
 }
 
-impl<E: Into<Expression>> Div<E> for Expression {
+impl<E: Into<IntegerExpression>> Div<E> for IntegerExpression {
     type Output = Self;
     fn div(self, rhs: E) -> Self::Output {
         let rhs = rhs.into();
@@ -1003,11 +1008,11 @@ impl<E: Into<Expression>> Div<E> for Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Div);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
 }
 
-impl<E: Into<Expression>> Rem<E> for Expression {
+impl<E: Into<IntegerExpression>> Rem<E> for IntegerExpression {
     type Output = Self;
     fn rem(self, rhs: E) -> Self::Output {
         let rhs = rhs.into();
@@ -1020,11 +1025,11 @@ impl<E: Into<Expression>> Rem<E> for Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Mod);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
 }
 
-impl<E: Into<Expression>> BitAnd<E> for Expression {
+impl<E: Into<IntegerExpression>> BitAnd<E> for IntegerExpression {
     type Output = Self;
     fn bitand(self, rhs: E) -> Self::Output {
         let rhs = rhs.into();
@@ -1043,11 +1048,11 @@ impl<E: Into<Expression>> BitAnd<E> for Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::And);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
 }
 
-impl<E: Into<Expression>> BitOr<E> for Expression {
+impl<E: Into<IntegerExpression>> BitOr<E> for IntegerExpression {
     type Output = Self;
     fn bitor(self, rhs: E) -> Self::Output {
         let rhs = rhs.into();
@@ -1060,12 +1065,12 @@ impl<E: Into<Expression>> BitOr<E> for Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Or);
-        Expression::new(terms)
+        IntegerExpression::new(terms)
     }
 }
 
-impl std::iter::Product for Expression {
-    fn product<I: Iterator<Item = Expression>>(mut iter: I) -> Self {
+impl std::iter::Product for IntegerExpression {
+    fn product<I: Iterator<Item = IntegerExpression>>(mut iter: I) -> Self {
         // Empty product is the multiplicative identity, 1 — not 0. Returning
         // 0 here breaks rank-0 tensors: every `shape.iter().product()` call
         // site treats this as `numel`, and a `numel=0` rank-0 tensor reduces
@@ -1080,8 +1085,8 @@ impl std::iter::Product for Expression {
     }
 }
 
-impl std::iter::Sum for Expression {
-    fn sum<I: Iterator<Item = Expression>>(mut iter: I) -> Self {
+impl std::iter::Sum for IntegerExpression {
+    fn sum<I: Iterator<Item = IntegerExpression>>(mut iter: I) -> Self {
         let Some(mut p) = iter.next() else {
             return 0.into();
         };
@@ -1092,52 +1097,52 @@ impl std::iter::Sum for Expression {
     }
 }
 
-impl<E: Into<Expression>> AddAssign<E> for Expression {
+impl<E: Into<IntegerExpression>> AddAssign<E> for IntegerExpression {
     fn add_assign(&mut self, rhs: E) {
         *self = *self + rhs;
     }
 }
 
-impl<E: Into<Expression>> SubAssign<E> for Expression {
+impl<E: Into<IntegerExpression>> SubAssign<E> for IntegerExpression {
     fn sub_assign(&mut self, rhs: E) {
         *self = *self - rhs;
     }
 }
 
-impl<E: Into<Expression>> MulAssign<E> for Expression {
+impl<E: Into<IntegerExpression>> MulAssign<E> for IntegerExpression {
     fn mul_assign(&mut self, rhs: E) {
         *self = *self * rhs;
     }
 }
 
-impl<E: Into<Expression>> DivAssign<E> for Expression {
+impl<E: Into<IntegerExpression>> DivAssign<E> for IntegerExpression {
     fn div_assign(&mut self, rhs: E) {
         *self = *self / rhs;
     }
 }
 
-impl<E: Into<Expression>> RemAssign<E> for Expression {
+impl<E: Into<IntegerExpression>> RemAssign<E> for IntegerExpression {
     fn rem_assign(&mut self, rhs: E) {
         *self = *self % rhs;
     }
 }
 
-impl<E: Into<Expression>> BitAndAssign<E> for Expression {
+impl<E: Into<IntegerExpression>> BitAndAssign<E> for IntegerExpression {
     fn bitand_assign(&mut self, rhs: E) {
         *self = *self & rhs;
     }
 }
 
-impl<E: Into<Expression>> BitOrAssign<E> for Expression {
+impl<E: Into<IntegerExpression>> BitOrAssign<E> for IntegerExpression {
     fn bitor_assign(&mut self, rhs: E) {
         *self = *self | rhs;
     }
 }
 
 #[tracing::instrument(skip_all)]
-fn egglog_simplify(e: Expression) -> Expression {
+fn egglog_simplify(e: IntegerExpression) -> IntegerExpression {
     let cache = SIMPLIFY_CACHE.get_or_init(|| {
-        Mutex::new(LruCache::<Expression, Expression>::new(
+        Mutex::new(LruCache::<IntegerExpression, IntegerExpression>::new(
             NonZeroUsize::new(MAX_CACHED_SIMPLIFICATIONS).unwrap(),
         ))
     });
@@ -1178,13 +1183,13 @@ fn egglog_simplify(e: Expression) -> Expression {
 }
 
 #[tracing::instrument(skip_all)]
-fn egglog_simplify_with_intervals(e: Expression, intervals: &DynDimIntervals) -> Expression {
+fn egglog_simplify_with_intervals(e: IntegerExpression, intervals: &DynDimIntervals) -> IntegerExpression {
     let key = IntervalSimplifyKey {
         expr: e,
         intervals: canonical_intervals(intervals),
     };
     let cache = INTERVAL_SIMPLIFY_CACHE.get_or_init(|| {
-        Mutex::new(LruCache::<IntervalSimplifyKey, Expression>::new(
+        Mutex::new(LruCache::<IntervalSimplifyKey, IntegerExpression>::new(
             NonZeroUsize::new(MAX_CACHED_SIMPLIFICATIONS).unwrap(),
         ))
     });
@@ -1241,18 +1246,18 @@ mod tests {
         // emitters use `shape.iter().product()` to compute `numel`, and a
         // rank-0 tensor has 1 element. Returning 0 here would yield a CUDA
         // launch with grid=(0, 1, 1) and crash at runtime.
-        let empty: Vec<Expression> = vec![];
+        let empty: Vec<IntegerExpression> = vec![];
         assert_eq!(
-            empty.into_iter().product::<Expression>(),
-            Expression::from(1)
+            empty.into_iter().product::<IntegerExpression>(),
+            IntegerExpression::from(1)
         );
     }
 
     #[test]
     fn test_empty_sum_is_zero() {
         // Sanity check the additive identity stays 0 (it always was).
-        let empty: Vec<Expression> = vec![];
-        assert_eq!(empty.into_iter().sum::<Expression>(), Expression::from(0));
+        let empty: Vec<IntegerExpression> = vec![];
+        assert_eq!(empty.into_iter().sum::<IntegerExpression>(), IntegerExpression::from(0));
     }
 
     #[test]
@@ -1378,7 +1383,7 @@ mod tests {
         // let x = z % (((((153 + h) / 8) + -31) * ((((w + 153) / 8) + -31) / 16)) * 64);
         // assert!(x.simplify().len() < 15);
         // Like-term combining: 1+s+8+s+12+s+1+s+3+s+8+s+3+s+11+s+15+s+8+s+19 -> 10*s + 89
-        let x: Expression =
+        let x: IntegerExpression =
             (((((((((((((((((((1 + s) + 8) + s) + 12) + s) + 1) + s) + 3) + s) + 8) + s)
                 + 3)
                 + s)
@@ -1395,7 +1400,7 @@ mod tests {
     #[test]
     fn test_no_explode() {
         // This expression previously caused e-graph explosion with naive associativity rules
-        let x: Expression = 1 + ((8 / expr(32)) + 27);
+        let x: IntegerExpression = 1 + ((8 / expr(32)) + 27);
         x.simplify();
     }
 

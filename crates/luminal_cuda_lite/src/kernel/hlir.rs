@@ -81,11 +81,11 @@ pub fn kernel_rewrite<H: Default + EgglogOp, L: Default + EgglogOp>() -> Rule {
 #[derive(Default, Debug, Clone)]
 
 pub struct KernelMaxReduce {
-    out_shape: Vec<Expression>,
-    iters: Expression,
-    in_stride: Vec<Expression>,
-    iter_stride: Expression,
-    out_stride: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    iters: IntExpr,
+    in_stride: Vec<IntExpr>,
+    iter_stride: IntExpr,
+    out_stride: Vec<IntExpr>,
     dtype: DType,
 }
 impl EgglogOp for KernelMaxReduce {
@@ -121,8 +121,8 @@ impl EgglogOp for KernelMaxReduce {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -150,9 +150,9 @@ impl KernelOp for KernelMaxReduce {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let vars = self
@@ -179,7 +179,7 @@ impl KernelOp for KernelMaxReduce {
             dtype
         };
         let includes = dtype_includes(&[self.dtype]);
-        let n_outputs: Expression = self.out_shape.iter().copied().product();
+        let n_outputs: IntExpr = self.out_shape.iter().copied().product();
         let threads_per_block = 256; // 8 warps per block
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
         let dyn_dims_param = if vars.is_empty() {
@@ -273,25 +273,25 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
-        (self.out_shape.iter().copied().product::<Expression>() * self.iters * self.dtype.bits())
+    fn bytes_loaded(&self) -> IntExpr {
+        (self.out_shape.iter().copied().product::<IntExpr>() * self.iters * self.dtype.bits())
             .ceil_div(8)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
-        self.out_shape.iter().copied().product::<Expression>() * self.iters
+    fn flops(&self) -> IntExpr {
+        self.out_shape.iter().copied().product::<IntExpr>() * self.iters
     }
 
     fn output_dtype(&self) -> DType {
@@ -305,11 +305,11 @@ extern \"C\" {{
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelSumReduce {
-    out_shape: Vec<Expression>,
-    iters: Expression,
-    in_stride: Vec<Expression>,
-    iter_stride: Expression,
-    out_stride: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    iters: IntExpr,
+    in_stride: Vec<IntExpr>,
+    iter_stride: IntExpr,
+    out_stride: Vec<IntExpr>,
     dtype: DType,
 }
 impl EgglogOp for KernelSumReduce {
@@ -345,8 +345,8 @@ impl EgglogOp for KernelSumReduce {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             {
@@ -382,9 +382,9 @@ impl KernelOp for KernelSumReduce {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let vars = self
@@ -407,7 +407,7 @@ impl KernelOp for KernelSumReduce {
         );
         let accum_dtype = if uses_fp8_storage { "float" } else { dtype };
         let includes = dtype_includes(&[self.dtype]);
-        let n_outputs: Expression = self.out_shape.iter().copied().product();
+        let n_outputs: IntExpr = self.out_shape.iter().copied().product();
         let threads_per_block = 256; // 8 warps per block
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
         let dyn_dims_param = if vars.is_empty() {
@@ -510,25 +510,25 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
-        (self.out_shape.iter().copied().product::<Expression>() * self.iters * self.dtype.bits())
+    fn bytes_loaded(&self) -> IntExpr {
+        (self.out_shape.iter().copied().product::<IntExpr>() * self.iters * self.dtype.bits())
             .ceil_div(8)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
-        self.out_shape.iter().copied().product::<Expression>() * self.iters
+    fn flops(&self) -> IntExpr {
+        self.out_shape.iter().copied().product::<IntExpr>() * self.iters
     }
 
     fn output_dtype(&self) -> DType {
@@ -551,11 +551,11 @@ extern \"C\" {{
 /// same semantics, one kernel.
 #[derive(Default, Debug, Clone)]
 pub struct KernelCastSumReduce {
-    out_shape: Vec<Expression>,
-    iters: Expression,
-    in_stride: Vec<Expression>,
-    iter_stride: Expression,
-    out_stride: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    iters: IntExpr,
+    in_stride: Vec<IntExpr>,
+    iter_stride: IntExpr,
+    out_stride: Vec<IntExpr>,
     dtype: DType,
 }
 
@@ -611,8 +611,8 @@ impl EgglogOp for KernelCastSumReduce {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -640,9 +640,9 @@ impl KernelOp for KernelCastSumReduce {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let vars = self
@@ -657,7 +657,7 @@ impl KernelOp for KernelCastSumReduce {
 
         let dtype = cuda_dtype(self.dtype);
         let includes = dtype_includes(&[self.dtype]);
-        let n_outputs: Expression = self.out_shape.iter().copied().product();
+        let n_outputs: IntExpr = self.out_shape.iter().copied().product();
         let threads_per_block = 256; // 8 warps per block
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
         let dyn_dims_param = if vars.is_empty() {
@@ -747,25 +747,25 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
-        (self.out_shape.iter().copied().product::<Expression>() * self.iters * self.dtype.bits())
+    fn bytes_loaded(&self) -> IntExpr {
+        (self.out_shape.iter().copied().product::<IntExpr>() * self.iters * self.dtype.bits())
             .ceil_div(8)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
-        self.out_shape.iter().copied().product::<Expression>() * self.iters
+    fn flops(&self) -> IntExpr {
+        self.out_shape.iter().copied().product::<IntExpr>() * self.iters
     }
 
     fn output_dtype(&self) -> DType {
@@ -779,11 +779,11 @@ extern \"C\" {{
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelGather {
-    out_shape: Vec<Expression>,
-    index_stride: Vec<Expression>,
-    data_shape: Vec<Expression>,
-    data_stride: Vec<Expression>,
-    out_stride: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    index_stride: Vec<IntExpr>,
+    data_shape: Vec<IntExpr>,
+    data_stride: Vec<IntExpr>,
+    out_stride: Vec<IntExpr>,
     dtype: DType,
 }
 
@@ -869,8 +869,8 @@ impl EgglogOp for KernelGather {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -900,9 +900,9 @@ impl KernelOp for KernelGather {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let vars = self
@@ -926,7 +926,7 @@ impl KernelOp for KernelGather {
             .out_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .to_kernel();
         let out_idx = flatten_strides(&self.out_shape, &self.out_stride).to_kernel();
         let idx_idx = flatten_strides(&self.out_shape, &self.index_stride).to_kernel();
@@ -953,7 +953,7 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let out_size = self.out_shape.iter().copied().product::<Expression>();
+        let out_size = self.out_shape.iter().copied().product::<IntExpr>();
         (
             func,
             module,
@@ -965,7 +965,7 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
@@ -980,20 +980,20 @@ extern \"C\" {{
             .collect()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         // Data + indices (indices are always int32)
         (self.output_size() * self.dtype.bits()).ceil_div(8) + self.output_size() * 4
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         0.into()
     }
 
@@ -1010,12 +1010,12 @@ extern \"C\" {{
 // Two-phase: memcpy graph node copies dest→output, then scatter kernel runs in same CUDA graph.
 #[derive(Debug, Clone)]
 pub struct KernelScatter {
-    dest_shape: Vec<Expression>,
-    dest_strides: Vec<Expression>,
-    index_shape: Vec<Expression>,
-    index_strides: Vec<Expression>,
-    src_strides: Vec<Expression>,
-    out_strides: Vec<Expression>,
+    dest_shape: Vec<IntExpr>,
+    dest_strides: Vec<IntExpr>,
+    index_shape: Vec<IntExpr>,
+    index_strides: Vec<IntExpr>,
+    src_strides: Vec<IntExpr>,
+    out_strides: Vec<IntExpr>,
     dtype: DType,
 }
 
@@ -1108,8 +1108,8 @@ impl EgglogOp for KernelScatter {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -1141,9 +1141,9 @@ impl KernelOp for KernelScatter {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let all_vars: FxHashSet<char> = self
@@ -1171,13 +1171,13 @@ impl KernelOp for KernelScatter {
             .index_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .to_kernel();
         let n_dest_elements = self
             .dest_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .to_kernel();
         let copy_dest_idx = flatten_strides(&self.dest_shape, &self.dest_strides).to_kernel();
         let copy_out_idx = flatten_strides(&self.dest_shape, &self.out_strides).to_kernel();
@@ -1231,7 +1231,7 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.dest_shape.iter().copied().product()
     }
 
@@ -1247,8 +1247,8 @@ extern \"C\" {{
             .collect()
     }
 
-    fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
+    fn output_bytes(&self) -> IntExpr {
+        let elem_size: IntExpr = match self.dtype {
             DType::F64 | DType::I64 => 8,
             DType::F32 | DType::Int => 4,
             DType::F16 | DType::Bf16 | DType::I16 | DType::U16 => 2,
@@ -1281,8 +1281,8 @@ extern \"C\" {{
         params
     }
 
-    fn bytes_loaded(&self) -> Expression {
-        let data_elem_size: Expression = match self.dtype {
+    fn bytes_loaded(&self) -> IntExpr {
+        let data_elem_size: IntExpr = match self.dtype {
             DType::F64 | DType::I64 => 8,
             DType::F32 | DType::Int => 4,
             DType::F16 | DType::Bf16 | DType::I16 | DType::U16 => 2,
@@ -1295,16 +1295,16 @@ extern \"C\" {{
             other => panic!("Unsupported dtype for scatter bytes_loaded: {other:?}"),
         }
         .into();
-        let n_src: Expression = self.index_shape.iter().copied().product();
+        let n_src: IntExpr = self.index_shape.iter().copied().product();
         // dest (copy) + indices + src
         self.output_size() * data_elem_size + n_src * 4 + n_src * data_elem_size
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         0.into()
     }
 
@@ -1323,8 +1323,8 @@ extern \"C\" {{
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelIota {
-    expr: Expression,
-    range: Expression,
+    expr: IntExpr,
+    range: IntExpr,
 }
 
 impl EgglogOp for KernelIota {
@@ -1362,8 +1362,8 @@ impl EgglogOp for KernelIota {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -1384,9 +1384,9 @@ impl KernelOp for KernelIota {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let mut vars = self.expr.dyn_vars().into_iter().collect::<FxHashSet<_>>();
@@ -1430,24 +1430,24 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.range
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         // Iota always outputs int32 (4 bytes)
         self.output_size() * 4
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         0.into()
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         0.into()
     }
 
@@ -1462,10 +1462,10 @@ extern \"C\" {{
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelMod {
-    out_shape: Vec<Expression>,
-    a_stride: Vec<Expression>,
-    b_stride: Vec<Expression>,
-    out_stride: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    a_stride: Vec<IntExpr>,
+    b_stride: Vec<IntExpr>,
+    out_stride: Vec<IntExpr>,
     dtype: DType,
 }
 
@@ -1501,8 +1501,8 @@ impl EgglogOp for KernelMod {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -1530,9 +1530,9 @@ impl KernelOp for KernelMod {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let vars = self
@@ -1555,7 +1555,7 @@ impl KernelOp for KernelMod {
             .out_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .to_kernel();
         let out_idx = flatten_strides(&self.out_shape, &self.out_stride).to_kernel();
         let a_idx = flatten_strides(&self.out_shape, &self.a_stride).to_kernel();
@@ -1580,7 +1580,7 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let out_size = self.out_shape.iter().copied().product::<Expression>();
+        let out_size = self.out_shape.iter().copied().product::<IntExpr>();
         (
             func,
             module,
@@ -1592,24 +1592,24 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         // Both inputs have same dtype
         self.output_bytes() * 2
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
@@ -1624,10 +1624,10 @@ extern \"C\" {{
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelLessThan {
-    out_shape: Vec<Expression>,
-    a_stride: Vec<Expression>,
-    b_stride: Vec<Expression>,
-    out_stride: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    a_stride: Vec<IntExpr>,
+    b_stride: Vec<IntExpr>,
+    out_stride: Vec<IntExpr>,
     dtype: DType,
 }
 
@@ -1679,8 +1679,8 @@ impl EgglogOp for KernelLessThan {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -1708,9 +1708,9 @@ impl KernelOp for KernelLessThan {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let vars = self
@@ -1734,7 +1734,7 @@ impl KernelOp for KernelLessThan {
             .out_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .to_kernel();
         let out_idx = flatten_strides(&self.out_shape, &self.out_stride).to_kernel();
         let a_idx = flatten_strides(&self.out_shape, &self.a_stride).to_kernel();
@@ -1759,7 +1759,7 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let out_size = self.out_shape.iter().copied().product::<Expression>();
+        let out_size = self.out_shape.iter().copied().product::<IntExpr>();
         (
             func,
             module,
@@ -1771,25 +1771,25 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         // LessThan outputs Bool (unsigned char, 1 byte per element)
         self.output_size()
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
             + (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
@@ -1865,8 +1865,8 @@ impl EgglogOp for KernelConstant {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         _input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        _expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        _expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -1891,9 +1891,9 @@ impl KernelOp for KernelConstant {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let value_str = if self.value.is_nan() {
@@ -1937,23 +1937,23 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         1.into()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         0.into()
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         0.into()
     }
 
@@ -1968,7 +1968,7 @@ extern \"C\" {{
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelCast {
-    size: Expression,
+    size: IntExpr,
     in_dtype: DType,
     out_dtype: DType,
 }
@@ -2016,8 +2016,8 @@ impl EgglogOp for KernelCast {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -2039,9 +2039,9 @@ impl KernelOp for KernelCast {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let out_dtype = cuda_dtype(self.out_dtype);
@@ -2113,23 +2113,23 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.size
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.size * self.out_dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         (self.size * self.in_dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         0.into()
     }
 
@@ -2226,16 +2226,16 @@ pub fn get_dyn_dim_offset(dim: char, sorted_dims: &[char]) -> Option<usize> {
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelEmbed {
-    batch_shape: Vec<Expression>,  // batch dimensions (e.g., [seq_len])
-    token_stride: Vec<Expression>, // stride for token_ids input
-    out_stride: Vec<Expression>,   // stride for output
-    embed_dim: Expression,         // row length copied per token
-    row_stride: Expression,        // table row pitch (== embed_dim for embeddings)
+    batch_shape: Vec<IntExpr>,  // batch dimensions (e.g., [seq_len])
+    token_stride: Vec<IntExpr>, // stride for token_ids input
+    out_stride: Vec<IntExpr>,   // stride for output
+    embed_dim: IntExpr,         // row length copied per token
+    row_stride: IntExpr,        // table row pitch (== embed_dim for embeddings)
     dtype: DType,                  // embedding table / output dtype
 }
 
 const KERNEL_EMBED_LAYOUT_DECLARATIONS: &str =
-    "(relation kernel_embed_row_major (EList EList Expression))";
+    "(relation kernel_embed_row_major (EList EList IntExpr))";
 
 impl EgglogOp for KernelEmbed {
     fn sort(&self) -> SortDef {
@@ -2454,8 +2454,8 @@ impl EgglogOp for KernelEmbed {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -2483,16 +2483,16 @@ impl KernelOp for KernelEmbed {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let batch_size = self
             .batch_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .max(1);
         let vars = self
             .batch_shape
@@ -2559,31 +2559,31 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.batch_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .max(1)
             * self.embed_dim
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         let batch_size = self
             .batch_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .max(1);
         // Load: 1 token ID (4 bytes) per batch + 1 embedding row per batch
         batch_size * ((self.embed_dim * self.dtype.bits()).ceil_div(8) + 4)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         // Store: 1 embedding row per batch element
         self.output_bytes()
     }
@@ -2592,7 +2592,7 @@ extern \"C\" {{
         self.dtype
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         // No FLOPs - just memory copy
         0.into()
     }

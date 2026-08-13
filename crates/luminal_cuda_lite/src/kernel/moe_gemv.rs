@@ -50,18 +50,18 @@ const WARPS_PER_BLOCK: usize = TPB / 32;
 #[derive(Default, Debug, Clone)]
 pub struct KernelMoEGemv {
     /// Matmul output shape `[s, k, 1, O]` (s may be dynamic).
-    out_shape: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
     /// Reduce dimension (= D, the expert row length).
-    k_dim: Expression,
+    k_dim: IntExpr,
     /// Expert weight tensor shape `[E, O, D]`.
-    w_shape: Vec<Expression>,
+    w_shape: Vec<IntExpr>,
     /// x-operand strides over the mul shape `[s, k, 1, O, D]`.
-    x_strides: Vec<Expression>,
+    x_strides: Vec<IntExpr>,
     /// topk-operand strides over `(s, k)`. NOT necessarily contiguous: the
     /// routing indices are typically a `..k` slice VIEW of the full `(s, E)`
     /// argsort output, so the row stride is E, not k. Reading the buffer as
     /// contiguous (s, k) silently picks bottom-ranked experts for rows ≥ 1.
-    topk_strides: Vec<Expression>,
+    topk_strides: Vec<IntExpr>,
 }
 
 impl EgglogOp for KernelMoEGemv {
@@ -147,8 +147,8 @@ impl EgglogOp for KernelMoEGemv {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -174,7 +174,7 @@ impl KernelMoEGemv {
     fn dims(
         &self,
     ) -> (
-        Expression,
+        IntExpr,
         usize,
         usize,
         usize,
@@ -189,8 +189,8 @@ impl KernelMoEGemv {
         let d_out = self.out_shape[3].to_usize().expect("MoE d_out is static");
         let d_in = self.k_dim.to_usize().expect("MoE d_in is static");
         let n_experts = self.w_shape[0].to_usize().expect("MoE E is static");
-        let resolve = |e: Expression| -> usize {
-            e.substitute('z', Expression::from(1usize))
+        let resolve = |e: IntExpr| -> usize {
+            e.substitute('z', IntExpr::from(1usize))
                 .simplify()
                 .to_usize()
                 .expect("MoE x stride is static")
@@ -212,9 +212,9 @@ impl KernelOp for KernelMoEGemv {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let (s, k, o, d, e, xs_s, xs_k, ts_s, ts_k) = self.dims();
@@ -306,25 +306,25 @@ extern \"C\" {{
             kernel,
             (
                 (s * k * o).ceil_div(WARPS_PER_BLOCK),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
             (
-                Expression::from(TPB),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(TPB),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         let (s, k, o, ..) = self.dims();
         s * k * o
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size() * 4
     }
 
@@ -336,18 +336,18 @@ extern \"C\" {{
         self.out_shape[0].dyn_vars().into_iter().collect()
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         // Each (s, k) slot streams one expert's O×D BF16 rows plus its input
         // row and routing index.
         let (s, k, o, d, ..) = self.dims();
         s * k * (o * d * 2 + d * 4 + 4)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         let (s, k, o, d, ..) = self.dims();
         s * k * o * d * 2
     }

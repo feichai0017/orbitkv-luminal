@@ -11,7 +11,7 @@ use luminal::{
     },
     op::{EgglogOp, LLIROp},
     prelude::*,
-    shape::Expression,
+    shape::IntExpr,
 };
 
 use crate::{
@@ -61,19 +61,19 @@ const WORKSPACE_SIZE: usize = 32 * 1024 * 1024; // 32 MiB
 pub struct GLUMoE {
     pub(crate) mode: GLUMoEMode,
     /// Product of gate_up weight dimensions per expert (gate_up_dim * hidden) used for gather stride
-    gu_io: Expression,
+    gu_io: IntExpr,
     /// Product of down weight dimensions per expert (hidden * intermediate) used for gather stride
-    dn_io: Expression,
+    dn_io: IntExpr,
     /// K dimension of gate_up matmul (= hidden)
-    gu_matmul_k: Expression,
+    gu_matmul_k: IntExpr,
     /// K dimension of down matmul (= intermediate)
-    dn_matmul_k: Expression,
+    dn_matmul_k: IntExpr,
     /// K experts to sum over (= top_k)
-    output_k: Expression,
+    output_k: IntExpr,
     /// Total elements in a single gate_up expert weight matrix
-    gu_within_range: Expression,
+    gu_within_range: IntExpr,
     /// Total elements in a single down expert weight matrix
-    dn_within_range: Expression,
+    dn_within_range: IntExpr,
     cublaslt: OnceLock<Arc<CudaBlasLT>>,
     module: OnceLock<(Arc<CudaModule>, CudaFunction, CudaFunction)>,
 }
@@ -109,13 +109,13 @@ impl Default for GLUMoE {
     fn default() -> Self {
         Self {
             mode: GLUMoEMode::SwiGLU,
-            gu_io: Expression::default(),
-            dn_io: Expression::default(),
-            gu_matmul_k: Expression::default(),
-            dn_matmul_k: Expression::default(),
-            output_k: Expression::default(),
-            gu_within_range: Expression::default(),
-            dn_within_range: Expression::default(),
+            gu_io: IntExpr::default(),
+            dn_io: IntExpr::default(),
+            gu_matmul_k: IntExpr::default(),
+            dn_matmul_k: IntExpr::default(),
+            output_k: IntExpr::default(),
+            gu_within_range: IntExpr::default(),
+            dn_within_range: IntExpr::default(),
             cublaslt: OnceLock::new(),
             module: OnceLock::new(),
         }
@@ -255,8 +255,8 @@ impl EgglogOp for GLUMoE {
         egraph: &'a luminal::egglog_utils::SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let gu_io = extract_expr(egraph, kind_children[0], expr_cache).unwrap();
         let dn_io = extract_expr(egraph, kind_children[1], expr_cache).unwrap();
@@ -665,15 +665,15 @@ impl HostOp for GLUMoE {
         Ok(())
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         // Output is [seq, hidden] F32 → seq * hidden elements
         // But seq is dynamic. We derive from first input size / hidden.
         // Actually, output_bytes is what matters for allocation:
-        Expression::from('s') * self.gu_matmul_k
+        IntExpr::from('s') * self.gu_matmul_k
     }
 
-    fn output_bytes(&self) -> Expression {
-        Expression::from('s') * self.gu_matmul_k * 4 // F32
+    fn output_bytes(&self) -> IntExpr {
+        IntExpr::from('s') * self.gu_matmul_k * 4 // F32
     }
 
     fn device_memory_plan(
@@ -684,7 +684,7 @@ impl HostOp for GLUMoE {
         dyn_map: &FxHashMap<char, usize>,
     ) -> Result<HostDeviceMemoryPlan, ResourceViolation> {
         let x_bf16 = eval_resource_expression(
-            Expression::from('s') * self.gu_matmul_k * 2,
+            IntExpr::from('s') * self.gu_matmul_k * 2,
             dyn_map,
             "GLUMoE BF16 input scratch",
         )?;

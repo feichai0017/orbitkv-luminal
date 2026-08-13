@@ -25,7 +25,7 @@ pub struct GraphTensor {
     /// strides/contiguity/sizing are the compiler's business — views are
     /// explicit logical structure, layout is binding vocabulary). The
     /// recorder cross-checks these against its own recorded dims.
-    pub(crate) dims: ArrayVec<[Expression; 10]>,
+    pub(crate) dims: ArrayVec<[IntExpr; 10]>,
     pub dtype: DType,
     /// The SSA value this handle names in the logical graph (M3 Step 4a).
     /// `None` = unrecorded (a poisoned/uncovered path).
@@ -106,13 +106,13 @@ impl GraphTensor {
         source
     }
 
-    pub fn dims(&self) -> Vec<Expression> {
+    pub fn dims(&self) -> Vec<IntExpr> {
         self.dims.to_vec()
     }
 
     /// Dim agreement for elementwise ops: structural equality is the
     /// fast path; a structural mismatch falls back to PROPER equality
-    /// saturation per dim (`Expression::egglog_equal` — ruling
+    /// saturation per dim (`IntExpr::egglog_equal` — ruling
     /// 2026-08-13: `a + b` and `b + a` are the same extent, and the
     /// authoring surface must know it, not panic on spelling).
     pub(crate) fn dims_agree(&self, rhs: &GraphTensor) -> bool {
@@ -129,7 +129,7 @@ impl GraphTensor {
         self.dims.len()
     }
 
-    pub fn dims1(&self) -> Expression {
+    pub fn dims1(&self) -> IntExpr {
         assert_eq!(
             self.rank(),
             1,
@@ -138,7 +138,7 @@ impl GraphTensor {
         );
         self.dims[0]
     }
-    pub fn dims2(&self) -> (Expression, Expression) {
+    pub fn dims2(&self) -> (IntExpr, IntExpr) {
         assert_eq!(
             self.rank(),
             2,
@@ -147,7 +147,7 @@ impl GraphTensor {
         );
         (self.dims[0], self.dims[1])
     }
-    pub fn dims3(&self) -> (Expression, Expression, Expression) {
+    pub fn dims3(&self) -> (IntExpr, IntExpr, IntExpr) {
         assert_eq!(
             self.rank(),
             3,
@@ -156,7 +156,7 @@ impl GraphTensor {
         );
         (self.dims[0], self.dims[1], self.dims[2])
     }
-    pub fn dims4(&self) -> (Expression, Expression, Expression, Expression) {
+    pub fn dims4(&self) -> (IntExpr, IntExpr, IntExpr, IntExpr) {
         assert_eq!(
             self.rank(),
             4,
@@ -165,7 +165,7 @@ impl GraphTensor {
         );
         (self.dims[0], self.dims[1], self.dims[2], self.dims[3])
     }
-    pub fn dims5(&self) -> (Expression, Expression, Expression, Expression, Expression) {
+    pub fn dims5(&self) -> (IntExpr, IntExpr, IntExpr, IntExpr, IntExpr) {
         assert_eq!(
             self.rank(),
             5,
@@ -184,7 +184,7 @@ impl GraphTensor {
 
 impl Debug for GraphTensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let shape: Vec<Expression> = self
+        let shape: Vec<IntExpr> = self
             .dims
             .iter()
             .map(|d| d.resolve_vars(&self.graph().dyn_map))

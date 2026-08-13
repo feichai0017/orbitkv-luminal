@@ -16,7 +16,7 @@ use std::sync::Arc;
 use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream};
 use luminal::{
     dtype::DType, op::CustomOp, op::LLIROp, prelude::FxHashMap, prelude::GraphTensor,
-    shape::Expression,
+    shape::IntExpr,
 };
 
 use crate::compile_module_image_for_current_device;
@@ -26,7 +26,7 @@ const TPB: usize = 1024;
 
 #[derive(Debug, Clone)]
 pub struct RMSNormKernel {
-    pub rows: Expression,
+    pub rows: IntExpr,
     pub cols: usize,
     pub eps: f32,
     pub dtype: DType,
@@ -41,9 +41,9 @@ impl KernelOp for RMSNormKernel {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let cols = self.cols;
@@ -136,24 +136,24 @@ extern "C" __global__ void rms_norm_k(
             kernel,
             (
                 self.rows,
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
             (
-                Expression::from(TPB),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(TPB),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.rows * self.cols
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
@@ -161,16 +161,16 @@ extern "C" __global__ void rms_norm_k(
         self.dtype
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         // Two passes over x plus the weight row.
         (self.rows * self.cols * self.dtype.bits() * 2).ceil_div(8) + self.cols * 4
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.rows * self.cols * 4
     }
 
@@ -229,7 +229,7 @@ pub fn fused_rms_norm(x: GraphTensor, w: GraphTensor, eps: f32) -> GraphTensor {
 
 #[derive(Debug, Clone)]
 pub struct RMSNormQuantKernel {
-    pub rows: Expression,
+    pub rows: IntExpr,
     pub cols: usize,
     pub eps: f32,
     /// Input dtype (16-bit); output is always F8E4M3.
@@ -245,9 +245,9 @@ impl KernelOp for RMSNormQuantKernel {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let cols = self.cols;
@@ -341,24 +341,24 @@ extern "C" __global__ void rms_norm_quant_k(
             kernel,
             (
                 self.rows,
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
             (
-                Expression::from(TPB),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(TPB),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.rows * self.cols
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size()
     }
 
@@ -366,15 +366,15 @@ extern "C" __global__ void rms_norm_quant_k(
         DType::F8E4M3
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         (self.rows * self.cols * self.dtype.bits() * 2).ceil_div(8) + self.cols * 4 + 4
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.rows * self.cols * 5
     }
 
@@ -441,7 +441,7 @@ pub fn fused_rms_norm_quant(
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelRMSNorm {
-    out_shape: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
     eps: f64,
 }
 
@@ -474,7 +474,7 @@ impl EgglogOp for KernelRMSNorm {
         // weight-mul tail joins with ?rin/?xf bound, so each variant's pins
         // are cheap. A monolithic join explodes on rolled bodies with
         // several distinct layer instances.
-        let core = "(relation rms_rinv (IR IR IR f64 Expression))
+        let core = "(relation rms_rinv (IR IR IR f64 IntExpr))
             (rule
                 (
                     ; bf16 → f32 sandwich entry
@@ -572,8 +572,8 @@ impl EgglogOp for KernelRMSNorm {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let out_shape =
             extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();
@@ -589,7 +589,7 @@ impl EgglogOp for KernelRMSNorm {
         let rows = out_shape[..out_shape.len() - 1]
             .iter()
             .copied()
-            .product::<Expression>();
+            .product::<IntExpr>();
         (
             LLIROp::new::<dyn KernelOp>(Box::new(RMSNormKernel {
                 rows,
@@ -611,7 +611,7 @@ impl EgglogOp for KernelRMSNorm {
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelRMSNormQuant {
-    out_shape: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
     eps: f64,
 }
 
@@ -675,8 +675,8 @@ impl EgglogOp for KernelRMSNormQuant {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let out_shape =
             extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();

@@ -32,7 +32,7 @@ use luminal::{
 #[derive(Default, Debug, Clone)]
 pub struct KernelStableSortIdx {
     /// Output shape `(rows, E)`; rows may be dynamic.
-    out_shape: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
 }
 
 impl EgglogOp for KernelStableSortIdx {
@@ -175,8 +175,8 @@ impl EgglogOp for KernelStableSortIdx {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -197,9 +197,9 @@ impl KernelOp for KernelStableSortIdx {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let rows = self.out_shape[0];
@@ -262,22 +262,22 @@ extern \"C\" {{
             func,
             module,
             kernel,
-            (rows, Expression::from(1usize), Expression::from(1usize)),
+            (rows, IntExpr::from(1usize), IntExpr::from(1usize)),
             (
-                Expression::from(tpb),
-                Expression::from(1usize),
-                Expression::from(1usize),
+                IntExpr::from(tpb),
+                IntExpr::from(1usize),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size() * 4
     }
 
@@ -289,15 +289,15 @@ extern \"C\" {{
         self.out_shape[0].dyn_vars().into_iter().collect()
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         self.output_size() * 4
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         let e = self.out_shape[1];
         self.out_shape[0] * e * e * 2
     }

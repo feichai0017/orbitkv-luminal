@@ -162,7 +162,7 @@ fn cublaslt_available_for_runtime(stream: &Arc<cudarc::driver::CudaStream>) -> b
 }
 
 fn build_mixed_chain_graph(
-    m: impl Into<Expression>,
+    m: impl Into<IntExpr>,
     n: usize,
     k: usize,
 ) -> (Graph, NodeIndex, NodeIndex, NodeIndex, NodeIndex) {
@@ -632,7 +632,7 @@ fn cublaslt_post_matmul_fusions_reject_permuted_output_layout() {
 
 #[test]
 fn cublaslt_beta_rejects_clamped_c_leading_dimension() {
-    let z = Expression::from('z');
+    let z = IntExpr::from('z');
 
     let mut ld_cx = Graph::new();
     let a = ld_cx.tensor((4usize, 5usize));

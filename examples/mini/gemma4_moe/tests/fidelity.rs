@@ -3,7 +3,7 @@
 //! luminal_nn's mini.rs tests, 2026-08-13.
 
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal_nn::test_refs::*;
 use luminal_nn::FeedForward;
 use mini_gemma4_moe::MiniGemma4Moe;
@@ -26,7 +26,7 @@ fn mini_moe_family(softcap: f32) {
     let gather_idx = cx.tensor_dtyped(CTX, DType::Int);
     let scatter_idx = cx.tensor_dtyped(1, DType::Int);
     let caches = vec![(k_cache, v_cache)];
-    let step = Expression::from(1usize);
+    let step = IntExpr::from(1usize);
     let model = MiniGemma4Moe::new(VOCAB, D, E, 1, NH, 1, &mut cx);
     assert_eq!(model.logit_softcap, softcap, "family cap is fixed");
     let (logits, caches_out) = model.forward(ids, &caches, gather_idx, scatter_idx, step);

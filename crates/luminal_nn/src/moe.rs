@@ -14,7 +14,7 @@ impl MoE {
         let e_dim = *self.router.dims().last().unwrap();
         let (_, in_size, out_size) = self.expert_weights.dims3();
         let io = in_size * out_size;
-        let k_expr = Expression::from(self.k);
+        let k_expr = IntExpr::from(self.k);
 
         // 1. Routing probabilities: [batch.., E]
         let routing_weights = activations.matmul(self.router).softmax(n - 1);
@@ -33,7 +33,7 @@ impl MoE {
         let row_offsets = activations.graph().iota(idx_dims.clone(), |c| {
             let n = idx_dims.len();
             let mut stride = e_dim;
-            let mut acc = Expression::from(0);
+            let mut acc = IntExpr::from(0);
             for i in (0..n - 1).rev() {
                 acc = acc + c[i] * stride;
                 stride = (stride * idx_dims[i]).simplify();

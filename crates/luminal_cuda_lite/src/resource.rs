@@ -23,7 +23,7 @@ use luminal::{
     graph::LLIRGraph,
     hlir::Output,
     prelude::{
-        Expression, FxHashMap, FxHashSet, NodeIndex,
+        IntExpr, FxHashMap, FxHashSet, NodeIndex,
         petgraph::{
             Direction,
             algo::toposort,
@@ -520,7 +520,7 @@ where
 }
 
 pub(crate) fn eval_resource_expression(
-    expr: Expression,
+    expr: IntExpr,
     dyn_map: &FxHashMap<char, usize>,
     resource: &'static str,
 ) -> Result<usize, ResourceViolation> {
@@ -1143,7 +1143,7 @@ mod tests {
 
     #[derive(Debug)]
     struct TestKernel {
-        bytes: Expression,
+        bytes: IntExpr,
         aliases_input: bool,
         mutates_aliased_input: bool,
     }
@@ -1163,19 +1163,19 @@ mod tests {
             cudarc::driver::CudaFunction,
             std::sync::Arc<cudarc::driver::CudaModule>,
             String,
-            (Expression, Expression, Expression),
-            (Expression, Expression, Expression),
-            Expression,
+            (IntExpr, IntExpr, IntExpr),
+            (IntExpr, IntExpr, IntExpr),
+            IntExpr,
             FxHashMap<char, cudarc::driver::CudaSlice<u8>>,
         ) {
             unreachable!("static resource planning must not compile test kernels")
         }
 
-        fn output_size(&self) -> Expression {
+        fn output_size(&self) -> IntExpr {
             self.bytes
         }
 
-        fn output_bytes(&self) -> Expression {
+        fn output_bytes(&self) -> IntExpr {
             self.bytes
         }
 
@@ -1199,7 +1199,7 @@ mod tests {
         let mut llir = LLIRGraph::default();
         let input = llir.add_node(LLIROp::new::<Input>(Box::new(Input::default())));
         let first = llir.add_node(LLIROp::new::<dyn KernelOp>(Box::new(TestKernel {
-            bytes: Expression::from('s') * 4,
+            bytes: IntExpr::from('s') * 4,
             aliases_input: false,
             mutates_aliased_input: false,
         })));

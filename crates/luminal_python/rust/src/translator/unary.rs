@@ -183,7 +183,7 @@ impl<'a> Translator<'a> {
     /// The per-group volume is flattened into ONE axis before normalizing rather than
     /// reducing over multiple axes: the multi-axis reduction form is dropped by the
     /// e-graph during cleanup when composed into deep conv chains (see the note in
-    /// `examples/flux2/src/vae.rs`). Reshapes use `Expression` extents throughout, so
+    /// `examples/flux2/src/vae.rs`). Reshapes use `IntExpr` extents throughout, so
     /// dynamic batch and dynamic spatial dims are preserved.
     pub(crate) fn translate_group_norm(&mut self, node: &Node) -> Result<GraphTensor> {
         let input = self.get_input_tensor(node, 0)?;
@@ -210,8 +210,8 @@ impl<'a> Translator<'a> {
 
         // Per-group volume V = group_size * (product of spatial dims). Spatial extents
         // stay symbolic so dynamic spatial dims flow through.
-        let spatial: Expression = orig_dims[2..].iter().cloned().product();
-        let group_volume = spatial * Expression::from(group_size);
+        let spatial: IntExpr = orig_dims[2..].iter().cloned().product();
+        let group_volume = spatial * IntExpr::from(group_size);
 
         // Flatten everything after the batch dim into one axis: (N, C, ...) -> (N, M),
         // where M = C * spatial. Group volumes are contiguous in this layout.
@@ -231,7 +231,7 @@ impl<'a> Translator<'a> {
         // Peel the trailing (non-batch) dims back off one at a time, left to right.
         let trailing = &orig_dims[1..];
         for i in 0..trailing.len().saturating_sub(1) {
-            let suffix: Expression = trailing[i + 1..].iter().cloned().product();
+            let suffix: IntExpr = trailing[i + 1..].iter().cloned().product();
             t = t.split_dims(1 + i, suffix);
         }
 

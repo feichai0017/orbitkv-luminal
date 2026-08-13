@@ -197,8 +197,8 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn translate_expand(&mut self, node: &Node) -> Result<GraphTensor> {
         let mut a = self.get_input_tensor(node, 0)?;
-        let neg1_expr = Expression::from(-1i32);
-        let target_shape: Vec<Expression> = if let Ok(sizes) = self.get_ints_arg(node, 1) {
+        let neg1_expr = IntExpr::from(-1i32);
+        let target_shape: Vec<IntExpr> = if let Ok(sizes) = self.get_ints_arg(node, 1) {
             sizes
                 .iter()
                 .enumerate()
@@ -206,7 +206,7 @@ impl<'a> Translator<'a> {
                     if s == -1 {
                         a.legacy_tracker_ref().dims[i]
                     } else {
-                        Expression::from(s as usize)
+                        IntExpr::from(s as usize)
                     }
                 })
                 .collect()
@@ -226,11 +226,11 @@ impl<'a> Translator<'a> {
         let dim = self.get_int_arg(node, 1).unwrap_or(0);
         let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
 
-        let start: Expression = if node.inputs.len() > 2 {
+        let start: IntExpr = if node.inputs.len() > 2 {
             self.get_expr_arg(node, 2)
-                .unwrap_or_else(|_| Expression::from(0usize))
+                .unwrap_or_else(|_| IntExpr::from(0usize))
         } else {
-            Expression::from(0usize)
+            IntExpr::from(0usize)
         };
         let start = normalize_slice_bound(start, a.legacy_tracker_ref().dims[dim]);
 
@@ -251,7 +251,7 @@ impl<'a> Translator<'a> {
             });
         }
 
-        let end: Expression = self.get_expr_arg(node, 3)?;
+        let end: IntExpr = self.get_expr_arg(node, 3)?;
         let end = normalize_slice_bound(end, a.legacy_tracker_ref().dims[dim]);
 
         if let Some(s) = start.to_usize()
@@ -421,11 +421,11 @@ impl<'a> Translator<'a> {
                     let src_rank = src_dims.len();
                     let mut expanded = idx;
                     for _ in 0..(src_rank - expanded.legacy_tracker_ref().len()) {
-                        expanded = expanded.expand_dim(0, Expression::from(1usize));
+                        expanded = expanded.expand_dim(0, IntExpr::from(1usize));
                     }
                     // Build target shape: source dims everywhere except the indexed dim
                     let idx_dim_size = expanded.legacy_tracker_ref().dims[first_non_none_dim];
-                    let mut target: Vec<Expression> = src_dims.to_vec();
+                    let mut target: Vec<IntExpr> = src_dims.to_vec();
                     target[first_non_none_dim] = idx_dim_size;
                     crate::pt2_util::tracker_expand(expanded.legacy_tracker_mut(), target);
                     return Ok(super::movement_dynamic::pt2_gather_elements(
@@ -447,7 +447,7 @@ impl<'a> Translator<'a> {
         let src_shape = source.legacy_tracker_ref().dims;
         let n_indexed = index_names.len();
 
-        let mut strides: Vec<Expression> = vec![Expression::from(1usize); n_indexed];
+        let mut strides: Vec<IntExpr> = vec![IntExpr::from(1usize); n_indexed];
         for i in (0..n_indexed - 1).rev() {
             strides[i] = strides[i + 1] * src_shape[i + 1];
         }
@@ -457,7 +457,7 @@ impl<'a> Translator<'a> {
             let idx_tensor = self.get_tensor(&idx_name.name)?;
 
             // Normalize negative indices for this dimension. Stay in Int —
-            // multiplying an Int tensor by an Expression broadcasts the axis
+            // multiplying an Int tensor by an IntExpr broadcasts the axis
             // size, so we avoid three Cast nodes (Int→F32 for indices, F32→Int
             // for the result, Bool→F32 for the negative mask) per indexed dim.
             let axis_size = src_shape[dim_idx];
@@ -482,11 +482,11 @@ impl<'a> Translator<'a> {
             });
         }
 
-        let mut indexed_size = Expression::from(1usize);
+        let mut indexed_size = IntExpr::from(1usize);
         for i in 0..n_indexed {
             indexed_size *= src_shape[i];
         }
-        let remaining_dims: Vec<Expression> = src_shape[n_indexed..].to_vec();
+        let remaining_dims: Vec<IntExpr> = src_shape[n_indexed..].to_vec();
 
         let mut flat_shape = vec![indexed_size];
         flat_shape.extend_from_slice(&remaining_dims);
@@ -497,7 +497,7 @@ impl<'a> Translator<'a> {
         if remaining_dims.is_empty() {
             Ok(flat_source.gather1d(flat_idx))
         } else {
-            let mut remaining_size = Expression::from(1usize);
+            let mut remaining_size = IntExpr::from(1usize);
             for d in &remaining_dims {
                 remaining_size *= *d;
             }
@@ -518,7 +518,7 @@ impl<'a> Translator<'a> {
             let fully_flat = reshape_tensor(flat_source, vec![total_elements]);
             let gathered = fully_flat.gather1d(final_idx);
 
-            let mut result_shape: Vec<Expression> = idx_shape.to_vec();
+            let mut result_shape: Vec<IntExpr> = idx_shape.to_vec();
             result_shape.extend_from_slice(&remaining_dims);
             Ok(reshape_tensor(gathered, result_shape))
         }
@@ -543,7 +543,7 @@ impl<'a> Translator<'a> {
 
         // Normalize negative indices: -1 → last, -2 → second-to-last, etc.
         // Stay in Int the whole way — multiplying an Int tensor by an
-        // Expression broadcasts the axis size and avoids three Cast nodes
+        // IntExpr broadcasts the axis size and avoids three Cast nodes
         // (Int→F32 for indices, F32→Int for the result, plus a Bool→F32 for
         // the negative mask) that the previous F32-routed path emitted.
         let axis_dim = a.legacy_tracker_ref().dims[dim];
@@ -712,7 +712,7 @@ impl<'a> Translator<'a> {
             // a trailing size-1 dim so the rank-1 and rank-N cases share a path.
             let indices = idx_tensor.cast(DType::Int);
             let new_last = indices.legacy_tracker_ref().len();
-            let indices = indices.expand_dim(new_last, Expression::from(1usize));
+            let indices = indices.expand_dim(new_last, IntExpr::from(1usize));
             Ok(super::movement_dynamic::pt2_scatter_nd(a, indices, values))
         } else {
             bail!("index_put with multiple index tensors not yet supported");

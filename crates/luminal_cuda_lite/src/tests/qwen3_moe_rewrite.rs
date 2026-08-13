@@ -1,5 +1,5 @@
 use half::bf16;
-use luminal::{dtype::DType, prelude::*, shape::Expression};
+use luminal::{dtype::DType, prelude::*, shape::IntExpr};
 
 use super::utilities::{assert_close, get_cuda_stream, random_f32_vec};
 use crate::{host::moe::GLUMoE, runtime::CudaRuntime};
@@ -43,14 +43,14 @@ fn build_qwen_moe_graph() -> QwenMoeGraph {
 
     let n = x.dims().len();
     let e_dim = *router.dims().first().unwrap();
-    let k_expr = Expression::from(TOP_K);
+    let k_expr = IntExpr::from(TOP_K);
 
     let routing_weights = x.matmul(router.t()).softmax(n - 1);
     let top_k_indices = routing_weights.topk_indexes(TOP_K, n - 1);
 
     let row_offsets = x
         .graph()
-        .iota(Expression::from('z') / k_expr * e_dim, top_k_indices.dims());
+        .iota(IntExpr::from('z') / k_expr * e_dim, top_k_indices.dims());
     let routing_flat_idx = row_offsets + top_k_indices;
     let top_k_values = routing_weights.gather(routing_flat_idx);
     let top_k_values = top_k_values / top_k_values.sum(n - 1).expand_dim(n - 1, TOP_K);
@@ -95,7 +95,7 @@ fn build_gemma_moe_graph() -> GemmaMoeGraph {
 
     let n = router_input.dims().len();
     let e_dim = *router_proj.dims().first().unwrap();
-    let k_expr = Expression::from(TOP_K);
+    let k_expr = IntExpr::from(TOP_K);
 
     let router_hidden = router_input.std_norm(n - 1, RMS_NORM_EPS)
         * router_scale.expand_lhs(&router_input.dims()[..n - 1])
@@ -105,7 +105,7 @@ fn build_gemma_moe_graph() -> GemmaMoeGraph {
     let top_k_indices = routing_weights.topk_indexes(TOP_K, n - 1);
     let row_offsets = router_input
         .graph()
-        .iota(Expression::from('z') / k_expr * e_dim, top_k_indices.dims());
+        .iota(IntExpr::from('z') / k_expr * e_dim, top_k_indices.dims());
     let routing_flat_idx = row_offsets + top_k_indices;
     let top_k_values = routing_weights.gather(routing_flat_idx);
     let top_k_norm = top_k_values.sum(n - 1).expand_dim(n - 1, TOP_K);
@@ -149,7 +149,7 @@ fn gather_experts(
     let (_, d1, d2) = weights.dims3();
     let io = d1 * d2;
     let base = top_k_indices * io;
-    let within = graph_source.graph().iota(Expression::from('z'), (d1, d2));
+    let within = graph_source.graph().iota(IntExpr::from('z'), (d1, d2));
     let n_base = base.dims().len();
     let exp_base = base.expand_dim(n_base, d1).expand_dim(n_base + 1, d2);
     let mut exp_within = within;

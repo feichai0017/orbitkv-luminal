@@ -7,7 +7,7 @@ pub use expression::*;
 use std::ops::{Bound, Range, RangeBounds, RangeFrom, RangeFull, RangeTo, RangeToInclusive};
 
 
-fn get_start_bound<D: Into<Expression> + Copy>(bound: Bound<D>) -> Expression {
+fn get_start_bound<D: Into<IntExpr> + Copy>(bound: Bound<D>) -> IntExpr {
     match bound {
         Bound::Included(x) => x.into(),
         Bound::Excluded(x) => x.into() + 1,
@@ -15,26 +15,26 @@ fn get_start_bound<D: Into<Expression> + Copy>(bound: Bound<D>) -> Expression {
     }
 }
 
-fn get_end_bound<D: Into<Expression> + Copy>(bound: Bound<D>) -> Expression {
+fn get_end_bound<D: Into<IntExpr> + Copy>(bound: Bound<D>) -> IntExpr {
     match bound {
         Bound::Excluded(x) => x.into(),
         Bound::Included(x) => x.into() + 1,
-        Bound::Unbounded => Expression::from(i64::MAX),
+        Bound::Unbounded => IntExpr::from(i64::MAX),
     }
 }
 
 pub trait SliceRange {
-    fn bounds(&self) -> (Expression, Expression);
+    fn bounds(&self) -> (IntExpr, IntExpr);
 }
 
 impl SliceRange for usize {
-    fn bounds(&self) -> (Expression, Expression) {
-        (Expression::from(self), Expression::from(self))
+    fn bounds(&self) -> (IntExpr, IntExpr) {
+        (IntExpr::from(self), IntExpr::from(self))
     }
 }
 
 impl SliceRange for RangeFrom<usize> {
-    fn bounds(&self) -> (Expression, Expression) {
+    fn bounds(&self) -> (IntExpr, IntExpr) {
         (
             get_start_bound(self.start_bound()),
             get_end_bound(self.end_bound()),
@@ -42,7 +42,7 @@ impl SliceRange for RangeFrom<usize> {
     }
 }
 impl SliceRange for RangeTo<usize> {
-    fn bounds(&self) -> (Expression, Expression) {
+    fn bounds(&self) -> (IntExpr, IntExpr) {
         (
             get_start_bound(self.start_bound()),
             get_end_bound(self.end_bound()),
@@ -50,7 +50,7 @@ impl SliceRange for RangeTo<usize> {
     }
 }
 impl SliceRange for RangeToInclusive<usize> {
-    fn bounds(&self) -> (Expression, Expression) {
+    fn bounds(&self) -> (IntExpr, IntExpr) {
         (
             get_start_bound(self.start_bound()),
             get_end_bound(self.end_bound()),
@@ -58,39 +58,39 @@ impl SliceRange for RangeToInclusive<usize> {
     }
 }
 impl SliceRange for Range<usize> {
-    fn bounds(&self) -> (Expression, Expression) {
+    fn bounds(&self) -> (IntExpr, IntExpr) {
         (
             get_start_bound(self.start_bound()),
             get_end_bound(self.end_bound()),
         )
     }
 }
-impl SliceRange for RangeFrom<Expression> {
-    fn bounds(&self) -> (Expression, Expression) {
+impl SliceRange for RangeFrom<IntExpr> {
+    fn bounds(&self) -> (IntExpr, IntExpr) {
         (
             get_start_bound(self.start_bound()),
             get_end_bound(self.end_bound()),
         )
     }
 }
-impl SliceRange for RangeTo<Expression> {
-    fn bounds(&self) -> (Expression, Expression) {
+impl SliceRange for RangeTo<IntExpr> {
+    fn bounds(&self) -> (IntExpr, IntExpr) {
         (
             get_start_bound(self.start_bound()),
             get_end_bound(self.end_bound()),
         )
     }
 }
-impl SliceRange for RangeToInclusive<Expression> {
-    fn bounds(&self) -> (Expression, Expression) {
+impl SliceRange for RangeToInclusive<IntExpr> {
+    fn bounds(&self) -> (IntExpr, IntExpr) {
         (
             get_start_bound(self.start_bound()),
             get_end_bound(self.end_bound()),
         )
     }
 }
-impl SliceRange for Range<Expression> {
-    fn bounds(&self) -> (Expression, Expression) {
+impl SliceRange for Range<IntExpr> {
+    fn bounds(&self) -> (IntExpr, IntExpr) {
         (
             get_start_bound(self.start_bound()),
             get_end_bound(self.end_bound()),
@@ -98,40 +98,40 @@ impl SliceRange for Range<Expression> {
     }
 }
 impl SliceRange for RangeFull {
-    fn bounds(&self) -> (Expression, Expression) {
-        (0.into(), Expression::from(i64::MAX))
+    fn bounds(&self) -> (IntExpr, IntExpr) {
+        (0.into(), IntExpr::from(i64::MAX))
     }
 }
 impl<R: SliceRange> SliceRange for (R,) {
-    fn bounds(&self) -> (Expression, Expression) {
+    fn bounds(&self) -> (IntExpr, IntExpr) {
         self.0.bounds()
     }
 }
 
 pub trait ToSlice {
-    fn to_range_vec(self) -> Vec<(Expression, Expression)>;
+    fn to_range_vec(self) -> Vec<(IntExpr, IntExpr)>;
 }
 
 impl<R: SliceRange> ToSlice for R {
-    fn to_range_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_range_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![self.bounds()]
     }
 }
 
 impl<R1: SliceRange, R2: SliceRange> ToSlice for (R1, R2) {
-    fn to_range_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_range_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![self.0.bounds(), self.1.bounds()]
     }
 }
 
 impl<R1: SliceRange, R2: SliceRange, R3: SliceRange> ToSlice for (R1, R2, R3) {
-    fn to_range_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_range_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![self.0.bounds(), self.1.bounds(), self.2.bounds()]
     }
 }
 
 impl<R1: SliceRange, R2: SliceRange, R3: SliceRange, R4: SliceRange> ToSlice for (R1, R2, R3, R4) {
-    fn to_range_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_range_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![
             self.0.bounds(),
             self.1.bounds(),
@@ -144,7 +144,7 @@ impl<R1: SliceRange, R2: SliceRange, R3: SliceRange, R4: SliceRange> ToSlice for
 impl<R1: SliceRange, R2: SliceRange, R3: SliceRange, R4: SliceRange, R5: SliceRange> ToSlice
     for (R1, R2, R3, R4, R5)
 {
-    fn to_range_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_range_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![
             self.0.bounds(),
             self.1.bounds(),
@@ -155,58 +155,58 @@ impl<R1: SliceRange, R2: SliceRange, R3: SliceRange, R4: SliceRange, R5: SliceRa
     }
 }
 
-impl<A: Into<Expression>, B: Into<Expression>> ToSlice for Vec<(A, B)> {
-    fn to_range_vec(self) -> Vec<(Expression, Expression)> {
+impl<A: Into<IntExpr>, B: Into<IntExpr>> ToSlice for Vec<(A, B)> {
+    fn to_range_vec(self) -> Vec<(IntExpr, IntExpr)> {
         self.into_iter().map(|i| (i.0.into(), i.1.into())).collect()
     }
 }
 
-impl<A: Into<Expression> + Copy, B: Into<Expression> + Copy> ToSlice for &Vec<(A, B)> {
-    fn to_range_vec(self) -> Vec<(Expression, Expression)> {
+impl<A: Into<IntExpr> + Copy, B: Into<IntExpr> + Copy> ToSlice for &Vec<(A, B)> {
+    fn to_range_vec(self) -> Vec<(IntExpr, IntExpr)> {
         self.iter().map(|i| (i.0.into(), i.1.into())).collect()
     }
 }
 
-impl<A: Into<Expression> + Copy, B: Into<Expression> + Copy> ToSlice for &[(A, B)] {
-    fn to_range_vec(self) -> Vec<(Expression, Expression)> {
+impl<A: Into<IntExpr> + Copy, B: Into<IntExpr> + Copy> ToSlice for &[(A, B)] {
+    fn to_range_vec(self) -> Vec<(IntExpr, IntExpr)> {
         self.iter().map(|i| (i.0.into(), i.1.into())).collect()
     }
 }
 
-impl<const N: usize, A: Into<Expression> + Copy, B: Into<Expression> + Copy> ToSlice
+impl<const N: usize, A: Into<IntExpr> + Copy, B: Into<IntExpr> + Copy> ToSlice
     for &[(A, B); N]
 {
-    fn to_range_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_range_vec(self) -> Vec<(IntExpr, IntExpr)> {
         self.iter().map(|i| (i.0.into(), i.1.into())).collect()
     }
 }
 
 pub trait ToPad {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)>;
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)>;
 }
 
 impl ToPad for () {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![]
     }
 }
 
-impl<S: Into<Expression>, E: Into<Expression>> ToPad for (S, E) {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+impl<S: Into<IntExpr>, E: Into<IntExpr>> ToPad for (S, E) {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![(self.0.into(), self.1.into())]
     }
 }
 
-impl<S: Into<Expression>, E: Into<Expression>> ToPad for ((S, E),) {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+impl<S: Into<IntExpr>, E: Into<IntExpr>> ToPad for ((S, E),) {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![(self.0.0.into(), self.0.1.into())]
     }
 }
 
-impl<S1: Into<Expression>, E1: Into<Expression>, S2: Into<Expression>, E2: Into<Expression>> ToPad
+impl<S1: Into<IntExpr>, E1: Into<IntExpr>, S2: Into<IntExpr>, E2: Into<IntExpr>> ToPad
     for ((S1, E1), (S2, E2))
 {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![
             (self.0.0.into(), self.0.1.into()),
             (self.1.0.into(), self.1.1.into()),
@@ -215,15 +215,15 @@ impl<S1: Into<Expression>, E1: Into<Expression>, S2: Into<Expression>, E2: Into<
 }
 
 impl<
-    S1: Into<Expression>,
-    E1: Into<Expression>,
-    S2: Into<Expression>,
-    E2: Into<Expression>,
-    S3: Into<Expression>,
-    E3: Into<Expression>,
+    S1: Into<IntExpr>,
+    E1: Into<IntExpr>,
+    S2: Into<IntExpr>,
+    E2: Into<IntExpr>,
+    S3: Into<IntExpr>,
+    E3: Into<IntExpr>,
 > ToPad for ((S1, E1), (S2, E2), (S3, E3))
 {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![
             (self.0.0.into(), self.0.1.into()),
             (self.1.0.into(), self.1.1.into()),
@@ -233,17 +233,17 @@ impl<
 }
 
 impl<
-    S1: Into<Expression>,
-    E1: Into<Expression>,
-    S2: Into<Expression>,
-    E2: Into<Expression>,
-    S3: Into<Expression>,
-    E3: Into<Expression>,
-    S4: Into<Expression>,
-    E4: Into<Expression>,
+    S1: Into<IntExpr>,
+    E1: Into<IntExpr>,
+    S2: Into<IntExpr>,
+    E2: Into<IntExpr>,
+    S3: Into<IntExpr>,
+    E3: Into<IntExpr>,
+    S4: Into<IntExpr>,
+    E4: Into<IntExpr>,
 > ToPad for ((S1, E1), (S2, E2), (S3, E3), (S4, E4))
 {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![
             (self.0.0.into(), self.0.1.into()),
             (self.1.0.into(), self.1.1.into()),
@@ -254,19 +254,19 @@ impl<
 }
 
 impl<
-    S1: Into<Expression>,
-    E1: Into<Expression>,
-    S2: Into<Expression>,
-    E2: Into<Expression>,
-    S3: Into<Expression>,
-    E3: Into<Expression>,
-    S4: Into<Expression>,
-    E4: Into<Expression>,
-    S5: Into<Expression>,
-    E5: Into<Expression>,
+    S1: Into<IntExpr>,
+    E1: Into<IntExpr>,
+    S2: Into<IntExpr>,
+    E2: Into<IntExpr>,
+    S3: Into<IntExpr>,
+    E3: Into<IntExpr>,
+    S4: Into<IntExpr>,
+    E4: Into<IntExpr>,
+    S5: Into<IntExpr>,
+    E5: Into<IntExpr>,
 > ToPad for ((S1, E1), (S2, E2), (S3, E3), (S4, E4), (S5, E5))
 {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![
             (self.0.0.into(), self.0.1.into()),
             (self.1.0.into(), self.1.1.into()),
@@ -278,21 +278,21 @@ impl<
 }
 
 impl<
-    S1: Into<Expression>,
-    E1: Into<Expression>,
-    S2: Into<Expression>,
-    E2: Into<Expression>,
-    S3: Into<Expression>,
-    E3: Into<Expression>,
-    S4: Into<Expression>,
-    E4: Into<Expression>,
-    S5: Into<Expression>,
-    E5: Into<Expression>,
-    S6: Into<Expression>,
-    E6: Into<Expression>,
+    S1: Into<IntExpr>,
+    E1: Into<IntExpr>,
+    S2: Into<IntExpr>,
+    E2: Into<IntExpr>,
+    S3: Into<IntExpr>,
+    E3: Into<IntExpr>,
+    S4: Into<IntExpr>,
+    E4: Into<IntExpr>,
+    S5: Into<IntExpr>,
+    E5: Into<IntExpr>,
+    S6: Into<IntExpr>,
+    E6: Into<IntExpr>,
 > ToPad for ((S1, E1), (S2, E2), (S3, E3), (S4, E4), (S5, E5), (S6, E6))
 {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         vec![
             (self.0.0.into(), self.0.1.into()),
             (self.1.0.into(), self.1.1.into()),
@@ -304,34 +304,34 @@ impl<
     }
 }
 
-impl<S: Into<Expression> + Copy, E: Into<Expression> + Copy> ToPad for &[(S, E)] {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+impl<S: Into<IntExpr> + Copy, E: Into<IntExpr> + Copy> ToPad for &[(S, E)] {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         self.iter()
             .map(|(s, e)| ((*s).into(), (*e).into()))
             .collect()
     }
 }
 
-impl<const N: usize, S: Into<Expression> + Copy, E: Into<Expression> + Copy> ToPad
+impl<const N: usize, S: Into<IntExpr> + Copy, E: Into<IntExpr> + Copy> ToPad
     for &[(S, E); N]
 {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         self.iter()
             .map(|(s, e)| ((*s).into(), (*e).into()))
             .collect()
     }
 }
 
-impl<S: Into<Expression> + Copy, E: Into<Expression> + Copy> ToPad for &Vec<(S, E)> {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+impl<S: Into<IntExpr> + Copy, E: Into<IntExpr> + Copy> ToPad for &Vec<(S, E)> {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         self.iter()
             .map(|(s, e)| ((*s).into(), (*e).into()))
             .collect()
     }
 }
 
-impl<S: Into<Expression>, E: Into<Expression>> ToPad for Vec<(S, E)> {
-    fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
+impl<S: Into<IntExpr>, E: Into<IntExpr>> ToPad for Vec<(S, E)> {
+    fn to_pad_vec(self) -> Vec<(IntExpr, IntExpr)> {
         self.into_iter()
             .map(|(s, e)| (s.into(), e.into()))
             .collect()
@@ -409,50 +409,50 @@ impl ToAxes for &Vec<usize> {
 }
 
 pub trait ToShape {
-    fn to_shape(self) -> Vec<Expression>;
+    fn to_shape(self) -> Vec<IntExpr>;
 }
 
 impl ToShape for () {
-    fn to_shape(self) -> Vec<Expression> {
+    fn to_shape(self) -> Vec<IntExpr> {
         vec![]
     }
 }
 
-impl<A: Into<Expression>> ToShape for (A,) {
-    fn to_shape(self) -> Vec<Expression> {
+impl<A: Into<IntExpr>> ToShape for (A,) {
+    fn to_shape(self) -> Vec<IntExpr> {
         vec![self.0.into()]
     }
 }
 
-impl<A: Into<Expression>, B: Into<Expression>> ToShape for (A, B) {
-    fn to_shape(self) -> Vec<Expression> {
+impl<A: Into<IntExpr>, B: Into<IntExpr>> ToShape for (A, B) {
+    fn to_shape(self) -> Vec<IntExpr> {
         vec![self.0.into(), self.1.into()]
     }
 }
 
-impl<A: Into<Expression>, B: Into<Expression>, C: Into<Expression>> ToShape for (A, B, C) {
-    fn to_shape(self) -> Vec<Expression> {
+impl<A: Into<IntExpr>, B: Into<IntExpr>, C: Into<IntExpr>> ToShape for (A, B, C) {
+    fn to_shape(self) -> Vec<IntExpr> {
         vec![self.0.into(), self.1.into(), self.2.into()]
     }
 }
 
-impl<A: Into<Expression>, B: Into<Expression>, C: Into<Expression>, D: Into<Expression>> ToShape
+impl<A: Into<IntExpr>, B: Into<IntExpr>, C: Into<IntExpr>, D: Into<IntExpr>> ToShape
     for (A, B, C, D)
 {
-    fn to_shape(self) -> Vec<Expression> {
+    fn to_shape(self) -> Vec<IntExpr> {
         vec![self.0.into(), self.1.into(), self.2.into(), self.3.into()]
     }
 }
 
 impl<
-    A: Into<Expression>,
-    B: Into<Expression>,
-    C: Into<Expression>,
-    D: Into<Expression>,
-    E: Into<Expression>,
+    A: Into<IntExpr>,
+    B: Into<IntExpr>,
+    C: Into<IntExpr>,
+    D: Into<IntExpr>,
+    E: Into<IntExpr>,
 > ToShape for (A, B, C, D, E)
 {
-    fn to_shape(self) -> Vec<Expression> {
+    fn to_shape(self) -> Vec<IntExpr> {
         vec![
             self.0.into(),
             self.1.into(),
@@ -464,15 +464,15 @@ impl<
 }
 
 impl<
-    A: Into<Expression>,
-    B: Into<Expression>,
-    C: Into<Expression>,
-    D: Into<Expression>,
-    E: Into<Expression>,
-    F: Into<Expression>,
+    A: Into<IntExpr>,
+    B: Into<IntExpr>,
+    C: Into<IntExpr>,
+    D: Into<IntExpr>,
+    E: Into<IntExpr>,
+    F: Into<IntExpr>,
 > ToShape for (A, B, C, D, E, F)
 {
-    fn to_shape(self) -> Vec<Expression> {
+    fn to_shape(self) -> Vec<IntExpr> {
         vec![
             self.0.into(),
             self.1.into(),
@@ -484,32 +484,32 @@ impl<
     }
 }
 
-impl<A: Into<Expression> + Copy> ToShape for &[A] {
-    fn to_shape(self) -> Vec<Expression> {
+impl<A: Into<IntExpr> + Copy> ToShape for &[A] {
+    fn to_shape(self) -> Vec<IntExpr> {
         self.iter().map(|i| (*i).into()).collect()
     }
 }
 
-impl<const E: usize, A: Into<Expression> + Copy> ToShape for &[A; E] {
-    fn to_shape(self) -> Vec<Expression> {
+impl<const E: usize, A: Into<IntExpr> + Copy> ToShape for &[A; E] {
+    fn to_shape(self) -> Vec<IntExpr> {
         self.iter().map(|i| (*i).into()).collect()
     }
 }
 
-impl<const E: usize, A: Into<Expression>> ToShape for [A; E] {
-    fn to_shape(self) -> Vec<Expression> {
+impl<const E: usize, A: Into<IntExpr>> ToShape for [A; E] {
+    fn to_shape(self) -> Vec<IntExpr> {
         self.into_iter().map(|i| i.into()).collect()
     }
 }
 
-impl<A: Into<Expression>> ToShape for Vec<A> {
-    fn to_shape(self) -> Vec<Expression> {
+impl<A: Into<IntExpr>> ToShape for Vec<A> {
+    fn to_shape(self) -> Vec<IntExpr> {
         self.into_iter().map(|i| i.into()).collect()
     }
 }
 
-impl<A: Into<Expression>> ToShape for A {
-    fn to_shape(self) -> Vec<Expression> {
+impl<A: Into<IntExpr>> ToShape for A {
+    fn to_shape(self) -> Vec<IntExpr> {
         vec![self.into()]
     }
 }

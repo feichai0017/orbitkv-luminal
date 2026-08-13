@@ -280,7 +280,7 @@ fn generate_layer_weights(layer: &MiniTransformerLayer) -> Vec<(GraphTensor, Vec
 /// dynamic symbols in kernel expressions should route through dyn buffer.
 #[test]
 fn dynamic_const_codegen_uses_dyn_buffer() {
-    let expr = (Expression::from('a') * 2 + Expression::from('z')).simplify();
+    let expr = (IntExpr::from('a') * 2 + IntExpr::from('z')).simplify();
     let code = lower_expression_for_metal(&expr, "idx");
 
     assert!(

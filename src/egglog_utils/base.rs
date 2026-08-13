@@ -9,7 +9,7 @@ use rustc_hash::FxHashSet;
 pub const IR: SortClass = SortClass::new("IR");
 pub const OP_KIND: SortClass = SortClass::new("OpKind");
 pub const ILIST: SortClass = SortClass::new("IList");
-pub const EXPRESSION: SortClass = SortClass::new("Expression");
+pub const EXPRESSION: SortClass = SortClass::new("IntExpr");
 pub const ELIST: SortClass = SortClass::new("EList");
 pub const DTYPE: SortClass = SortClass::new("DType");
 pub const I64: SortClass = SortClass::new("i64");
@@ -76,7 +76,7 @@ pub fn nelem_f(l: Term) -> Term {
     app(&SORTS.f_nelem, vec![l])
 }
 
-// ---- Expression term constructors ----
+// ---- IntExpr term constructors ----
 
 pub fn num(val: Term) -> Term {
     SORTS.m_num.call(("n", val))
@@ -159,8 +159,8 @@ pub fn rowmajor(list: Term) -> Term {
 
 // ---- Conversions from shape types to egglog terms ----
 
-/// Convert a shape `Expression` into an egglog `Term`.
-pub fn expr_to_term(expr: &shape::Expression) -> Term {
+/// Convert a shape `IntExpr` into an egglog `Term`.
+pub fn expr_to_term(expr: &shape::IntExpr) -> Term {
     let mut stack = Vec::new();
     for term in expr.terms.read().iter() {
         let t = match term {
@@ -204,9 +204,9 @@ pub fn shape_to_elist(shape: impl ToShape) -> Term {
 }
 
 /// All sort classes, sort definitions, and convenience term constructors
-/// for the base Expression/EList/DType egglog types.
+/// for the base IntExpr/EList/DType egglog types.
 pub struct BaseSorts {
-    // Expression variants
+    // IntExpr variants
     pub m_num: SortDef,
     pub m_iter: SortDef,
     pub m_var: SortDef,
@@ -522,7 +522,7 @@ pub fn base_expression_egglog_with_intervals() -> String {
 
 /// Generate the egglog program equivalent to `base.egg`.
 ///
-/// This builds the Expression, EList, and DType datatypes along with all
+/// This builds the IntExpr, EList, and DType datatypes along with all
 /// algebraic rewrites, replacement rules, and list helper functions.
 fn base_expression_egglog_impl(use_interval_analysis: bool) -> String {
     let s = BaseSorts::new();
@@ -1253,7 +1253,7 @@ fn base_expression_egglog_impl(use_interval_analysis: bool) -> String {
     p.add_function(FunctionDef {
         name: "nth_from_end".into(),
         args: vec!["EList".into(), "i64".into()],
-        ret: "Expression".into(),
+        ret: "IntExpr".into(),
         merge: Some("new".into()),
     });
     p.add_rule(
@@ -1278,7 +1278,7 @@ fn base_expression_egglog_impl(use_interval_analysis: bool) -> String {
     p.add_function(FunctionDef {
         name: "n_elements".into(),
         args: vec!["EList".into()],
-        ret: "Expression".into(),
+        ret: "IntExpr".into(),
         merge: Some("new".into()),
     });
     p.add_rule(

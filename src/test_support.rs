@@ -3414,12 +3414,12 @@ mod subst_guard_study {
     #[test]
     fn compound_dim_extents_record_saturate_and_run() {
         use crate::prelude::{DType, Graph};
-        use crate::shape::Expression;
+        use crate::shape::IntExpr;
         let mut cx = Graph::default();
         cx.set_dim('a', 2);
         cx.set_dim('b', 3);
-        let ab = Expression::from('a') + Expression::from('b');
-        let ba = Expression::from('b') + Expression::from('a');
+        let ab = IntExpr::from('a') + IntExpr::from('b');
+        let ba = IntExpr::from('b') + IntExpr::from('a');
         let x = cx.named_tensor_dtyped("x", (ab,), DType::F32);
         let y = cx.named_tensor_dtyped("y", (ba,), DType::F32);
         let doubled = (x + x).output();

@@ -4,7 +4,7 @@
 //! ([`GemmaBlock`], [`Embedding`], [`LayerNorm`], rope helpers).
 
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal_nn::{Embedding, GemmaBlock, LayerNorm};
 
 /// MiniGemma3 — the gemma family at FULL ANATOMY (ruling 2026-08-10:
@@ -69,7 +69,7 @@ impl MiniGemma3 {
         caches: &[(GraphTensor, GraphTensor)],
         gather_idx: GraphTensor,
         scatter_idx: GraphTensor,
-        prev_seq: Expression,
+        prev_seq: IntExpr,
         rope: &[(GraphTensor, GraphTensor)],
         rope_rot: GraphTensor,
     ) -> (GraphTensor, Vec<(GraphTensor, GraphTensor)>) {

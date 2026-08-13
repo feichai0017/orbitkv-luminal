@@ -132,7 +132,7 @@ impl<'a> Translator<'a> {
             let neg_large = mask * (-1e9_f32);
             let mut neg_large = neg_large.cast(scores.dtype);
             for _ in 0..(q_ndim - 2) {
-                neg_large = neg_large.expand_dim(0, Expression::from(1usize));
+                neg_large = neg_large.expand_dim(0, IntExpr::from(1usize));
             }
             let (scores_b, mask_b) = broadcast_binary(scores, neg_large);
             scores = scores_b + mask_b;

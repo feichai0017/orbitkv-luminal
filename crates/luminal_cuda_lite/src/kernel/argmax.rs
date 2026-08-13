@@ -39,8 +39,8 @@ const TPB: usize = 1024;
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelArgmax {
-    out_shape: Vec<Expression>,
-    cols: Expression,
+    out_shape: Vec<IntExpr>,
+    cols: IntExpr,
     dtype: DType,
 }
 
@@ -119,8 +119,8 @@ impl EgglogOp for KernelArgmax {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -143,9 +143,9 @@ impl KernelOp for KernelArgmax {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let vars = self
@@ -163,11 +163,11 @@ impl KernelOp for KernelArgmax {
             ", const int* dyn_dims"
         };
         let cols = self.cols.to_kernel();
-        let n_rows: Expression = self
+        let n_rows: IntExpr = self
             .out_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .max(1);
 
         // Tie rule: highest index wins, matching both the decomposed chain
@@ -256,15 +256,15 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape
             .iter()
             .copied()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .max(1)
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size() * 4
     }
 
@@ -272,15 +272,15 @@ extern \"C\" {{
         DType::Int
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         (self.output_size() * self.cols * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.output_size() * self.cols
     }
 

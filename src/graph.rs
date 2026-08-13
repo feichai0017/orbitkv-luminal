@@ -162,7 +162,7 @@ impl Graph {
 // silently mistranslating.
 
 
-use crate::shape::{Expression, Term};
+use crate::shape::{IntExpr, Term};
 use anyhow::{bail, Result as AnyResult};
 
 /// Handle to a tracker-level view value. Lives on `GraphTensor` (`Copy`);
@@ -177,13 +177,13 @@ pub struct ViewId(pub u32);
 pub enum MapEntry {
     /// The consuming view's coordinate, zero-based FROM THE END (the
     /// de Bruijn house convention), with its extent.
-    Coord { from_end: usize, extent: Expression },
+    Coord { from_end: usize, extent: IntExpr },
     /// A dim-expression literal (a number or a symbolic dim var).
-    Lit(Expression),
+    Lit(IntExpr),
     Add(Box<MapEntry>, Box<MapEntry>),
-    Mul(Box<MapEntry>, Expression),
-    Div(Box<MapEntry>, Expression),
-    Rem(Box<MapEntry>, Expression),
+    Mul(Box<MapEntry>, IntExpr),
+    Div(Box<MapEntry>, IntExpr),
+    Rem(Box<MapEntry>, IntExpr),
     Min(Box<MapEntry>, Box<MapEntry>),
     Max(Box<MapEntry>, Box<MapEntry>),
 }
@@ -229,7 +229,7 @@ impl MapEntry {
 pub struct ViewValue {
     pub base_node: usize,
     pub entries: Vec<MapEntry>,
-    pub dims: Vec<Expression>,
+    pub dims: Vec<IntExpr>,
 }
 
 /// A movement transform, as the frontend method states it — its own
@@ -239,19 +239,19 @@ pub enum Movement {
     /// out dim i = in dim axes[i] (front-based, their convention).
     Permute(Vec<usize>),
     /// New broadcast dim inserted at front position `axis`.
-    ExpandDim { axis: usize, size: Expression },
+    ExpandDim { axis: usize, size: IntExpr },
     /// Size-1 front dim at `axis` removed (the squeeze).
     RemoveDim { axis: usize },
     /// dims[axis] = old/inner (outer), inner inserted after (their
     /// split_dims): parent coord = outer·inner_size + inner.
-    SplitDims { axis: usize, inner: Expression },
+    SplitDims { axis: usize, inner: IntExpr },
     /// axis2 moved adjacent then merged into axis1 (their merge_dims):
     /// axis1 reads merged/inner, axis2 reads merged%inner.
     MergeDims { axis1: usize, axis2: usize },
     /// Per-axis tile (their repeat): dim → dim·r, coord reads % old dim.
-    Repeat(Vec<Expression>),
+    Repeat(Vec<IntExpr>),
     /// Zero-start slice: same coords, smaller extents (in-bounds shrink).
-    Shrink { new_dims: Vec<Expression> },
+    Shrink { new_dims: Vec<IntExpr> },
 }
 
 /// A logical VALUE id — the SSA identity every tensor handle carries
@@ -262,7 +262,7 @@ pub struct ValueId(pub u32);
 
 /// An operand as a record call sees it: the handle's value plus its
 /// tracker dims (the divergence tripwire input).
-pub type Operand = (Option<ValueId>, Vec<Expression>);
+pub type Operand = (Option<ValueId>, Vec<IntExpr>);
 
 /// How a value renders: SSA rows are vocabulary-thin (constructor string
 /// + operand ids + aux text), but two constructors wrap some operands in
@@ -292,7 +292,7 @@ struct Value {
     /// Structured map entries — present exactly on movement-composed
     /// views, consumed by apply_movement composition.
     entries: Option<Vec<MapEntry>>,
-    dims: Vec<Expression>,
+    dims: Vec<IntExpr>,
     #[allow(dead_code)]
     dtype: DType,
     /// For inputs: the transitional binding-slot key (HLIR node index —
@@ -322,7 +322,7 @@ struct OutputRecord {
 pub struct InputSpec {
     pub label: String,
     pub id: petgraph::graph::NodeIndex,
-    pub dims: Vec<Expression>,
+    pub dims: Vec<IntExpr>,
     pub dtype: DType,
 }
 
@@ -362,7 +362,7 @@ impl LogicalGraph {
     #[allow(clippy::type_complexity)]
     pub(crate) fn viz_rows(
         &self,
-    ) -> impl Iterator<Item = (&str, &[ValueId], &[Expression], DType, Option<&str>)> {
+    ) -> impl Iterator<Item = (&str, &[ValueId], &[IntExpr], DType, Option<&str>)> {
         self.values.iter().map(|value| {
             (
                 value.constructor.as_str(),
@@ -379,7 +379,7 @@ impl LogicalGraph {
         self.outputs.iter().map(|record| (record.value, record.key))
     }
 
-    fn dim_term(expr: &Expression) -> Result<String, String> {
+    fn dim_term(expr: &IntExpr) -> Result<String, String> {
         let terms = expr.terms.read();
         match &terms[..] {
             [Term::Num(n)] => Ok(format!("(IntLit {n})")),
@@ -396,7 +396,7 @@ impl LogicalGraph {
         }
     }
 
-    fn shape_term(dims: &[Expression]) -> Result<String, String> {
+    fn shape_term(dims: &[IntExpr]) -> Result<String, String> {
         let mut term = "(IntExprNil)".to_string();
         for dim in dims.iter().rev() {
             term = format!("(IntExprCons {} {term})", Self::dim_term(dim)?);
@@ -484,7 +484,7 @@ impl LogicalGraph {
         &mut self,
         slot: usize,
         label: &str,
-        dims: &[Expression],
+        dims: &[IntExpr],
         dtype: DType,
     ) -> Option<ValueId> {
         if self.poisoned.is_some() {
@@ -598,7 +598,7 @@ impl LogicalGraph {
         constructor: &str,
         operands: &[Operand],
         extra: &str,
-        out_dims: Vec<Expression>,
+        out_dims: Vec<IntExpr>,
         out_dtype: DType,
     ) -> Option<ValueId> {
         if self.poisoned.is_some() {
@@ -634,7 +634,7 @@ impl LogicalGraph {
         at: usize,
         operand: &Operand,
         entries: &[MapEntry],
-        out_dims: Vec<Expression>,
+        out_dims: Vec<IntExpr>,
         out_dtype: DType,
     ) -> Option<ValueId> {
         if self.poisoned.is_some() {
@@ -655,7 +655,7 @@ impl LogicalGraph {
         at: usize,
         base: ValueId,
         entries: Vec<MapEntry>,
-        out_dims: Vec<Expression>,
+        out_dims: Vec<IntExpr>,
         out_dtype: DType,
     ) -> Option<ValueId> {
         let shape = match Self::shape_term(&out_dims) {
@@ -706,7 +706,7 @@ impl LogicalGraph {
         _at: usize,
         constructor: &str,
         args: &str,
-        out_dims: Vec<Expression>,
+        out_dims: Vec<IntExpr>,
         out_dtype: DType,
     ) -> Option<ValueId> {
         if self.poisoned.is_some() {
@@ -752,8 +752,8 @@ impl LogicalGraph {
     pub fn record_iota(
         &mut self,
         at: usize,
-        expr: &Expression,
-        dims: &[Expression],
+        expr: &IntExpr,
+        dims: &[IntExpr],
     ) -> Option<ValueId> {
         if self.poisoned.is_some() {
             return None;
@@ -768,7 +768,7 @@ impl LogicalGraph {
         let rank = dims.len();
         let coord_terms: Vec<String> = (0..rank)
             .map(|k| {
-                if dims[k] == Expression::from(1) {
+                if dims[k] == IntExpr::from(1) {
                     "(IntLit 0)".to_string()
                 } else {
                     format!("(CoordVar {shape} {})", rank - 1 - k)
@@ -803,9 +803,9 @@ impl LogicalGraph {
     pub fn record_mask_iota(
         &mut self,
         at: usize,
-        befores: &[Expression],
-        afters: &[Expression],
-        in_dims: &[Expression],
+        befores: &[IntExpr],
+        afters: &[IntExpr],
+        in_dims: &[IntExpr],
     ) -> Option<ValueId> {
         if self.poisoned.is_some() {
             return None;
@@ -843,12 +843,12 @@ impl LogicalGraph {
                 self.poison(format!("mask iota at t{at}: symbolic pad bound"));
                 return None;
             };
-            if before != Expression::from(0) {
+            if before != IntExpr::from(0) {
                 factors.push(format!(
                     "(IntCastFromBool (BoolLessThanInt {before_term} (IntAdd {coord} (IntLit 1))))"
                 ));
             }
-            if after != Expression::from(0) {
+            if after != IntExpr::from(0) {
                 factors.push(format!(
                     "(IntCastFromBool (BoolLessThanInt {coord} {bound_term}))"
                 ));
@@ -883,7 +883,7 @@ impl LogicalGraph {
         at: usize,
         data: &Operand,
         coords: &[Operand],
-        out_dims: Vec<Expression>,
+        out_dims: Vec<IntExpr>,
         out_dtype: DType,
     ) -> Option<ValueId> {
         if self.poisoned.is_some() {
@@ -926,7 +926,7 @@ impl LogicalGraph {
         init: &Operand,
         coords: &[Operand],
         src: &Operand,
-        out_dims: Vec<Expression>,
+        out_dims: Vec<IntExpr>,
         out_dtype: DType,
     ) -> Option<ValueId> {
         if self.poisoned.is_some() {
@@ -970,7 +970,7 @@ impl LogicalGraph {
     }
 
     /// Identity entries: parent axis p reads the like-positioned coord.
-    fn identity_entries(dims: &[Expression]) -> Vec<MapEntry> {
+    fn identity_entries(dims: &[IntExpr]) -> Vec<MapEntry> {
         let rank = dims.len();
         (0..rank)
             .map(|p| MapEntry::Coord {
@@ -1015,7 +1015,7 @@ impl LogicalGraph {
         let out_dtype = value.dtype;
         let prev_rank = prev_dims.len();
 
-        let (replacement, new_dims): (Vec<MapEntry>, Vec<Expression>) = match movement {
+        let (replacement, new_dims): (Vec<MapEntry>, Vec<IntExpr>) = match movement {
             Movement::Permute(axes) => {
                 if axes.len() != prev_rank {
                     self.poison(format!("permute arity {} vs rank {prev_rank}", axes.len()));
@@ -1446,7 +1446,7 @@ pub struct LogicalProgram {
 /// pins. Add/Mul only for now (their slice path is affine); anything else
 /// bails loudly.
 pub(crate) fn int_expr_term(
-    expr: &Expression,
+    expr: &IntExpr,
     coord_terms: &[String],
     at: &str,
 ) -> AnyResult<String> {
@@ -1460,13 +1460,13 @@ pub(crate) fn int_expr_term(
             // special: 'z' is an ordinary named symbol (P1, 2026-08-07).
             Term::Var(c) => stack.push(format!("(IntVar \"{c}\")")),
             // Coordinate atoms substitute their axis's CoordVar term; an
-            // out-of-range axis is a coord Expression that leaked out of
+            // out-of-range axis is a coord IntExpr that leaked out of
             // its own iota — refuse loudly.
             Term::Coord(k) => match coord_terms.get(*k as usize) {
                 Some(term) => stack.push(term.clone()),
                 None => bail!(
                     "coordinate atom c{k} at {at}: out of range for rank {} — a \
-                     coordinate Expression escaped its iota's value function",
+                     coordinate IntExpr escaped its iota's value function",
                     coord_terms.len()
                 ),
             },

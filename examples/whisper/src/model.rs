@@ -13,7 +13,7 @@
 use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::prelude::{GraphTensor, Ns};
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal_nn::{Embedding, KvCachePool, LayerNorm, Linear};
 
 #[derive(Clone)]
@@ -81,8 +81,8 @@ fn conv1d_bias(
 ) -> GraphTensor {
     let padded = x.pad(
         vec![
-            (Expression::from(0), Expression::from(0)),
-            (Expression::from(padding), Expression::from(padding)),
+            (IntExpr::from(0), IntExpr::from(0)),
+            (IntExpr::from(padding), IntExpr::from(padding)),
         ],
         0.0,
     );

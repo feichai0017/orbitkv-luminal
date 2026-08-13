@@ -54,7 +54,7 @@ impl GraphTensor {
             .to_axes()
             .into_iter()
             .map(|i| self.dims()[i])
-            .product::<Expression>();
+            .product::<IntExpr>();
         self.sum(axes) / reduced_elements
     }
 

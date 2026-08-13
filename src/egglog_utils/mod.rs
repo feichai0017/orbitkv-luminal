@@ -1,10 +1,10 @@
-//! Expression-level egglog machinery: the base interval/expression
+//! IntExpr-level egglog machinery: the base interval/expression
 //! lattice (`base`), the rule-authoring DSL (`api`), the serialized
-//! e-graph snapshot, and shortest-form Expression extraction.
+//! e-graph snapshot, and shortest-form IntExpr extraction.
 //!
 //! M3 Step 4b: their HLIR<->egglog compile ladder (hlir_to_egglog,
 //! egglog_to_llir, choice-set search, run_egglog report machinery) is
-//! DELETED — what survives is exactly what `Expression::simplify` /
+//! DELETED — what survives is exactly what `IntExpr::simplify` /
 //! `egglog_equal` (shape/expression.rs) consume.
 
 pub mod api;
@@ -12,7 +12,7 @@ pub mod base;
 
 pub use egraph_serialize::{ClassId, NodeId};
 
-use crate::{prelude::FxHashMap, shape::Expression};
+use crate::{prelude::FxHashMap, shape::IntExpr};
 use egglog::{ArcSort, EGraph, Value};
 
 #[derive(Debug, Clone)]
@@ -119,8 +119,8 @@ impl SerializedEGraph {
 pub fn extract_expr<'a>(
     egraph: &'a SerializedEGraph,
     node: &'a NodeId,
-    expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
-) -> Option<Expression> {
+    expr_cache: &mut FxHashMap<&'a NodeId, IntExpr>,
+) -> Option<IntExpr> {
     if let Some(e) = expr_cache.get(node) {
         return Some(*e);
     }
@@ -173,7 +173,7 @@ pub fn extract_expr<'a>(
         egraph: &SerializedEGraph,
         trajectory: &[&NodeId],
         current: &mut usize,
-    ) -> Expression {
+    ) -> IntExpr {
         let nid = trajectory[*current];
         let op = egraph.enodes[nid].0.as_str();
         match op {
@@ -207,7 +207,7 @@ pub fn extract_expr<'a>(
                     "MGte" => lhs.gte(rhs),
                     "MLt" => lhs.lt(rhs),
                     "MCeilDiv" => lhs.ceil_div(rhs),
-                    "MFloorTo" => lhs / rhs * rhs, // TODO: real floorto in Expression
+                    "MFloorTo" => lhs / rhs * rhs, // TODO: real floorto in IntExpr
                     _ => unreachable!(),
                 }
             }
@@ -216,7 +216,7 @@ pub fn extract_expr<'a>(
                 *current += 1;
                 build_expression(egraph, trajectory, current)
             }
-            "MIter" => Expression::from('z'),
+            "MIter" => IntExpr::from('z'),
             op if op.starts_with("Boxed(\"") => {
                 // Anchored strip, full name — the old chars().next()
                 // TRUNCATED multi-char names ("s77" -> 's', a silent
@@ -225,7 +225,7 @@ pub fn extract_expr<'a>(
                     .strip_prefix("Boxed(\"")
                     .and_then(|rest| rest.strip_suffix("\")"))
                     .unwrap_or_else(|| panic!("malformed boxed M-var {op:?}"));
-                Expression::from(crate::shape::Symbol::new(name))
+                IntExpr::from(crate::shape::Symbol::new(name))
             }
             op if op.starts_with("\"#") => {
                 // The coordinate atom's M-var spelling (see expr_to_term).
@@ -234,12 +234,12 @@ pub fn extract_expr<'a>(
                     .trim_start_matches('#')
                     .parse()
                     .unwrap_or_else(|_| panic!("malformed coord M-var '{op}'"));
-                Expression::new(vec![crate::shape::Term::Coord(axis)])
+                IntExpr::new(vec![crate::shape::Term::Coord(axis)])
             }
             op => op
                 .parse::<i64>()
-                .map(Expression::from)
-                .or_else(|_| op.replace('"', "").parse::<char>().map(Expression::from))
+                .map(IntExpr::from)
+                .or_else(|_| op.replace('"', "").parse::<char>().map(IntExpr::from))
                 .unwrap_or_else(|_| panic!("unsupported expression op '{op}'")),
         }
     }

@@ -728,7 +728,7 @@ fn tiny_original_gqa_attention(
 ) -> (GraphTensor, GraphTensor, GraphTensor) {
     let cx = q_rope.graph();
     let seq = q_rope.dims()[0];
-    let prev = Expression::from('p');
+    let prev = IntExpr::from('p');
     let total_seq = prev + seq;
     let kv_groups = n_heads / n_kv_heads;
 
@@ -768,13 +768,13 @@ fn tiny_original_gqa_attention(
 
 fn gqa_expand_k(
     k_full: GraphTensor,
-    ctx: Expression,
+    ctx: IntExpr,
     n_heads: usize,
     kv_groups: usize,
     head_dim: usize,
     kv_dim: usize,
 ) -> GraphTensor {
-    let z = Expression::from('z');
+    let z = IntExpr::from('z');
     let h = z / (head_dim * ctx);
     let d = (z / ctx) % head_dim;
     let c = z % ctx;
@@ -787,13 +787,13 @@ fn gqa_expand_k(
 
 fn gqa_expand_v(
     v_full: GraphTensor,
-    ctx: Expression,
+    ctx: IntExpr,
     n_heads: usize,
     kv_groups: usize,
     head_dim: usize,
     kv_dim: usize,
 ) -> GraphTensor {
-    let z = Expression::from('z');
+    let z = IntExpr::from('z');
     let h = z / (ctx * head_dim);
     let c = (z / head_dim) % ctx;
     let d = z % head_dim;
@@ -1104,7 +1104,7 @@ fn test_tiny_gqa_value_matmul_with_expanded_kv() {
     let mask = cx.named_tensor("mask", ('s', 'c')).persist();
     let v = gqa_expand_v(
         v_full,
-        Expression::from('c'),
+        IntExpr::from('c'),
         N_HEADS,
         KV_GROUPS,
         HEAD_DIM,
@@ -1490,12 +1490,12 @@ fn test_batched_argsort_ranks_axis1_matches_cpu() {
 
     let mut cx = Graph::default();
     let routing = cx.named_tensor("routing", ('s', E)).persist();
-    let z = Expression::from('z');
+    let z = IntExpr::from('z');
     let row = z / (E * E);
     let compare_col = (z / E) % E;
     let original_col = z % E;
-    let compare_idx = cx.iota(row * E + compare_col, (Expression::from('s'), E, E));
-    let original_idx = cx.iota(row * E + original_col, (Expression::from('s'), E, E));
+    let compare_idx = cx.iota(row * E + compare_col, (IntExpr::from('s'), E, E));
+    let original_idx = cx.iota(row * E + original_col, (IntExpr::from('s'), E, E));
     let a = routing.gather(compare_idx);
     let b = routing.gather(original_idx) + 1e-9;
     let ranks = (a.gt(b).cast(DType::F32) + 0.0)
@@ -1544,11 +1544,11 @@ fn test_dynamic_3d_flat_index_iota_rows() {
     const E: usize = 128;
 
     let mut cx = Graph::default();
-    let z = Expression::from('z');
+    let z = IntExpr::from('z');
     let row = z / (E * E);
     let col = z % E;
     let idx = cx
-        .iota(row * E + col, (Expression::from('s'), E, E))
+        .iota(row * E + col, (IntExpr::from('s'), E, E))
         .output();
 
     cx.set_dim('s', S);
@@ -1588,10 +1588,10 @@ fn test_dynamic_2d_to_3d_gather_rows() {
     let data = cx
         .named_tensor_dtyped("data", ('s', E), DType::Int)
         .persist();
-    let z = Expression::from('z');
+    let z = IntExpr::from('z');
     let row = z / (E * E);
     let col = z % E;
-    let idx = cx.iota(row * E + col, (Expression::from('s'), E, E));
+    let idx = cx.iota(row * E + col, (IntExpr::from('s'), E, E));
     let out = data.gather(idx).output();
 
     cx.set_dim('s', S);
@@ -1640,9 +1640,9 @@ fn test_batched_gather_experts_matches_cpu() {
     let weights = cx.named_tensor("weights", (E, D1, D2)).persist();
     let io = D1 * D2;
     let base = topk * io;
-    let within = cx.iota(Expression::from('z'), (D1, D2));
+    let within = cx.iota(IntExpr::from('z'), (D1, D2));
     let exp_base = base.expand_dim(2, D1).expand_dim(3, D2);
-    let exp_within = within.expand_dim(0, Expression::from('s')).expand_dim(1, K);
+    let exp_within = within.expand_dim(0, IntExpr::from('s')).expand_dim(1, K);
     let out = weights.gather(exp_base + exp_within).output();
 
     cx.set_dim('s', S);

@@ -5,7 +5,7 @@
 
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal::ssa_reference::SsaReferenceRuntime;
 use mini_llama3::MiniLlama3;
 
@@ -25,7 +25,7 @@ fn main() {
     let scatter_idx = cx.tensor_dtyped(1, DType::Int);
     let caches = vec![(k_cache, v_cache)];
     let (logits, _caches_out) =
-        model.forward(ids, &caches, gather_idx, scatter_idx, Expression::from(1usize));
+        model.forward(ids, &caches, gather_idx, scatter_idx, IntExpr::from(1usize));
     let logits = logits.output();
 
     let block = &model.blocks[0];

@@ -149,10 +149,10 @@ pub trait HostOp: Debug + as_any::AsAny + EgglogOp {
 
     /// Returns the output buffer size in elements.
     /// Return 0 if this op doesn't have a single output buffer (e.g., CudaGraphOp).
-    fn output_size(&self) -> Expression;
+    fn output_size(&self) -> IntExpr;
 
     /// Returns the output buffer size in bytes (accounts for dtype).
-    fn output_bytes(&self) -> Expression;
+    fn output_bytes(&self) -> IntExpr;
 
     /// Returns additional nodes (beyond graph edges) that this op needs buffers for.
     ///
@@ -184,7 +184,7 @@ pub trait HostOp: Debug + as_any::AsAny + EgglogOp {
     ///
     /// Called during buffer allocation to ensure all required buffers exist.
     /// For CudaGraphOp, this returns sizes for all internal kernel output buffers.
-    fn extra_buffer_sizes(&self) -> FxHashMap<NodeIndex, Expression> {
+    fn extra_buffer_sizes(&self) -> FxHashMap<NodeIndex, IntExpr> {
         FxHashMap::default()
     }
 

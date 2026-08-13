@@ -11,7 +11,7 @@
 //! promote) plus a spread summary. Bimodal step times = lottery-bound.
 
 use half::bf16;
-use luminal::{dtype::DType, prelude::*, shape::Expression};
+use luminal::{dtype::DType, prelude::*, shape::IntExpr};
 use luminal_cuda_lite::{cudarc, cudarc::driver::CudaContext, runtime::CudaRuntime};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
@@ -71,7 +71,7 @@ fn gather_experts(
     let (_, d1, d2) = weights.dims3();
     let io = d1 * d2;
     let base = top_k_indices * io;
-    let within = graph_source.graph().iota(Expression::from('z'), (d1, d2));
+    let within = graph_source.graph().iota(IntExpr::from('z'), (d1, d2));
     let n_base = base.dims().len();
     let exp_base = base.expand_dim(n_base, d1).expand_dim(n_base + 1, d2);
     let mut exp_within = within;
@@ -85,14 +85,14 @@ fn gather_experts(
 fn moe_block(x: GraphTensor, inputs: &LayerInputs) -> GraphTensor {
     let n = x.dims().len();
     let e_dim = NUM_EXPERTS;
-    let k_expr = Expression::from(TOP_K);
+    let k_expr = IntExpr::from(TOP_K);
 
     let routing_weights = x.matmul(inputs.router.t()).softmax(n - 1);
     let top_k_indices = routing_weights.topk_indexes(TOP_K, n - 1);
 
     let row_offsets = x
         .graph()
-        .iota(Expression::from('z') / k_expr * e_dim, top_k_indices.dims());
+        .iota(IntExpr::from('z') / k_expr * e_dim, top_k_indices.dims());
     let routing_flat_idx = row_offsets + top_k_indices;
     let top_k_values = routing_weights.gather(routing_flat_idx);
     let top_k_values = top_k_values / top_k_values.sum(n - 1).expand_dim(n - 1, TOP_K);

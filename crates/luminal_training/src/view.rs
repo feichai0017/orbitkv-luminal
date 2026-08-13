@@ -25,7 +25,7 @@ pub(crate) enum ViewClass {
     General,
 }
 
-fn expr_eq(a: Expression, b: Expression) -> bool {
+fn expr_eq(a: IntExpr, b: IntExpr) -> bool {
     if let (Some(x), Some(y)) = (a.as_num(), b.as_num()) {
         return x == y;
     }
@@ -47,7 +47,7 @@ pub(crate) fn is_contiguous_view(view: &ShapeTracker) -> bool {
 
 /// Classify how `view` (with no stride-0 dims) reads the buffer a producer
 /// wrote contiguously with `producer_dims`.
-pub(crate) fn classify_view(view: &ShapeTracker, producer_dims: &[Expression]) -> ViewClass {
+pub(crate) fn classify_view(view: &ShapeTracker, producer_dims: &[IntExpr]) -> ViewClass {
     let prod = ShapeTracker::new(producer_dims);
     if view.len() == prod.len()
         && (0..view.len()).all(|i| {
@@ -91,7 +91,7 @@ pub(crate) fn materialize(g: GraphTensor) -> GraphTensor {
         return g;
     }
     let dims = g.dims();
-    let total = dims.iter().copied().product::<Expression>();
+    let total = dims.iter().copied().product::<IntExpr>();
     let idx = g.graph().iota('z', total);
     let mut m = g.gather1d(idx);
     *m.legacy_tracker_mut() = ShapeTracker::new(&dims[..]).with_element_bits(g.dtype.bits());
@@ -100,7 +100,7 @@ pub(crate) fn materialize(g: GraphTensor) -> GraphTensor {
 
 /// View `g` as `dims` (same element count). Free when `g` is already
 /// contiguous; otherwise materializes first.
-pub(crate) fn reinterpret(g: GraphTensor, dims: &[Expression]) -> GraphTensor {
+pub(crate) fn reinterpret(g: GraphTensor, dims: &[IntExpr]) -> GraphTensor {
     let mut m = materialize(g);
     *m.legacy_tracker_mut() = ShapeTracker::new(dims).with_element_bits(m.dtype.bits());
     m
@@ -112,7 +112,7 @@ pub(crate) fn reinterpret(g: GraphTensor, dims: &[Expression]) -> GraphTensor {
 /// `view`": broadcast (stride-0) dims sum out, permutations invert as free
 /// views, reshapes reinterpret, and everything else scatter-adds via the
 /// view's index expression.
-pub fn unview(g: GraphTensor, view: ShapeTracker, producer_dims: &[Expression]) -> GraphTensor {
+pub fn unview(g: GraphTensor, view: ShapeTracker, producer_dims: &[IntExpr]) -> GraphTensor {
     assert_eq!(
         g.dims(),
         view.dims.to_vec(),
@@ -121,7 +121,7 @@ pub fn unview(g: GraphTensor, view: ShapeTracker, producer_dims: &[Expression]) 
     // 1) Sum out broadcast dims. Reading a broadcast value N times means the
     // upstream gradient is the sum of the N downstream gradients.
     let fake_axes = (0..view.len())
-        .filter(|i| view.strides[*i] == Expression::from(0))
+        .filter(|i| view.strides[*i] == IntExpr::from(0))
         .collect_vec();
     let (g, view) = if fake_axes.is_empty() {
         (g, view)
@@ -164,7 +164,7 @@ const MAX_CLASSES: usize = 64;
 pub(crate) fn static_scatter_add(
     g_flat: GraphTensor,
     idx_flat: GraphTensor,
-    f: Expression,
+    f: IntExpr,
     m: usize,
     l: usize,
 ) -> Option<GraphTensor> {
@@ -224,7 +224,7 @@ fn classes_injective(vals: &[usize], b: usize, l: usize) -> bool {
 
 /// A flat (n,) tensor of zeros, expressed as a stride-0 view of a scalar
 /// constant (used as the Scatter destination in scatter adjoints).
-pub(crate) fn zeros_flat(cx: &mut Graph, n: Expression, dtype: DType) -> GraphTensor {
+pub(crate) fn zeros_flat(cx: &mut Graph, n: IntExpr, dtype: DType) -> GraphTensor {
     let mut z = cx.constant_float(0.0);
     if dtype != DType::F32 {
         z = z.cast(dtype);
@@ -245,14 +245,14 @@ pub(crate) fn zeros_flat(cx: &mut Graph, n: Expression, dtype: DType) -> GraphTe
 fn scatter_add_through_view(
     g: GraphTensor,
     view: &ShapeTracker,
-    producer_dims: &[Expression],
+    producer_dims: &[IntExpr],
 ) -> GraphTensor {
     let cx = g.graph();
     let m = view.n_elements().simplify();
     let n = producer_dims
         .iter()
         .copied()
-        .product::<Expression>()
+        .product::<IntExpr>()
         .simplify();
     let g_flat = reinterpret(g, &[m]);
     // Physical index for each logical position of the view.
@@ -276,8 +276,8 @@ fn scatter_add_through_view(
 mod tests {
     use super::*;
 
-    fn dims(v: &[usize]) -> Vec<Expression> {
-        v.iter().map(|d| Expression::from(*d)).collect()
+    fn dims(v: &[usize]) -> Vec<IntExpr> {
+        v.iter().map(|d| IntExpr::from(*d)).collect()
     }
 
     #[test]

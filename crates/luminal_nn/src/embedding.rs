@@ -1,5 +1,5 @@
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 
 /// Token embedding: a (n_embeddings, embedding_dim) table indexed by Int
 /// token ids. Forward is a row-gather over the flattened index tensor —
@@ -44,10 +44,10 @@ impl Embedding {
         // Rebuild the batch shape with recorded splits: (N, D) → (in_dims.., D)
         let mut out = rows;
         for axis in 0..in_dims.len().saturating_sub(1) {
-            let inner: Expression = in_dims[axis + 1..]
+            let inner: IntExpr = in_dims[axis + 1..]
                 .iter()
                 .copied()
-                .fold(Expression::from(1), |acc, d| acc * d)
+                .fold(IntExpr::from(1), |acc, d| acc * d)
                 .simplify();
             out = out.split_dims(axis, inner);
         }
@@ -70,7 +70,7 @@ mod tests {
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
     use luminal::ssa_reference::SsaReferenceRuntime;
-    use luminal::shape::Expression;
+    use luminal::shape::IntExpr;
     use rustc_hash::FxHashMap;
 
     fn assert_close(ours: &[f32], expected: &[f32]) {
@@ -92,7 +92,7 @@ mod tests {
         let model = Embedding::new(3, 4, &Ns::root().child("embed"), &mut cx);
         let ids = cx.tensor_dtyped(3, DType::Int);
         let out = model.forward(ids).output();
-        assert_eq!(out.dims(), vec![Expression::from(3), Expression::from(4)]);
+        assert_eq!(out.dims(), vec![IntExpr::from(3), IntExpr::from(4)]);
 
         let ids_data = vec![1i32, 0, 2];
         // Hand golden: rows 1, 0, 2 of the table.
@@ -121,7 +121,7 @@ mod tests {
         let model = Embedding::new(3, 4, &Ns::root().child("embed"), &mut cx);
         let ids = cx.tensor_dtyped((2, 3), DType::Int);
         let out = model.forward(ids).output();
-        assert_eq!(out.dims(), vec![Expression::from(2), Expression::from(3), Expression::from(4)]);
+        assert_eq!(out.dims(), vec![IntExpr::from(2), IntExpr::from(3), IntExpr::from(4)]);
 
         let id_ints = [1usize, 0, 2, 1, 0, 1];
         let ids_data: Vec<i32> = id_ints.iter().map(|v| *v as i32).collect();

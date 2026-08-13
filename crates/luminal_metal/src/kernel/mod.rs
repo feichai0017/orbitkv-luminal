@@ -129,18 +129,18 @@ pub struct MetalEncodeContext<'a> {
 
 #[derive(Debug, Clone)]
 pub struct MetalMulInfo {
-    pub shape: Vec<Expression>,
-    pub a_strides: Vec<Expression>,
-    pub b_strides: Vec<Expression>,
-    pub output_strides: Vec<Expression>,
+    pub shape: Vec<IntExpr>,
+    pub a_strides: Vec<IntExpr>,
+    pub b_strides: Vec<IntExpr>,
+    pub output_strides: Vec<IntExpr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MetalSumReduceInfo {
-    pub shape: Vec<Expression>,
-    pub strides: Vec<Expression>,
-    pub iters: Expression,
-    pub iter_stride: Expression,
+    pub shape: Vec<IntExpr>,
+    pub strides: Vec<IntExpr>,
+    pub iters: IntExpr,
+    pub iter_stride: IntExpr,
 }
 
 pub trait MetalKernelOp: EgglogOp {
@@ -155,7 +155,7 @@ pub trait MetalKernelOp: EgglogOp {
         input_dtypes.first().copied().unwrap_or(DType::F32)
     }
 
-    fn output_size(&self) -> Expression;
+    fn output_size(&self) -> IntExpr;
 
     fn encode_compute(
         &self,

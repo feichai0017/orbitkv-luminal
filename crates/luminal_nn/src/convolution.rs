@@ -95,24 +95,24 @@ impl ConvND {
         let batch_len = rank - spatial - 1;
         assert_eq!(
             input_dims[batch_len],
-            Expression::from(self.ch_in),
+            IntExpr::from(self.ch_in),
             "Input channel dimension ({}) must match ch_in ({})",
             input_dims[batch_len],
             self.ch_in
         );
         assert_eq!(
             self.weight.dims()[0],
-            Expression::from(self.ch_out),
+            IntExpr::from(self.ch_out),
             "Weight output channels ({}) must match ch_out ({})",
             self.weight.dims()[0],
             self.ch_out
         );
 
         // Pad only the spatial dimensions.
-        let mut padding = vec![(Expression::from(0), Expression::from(0)); rank];
+        let mut padding = vec![(IntExpr::from(0), IntExpr::from(0)); rank];
         for (i, pad) in self.padding.iter().enumerate() {
             let axis = batch_len + 1 + i;
-            padding[axis] = (Expression::from(*pad), Expression::from(*pad));
+            padding[axis] = (IntExpr::from(*pad), IntExpr::from(*pad));
         }
         let padded = input.pad(padding, 0.0);
 
@@ -132,7 +132,7 @@ impl ConvND {
         let unfolded_dims = unfolded.dims();
 
         // Capture output spatial dimensions from the unfolded view.
-        let output_dims: Vec<Expression> =
+        let output_dims: Vec<IntExpr> =
             unfolded_dims[batch_len + 1..batch_len + 1 + spatial].to_vec();
 
         // Reorder to [batch..., out..., channels, kernel_spatial..., kernel_batch..., kernel_channel].
@@ -196,7 +196,7 @@ impl ConvND {
         out
     }
 
-    fn input_batch_dims(&self, input_dims: &[Expression], batch_len: usize) -> Vec<Expression> {
+    fn input_batch_dims(&self, input_dims: &[IntExpr], batch_len: usize) -> Vec<IntExpr> {
         input_dims[..batch_len].to_vec()
     }
 

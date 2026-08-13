@@ -2,7 +2,7 @@ use crate::prelude::*;
 
 impl Graph {
     /// A scalar expression constant
-    pub fn constant(&mut self, i: impl Into<Expression>) -> GraphTensor {
+    pub fn constant(&mut self, i: impl Into<IntExpr>) -> GraphTensor {
         let expr = i.into();
         let id = self.mint_id();
         let tensor = GraphTensor::from_id(id, (), self, DType::Int);
@@ -25,7 +25,7 @@ impl Graph {
     }
 
     /// Iota as a TRUE COORDINATE FUNCTION (P1 ruling 2026-08-07): the
-    /// closure receives one coordinate Expression per output axis
+    /// closure receives one coordinate IntExpr per output axis
     /// (`c[k]` ranges over `0..shape[k]`) and returns the value
     /// expression. Coordinates lower to `CoordVar`; named symbols (any
     /// char — nothing is reserved, `'z'` included) lower to `IntVar` and
@@ -39,10 +39,10 @@ impl Graph {
     pub fn iota(
         &mut self,
         shape: impl ToShape,
-        f: impl FnOnce(&[Expression]) -> Expression,
+        f: impl FnOnce(&[IntExpr]) -> IntExpr,
     ) -> GraphTensor {
         let sh = shape.to_shape();
-        let coords: Vec<Expression> = (0..sh.len()).map(Expression::coord).collect();
+        let coords: Vec<IntExpr> = (0..sh.len()).map(IntExpr::coord).collect();
         let expr = f(&coords).simplify();
         let id = self.mint_id();
         let tensor = GraphTensor::from_id(id, sh.clone(), self, DType::Int);
@@ -51,16 +51,16 @@ impl Graph {
     }
 
     /// ARange from 0 to N
-    pub fn arange(&mut self, to: impl Into<Expression>) -> GraphTensor {
+    pub fn arange(&mut self, to: impl Into<IntExpr>) -> GraphTensor {
         self.iota(to, |c| c[0])
     }
 
     /// ARange from beginning to end
     pub fn arange_options(
         &mut self,
-        start: impl Into<Expression>,
-        end: impl Into<Expression>,
-        step: impl Into<Expression>,
+        start: impl Into<IntExpr>,
+        end: impl Into<IntExpr>,
+        step: impl Into<IntExpr>,
     ) -> GraphTensor {
         let (start, end, step) = (start.into(), end.into(), step.into());
         self.iota((end - start) / step, move |c| c[0] * step + start)
@@ -69,7 +69,7 @@ impl Graph {
     /// Lower left-hand triangle of 1s. Currently required to be square
     ///
     /// Same API as https://pytorch.org/docs/stable/generated/torch.tril
-    pub fn tril(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
+    pub fn tril(&mut self, size: impl Into<IntExpr>, diagonal: i32) -> GraphTensor {
         let size = size.into();
         let horizontal = self.arange(size).cast(DType::F32).expand_dim(0, size);
         let vertical = self.arange(size).cast(DType::F32).expand_dim(1, size);
@@ -79,7 +79,7 @@ impl Graph {
     /// Upper right-hand triangle of 1s
     ///
     /// Same API as https://pytorch.org/docs/stable/generated/torch.triu
-    pub fn triu(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
+    pub fn triu(&mut self, size: impl Into<IntExpr>, diagonal: i32) -> GraphTensor {
         let size = size.into();
         let horizontal = self.arange(size).cast(DType::F32).expand_dim(0, size);
         let vertical = self.arange(size).cast(DType::F32).expand_dim(1, size);

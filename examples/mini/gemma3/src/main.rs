@@ -7,7 +7,7 @@
 
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal::ssa_reference::SsaReferenceRuntime;
 use luminal_nn::{rope_pairing_matrix, rope_tables_split_half};
 use mini_gemma3::MiniGemma3;
@@ -45,7 +45,7 @@ fn main() {
         &caches,
         gather_idx,
         scatter_idx,
-        Expression::from(1usize),
+        IntExpr::from(1usize),
         &rope_inputs,
         rope_rot,
     );

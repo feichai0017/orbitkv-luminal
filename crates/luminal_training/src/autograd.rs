@@ -43,7 +43,7 @@ pub fn backward(cx: &mut Graph, loss: GraphTensor, params: &[GraphTensor]) -> Ve
     // contiguous shape. Views live on the consumer side (in each op's stored
     // input ShapeTrackers), so gradients are always accumulated in canonical
     // space and mapped through views by `unview`.
-    let mut dims: FxHashMap<NodeIndex, Vec<Expression>> = FxHashMap::default();
+    let mut dims: FxHashMap<NodeIndex, Vec<IntExpr>> = FxHashMap::default();
     let mut dtypes: FxHashMap<NodeIndex, DType> = FxHashMap::default();
     for p in params {
         assert!(
@@ -87,7 +87,7 @@ pub fn backward(cx: &mut Graph, loss: GraphTensor, params: &[GraphTensor]) -> Ve
         .get(&loss.id)
         .cloned()
         .expect("loss node has no derivable shape");
-    let loss_elements = loss_dims.iter().copied().product::<Expression>().simplify();
+    let loss_elements = loss_dims.iter().copied().product::<IntExpr>().simplify();
     assert_eq!(
         loss_elements.as_num(),
         Some(1),
@@ -166,9 +166,9 @@ fn derive_node_meta(
     cx: &Graph,
     n: NodeIndex,
     srcs: &[NodeIndex],
-    dims: &FxHashMap<NodeIndex, Vec<Expression>>,
+    dims: &FxHashMap<NodeIndex, Vec<IntExpr>>,
     dtypes: &FxHashMap<NodeIndex, DType>,
-) -> (Option<Vec<Expression>>, Option<DType>) {
+) -> (Option<Vec<IntExpr>>, Option<DType>) {
     if let Some(op) = cx.try_get_op::<hl::Input>(n) {
         // Dims of an Input aren't recorded on the node; params supply theirs.
         return (None, Some(op.dtype));
@@ -296,7 +296,7 @@ fn vjp(
     n: NodeIndex,
     g: GraphTensor,
     srcs: &[NodeIndex],
-    dims: &FxHashMap<NodeIndex, Vec<Expression>>,
+    dims: &FxHashMap<NodeIndex, Vec<IntExpr>>,
     dtypes: &FxHashMap<NodeIndex, DType>,
     rg: &FxHashSet<NodeIndex>,
 ) -> Vec<(usize, GraphTensor, ShapeTracker)> {
@@ -305,7 +305,7 @@ fn vjp(
         |slot: usize| -> DType { dtypes.get(&srcs[slot]).copied().unwrap_or(DType::F32) };
     // The forward node's own (contiguous) output, reusable in vjps to avoid
     // recomputing e.g. exp2(x).
-    let out_tensor = |out_dims: &[Expression]| -> GraphTensor {
+    let out_tensor = |out_dims: &[IntExpr]| -> GraphTensor {
         GraphTensor::from_id(
             n,
             ShapeTracker::new(out_dims).with_element_bits(g.dtype.bits()),

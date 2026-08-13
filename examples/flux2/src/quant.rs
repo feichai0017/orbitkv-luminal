@@ -44,7 +44,7 @@
 use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::prelude::GraphTensor;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 
 /// NVFP4 block size along the input dimension (matches NVIDIA modelopt /
 /// Blackwell hardware).
@@ -116,7 +116,7 @@ impl Nvfp4Linear {
             .weight_scale_2
             .cast(target_dtype)
             .expand_lhs([out_dim])
-            .repeat([Expression::from(1_usize), in_dim]);
+            .repeat([IntExpr::from(1_usize), in_dim]);
 
         // 5. Combined elementwise dequant.
         w * s_blocked * s2

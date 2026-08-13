@@ -208,14 +208,14 @@ pub trait KernelOp: std::fmt::Debug + as_any::AsAny {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     );
 
     /// Returns the output buffer size in elements.
-    fn output_size(&self) -> Expression;
+    fn output_size(&self) -> IntExpr;
 
     /// Returns all dynamic variables used by this kernel (for grid dims, strides, etc).
     /// Default: returns dyn vars from output_size(). Override if the kernel has dyn vars
@@ -225,7 +225,7 @@ pub trait KernelOp: std::fmt::Debug + as_any::AsAny {
     }
 
     /// Returns the output buffer size in bytes (accounts for dtype).
-    fn output_bytes(&self) -> Expression;
+    fn output_bytes(&self) -> IntExpr;
 
     /// Returns the DType of this kernel's output buffer.
     /// Used by has_nan_outputs to interpret buffer bytes correctly.
@@ -235,17 +235,17 @@ pub trait KernelOp: std::fmt::Debug + as_any::AsAny {
     }
 
     /// Returns the number of bytes this kernel will load from global memory.
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         0.into()
     }
 
     /// Returns the number of bytes this kernel will store to global memory.
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         0.into()
     }
 
     /// Returns the number of floating point operations this kernel performs.
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         0.into()
     }
 

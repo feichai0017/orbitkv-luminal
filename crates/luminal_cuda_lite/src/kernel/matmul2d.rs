@@ -29,7 +29,7 @@ use std::sync::Arc;
 use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream};
 use luminal::{
     dtype::DType, op::CustomOp, op::LLIROp, prelude::FxHashMap, prelude::GraphTensor,
-    shape::Expression,
+    shape::IntExpr,
 };
 
 use crate::compile_module_image_for_current_device;
@@ -76,9 +76,9 @@ impl KernelOp for Matmul2DKernel {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let bias_param = if self.has_bias {
@@ -213,25 +213,25 @@ impl KernelOp for Matmul2DKernel {
             module,
             kernel,
             (
-                Expression::from(grid_x),
-                Expression::from(grid_y),
-                Expression::from(self.batch),
+                IntExpr::from(grid_x),
+                IntExpr::from(grid_y),
+                IntExpr::from(self.batch),
             ),
             (
-                Expression::from(TILE),
-                Expression::from(TILE),
-                Expression::from(1usize),
+                IntExpr::from(TILE),
+                IntExpr::from(TILE),
+                IntExpr::from(1usize),
             ),
-            Expression::from(0usize),
+            IntExpr::from(0usize),
             FxHashMap::default(),
         )
     }
 
-    fn output_size(&self) -> Expression {
-        Expression::from(self.batch * self.m * self.n)
+    fn output_size(&self) -> IntExpr {
+        IntExpr::from(self.batch * self.m * self.n)
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size() * 4
     }
 
@@ -239,7 +239,7 @@ impl KernelOp for Matmul2DKernel {
         DType::F32
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         // K elements from A (F32) + K elements from B (F32 or BF16) + maybe bias (F32).
         let b_bytes = match self.weight_dtype {
             DType::F32 => 4,
@@ -247,18 +247,18 @@ impl KernelOp for Matmul2DKernel {
             _ => 4,
         };
         let bias_bytes = if self.has_bias { 4 } else { 0 };
-        Expression::from(
+        IntExpr::from(
             self.batch * self.m * self.n * (self.k * 4 + self.k * b_bytes + bias_bytes),
         )
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_size() * 4
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         let per_out = self.k * 2 + if self.has_bias { 1 } else { 0 };
-        Expression::from(self.batch * self.m * self.n * per_out)
+        IntExpr::from(self.batch * self.m * self.n * per_out)
     }
 
     fn kernel_name(&self) -> &'static str {

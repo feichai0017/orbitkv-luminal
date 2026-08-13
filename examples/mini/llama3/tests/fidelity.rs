@@ -3,7 +3,7 @@
 //! 2026-08-13).
 
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal_nn::test_refs::*;
 
 use mini_llama3::MiniLlama3;
@@ -37,7 +37,7 @@ fn mini_gqa_family(family: &str, gate_act: &dyn Fn(&[f32]) -> Vec<f32>) {
         .collect();
     let gather_idx = cx.tensor_dtyped(CTX, DType::Int);
     let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-    let step = Expression::from(1usize);
+    let step = IntExpr::from(1usize);
     let (logits, caches_out, embed, blocks) = match family {
         "llama3" => {
             let model = MiniLlama3::new(VOCAB, D, FF, NH, NKV, LAYERS, &mut cx);

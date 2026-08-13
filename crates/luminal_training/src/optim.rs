@@ -57,7 +57,7 @@ pub trait Optimizer {
 }
 
 /// Broadcast a scalar (0-dim) input across `dims` as a free stride-0 view.
-fn broadcast_scalar(mut s: GraphTensor, dims: &[Expression]) -> GraphTensor {
+fn broadcast_scalar(mut s: GraphTensor, dims: &[IntExpr]) -> GraphTensor {
     for (i, d) in dims.iter().enumerate() {
         s = s.expand_dim(i, *d);
     }

@@ -17,7 +17,7 @@ use luminal::{
     },
     op::{EgglogOp, LLIROp},
     prelude::FxHashSet,
-    shape::{Expression, flatten_strides},
+    shape::{IntExpr, flatten_strides},
 };
 
 use crate::compile_module_image_for_current_device;
@@ -25,21 +25,21 @@ use crate::kernel::{KernelOp, hlir::generate_dyn_dims_defines};
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelConv2D {
-    out_shape: Vec<Expression>,
-    input_shape: Vec<Expression>,
-    input_stride: Vec<Expression>,
-    weight_co_stride: Expression,
-    weight_inner_stride: Expression,
-    bias_c_stride: Expression,
-    out_stride: Vec<Expression>,
-    kernel_h: Expression,
-    kernel_w: Expression,
-    stride_h: Expression,
-    stride_w: Expression,
-    dilation_h: Expression,
-    dilation_w: Expression,
-    pad_h: Expression,
-    pad_w: Expression,
+    out_shape: Vec<IntExpr>,
+    input_shape: Vec<IntExpr>,
+    input_stride: Vec<IntExpr>,
+    weight_co_stride: IntExpr,
+    weight_inner_stride: IntExpr,
+    bias_c_stride: IntExpr,
+    out_stride: Vec<IntExpr>,
+    kernel_h: IntExpr,
+    kernel_w: IntExpr,
+    stride_h: IntExpr,
+    stride_w: IntExpr,
+    dilation_h: IntExpr,
+    dilation_w: IntExpr,
+    pad_h: IntExpr,
+    pad_w: IntExpr,
     dtype: DType,
 }
 
@@ -82,11 +82,11 @@ impl EgglogOp for KernelConv2D {
             ; the Gather/index/layout contract.
             (relation conv2d_unfold_matmul
                 (IR IR IR EList EList
-                 Expression Expression Expression Expression Expression
-                 Expression Expression Expression Expression Expression))
+                 IntExpr IntExpr IntExpr IntExpr IntExpr
+                 IntExpr IntExpr IntExpr IntExpr IntExpr))
             (relation conv2d_1x1_matmul
-                (IR IR IR Expression Expression Expression
-                 Expression Expression Expression))
+                (IR IR IR IntExpr IntExpr IntExpr
+                 IntExpr IntExpr IntExpr))
 
             (rule
                 (
@@ -674,8 +674,8 @@ impl EgglogOp for KernelConv2D {
         egraph: &'a luminal::egglog_utils::SerializedEGraph,
         kind_children: &[&'a luminal::egglog_utils::NodeId],
         input_enodes: Vec<&'a luminal::egglog_utils::NodeId>,
-        list_cache: &mut FxHashMap<&'a luminal::egglog_utils::NodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a luminal::egglog_utils::NodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a luminal::egglog_utils::NodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a luminal::egglog_utils::NodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a luminal::egglog_utils::NodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -714,9 +714,9 @@ impl KernelOp for KernelConv2D {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         assert_eq!(self.dtype, DType::F32, "KernelConv2D currently emits F32");
@@ -756,17 +756,17 @@ impl KernelOp for KernelConv2D {
         let w_in = self.input_shape[2].to_kernel();
         let weight_co_stride = self
             .weight_co_stride
-            .substitute('z', Expression::from(1))
+            .substitute('z', IntExpr::from(1))
             .simplify()
             .to_kernel();
         let weight_inner_stride = self
             .weight_inner_stride
-            .substitute('z', Expression::from(1))
+            .substitute('z', IntExpr::from(1))
             .simplify()
             .to_kernel();
         let bias_c_stride = self
             .bias_c_stride
-            .substitute('z', Expression::from(1))
+            .substitute('z', IntExpr::from(1))
             .simplify()
             .to_kernel();
         let kh = self.kernel_h.to_kernel();
@@ -781,7 +781,7 @@ impl KernelOp for KernelConv2D {
         let input_idx = flatten_strides(&self.input_shape, &self.input_stride)
             .to_kernel()
             .replace("const_z", "input_linear");
-        let n_outputs: Expression = self.out_shape.iter().copied().product();
+        let n_outputs: IntExpr = self.out_shape.iter().copied().product();
 
         let kernel = format!(
             "
@@ -863,7 +863,7 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
@@ -888,20 +888,20 @@ extern \"C\" {{
             .collect()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         self.output_size() * 4
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         let c_in = self.input_shape[0];
         self.output_size() * self.kernel_h * self.kernel_w * c_in * 2 * 4 + self.output_size() * 4
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_size() * 4
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         let c_in = self.input_shape[0];
         self.output_size() * self.kernel_h * self.kernel_w * c_in * 2
     }

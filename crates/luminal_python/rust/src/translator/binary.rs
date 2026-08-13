@@ -24,8 +24,8 @@ fn normalize_equal_dims(
 }
 
 fn same_dims(
-    lhs: &[Expression],
-    rhs: &[Expression],
+    lhs: &[IntExpr],
+    rhs: &[IntExpr],
     sym_ranges: &FxHashMap<char, ExprBounds>,
 ) -> bool {
     lhs.len() == rhs.len()
@@ -111,7 +111,7 @@ impl<'a> Translator<'a> {
     pub(crate) fn apply_symbolic_scalar_op(
         &mut self,
         a: GraphTensor,
-        val: Expression,
+        val: IntExpr,
         op: BinaryOp,
     ) -> GraphTensor {
         match op {
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn simplifies_mark_dynamic_slice_shapes_using_lower_bound() {
-        let a = Expression::from('a');
+        let a = IntExpr::from('a');
         let lhs = (a.min(1) + a).min(a + 1) - 1;
         let rhs = (a.min(1) + a).min(a);
         let sym_ranges = [(
@@ -146,8 +146,8 @@ mod tests {
         let lhs_simplified = simplify_expr_with_ranges(lhs, &sym_ranges);
         let rhs_simplified = simplify_expr_with_ranges(rhs, &sym_ranges);
 
-        assert_eq!(lhs_simplified, Expression::from('a'));
-        assert_eq!(rhs_simplified, Expression::from('a'));
+        assert_eq!(lhs_simplified, IntExpr::from('a'));
+        assert_eq!(rhs_simplified, IntExpr::from('a'));
         assert!(same_expr_with_ranges(lhs, rhs, &sym_ranges));
     }
 }

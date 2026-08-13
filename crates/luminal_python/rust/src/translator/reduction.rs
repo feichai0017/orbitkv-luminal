@@ -163,7 +163,7 @@ impl<'a> Translator<'a> {
             None => {
                 // Full-reduce: flatten to 1-D, argsort along axis 0.
                 let total = concrete_numel(&a)?;
-                let flat = reshape_tensor(a, vec![Expression::from(total)]);
+                let flat = reshape_tensor(a, vec![IntExpr::from(total)]);
                 (0usize, flat)
             }
             Some(dim_raw) => {

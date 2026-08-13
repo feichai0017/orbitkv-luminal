@@ -7,7 +7,7 @@ use std::ops::{Add, Mul, Neg};
 /// into sort indices. Handles multi-dim by computing flat scatter offsets.
 fn scatter_ranks_to_sort_indices(
     ranks: GraphTensor,
-    dims: Vec<Expression>,
+    dims: Vec<IntExpr>,
     axis: usize,
     g: &mut Graph,
 ) -> GraphTensor {
@@ -16,7 +16,7 @@ fn scatter_ranks_to_sort_indices(
 
     // Values: [0, 1, ..., ax_size-1] along axis, expanded to full shape
     let mut values = g.arange(ax_size);
-    let mut zeros = g.iota(ax_size, |_| Expression::from(0usize));
+    let mut zeros = g.iota(ax_size, |_| IntExpr::from(0usize));
     for (i, &dim) in dims.iter().enumerate() {
         if i != axis {
             values = values.expand_dim(i, dim);
@@ -30,7 +30,7 @@ fn scatter_ranks_to_sort_indices(
 
     // Multi-dim: ranks are per-axis (0..ax_size) but scatter uses flat indices.
     // Compute: adjusted = base_offset + ranks * axis_stride
-    let mut strides = vec![Expression::from(1usize); ndim];
+    let mut strides = vec![IntExpr::from(1usize); ndim];
     for d in (0..ndim.saturating_sub(1)).rev() {
         strides[d] = (strides[d + 1] * dims[d + 1]).simplify();
     }
@@ -42,7 +42,7 @@ fn scatter_ranks_to_sort_indices(
     let base_offset = g.iota(dims.to_vec(), |c| {
         (0..ndim)
             .filter(|d| *d != axis)
-            .fold(Expression::from(0), |acc, d| acc + c[d] * strides[d])
+            .fold(IntExpr::from(0), |acc, d| acc + c[d] * strides[d])
     });
     let adjusted = base_offset + ranks_scaled;
 
@@ -57,7 +57,7 @@ impl Neg for GraphTensor {
         // the f32 literal would record a refused f32 -> Int cast
         // (typed-buffers cast policy, 2026-08-11).
         match self.dtype {
-            DType::Int | DType::I64 => self * Expression::from(-1),
+            DType::Int | DType::I64 => self * IntExpr::from(-1),
             _ => self * -1.,
         }
     }
@@ -246,7 +246,7 @@ impl GraphTensor {
             .to_axes()
             .into_iter()
             .map(|i| self.dims()[i])
-            .product::<Expression>();
+            .product::<IntExpr>();
         let mean = self
             .mean(axes.to_axes())
             .expand_to_shape_on_axes(self.dims(), axes.to_axes());
@@ -452,7 +452,7 @@ impl GraphTensor {
         for axis in axes.to_axes() {
             // Pad out length
             let mut kernel = vec![1.into(); n_dims];
-            let mut padding = vec![(Expression::from(0), Expression::from(0)); n_dims];
+            let mut padding = vec![(IntExpr::from(0), IntExpr::from(0)); n_dims];
             let orig_length = self.dims()[axis];
             padding[axis] = (orig_length - 1, 0.into());
             kernel[axis] = orig_length;

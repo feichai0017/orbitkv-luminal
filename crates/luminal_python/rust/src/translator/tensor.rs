@@ -29,7 +29,7 @@ const TRIANGULAR_DIAGONAL_ARG: usize = 1;
 
 impl<'a> Translator<'a> {
     pub(crate) fn translate_arange(&mut self, node: &Node) -> Result<GraphTensor> {
-        let positional_args: Vec<Expression> = node
+        let positional_args: Vec<IntExpr> = node
             .inputs
             .iter()
             .filter(|i| i.kind <= 1)
@@ -124,7 +124,7 @@ impl<'a> Translator<'a> {
 
         // arange(bins) [bins] → cast to input dtype, optionally shift by min,
         // broadcast to [bins, N], compare for equality with input broadcast.
-        let mut bins_arange = self.graph.arange(Expression::from(bins_u));
+        let mut bins_arange = self.graph.arange(IntExpr::from(bins_u));
         if min != 0.0 {
             // `min` is non-zero (uncommon in the qwen3-moe path but legal)
             // — shift the comparison values to start at min.
@@ -137,7 +137,7 @@ impl<'a> Translator<'a> {
             bins_arange += shift;
         }
         let bins_expanded = bins_arange.cast(input.dtype).expand_dim(1, n);
-        let input_expanded = input.expand_dim(0, Expression::from(bins_u));
+        let input_expanded = input.expand_dim(0, IntExpr::from(bins_u));
         let matches = input_expanded.eq(bins_expanded); // Bool [bins, N]
 
         let out_dtype = self.output_meta_dtype(node)?;
@@ -270,7 +270,7 @@ impl<'a> Translator<'a> {
         // resulting Gather matches the GLUMoE / gather-experts egglog patterns.
         let io = k * n;
         let base = expert_id * io;
-        let within = self.graph.iota(Expression::from('z'), (k, n));
+        let within = self.graph.iota(IntExpr::from('z'), (k, n));
         let exp_base = base.expand_dim(1, k).expand_dim(2, n);
         let exp_within = within.expand_dim(0, s);
         let flat_idx = exp_base + exp_within;

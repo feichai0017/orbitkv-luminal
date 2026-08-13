@@ -194,7 +194,7 @@ impl Add<f32> for GraphTensor {
     }
 }
 
-impl<S: Into<Expression>> Add<S> for GraphTensor {
+impl<S: Into<IntExpr>> Add<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn add(self, rhs: S) -> Self::Output {
@@ -218,7 +218,7 @@ impl Sub<f32> for GraphTensor {
     }
 }
 
-impl<S: Into<Expression>> Sub<S> for GraphTensor {
+impl<S: Into<IntExpr>> Sub<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn sub(self, rhs: S) -> Self::Output {
@@ -242,7 +242,7 @@ impl Mul<f32> for GraphTensor {
     }
 }
 
-impl<S: Into<Expression>> Mul<S> for GraphTensor {
+impl<S: Into<IntExpr>> Mul<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn mul(self, rhs: S) -> Self::Output {
@@ -267,7 +267,7 @@ impl Div<f32> for GraphTensor {
     }
 }
 
-impl<S: Into<Expression>> Div<S> for GraphTensor {
+impl<S: Into<IntExpr>> Div<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn div(self, rhs: S) -> Self::Output {
@@ -291,7 +291,7 @@ impl Rem<f32> for GraphTensor {
     }
 }
 
-impl<S: Into<Expression>> Rem<S> for GraphTensor {
+impl<S: Into<IntExpr>> Rem<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn rem(self, rhs: S) -> Self::Output {

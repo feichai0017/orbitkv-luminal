@@ -20,23 +20,23 @@ use luminal::{
 };
 
 const MATMUL_BACKEND_RELATION_DECLARATIONS: &str = "(relation generic_matmul_exact_2d
-        (IR Expression Expression Expression DType))
+        (IR IntExpr IntExpr IntExpr DType))
      (relation generic_matmul_exact_3d
-        (IR Expression Expression Expression Expression DType))
+        (IR IntExpr IntExpr IntExpr IntExpr DType))
      (relation low_precision_matmul_dtype (DType))
      (low_precision_matmul_dtype (F16))
      (low_precision_matmul_dtype (Bf16))";
 
 #[derive(Default, Debug, Clone)]
 pub struct GenericMatmul {
-    out_shape: Vec<Expression>,
-    mul_shape: Vec<Expression>,
-    k: Expression,
-    lhs_strides: Vec<Expression>,
-    rhs_strides: Vec<Expression>,
-    sum_input_strides: Vec<Expression>,
-    sum_iter_stride: Expression,
-    out_strides: Vec<Expression>,
+    out_shape: Vec<IntExpr>,
+    mul_shape: Vec<IntExpr>,
+    k: IntExpr,
+    lhs_strides: Vec<IntExpr>,
+    rhs_strides: Vec<IntExpr>,
+    sum_input_strides: Vec<IntExpr>,
+    sum_iter_stride: IntExpr,
+    out_strides: Vec<IntExpr>,
     dtype: DType,
 }
 
@@ -273,8 +273,8 @@ impl EgglogOp for GenericMatmul {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -313,9 +313,9 @@ impl KernelOp for GenericMatmul {
         CudaFunction,
         Arc<CudaModule>,
         String,
-        (Expression, Expression, Expression),
-        (Expression, Expression, Expression),
-        Expression,
+        (IntExpr, IntExpr, IntExpr),
+        (IntExpr, IntExpr, IntExpr),
+        IntExpr,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let vars = self.all_dyn_vars();
@@ -413,12 +413,12 @@ extern \"C\" {{
         )
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape
             .iter()
             .copied()
-            .product::<Expression>()
-            .max(Expression::from(1))
+            .product::<IntExpr>()
+            .max(IntExpr::from(1))
     }
 
     fn all_dyn_vars(&self) -> FxHashSet<char> {
@@ -435,19 +435,19 @@ extern \"C\" {{
             .collect()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         (self.output_size() * self.k * self.dtype.bits() * 2).ceil_div(8)
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.output_size() * self.k * 2
     }
 

@@ -43,7 +43,7 @@ pub struct FlashInferAttention {
     pub num_kv_heads: usize,
     pub head_dim: usize,
     pub page_size: usize,
-    pub batch_dim: Expression,
+    pub batch_dim: IntExpr,
     pub dtype: DType,
     /// Softmax scale; 0.0 = default `1/sqrt(head_dim)`.
     pub sm_scale: f64,
@@ -331,7 +331,7 @@ impl Default for FlashInferAttention {
             num_kv_heads: 0,
             head_dim: 0,
             page_size: 0,
-            batch_dim: Expression::default(),
+            batch_dim: IntExpr::default(),
             dtype: DType::F32,
             sm_scale: 0.0,
             window_left: -1,
@@ -384,8 +384,8 @@ impl EgglogOp for FlashInferAttention {
         egraph: &'a luminal::egglog_utils::SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let num_qo_heads = extract_expr(egraph, kind_children[0], expr_cache)
             .unwrap()
@@ -1091,11 +1091,11 @@ impl HostOp for FlashInferAttention {
         prepared.enqueue(stream, ptrs, true)
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.batch_dim * self.num_qo_heads * self.head_dim
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 

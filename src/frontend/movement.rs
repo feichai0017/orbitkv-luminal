@@ -41,7 +41,7 @@ impl GraphTensor {
     }
 
     /// Broadcast tensor along a new dimension
-    pub fn expand_dim(mut self, axis: usize, size: impl Into<Expression>) -> GraphTensor {
+    pub fn expand_dim(mut self, axis: usize, size: impl Into<IntExpr>) -> GraphTensor {
         let size = size.into();
         let current_dims = self.dims();
         self.logical_value = self.graph().logical.apply_movement(
@@ -82,7 +82,7 @@ impl GraphTensor {
             crate::graph::Movement::Repeat(repeats.clone()),
         );
         for (dim, repeat) in self.dims.iter_mut().zip(repeats) {
-            if repeat == Expression::from(1) {
+            if repeat == IntExpr::from(1) {
                 continue;
             }
             *dim = (*dim * repeat).simplify();
@@ -104,7 +104,7 @@ impl GraphTensor {
             }
             assert_eq!(
                 current,
-                Expression::from(1),
+                IntExpr::from(1),
                 "expand: axis {axis} is {current}, only size-1 axes broadcast"
             );
             self = self.squeeze(axis).expand_dim(axis, target_dim);
@@ -161,7 +161,7 @@ impl GraphTensor {
     }
 
     //// Split a dim into 2 dims, new dim is placed directly after original dim
-    pub fn split_dims(mut self, axis: usize, new_dim_size: impl Into<Expression>) -> GraphTensor {
+    pub fn split_dims(mut self, axis: usize, new_dim_size: impl Into<IntExpr>) -> GraphTensor {
         let new_dim_size = new_dim_size.into();
         assert!(
             new_dim_size.as_num().is_none_or(|n| n > 0),
@@ -199,7 +199,7 @@ impl GraphTensor {
     pub fn squeeze(mut self, axis: usize) -> GraphTensor {
         assert_eq!(
             self.dims()[axis],
-            Expression::from(1),
+            IntExpr::from(1),
             "Only dimensions of size 1 can be squeezed!"
         );
         let current_dims = self.dims();
@@ -220,19 +220,19 @@ impl GraphTensor {
     pub fn gather_elements(self, indexes: GraphTensor, axis: usize) -> GraphTensor {
         let dims = self.dims();
         let rank = dims.len();
-        let out_shape: Vec<Expression> = indexes.dims();
+        let out_shape: Vec<IntExpr> = indexes.dims();
 
         // Row-major strides: stride[i] = prod(dims[i+1..]) — SYMBOLIC
-        // Expression products (ruling 2026-08-13: the frontend computes
+        // IntExpr products (ruling 2026-08-13: the frontend computes
         // nothing eagerly that the expression language can carry; static
         // dims still fold to literals via to_usize so the recorded text
         // is unchanged for concrete shapes).
-        let strides: Vec<Expression> = (0..rank)
+        let strides: Vec<IntExpr> = (0..rank)
             .map(|i| {
                 let product = dims[i + 1..]
                     .iter()
-                    .fold(Expression::from(1), |acc, d| acc * *d);
-                product.to_usize().map(Expression::from).unwrap_or(product)
+                    .fold(IntExpr::from(1), |acc, d| acc * *d);
+                product.to_usize().map(IntExpr::from).unwrap_or(product)
             })
             .collect();
 
@@ -260,7 +260,7 @@ impl GraphTensor {
         let non_axis_flat = self.graph().iota(out_shape, |c| {
             (0..rank)
                 .filter(|d| *d != axis)
-                .fold(Expression::from(0), |acc, d| acc + c[d] * strides[d])
+                .fold(IntExpr::from(0), |acc, d| acc + c[d] * strides[d])
         });
 
         // Axis contribution from the runtime index values
@@ -288,16 +288,16 @@ impl GraphTensor {
     ) -> GraphTensor {
         let data_dims = self.dims();
         let rank = data_dims.len();
-        let idx_shape: Vec<Expression> = indices.dims();
+        let idx_shape: Vec<IntExpr> = indices.dims();
 
-        // Row-major strides for data — symbolic Expression products
+        // Row-major strides for data — symbolic IntExpr products
         // (see gather_elements; static dims fold to literals).
-        let strides: Vec<Expression> = (0..rank)
+        let strides: Vec<IntExpr> = (0..rank)
             .map(|i| {
                 let product = data_dims[i + 1..]
                     .iter()
-                    .fold(Expression::from(1), |acc, d| acc * *d);
-                product.to_usize().map(Expression::from).unwrap_or(product)
+                    .fold(IntExpr::from(1), |acc, d| acc * *d);
+                product.to_usize().map(IntExpr::from).unwrap_or(product)
             })
             .collect();
 
@@ -319,7 +319,7 @@ impl GraphTensor {
         let non_axis_flat = self.graph().iota(idx_shape.clone(), |c| {
             (0..rank)
                 .filter(|d| *d != axis)
-                .fold(Expression::from(0), |acc, d| acc + c[d] * strides[d])
+                .fold(IntExpr::from(0), |acc, d| acc + c[d] * strides[d])
         });
 
         // Axis contribution from the runtime index values
@@ -357,7 +357,7 @@ impl GraphTensor {
 
         // K is STRUCTURAL — it fixes how many slice extractions the
         // recorder emits (a rank, not an extent) — so it alone must be
-        // concrete. Every other quantity stays a symbolic Expression
+        // concrete. Every other quantity stays a symbolic IntExpr
         // (ruling 2026-08-13: nothing eager in the frontend that the
         // expression language can carry; static dims fold to literals).
         let k = idx_dims[idx_rank - 1]
@@ -365,18 +365,18 @@ impl GraphTensor {
             .expect("scatter_nd: K (last indices dim) is structural and must be concrete");
         assert!(k <= data_rank, "scatter_nd: K must be <= data rank");
 
-        let fold_product = |dims: &[Expression]| {
-            let product = dims.iter().fold(Expression::from(1), |acc, d| acc * *d);
-            product.to_usize().map(Expression::from).unwrap_or(product)
+        let fold_product = |dims: &[IntExpr]| {
+            let product = dims.iter().fold(IntExpr::from(1), |acc, d| acc * *d);
+            product.to_usize().map(IntExpr::from).unwrap_or(product)
         };
         // Batch numel = product of indices shape without the last dim.
         let batch_numel = fold_product(&idx_dims[..idx_rank - 1]);
         // Trailing shape = data dims [K..].
-        let trailing_shape: Vec<Expression> = data_dims[k..].to_vec();
+        let trailing_shape: Vec<IntExpr> = data_dims[k..].to_vec();
         let trailing_numel = fold_product(&trailing_shape);
 
         // Row-major strides for data — symbolic products.
-        let data_strides: Vec<Expression> = (0..data_rank)
+        let data_strides: Vec<IntExpr> = (0..data_rank)
             .map(|i| fold_product(&data_dims[i + 1..]))
             .collect();
 
@@ -520,13 +520,13 @@ impl GraphTensor {
     /// Rebuild a multi-dim shape from a flat tensor with recorded splits
     /// (the inverse of `flatten`; there is no wholesale reshape in the
     /// recorded vocabulary).
-    pub(crate) fn unflatten_to(mut self, dims: &[Expression]) -> GraphTensor {
+    pub(crate) fn unflatten_to(mut self, dims: &[IntExpr]) -> GraphTensor {
         assert_eq!(self.rank(), 1, "unflatten_to starts from a flat tensor");
         for axis in 0..dims.len().saturating_sub(1) {
-            let inner: Expression = dims[axis + 1..]
+            let inner: IntExpr = dims[axis + 1..]
                 .iter()
                 .copied()
-                .fold(Expression::from(1), |acc, d| acc * d)
+                .fold(IntExpr::from(1), |acc, d| acc * d)
                 .simplify();
             self = self.split_dims(axis, inner);
         }
@@ -597,8 +597,8 @@ impl GraphTensor {
         // Compute input strides (row-major contiguous)
         let dims = self.dims();
         let n = dims.len();
-        let mut in_strides = vec![Expression::from(1); n];
-        let mut acc = Expression::from(1);
+        let mut in_strides = vec![IntExpr::from(1); n];
+        let mut acc = IntExpr::from(1);
         for (dim, in_stride) in dims.iter().zip(&mut in_strides).rev() {
             *in_stride = acc;
             acc *= dim;
@@ -612,7 +612,7 @@ impl GraphTensor {
         }
 
         // [win..., kernel...]
-        let mut final_shape: Vec<Expression> = win.into_iter().map(|e| e.simplify()).collect();
+        let mut final_shape: Vec<IntExpr> = win.into_iter().map(|e| e.simplify()).collect();
         final_shape.extend(kernel.iter().copied());
 
         // Structure-preserving seam (see SliceView): the per-axis window
@@ -662,7 +662,7 @@ impl GraphTensor {
     /// # let mut cx = Graph::new();
     /// let a = cx.tensor((5, 10));
     /// let b = a.slice((2..4, 1..)); // 2x9 tensor
-    /// assert_eq!(b.dims(), vec![Expression::from(2), Expression::from(9)]);
+    /// assert_eq!(b.dims(), vec![IntExpr::from(2), IntExpr::from(9)]);
     /// ```
     pub fn slice(mut self, slice: impl ToSlice) -> GraphTensor {
         let mut ranges = slice.to_range_vec();
@@ -693,7 +693,7 @@ impl GraphTensor {
                         from_end: rank - 1 - p,
                         extent: new_dims[p],
                     };
-                    if starts[p] == Expression::from(0) {
+                    if starts[p] == IntExpr::from(0) {
                         coord
                     } else {
                         crate::graph::MapEntry::Add(
@@ -740,10 +740,10 @@ impl GraphTensor {
     /// # let mut cx = Graph::new();
     /// let a = cx.tensor((5, 10));
     /// let b = a.slice_along(4.., 1); // 5x6 tensor
-    /// assert_eq!(b.dims(), vec![Expression::from(5), Expression::from(6)]);
+    /// assert_eq!(b.dims(), vec![IntExpr::from(5), IntExpr::from(6)]);
     /// ```
     pub fn slice_along(self, slice: impl SliceRange, axis: usize) -> GraphTensor {
-        let mut s = vec![(Expression::from(0), Expression::from(i64::MAX)); axis + 1];
+        let mut s = vec![(IntExpr::from(0), IntExpr::from(i64::MAX)); axis + 1];
         s[axis] = slice.bounds();
         self.slice(s)
     }
@@ -760,9 +760,9 @@ impl GraphTensor {
         // iota; both nodes lower to the legacy flat forms for the existing
         // pipeline via their to_egglog.
         let dims = self.dims();
-        let befores: Vec<Expression> = padding.iter().map(|(s, _)| *s).collect();
-        let afters: Vec<Expression> = padding.iter().map(|(_, e)| *e).collect();
-        let out_dims: Vec<Expression> = dims
+        let befores: Vec<IntExpr> = padding.iter().map(|(s, _)| *s).collect();
+        let afters: Vec<IntExpr> = padding.iter().map(|(_, e)| *e).collect();
+        let out_dims: Vec<IntExpr> = dims
             .iter()
             .zip(&padding)
             .map(|(d, (s, e))| (*d + *s + *e).simplify())
@@ -782,18 +782,18 @@ impl GraphTensor {
                         extent: out_dims[k],
                     };
                     let mut entry = coord;
-                    if befores[k] != Expression::from(0) {
+                    if befores[k] != IntExpr::from(0) {
                         entry = crate::graph::MapEntry::Max(
                             Box::new(crate::graph::MapEntry::Add(
                                 Box::new(entry),
                                 Box::new(crate::graph::MapEntry::Lit(
-                                    (Expression::from(0) - befores[k]).simplify(),
+                                    (IntExpr::from(0) - befores[k]).simplify(),
                                 )),
                             )),
                             Box::new(crate::graph::MapEntry::Lit(0.into())),
                         );
                     }
-                    if afters[k] != Expression::from(0) {
+                    if afters[k] != IntExpr::from(0) {
                         entry = crate::graph::MapEntry::Min(
                             Box::new(entry),
                             Box::new(crate::graph::MapEntry::Lit(
@@ -841,12 +841,12 @@ impl GraphTensor {
     /// Pad along an existing dimension
     pub fn pad_along(
         self,
-        left: impl Into<Expression>,
-        right: impl Into<Expression>,
+        left: impl Into<IntExpr>,
+        right: impl Into<IntExpr>,
         axis: usize,
         elem: f32,
     ) -> GraphTensor {
-        let mut p = vec![(Expression::from(0), Expression::from(0)); axis + 1];
+        let mut p = vec![(IntExpr::from(0), IntExpr::from(0)); axis + 1];
         p[axis] = (left.into(), right.into());
         self.pad(p, elem)
     }
@@ -1189,7 +1189,7 @@ mod tests {
         assert_eq!(repeated.id, a.id);
         assert_eq!(
             repeated.dims(),
-            vec![Expression::from(4usize), Expression::from(6usize)]
+            vec![IntExpr::from(4usize), IntExpr::from(6usize)]
         );
     }
 

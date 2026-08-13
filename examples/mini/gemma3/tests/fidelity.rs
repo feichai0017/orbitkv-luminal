@@ -2,7 +2,7 @@
 //! construct-isolation probes (moved from luminal_nn's mini.rs, 2026-08-13).
 
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal_nn::test_refs::*;
 use mini_gemma3::MiniGemma3;
 
@@ -48,7 +48,7 @@ fn mini_gemma3_matches_scalar_reference() {
         &caches,
         gather_idx,
         scatter_idx,
-        Expression::from(q_pos),
+        IntExpr::from(q_pos),
         &rope_inputs,
         rope_rot,
     );
@@ -261,7 +261,7 @@ fn probe_gemma_constructs() {
             v_cache,
             gather_idx,
             scatter_idx,
-            Expression::from(1usize),
+            IntExpr::from(1usize),
             1,
             1,
             4,

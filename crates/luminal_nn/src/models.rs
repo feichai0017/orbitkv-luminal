@@ -9,7 +9,7 @@
 
 use crate::{Embedding, Linear, MoE, paged_attention};
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 
 /// The smallest true model: Linear → relu → Linear → relu → Linear.
 pub struct Mlp {
@@ -83,7 +83,7 @@ impl DecoderBlock {
         v_cache: GraphTensor,
         gather_idx: GraphTensor,
         scatter_idx: GraphTensor,
-        prev_seq: Expression,
+        prev_seq: IntExpr,
     ) -> (GraphTensor, GraphTensor, GraphTensor) {
         let (attn, k_cache, v_cache) = paged_attention(
             self.wq.forward(x),
@@ -123,7 +123,7 @@ impl TinyDecoder {
         caches: &[(GraphTensor, GraphTensor)],
         gather_idx: GraphTensor,
         scatter_idx: GraphTensor,
-        prev_seq: Expression,
+        prev_seq: IntExpr,
     ) -> (GraphTensor, Vec<(GraphTensor, GraphTensor)>) {
         let mut x = self.embed.forward(ids);
         let mut caches_out = Vec::with_capacity(self.blocks.len());
@@ -237,7 +237,7 @@ impl LlamaBlock {
         v_cache: GraphTensor,
         gather_idx: GraphTensor,
         scatter_idx: GraphTensor,
-        prev_seq: Expression,
+        prev_seq: IntExpr,
     ) -> (GraphTensor, GraphTensor, GraphTensor) {
         let normed = self.attn_norm.forward(x);
         let mut q = self.wq.forward(normed);
@@ -472,7 +472,7 @@ impl GemmaBlock {
         v_cache: GraphTensor,
         gather_idx: GraphTensor,
         scatter_idx: GraphTensor,
-        prev_seq: Expression,
+        prev_seq: IntExpr,
         rope_cos: GraphTensor,
         rope_sin: GraphTensor,
         rope_rot: GraphTensor,
@@ -580,7 +580,7 @@ mod tests {
     use crate::{Embedding, Linear, MoE};
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
-    use luminal::shape::Expression;
+    use luminal::shape::IntExpr;
     use luminal::ssa_reference::SsaReferenceRuntime;
     use rustc_hash::FxHashMap;
     use crate::test_refs::*;
@@ -689,7 +689,7 @@ mod tests {
             v_cache,
             gather_idx,
             scatter_idx,
-            Expression::from(1usize),
+            IntExpr::from(1usize),
         );
         let out = out.output();
         let kc = kc.output();
@@ -818,7 +818,7 @@ mod tests {
                     caches[layer].1,
                     gather_idx,
                     scatter_idx,
-                    Expression::from(1usize),
+                    IntExpr::from(1usize),
                 );
                 h = next;
                 outs.push((kc.output(), vc.output()));
@@ -893,7 +893,7 @@ mod tests {
                 caches[layer].1,
                 gather_idx,
                 scatter_idx,
-                Expression::from(1usize),
+                IntExpr::from(1usize),
             );
             h = next;
             kc.output();
@@ -1031,7 +1031,7 @@ mod tests {
             v_cache,
             gather_idx,
             scatter_idx,
-            Expression::from(PREV_SEQ),
+            IntExpr::from(PREV_SEQ),
         );
         let logits = embed.reverse(x).output();
         let kc = kc.output();
@@ -1218,7 +1218,7 @@ mod tests {
                 &cache_inputs,
                 gather_idx,
                 scatter_idx,
-                Expression::from(prev_seq),
+                IntExpr::from(prev_seq),
             );
             let logits = logits.output();
             let caches_out: Vec<_> = caches_out
@@ -1324,12 +1324,12 @@ mod forward_rope_tests {
     use super::LlamaBlock;
     use crate::test_refs::*;
     use luminal::prelude::*;
-    use luminal::shape::Expression;
+    use luminal::shape::IntExpr;
 
-    /// forward_rope ≡ the hand-composed Expression path: one graph, one
+    /// forward_rope ≡ the hand-composed IntExpr path: one graph, one
     /// set of block weights, the same decode-step inputs — the new
     /// method on one side; rms_norm_heads → rotary_apply →
-    /// paged_attention(Expression) → residual/FFN spelled out on the
+    /// paged_attention(IntExpr) → residual/FFN spelled out on the
     /// other. Outputs and both cache outs must agree exactly, proving
     /// the rope threading and the data-driven mask change nothing at
     /// the pinned position.
@@ -1365,7 +1365,7 @@ mod forward_rope_tests {
         let k_rope = k_rope.output();
         let v_rope = v_rope.output();
 
-        // The same anatomy composed by hand on the Expression path.
+        // The same anatomy composed by hand on the IntExpr path.
         let normed = block.attn_norm.forward(x);
         let (q_weight, k_weight) = block.qk_norm.expect("qk-norm minted");
         let q = crate::rotary_apply(
@@ -1390,7 +1390,7 @@ mod forward_rope_tests {
             v_cache,
             gather_idx,
             scatter_idx,
-            Expression::from(position),
+            IntExpr::from(position),
             N_HEADS,
             N_KV_HEADS,
             HEAD_DIM,

@@ -6,16 +6,16 @@
 //! input dim and panic at translate-time when `torch.compile` hands us a
 //! batch dim, sequence-length dim, or any other dynamic dim. PT2's whole
 //! point is dynamic shapes, so we re-implement the same three ops here
-//! using `Expression`-typed shape arithmetic and only call luminal-core
-//! primitives that already accept `Expression`s (`Graph::constant`,
-//! `Graph::iota`, `flatten_strides`, `ShapeTracker::new(Vec<Expression>)`,
+//! using `IntExpr`-typed shape arithmetic and only call luminal-core
+//! primitives that already accept `IntExpr`s (`Graph::constant`,
+//! `Graph::iota`, `flatten_strides`, `ShapeTracker::new(Vec<IntExpr>)`,
 //! `expand_dim`, `expand_rhs`, `flatten`, `slice_along`, `squeeze`,
 //! `cast`, `scatter`, `gather`).
 //!
 //! Every shape product flows through `crate::dim_arith::product_of_dims`
-//! so the `Expression`s we build are canonical: two callers that produce
+//! so the `IntExpr`s we build are canonical: two callers that produce
 //! the same logical dim via differently-ordered multiplications end up
-//! with byte-identical `Expression`s. Without this, downstream dim-equality
+//! with byte-identical `IntExpr`s. Without this, downstream dim-equality
 //! asserts in luminal-core's `Add` / `Sub` (see `src/frontend/binary.rs`)
 //! panic on `a*8` ≠ `8*a` after these helpers feed into broadcast paths.
 
@@ -23,8 +23,8 @@ use luminal::prelude::*;
 
 use crate::dim_arith::product_of_dims;
 
-/// Row-major strides as `Expression`s. `stride[i] = prod(dims[i+1..])`.
-fn row_major_strides(dims: &[Expression]) -> Vec<Expression> {
+/// Row-major strides as `IntExpr`s. `stride[i] = prod(dims[i+1..])`.
+fn row_major_strides(dims: &[IntExpr]) -> Vec<IntExpr> {
     let rank = dims.len();
     (0..rank)
         .map(|i| product_of_dims(dims[i + 1..].iter().copied()))
@@ -35,20 +35,20 @@ fn row_major_strides(dims: &[Expression]) -> Vec<Expression> {
 /// rank-`rank` output of shape `out_shape`. The axis dim contributes
 /// 0; every other dim `d` contributes `iota_d * strides[d]`. Materialised
 /// via one `Graph::iota` call with `flatten_strides(out_shape, axis_exprs)`
-/// — same pattern luminal core uses, just with `Expression` throughout.
+/// — same pattern luminal core uses, just with `IntExpr` throughout.
 fn non_axis_flat(
     graph: &mut Graph,
-    out_shape: &[Expression],
-    strides: &[Expression],
+    out_shape: &[IntExpr],
+    strides: &[IntExpr],
     axis: usize,
 ) -> GraphTensor {
     let rank = out_shape.len();
-    let axis_exprs: Vec<Expression> = (0..rank)
+    let axis_exprs: Vec<IntExpr> = (0..rank)
         .map(|d| {
             if d == axis {
-                Expression::from(0)
+                IntExpr::from(0)
             } else {
-                Expression::from('z') * strides[d]
+                IntExpr::from('z') * strides[d]
             }
         })
         .collect();
@@ -57,7 +57,7 @@ fn non_axis_flat(
 
 /// Wrap negative axis indices into `[0, axis_dim)`. Equivalent to
 /// `if idx < 0 { idx + axis_dim } else { idx }` in tensor form.
-fn normalize_negative_index(indices: GraphTensor, axis_dim: Expression) -> GraphTensor {
+fn normalize_negative_index(indices: GraphTensor, axis_dim: IntExpr) -> GraphTensor {
     let idx_f32 = indices.cast(DType::F32);
     let zero = idx_f32
         .graph()
@@ -74,13 +74,13 @@ fn normalize_negative_index(indices: GraphTensor, axis_dim: Expression) -> Graph
 
 /// Translator-local `gather_elements` that accepts symbolic shape dims.
 /// Mirrors `GraphTensor::gather_elements` semantics but uses
-/// `Expression`-typed shape arithmetic and only calls symbol-safe
+/// `IntExpr`-typed shape arithmetic and only calls symbol-safe
 /// luminal-core primitives.
 ///
 /// `output[i0,..,ik] = self[i0,..,i_{axis-1}, indices[i0,..,ik], i_{axis+1},..,ik]`
 pub fn pt2_gather_elements(data: GraphTensor, indexes: GraphTensor, axis: usize) -> GraphTensor {
     let dims = data.dims();
-    let out_shape: Vec<Expression> = indexes.dims();
+    let out_shape: Vec<IntExpr> = indexes.dims();
     let strides = row_major_strides(&dims);
 
     let idx_normalized = normalize_negative_index(indexes, dims[axis]);
@@ -104,7 +104,7 @@ pub fn pt2_scatter_elements(
     axis: usize,
 ) -> GraphTensor {
     let data_dims = data.dims();
-    let idx_shape: Vec<Expression> = indices.dims();
+    let idx_shape: Vec<IntExpr> = indices.dims();
     let strides = row_major_strides(&data_dims);
 
     let idx_normalized = normalize_negative_index(indices, data_dims[axis]);
@@ -154,11 +154,11 @@ pub fn pt2_scatter_nd(
     assert!(k <= data_rank, "scatter_nd: K must be <= data rank");
 
     // Batch shape = indices shape without last dim.
-    let batch_shape: Vec<Expression> = idx_dims[..idx_rank - 1].to_vec();
+    let batch_shape: Vec<IntExpr> = idx_dims[..idx_rank - 1].to_vec();
     let batch_numel = product_of_dims(batch_shape.iter().copied());
 
     // Trailing shape = data_shape[K..]
-    let trailing_shape: Vec<Expression> = data_dims[k..].to_vec();
+    let trailing_shape: Vec<IntExpr> = data_dims[k..].to_vec();
     let trailing_numel = product_of_dims(trailing_shape.iter().copied());
 
     let data_strides = row_major_strides(&data_dims);
@@ -166,7 +166,7 @@ pub fn pt2_scatter_nd(
     // Flatten batch dims of indices to [batch_numel, K] via view reshape.
     let mut indices_flat = indices;
     if idx_rank > 2 {
-        *indices_flat.legacy_tracker_mut() = ShapeTracker::new(vec![batch_numel, Expression::from(k)]);
+        *indices_flat.legacy_tracker_mut() = ShapeTracker::new(vec![batch_numel, IntExpr::from(k)]);
     }
 
     let mut flat_base: Option<GraphTensor> = None;

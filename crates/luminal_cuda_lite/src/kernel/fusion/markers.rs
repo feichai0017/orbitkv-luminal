@@ -35,9 +35,9 @@ type CompileOut = (
     CudaFunction,
     Arc<CudaModule>,
     String,
-    (Expression, Expression, Expression),
-    (Expression, Expression, Expression),
-    Expression,
+    (IntExpr, IntExpr, IntExpr),
+    (IntExpr, IntExpr, IntExpr),
+    IntExpr,
     FxHashMap<char, CudaSlice<u8>>,
 );
 
@@ -47,8 +47,8 @@ type CompileOut = (
 
 #[derive(Default, Debug, Clone)]
 pub struct FusionStart {
-    pub(crate) shape: Vec<Expression>,
-    pub(crate) strides: Vec<Expression>,
+    pub(crate) shape: Vec<IntExpr>,
+    pub(crate) strides: Vec<IntExpr>,
     pub(crate) dtype: DType,
 }
 
@@ -78,8 +78,8 @@ impl EgglogOp for FusionStart {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -101,10 +101,10 @@ impl KernelOp for FusionStart {
     ) -> CompileOut {
         unreachable!("FusionStart must be compiled through fusion region codegen")
     }
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.shape.iter().copied().product()
     }
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
     fn output_dtype(&self) -> DType {
@@ -127,8 +127,8 @@ impl KernelOp for FusionStart {
 
 #[derive(Default, Debug, Clone)]
 pub struct FusionEnd {
-    pub(crate) shape: Vec<Expression>,
-    pub(crate) strides: Vec<Expression>,
+    pub(crate) shape: Vec<IntExpr>,
+    pub(crate) strides: Vec<IntExpr>,
     pub(crate) dtype: DType,
 }
 
@@ -164,8 +164,8 @@ impl EgglogOp for FusionEnd {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -187,10 +187,10 @@ impl KernelOp for FusionEnd {
     ) -> CompileOut {
         unreachable!("FusionEnd must be compiled through fusion region codegen")
     }
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.shape.iter().copied().product()
     }
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
     fn output_dtype(&self) -> DType {

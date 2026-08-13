@@ -968,7 +968,7 @@ mod tests {
         let mut cx = Graph::new();
         cx.set_dim('a', 5);
         let out = cx
-            .arange(crate::shape::Expression::from('a'))
+            .arange(crate::shape::IntExpr::from('a'))
             .output();
 
         let expected = vec![0i32, 1, 2, 3, 4];

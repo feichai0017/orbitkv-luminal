@@ -87,8 +87,8 @@ impl Conv {
         let spatial = 2;
 
         // Pad spatial dims only.
-        let zero = Expression::from(0);
-        let pp = Expression::from(self.p);
+        let zero = IntExpr::from(0);
+        let pp = IntExpr::from(self.p);
         let padded = if self.p > 0 {
             x.pad(vec![(zero, zero), (zero, zero), (pp, pp), (pp, pp)], 0.0)
         } else {
@@ -110,7 +110,7 @@ impl Conv {
         perm.extend(rank..2 * rank);
         let permuted = unfolded.permute(perm);
 
-        let output_spatial_dims: Vec<Expression> = permuted.dims()[1..1 + spatial].to_vec();
+        let output_spatial_dims: Vec<IntExpr> = permuted.dims()[1..1 + spatial].to_vec();
 
         // Merge all channel+kernel dims into [N, spatial..., ch_in * kernel_product]
         let mut patches = permuted;
@@ -208,8 +208,8 @@ impl DwConv {
         let w_out = (w + 2 * self.p - self.k) / self.s + 1;
 
         // Pad spatial dims only.
-        let zero = Expression::from(0);
-        let pp = Expression::from(self.p);
+        let zero = IntExpr::from(0);
+        let pp = IntExpr::from(self.p);
         let padded = x.pad(vec![(zero, zero), (zero, zero), (pp, pp), (pp, pp)], 0.0);
         // Unfold: kernel for batch and channel = 1, spatial = k.
         let unfolded = padded.unfold(
@@ -455,8 +455,8 @@ pub fn max_pool_2d(x: GraphTensor, k: usize, s: usize, p: usize) -> GraphTensor 
     let h_out = (h + 2 * p - k) / s + 1;
     let w_out = (w + 2 * p - k) / s + 1;
 
-    let zero = Expression::from(0);
-    let pp = Expression::from(p);
+    let zero = IntExpr::from(0);
+    let pp = IntExpr::from(p);
     let padded = x.pad(
         vec![(zero, zero), (zero, zero), (pp, pp), (pp, pp)],
         -1.0e30,

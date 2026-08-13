@@ -6,7 +6,7 @@
 //! constructs are visible in one place.
 
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 use luminal_nn::{Embedding, GatedFfn, LayerNorm, LlamaBlock};
 
 /// Shared GQA-decoder assembly behind the family minis: embed →
@@ -48,7 +48,7 @@ fn gqa_lm_forward(
     caches: &[(GraphTensor, GraphTensor)],
     gather_idx: GraphTensor,
     scatter_idx: GraphTensor,
-    prev_seq: Expression,
+    prev_seq: IntExpr,
 ) -> (GraphTensor, Vec<(GraphTensor, GraphTensor)>) {
     let mut x = embed.forward(ids);
     let mut caches_out = Vec::with_capacity(blocks.len());
@@ -98,7 +98,7 @@ impl MiniQwen3 {
         caches: &[(GraphTensor, GraphTensor)],
         gather_idx: GraphTensor,
         scatter_idx: GraphTensor,
-        prev_seq: Expression,
+        prev_seq: IntExpr,
     ) -> (GraphTensor, Vec<(GraphTensor, GraphTensor)>) {
         gqa_lm_forward(
             &self.embed,

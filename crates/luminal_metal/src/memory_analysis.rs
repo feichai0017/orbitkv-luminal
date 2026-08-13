@@ -41,8 +41,8 @@ pub(crate) fn metal_memory_analysis_pass(
     let mut program = String::from(
         r#"
 (ruleset metal_memory_analysis)
-(relation metal_output_bytes (OpKind Expression))
-(relation metal_local_memory (IR Expression))
+(relation metal_output_bytes (OpKind IntExpr))
+(relation metal_local_memory (IR IntExpr))
 
 (rule ((= ?node (Input ?id ?label ?dtype)))
       ((metal_local_memory ?node (MNum 0)))
@@ -970,7 +970,7 @@ fn first_data_node<'a>(egraph: &'a SerializedEGraph, class: &'a ClassId) -> Opti
     nodes.iter().find(|node| egraph.enodes.contains_key(*node))
 }
 
-fn eval_bytes(expr: Expression, dyn_map: &FxHashMap<char, usize>) -> Option<usize> {
+fn eval_bytes(expr: IntExpr, dyn_map: &FxHashMap<char, usize>) -> Option<usize> {
     let mut dyn_map = dyn_map.clone();
     dyn_map.entry('z').or_insert(1);
     expr.simplify().exec(&dyn_map)
@@ -1250,9 +1250,9 @@ fn local_output_bytes<'a>(
     egraph: &'a SerializedEGraph,
     sort: &SortDef,
     kind_children: &[&'a ENodeId],
-    list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-    expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
-) -> Option<Expression> {
+    list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+    expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
+) -> Option<IntExpr> {
     match sort.name.as_str() {
         name if zero_local_op_kind(name) => Some(0.into()),
         "FusionStart" => Some(0.into()),
@@ -1299,7 +1299,7 @@ fn local_output_bytes<'a>(
     }
 }
 
-fn bytes_for_elements(elements: Expression, dtype: DType) -> Expression {
+fn bytes_for_elements(elements: IntExpr, dtype: DType) -> IntExpr {
     (elements * dtype.bits()).ceil_div(8)
 }
 
@@ -1312,8 +1312,8 @@ fn expr_field<'a>(
     sort: &SortDef,
     kind_children: &[&'a ENodeId],
     field: &str,
-    expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
-) -> Option<Expression> {
+    expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
+) -> Option<IntExpr> {
     let node = kind_children.get(field_index(sort, field)?)?;
     extract_expr(egraph, node, expr_cache)
 }
@@ -1333,14 +1333,14 @@ fn n_elements_field<'a>(
     sort: &SortDef,
     kind_children: &[&'a ENodeId],
     field: &str,
-    list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-    expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
-) -> Option<Expression> {
+    list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+    expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
+) -> Option<IntExpr> {
     let node = kind_children.get(field_index(sort, field)?)?;
     Some(
         extract_expr_list(egraph, node, list_cache, expr_cache)?
             .into_iter()
-            .product::<Expression>()
+            .product::<IntExpr>()
             .max(1),
     )
 }

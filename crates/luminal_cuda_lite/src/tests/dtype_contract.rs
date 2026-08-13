@@ -818,7 +818,7 @@ fn fused_rms_norm_matches_decomposed() {
     let mut cx = Graph::default();
     let x = cx.tensor((ROWS, COLS));
     let w = cx.tensor(COLS);
-    let out = (x.std_norm(1, 1e-5_f32) * w.expand_lhs([Expression::from(ROWS)])).output();
+    let out = (x.std_norm(1, 1e-5_f32) * w.expand_lhs([IntExpr::from(ROWS)])).output();
     cx.build_search_space::<CudaRuntime>(CompileOptions::default());
     let mut rt = CudaRuntime::initialize(stream.clone());
     rt.set_data(x, x_data.clone());
@@ -1313,7 +1313,7 @@ fn rope_half_scatter_fusion_requires_exact_shape_and_layout() {
     let dest = cx.tensor_dtyped((10, KVD), DType::Bf16).persist();
 
     // Same logical dimensions but a non-contiguous source view.
-    let z = Expression::from('z');
+    let z = IntExpr::from('z');
     let wrong_layout = GraphTensor::from_id(
         rope.id,
         ShapeTracker::new_strided((S, KVD), (z, z * S)).with_element_bits(DType::Bf16.bits()),
@@ -1607,7 +1607,7 @@ fn moe_gemv_matches_hlir_reference() {
         let (_, d1, d2) = weights.dims3();
         let io = d1 * d2;
         let base = top_k_indices * io;
-        let within = weights.graph().iota(Expression::from('z'), (d1, d2));
+        let within = weights.graph().iota(IntExpr::from('z'), (d1, d2));
         let n_base = base.dims().len();
         let exp_base = base.expand_dim(n_base, d1).expand_dim(n_base + 1, d2);
         let mut exp_within = within;
@@ -1619,10 +1619,10 @@ fn moe_gemv_matches_hlir_reference() {
 
     for (per_expert, dyn_s) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut cx = Graph::default();
-        let s_dim: Expression = if dyn_s {
-            Expression::from('s')
+        let s_dim: IntExpr = if dyn_s {
+            IntExpr::from('s')
         } else {
-            Expression::from(S)
+            IntExpr::from(S)
         };
         if dyn_s {
             cx.set_dim('s', S);

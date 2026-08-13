@@ -22,7 +22,7 @@ fn is_runtime_label(label: &str) -> bool {
     label.starts_with("arg.") || label.starts_with("cache.")
 }
 
-fn spec_numel(dims: &[luminal::prelude::Expression]) -> usize {
+fn spec_numel(dims: &[luminal::prelude::IntExpr]) -> usize {
     dims.iter()
         .map(|d| d.to_usize().expect("model dims are static"))
         .product()

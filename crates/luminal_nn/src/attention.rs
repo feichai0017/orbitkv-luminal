@@ -1,5 +1,5 @@
 use luminal::prelude::*;
-use luminal::shape::Expression;
+use luminal::shape::IntExpr;
 
 /// Gather entire rows from a 2D tensor using row indices.
 ///
@@ -74,7 +74,7 @@ pub fn paged_attention(
     v_cache: GraphTensor,
     gather_idx: GraphTensor,
     scatter_idx: GraphTensor,
-    prev_seq: Expression,
+    prev_seq: IntExpr,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
@@ -112,7 +112,7 @@ pub fn paged_attention_windowed(
     v_cache: GraphTensor,
     gather_idx: GraphTensor,
     scatter_idx: GraphTensor,
-    prev_seq: Expression,
+    prev_seq: IntExpr,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
@@ -146,7 +146,7 @@ pub fn paged_attention_windowed(
 
 /// [`paged_attention_windowed`] with the query positions fed as DATA —
 /// a `q_pos` (s,) Int input tensor — instead of a `prev_seq`
-/// Expression. An Expression is baked concrete into the searched plan
+/// IntExpr. An IntExpr is baked concrete into the searched plan
 /// (bucketed search pins the representative), so a decode loop that
 /// wants ONE search and N executes needs the position to arrive through
 /// a buffer like any other per-step input. Same cache/gather/mask
@@ -537,7 +537,7 @@ mod tests {
     use super::{gather_rows, paged_attention, paged_attention_positional, scatter_rows};
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
-    use luminal::shape::Expression;
+    use luminal::shape::IntExpr;
     use luminal::ssa_reference::SsaReferenceRuntime;
     use rustc_hash::FxHashMap;
 
@@ -638,7 +638,7 @@ mod tests {
             v_cache,
             gather_idx,
             scatter_idx,
-            Expression::from(prev_seq),
+            IntExpr::from(prev_seq),
             N_HEADS,
             N_KV_HEADS,
             HEAD_DIM,
@@ -706,7 +706,7 @@ mod tests {
     /// where the mask BINDS: the query sits at position 1 while the
     /// gather covers slots 0..3, so slot 2 must be masked out (it is
     /// beyond the write frontier and holds stale cache rows). Also
-    /// pins positional ≡ the Expression form: same fixture, both
+    /// pins positional ≡ the IntExpr form: same fixture, both
     /// attention spellings in one graph, outputs asserted against the
     /// same reference.
     #[test]
@@ -751,7 +751,7 @@ mod tests {
             v_cache,
             gather_idx,
             scatter_idx,
-            Expression::from(q_position),
+            IntExpr::from(q_position),
             N_HEADS,
             N_KV_HEADS,
             HEAD_DIM,

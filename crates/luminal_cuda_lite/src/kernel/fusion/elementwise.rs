@@ -27,9 +27,9 @@ type CompileOut = (
     CudaFunction,
     Arc<CudaModule>,
     String,
-    (Expression, Expression, Expression),
-    (Expression, Expression, Expression),
-    Expression,
+    (IntExpr, IntExpr, IntExpr),
+    (IntExpr, IntExpr, IntExpr),
+    IntExpr,
     FxHashMap<char, CudaSlice<u8>>,
 );
 
@@ -40,9 +40,9 @@ fn extract_string_label(egraph: &SerializedEGraph, node: &ENodeId) -> String {
 #[derive(Default, Debug, Clone)]
 pub struct CudaUnaryElementwise {
     pub(crate) op: String,
-    pub(crate) shape: Vec<Expression>,
-    pub(crate) in_strides: Vec<Expression>,
-    pub(crate) out_strides: Vec<Expression>,
+    pub(crate) shape: Vec<IntExpr>,
+    pub(crate) in_strides: Vec<IntExpr>,
+    pub(crate) out_strides: Vec<IntExpr>,
     pub(crate) dtype: DType,
 }
 
@@ -114,8 +114,8 @@ impl EgglogOp for CudaUnaryElementwise {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
@@ -141,23 +141,23 @@ impl KernelOp for CudaUnaryElementwise {
         unreachable!("CudaUnaryElementwise must be compiled through fusion region codegen")
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.shape.iter().copied().product()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.output_size()
     }
 
@@ -173,10 +173,10 @@ impl KernelOp for CudaUnaryElementwise {
 #[derive(Default, Debug, Clone)]
 pub struct CudaBinaryElementwise {
     pub(crate) op: String,
-    pub(crate) out_shape: Vec<Expression>,
-    pub(crate) a_stride: Vec<Expression>,
-    pub(crate) b_stride: Vec<Expression>,
-    pub(crate) out_stride: Vec<Expression>,
+    pub(crate) out_shape: Vec<IntExpr>,
+    pub(crate) a_stride: Vec<IntExpr>,
+    pub(crate) b_stride: Vec<IntExpr>,
+    pub(crate) out_stride: Vec<IntExpr>,
     pub(crate) dtype: DType,
 }
 
@@ -251,8 +251,8 @@ impl EgglogOp for CudaBinaryElementwise {
         egraph: &'a SerializedEGraph,
         kind_children: &[&'a ENodeId],
         input_enodes: Vec<&'a ENodeId>,
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<IntExpr>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, IntExpr>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         // Preserve every extracted metadata list verbatim. A selected
         // candidate with inconsistent ranks is rejected by fusion-region
@@ -287,23 +287,23 @@ impl KernelOp for CudaBinaryElementwise {
         unreachable!("CudaBinaryElementwise must be compiled through fusion region codegen")
     }
 
-    fn output_size(&self) -> Expression {
+    fn output_size(&self) -> IntExpr {
         self.out_shape.iter().copied().product()
     }
 
-    fn output_bytes(&self) -> Expression {
+    fn output_bytes(&self) -> IntExpr {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
-    fn bytes_loaded(&self) -> Expression {
+    fn bytes_loaded(&self) -> IntExpr {
         self.output_bytes() * 2
     }
 
-    fn bytes_stored(&self) -> Expression {
+    fn bytes_stored(&self) -> IntExpr {
         self.output_bytes()
     }
 
-    fn flops(&self) -> Expression {
+    fn flops(&self) -> IntExpr {
         self.output_size()
     }
 

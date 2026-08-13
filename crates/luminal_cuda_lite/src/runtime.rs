@@ -136,7 +136,7 @@ impl Debug for ExecutableHostOp {
 
 #[derive(Clone)]
 pub(crate) struct BufferSpec {
-    bytes: Expression,
+    bytes: IntExpr,
     dtype: DType,
 }
 
@@ -4794,7 +4794,7 @@ mod arena_plan_tests {
         bucket.buffer_specs.insert(
             data,
             BufferSpec {
-                bytes: Expression::from('s') * 4,
+                bytes: IntExpr::from('s') * 4,
                 dtype: DType::F32,
             },
         );
@@ -4950,14 +4950,14 @@ mod arena_plan_tests {
         bucket.buffer_specs.insert(
             a,
             BufferSpec {
-                bytes: Expression::from('s') * 4,
+                bytes: IntExpr::from('s') * 4,
                 dtype: DType::F32,
             },
         );
         bucket.buffer_specs.insert(
             b,
             BufferSpec {
-                bytes: Expression::from('s') * 8,
+                bytes: IntExpr::from('s') * 8,
                 dtype: DType::F32,
             },
         );
