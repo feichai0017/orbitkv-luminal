@@ -110,6 +110,19 @@ impl GraphTensor {
         self.dims.to_vec()
     }
 
+    /// Dim agreement for elementwise ops: structural equality is the
+    /// fast path; a structural mismatch falls back to PROPER equality
+    /// saturation per dim (`Expression::egglog_equal` — ruling
+    /// 2026-08-13: `a + b` and `b + a` are the same extent, and the
+    /// authoring surface must know it, not panic on spelling).
+    pub(crate) fn dims_agree(&self, rhs: &GraphTensor) -> bool {
+        let (a, b) = (self.dims(), rhs.dims());
+        a.len() == b.len()
+            && a.iter()
+                .zip(&b)
+                .all(|(x, y)| x == y || x.egglog_equal(y))
+    }
+
     /// The tensor's rank — the public shape surface is dims()/rank()
     /// (A2 quarantine; ruling 2026-07-30).
     pub fn rank(&self) -> usize {

@@ -1355,11 +1355,35 @@ fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) ->
     for (value, id) in &plan.value_buffer {
         if let Some((dims, bits, dtype)) = value_geometry.get(value) {
             if let Some(buffer) = plan.buffers.get_mut(id) {
+                // Dims/bits joins are CHECKED, order-independent lattice
+                // joins (None ∨ x = x; equal ∨ equal = equal; different
+                // knowns BAIL) — the old first-wins-by-hash-order join
+                // let a buffer shared by values of different numel take
+                // its geometry nondeterministically (found 2026-08-12 by
+                // the forced view-admission probe; fix ruled 2026-08-13).
+                // Dims stay FIRST-WINS for now — and that is a documented
+                // hole, not a design: folded views legitimately cohabit a
+                // buffer with the parent at DIFFERENT numel (matmul expand
+                // reads (2,3) through (2,4,3); slice reads (2,2) through
+                // (2); scalar broadcast reads () through (3,5)), so a
+                // checked numel join refuses valid plans. The sound join
+                // needs WRITER identity — storage geometry = the resident
+                // value that supplies the bytes (staged input or writing
+                // kernel), view readers skipped. That resident-geometry
+                // annotation is the prerequisite for admitting views on
+                // real backends and lands with the M4 re-seat (ruling
+                // 2026-08-13); until then hash-order decides ties exactly
+                // as before, deterministic per build.
                 if buffer.dims.is_none() {
                     buffer.dims = dims.clone();
                 }
-                if buffer.element_bits.is_none() {
-                    buffer.element_bits = *bits;
+                match (buffer.element_bits, *bits) {
+                    (None, known) => buffer.element_bits = known,
+                    (Some(held), Some(new)) if held != new => anyhow::bail!(
+                        "buffer {} backs values of conflicting element                          widths {held} and {new} bits",
+                        buffer.label
+                    ),
+                    _ => {}
                 }
                 // Dtype join is CHECKED, not first-wins: two values
                 // cohabiting one buffer with different dtypes would be a

@@ -3412,6 +3412,10 @@ mod subst_guard_study {
         let y = cx.named_tensor_dtyped("y", (ba,), DType::F32);
         let doubled = (x + x).output();
         let summed = (y * y).output();
+        // MIXED-SPELLING elementwise: a+b meets b+a directly — the
+        // frontend accepts via egglog_equal (ruling 2026-08-13) and the
+        // egglog side unifies the extents through the pin collapse.
+        let mixed = (x + y).output();
 
         let x_vals = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let y_vals = vec![2.0f32, 3.0, 4.0, 5.0, 6.0];
@@ -3426,6 +3430,10 @@ mod subst_guard_study {
         }
         for (i, v) in out_y.iter().enumerate() {
             assert_eq!(*v, y_vals[i] * y_vals[i]);
+        }
+        let out_mixed = rt.get_f32(mixed.id).expect("mixed-spelling add runs");
+        for (i, v) in out_mixed.iter().enumerate() {
+            assert_eq!(*v, x_vals[i] + y_vals[i]);
         }
     }
 }
