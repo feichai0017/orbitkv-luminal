@@ -2,9 +2,11 @@
 pub mod binary;
 pub mod matmul;
 pub mod movement;
+pub mod ns;
 pub mod other;
 pub mod reduction;
 pub mod tensor;
 pub mod unary;
 
+pub use ns::Ns;
 pub use tensor::*;
