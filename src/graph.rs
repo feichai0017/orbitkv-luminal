@@ -339,6 +339,8 @@ pub struct LogicalGraph {
     values: Vec<Value>,
     /// Output designations in .output() order.
     outputs: Vec<OutputRecord>,
+    /// Anonymous-input counter — mints "arg.{k}" labels (Stage 3).
+    anon_inputs: usize,
     post_checks: String,
     poisoned: Option<String>,
 }
@@ -495,7 +497,30 @@ impl LogicalGraph {
                 return None;
             }
         };
-        let full_label = format!("{label}_{slot}");
+        // STAGE 3 (rulings 2026-08-13): every input has a unique
+        // pristine label. Anonymous inputs auto-name "arg.{k}" in
+        // declaration order (the ExportedProgram/ONNX convention for
+        // positional user inputs); duplicate labels POISON at the one
+        // choke point (uniqueness is a tree-address corollary under Ns,
+        // and this tripwire catches hand-authored collisions); and the
+        // label ALONE is the input's identity in the IR text — the
+        // "{label}_{slot}" mangle is dead, its anti-hash-cons job done
+        // by label uniqueness.
+        let label = if label.is_empty() {
+            let minted = format!("arg.{}", self.anon_inputs);
+            self.anon_inputs += 1;
+            minted
+        } else {
+            label.to_string()
+        };
+        if self
+            .values
+            .iter()
+            .any(|value| value.input_label.as_deref() == Some(&label))
+        {
+            self.poison(format!("duplicate input label \"{label}\""));
+            return None;
+        }
         // Boolean inputs cross the boundary as Bool8 (the Bool8 ruling:
         // models compute in 1-bit Bool; bindings state the byte
         // representation). Outputs get their boundary cast from the
@@ -507,7 +532,7 @@ impl LogicalGraph {
             DType::Bool => "(Bool8)".to_string(),
             other => Self::dtype_term(other),
         };
-        let aux = format!("(LogicalIdLit \"{full_label}\") {shape} {wire_dtype_term}");
+        let aux = format!("(LogicalIdLit \"{label}\") {shape} {wire_dtype_term}");
         let lit = self.push(Value {
             constructor: "LogicalTensorInputLit".to_string(),
             operands: Vec::new(),
@@ -517,7 +542,7 @@ impl LogicalGraph {
             dims: dims.to_vec(),
             dtype,
             input_slot: Some(slot),
-            input_label: Some(label.to_string()),
+            input_label: Some(label),
         });
         if dtype == DType::Bool {
             return self.op(

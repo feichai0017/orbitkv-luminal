@@ -3371,8 +3371,8 @@ mod subst_guard_study {
         );
         assert_eq!(inputs[0].dtype, DType::F32);
         assert_eq!(
-            inputs[1].label, "",
-            "anonymous inputs keep an empty pristine label until auto-naming lands"
+            inputs[1].label, "arg.0",
+            "anonymous inputs auto-name in declaration order (Stage 3)"
         );
 
         let outputs = cx.logical.output_specs();
@@ -3389,6 +3389,18 @@ mod subst_guard_study {
         assert!(
             cx.logical.model_text().unwrap_err().contains("duplicate output name"),
             "second \"logits\" poisons loudly"
+        );
+
+        // Stage 3: duplicate INPUT labels poison at the choke point.
+        let mut cx2 = Graph::default();
+        let _a = cx2.named_tensor("blocks.0.wq.weight", (2usize,));
+        let _b = cx2.named_tensor("blocks.0.wq.weight", (2usize,));
+        assert!(
+            cx2.logical
+                .model_text()
+                .unwrap_err()
+                .contains("duplicate input label"),
+            "duplicate input label poisons loudly"
         );
     }
 
