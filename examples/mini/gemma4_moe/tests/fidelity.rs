@@ -4,7 +4,7 @@
 
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use luminal_nn::test_refs::*;
+use luminal::reference::scalar_refs::*;
 use luminal_nn::FeedForward;
 use mini_gemma4_moe::MiniGemma4Moe;
 

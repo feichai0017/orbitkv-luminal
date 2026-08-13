@@ -286,7 +286,7 @@ impl MoETopK {
 #[cfg(test)]
 mod topk_tests {
     use super::MoETopK;
-    use crate::test_refs::*;
+    use luminal::reference::scalar_refs::*;
     use luminal::prelude::*;
 
     /// The full Qwen3-MoE chain against a scalar reference: softmax over

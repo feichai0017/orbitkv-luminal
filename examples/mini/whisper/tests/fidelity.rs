@@ -2,7 +2,7 @@
 //! luminal_nn's mini.rs tests, relocation ruling 2026-08-13).
 
 use luminal::prelude::*;
-use luminal_nn::test_refs::*;
+use luminal::reference::scalar_refs::*;
 use mini_whisper::MiniWhisper;
 
 /// MiniWhisper: encoder self-attention + decoder CROSS-attention —

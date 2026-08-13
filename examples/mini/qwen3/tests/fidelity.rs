@@ -4,7 +4,7 @@
 
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use luminal_nn::test_refs::*;
+use luminal::reference::scalar_refs::*;
 use mini_qwen3::*;
 
 fn seeds_for(layer: usize) -> (usize, usize, usize, usize, usize, usize, usize) {

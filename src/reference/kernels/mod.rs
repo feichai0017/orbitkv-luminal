@@ -71,7 +71,6 @@ pub fn reference_kernels() -> &'static [ReferenceKernel] {
             entry::<RecipFunctionalDps>("RecipFunctionalGeneric", elementwise::recip),
             entry::<LessThanDps>("LessThanGeneric", elementwise::less_than),
             entry::<CastDps>("CastGeneric", elementwise::cast),
-            entry::<AddMulFusedDps>("AddMulFusedGeneric", elementwise::add_mul_fused),
             // ── sources ──
             entry::<ConstantDps>("ConstantGeneric", source::constant),
             entry::<IotaDps>("IotaGeneric", source::iota),
@@ -79,7 +78,6 @@ pub fn reference_kernels() -> &'static [ReferenceKernel] {
             entry::<ReduceSumDps>("ReduceSumGeneric", reduce::sum),
             entry::<ReduceMaxDps>("ReduceMaxGeneric", reduce::max),
             // ── matmul ──
-            entry::<MatMulFusedDps>("MatMulFusedGeneric", matmul::matmul_fused),
             // ── data movement ──
             entry::<GatherDps>("GatherGeneric", data_movement::gather),
             entry::<ScatterFunctionalDps>("ScatterFunctionalGeneric", data_movement::scatter_checked),

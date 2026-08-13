@@ -2647,7 +2647,7 @@ mod tests {
     #[test]
     fn builtin_ops_declare_no_unconditional_permits() {
         use crate::layout_ir::{
-            AddFunctional, AddMulFused, AddMutating, DivFunctional, ExpFunctional,
+            AddFunctional, AddMutating, DivFunctional, ExpFunctional,
             IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax,
             ReduceSum, SqrtFunctional, SqrtMutating,
         };

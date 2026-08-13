@@ -2771,7 +2771,8 @@ mod tests {
     /// blanket permit the engine would have to trust.
     #[test]
     fn builtin_ops_declare_no_unconditional_permits() {
-        use crate::reference::ops::{AddFunctional, AddMulFused, AddMutating, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax, ReduceSum, SqrtFunctional, SqrtMutating};
+        use crate::test_support::test_ops::AddMulFused;
+        use crate::reference::ops::{AddFunctional, AddMutating, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax, ReduceSum, SqrtFunctional, SqrtMutating};
         let ops: Vec<Box<dyn LayoutIrOp>> = vec![
             Box::new(SqrtFunctional),
             Box::new(ExpFunctional),

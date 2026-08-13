@@ -3,7 +3,7 @@
 
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use luminal_nn::test_refs::*;
+use luminal::reference::scalar_refs::*;
 use mini_qwen3_moe::MiniQwen3Moe;
 
 /// MoE-family harness: 1 block + embed + tied logits, one decode step.

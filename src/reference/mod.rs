@@ -12,6 +12,7 @@
 //! HLIR node indices, so differential tests against `ReferenceRuntime`
 //! bind identically on both sides.
 
+pub mod scalar_refs;
 pub mod kernels;
 pub mod ops;
 
@@ -462,7 +463,6 @@ mod tests {
         allow.sort_unstable();
         let expected = vec![
             "LayoutTensorOpAddFunctionalGeneric",
-            "LayoutTensorOpAddMulFusedGeneric",
             "LayoutTensorOpCastGeneric",
             "LayoutTensorOpConstantGeneric",
             "LayoutTensorOpCopyGeneric",
@@ -474,7 +474,6 @@ mod tests {
             "LayoutTensorOpIotaGeneric",
             "LayoutTensorOpLessThanGeneric",
             "LayoutTensorOpLog2FunctionalGeneric",
-            "LayoutTensorOpMatMulFusedGeneric",
             "LayoutTensorOpModFunctionalGeneric",
             "LayoutTensorOpMulFunctionalGeneric",
             "LayoutTensorOpRecipFunctionalGeneric",

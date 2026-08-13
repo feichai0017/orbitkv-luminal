@@ -23,7 +23,6 @@
 #![allow(unused_imports)]
 
 mod add;
-mod add_mul_fused;
 mod cast;
 mod constant;
 mod div;
@@ -38,7 +37,6 @@ mod iota;
 mod less_than;
 mod log2;
 mod materialize_layout_copy;
-mod matmul_fused;
 mod modulo;
 mod mul;
 mod poison;
@@ -59,7 +57,6 @@ mod sqrt;
 // created by its matcher's `extract` (or derived via `to_dps` / synthesized
 // by the DPS pass, for Poison) — a hygiene convention, not a privacy fence.
 pub use add::{AddFunctional, AddMutating, AddMutatingInputAliasSafe};
-pub use add_mul_fused::AddMulFused;
 pub use cast::Cast;
 pub use constant::Constant;
 pub use div::{DivFunctional, DivMutating};
@@ -86,7 +83,6 @@ pub use sqrt::{SqrtFunctional, SqrtMutating};
 // (reference::kernels downcasts plan ops to these concrete types —
 // ops carry no execution of their own, ruling 2026-08-06).
 pub use add::AddFunctionalDps;
-pub use add_mul_fused::AddMulFusedDps;
 pub use cast::CastDps;
 pub use constant::ConstantDps;
 pub use div::DivFunctionalDps;
@@ -98,7 +94,6 @@ pub use iota::IotaDps;
 pub use less_than::LessThanDps;
 pub use log2::Log2FunctionalDps;
 pub use materialize_layout_copy::MaterializeLayoutCopyDps;
-pub use matmul_fused::MatMulFusedDps;
 pub use modulo::ModFunctionalDps;
 pub use mul::MulFunctionalDps;
 pub use recip::RecipFunctionalDps;
@@ -109,7 +104,6 @@ pub use sin::SinFunctionalDps;
 pub use sqrt::SqrtFunctionalDps;
 
 pub use add::{AddFunctionalMatcher, AddMutatingInputAliasSafeMatcher, AddMutatingMatcher};
-pub use add_mul_fused::AddMulFusedMatcher;
 pub use cast::CastMatcher;
 pub use constant::ConstantMatcher;
 pub use div::{DivFunctionalMatcher, DivMutatingMatcher};
@@ -125,7 +119,6 @@ pub use less_than::LessThanMatcher;
 pub use log2::{Log2FunctionalMatcher, Log2MutatingMatcher};
 pub use modulo::{ModFunctionalMatcher, ModMutatingMatcher};
 pub use materialize_layout_copy::MaterializeLayoutCopyMatcher;
-pub use matmul_fused::MatMulFusedMatcher;
 pub use mul::{MulFunctionalMatcher, MulMutatingMatcher};
 pub use recip::{RecipFunctionalMatcher, RecipMutatingMatcher};
 pub use reduce_max::ReduceMaxMatcher;
@@ -176,8 +169,5 @@ pub fn built_in_matchers() -> Vec<Box<dyn crate::layout_ir::OpMatcher>> {
         Box::new(LessThanMatcher),
         Box::new(CastMatcher),
         Box::new(IndexMapApplyMaterializeMatcher),
-        Box::new(IndexMapApplyViewMatcher),
-        Box::new(AddMulFusedMatcher),
-        Box::new(MatMulFusedMatcher),
     ]
 }

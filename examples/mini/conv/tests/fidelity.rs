@@ -2,7 +2,7 @@
 //! luminal_nn::mini's test module, 2026-08-13 mini relocation).
 
 use luminal::prelude::*;
-use luminal_nn::test_refs::*;
+use luminal::reference::scalar_refs::*;
 use mini_conv::*;
 
 /// MiniConvNet: 3×3 valid convs 5→3→1 + relu + linear head.

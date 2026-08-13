@@ -1,2 +1,0 @@
-;                                    Lhs          Rhs         Out
-(constructor LayoutTensorOpMatMulFusedGeneric (LayoutTensor LayoutTensor Layout) LayoutTensorOp)

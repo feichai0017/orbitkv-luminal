@@ -583,7 +583,7 @@ mod tests {
     use luminal::shape::IntExpr;
     use luminal::reference::ReferenceRuntime;
     use rustc_hash::FxHashMap;
-    use crate::test_refs::*;
+    use luminal::reference::scalar_refs::*;
 
 
 
@@ -1322,7 +1322,7 @@ mod tests {
 #[cfg(test)]
 mod forward_rope_tests {
     use super::LlamaBlock;
-    use crate::test_refs::*;
+    use luminal::reference::scalar_refs::*;
     use luminal::prelude::*;
     use luminal::shape::IntExpr;
 
