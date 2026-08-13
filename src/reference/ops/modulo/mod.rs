@@ -195,3 +195,24 @@ impl OpMatcher for ModMutatingMatcher {
         Box::new(ModMutating)
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
+
+/// Same story as the Div kernel: f32 `%` only; integer remainder is
+/// TruncRem.
+pub(in crate::reference) fn kernel(_op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+    match &ctx.operands[0] {
+        TypedBuffer::F32(_) => ctx.binary_elementwise(|a, b| a % b),
+        other => anyhow::bail!(
+            "Mod has no {} arm: integer remainder is TruncRem, not Mod",
+            other.type_name()
+        ),
+    }
+}

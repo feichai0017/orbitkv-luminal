@@ -195,3 +195,31 @@ impl OpMatcher for MulMutatingMatcher {
         Box::new(MulMutating)
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
+
+/// Int arithmetic is CHECKED (non-wrapping by ruling 2026-08-11): an
+/// overflow is a loud kernel error, never a wrapped value — until the
+/// landing-D bounds proofs gate Int ops statically, this dynamic check
+/// is the soundness floor.
+pub(in crate::reference) fn kernel(_op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+    match &ctx.operands[0] {
+        TypedBuffer::F32(_) => ctx.binary_elementwise(|a, b| a * b),
+        TypedBuffer::I32(_) => ctx.binary_elementwise_i32(|a, b| {
+            a.checked_mul(b)
+                .ok_or_else(|| anyhow::anyhow!("i32 mul overflow: {a} * {b} (ints are non-wrapping)"))
+        }),
+        TypedBuffer::I64(_) => ctx.binary_elementwise_i64(|a, b| {
+            a.checked_mul(b)
+                .ok_or_else(|| anyhow::anyhow!("i64 mul overflow: {a} * {b} (ints are non-wrapping)"))
+        }),
+        other => anyhow::bail!("mul has no {} arm", other.type_name()),
+    }
+}

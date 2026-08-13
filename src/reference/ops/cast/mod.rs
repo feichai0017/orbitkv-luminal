@@ -118,3 +118,155 @@ impl OpMatcher for CastMatcher {
         Box::new(Cast)
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
+
+pub(in crate::reference) fn kernel(_op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+    // The conversion is driven by the BUFFER types the plan annotated —
+    // the op needs no dtype field of its own. Covered pairs only;
+    // anything else refuses loudly (never a silent reinterpretation).
+    // The 2026-08-11 cast policy: int -> float is CHECKED-EXACT
+    // (conservative |v| <= 2^24, loud outside it); float -> int is a
+    // REFUSAL (a lossy read is an explicit op, never a cast — the
+    // Bool8 projection rule generalized); bool -> number is the exact
+    // 0/1 indicator bridge; number -> bool is always the refusal.
+    const F32_EXACT_INT: i64 = 1 << 24;
+    match (&ctx.operands[0], &mut ctx.dests[0]) {
+        // Same-type: value-preserving copies.
+        (TypedBuffer::F32(input), TypedBuffer::F32(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            dest.copy_from_slice(input);
+        }
+        (TypedBuffer::I32(input), TypedBuffer::I32(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            dest.copy_from_slice(input);
+        }
+        (TypedBuffer::I64(input), TypedBuffer::I64(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            dest.copy_from_slice(input);
+        }
+        (TypedBuffer::Bool8(input), TypedBuffer::Bool8(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            dest.copy_from_slice(input);
+        }
+        // The indicator bridges: bool -> number is exactly 0 / 1.
+        (TypedBuffer::Bool8(input), TypedBuffer::F32(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, code) in dest.iter_mut().zip(input) {
+                // The Bool8 invariant, enforced at the read: only the
+                // two legal codes exist; anything else is ill-formed
+                // data, not a truthy byte.
+                anyhow::ensure!(*code <= 1, "Bool8 buffer holds ill-formed code {code}");
+                *out = f32::from(*code);
+            }
+        }
+        (TypedBuffer::Bool8(input), TypedBuffer::I32(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, code) in dest.iter_mut().zip(input) {
+                anyhow::ensure!(*code <= 1, "Bool8 buffer holds ill-formed code {code}");
+                *out = i32::from(*code);
+            }
+        }
+        (TypedBuffer::Bool8(input), TypedBuffer::I64(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, code) in dest.iter_mut().zip(input) {
+                anyhow::ensure!(*code <= 1, "Bool8 buffer holds ill-formed code {code}");
+                *out = i64::from(*code);
+            }
+        }
+        // Int -> float: checked-exact (conservative), loud outside it.
+        (TypedBuffer::I32(input), TypedBuffer::F32(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, value) in dest.iter_mut().zip(input) {
+                anyhow::ensure!(
+                    (i64::from(*value)).abs() <= F32_EXACT_INT,
+                    "cast i32 -> f32 loses exactness at value {value} \
+                     (|v| <= 2^24 by the conservative-exact ruling)"
+                );
+                *out = *value as f32;
+            }
+        }
+        (TypedBuffer::I64(input), TypedBuffer::F32(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, value) in dest.iter_mut().zip(input) {
+                anyhow::ensure!(
+                    value.abs() <= F32_EXACT_INT,
+                    "cast i64 -> f32 loses exactness at value {value} \
+                     (|v| <= 2^24 by the conservative-exact ruling)"
+                );
+                *out = *value as f32;
+            }
+        }
+        // Int widenings/narrowings: exact or loud.
+        (TypedBuffer::I32(input), TypedBuffer::I64(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, value) in dest.iter_mut().zip(input) {
+                *out = i64::from(*value);
+            }
+        }
+        (TypedBuffer::I64(input), TypedBuffer::I32(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, value) in dest.iter_mut().zip(input) {
+                *out = i32::try_from(*value).map_err(|_| {
+                    anyhow::anyhow!("cast i64 -> i32 out of range at value {value}")
+                })?;
+            }
+        }
+        // fp8: the QUANTIZE direction is the model's own explicit
+        // step (quantization is model definition, ruling 2026-08-12) —
+        // E4M3FN semantics: round-to-nearest-even, SATURATE to ±448
+        // (the clamp handles the crate's non-FN overflow behavior;
+        // agreement with the checkpoint codec is pinned exhaustively
+        // by test). Widening back is exact.
+        (TypedBuffer::F32(input), TypedBuffer::F8E4M3(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, value) in dest.iter_mut().zip(input) {
+                *out = if value.is_nan() {
+                    float8::F8E4M3::from_bits(0x7F)
+                } else {
+                    float8::F8E4M3::from_f32(value.clamp(-448.0, 448.0))
+                };
+            }
+        }
+        (TypedBuffer::F8E4M3(input), TypedBuffer::F32(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            for (out, code) in dest.iter_mut().zip(input) {
+                *out = code.to_f32();
+            }
+        }
+        (TypedBuffer::F8E4M3(input), TypedBuffer::F8E4M3(dest)) => {
+            anyhow::ensure!(input.len() == dest.len(), "cast length mismatch");
+            dest.copy_from_slice(input);
+        }
+        // Float -> int is a REFUSAL: rounding/truncation is a lossy
+        // read and must be an explicit op with ruled semantics, never
+        // a cast (the F32 -> Bool8 projection rule generalized).
+        (TypedBuffer::F32(_), TypedBuffer::I32(_) | TypedBuffer::I64(_)) => {
+            anyhow::bail!(
+                "cast f32 -> int is not a reinterpretation: a rounding \
+                 or truncation is a lossy read and must appear as an \
+                 explicit op in the model, never as a cast"
+            );
+        }
+        (TypedBuffer::F32(_) | TypedBuffer::I32(_) | TypedBuffer::I64(_), TypedBuffer::Bool8(_)) => {
+            anyhow::bail!(
+                "cast number -> Bool8 is not a reinterpretation: the != 0 \
+                 reading is a PROJECTION and must appear as an explicit \
+                 comparison in the model (LessThan), never as a cast"
+            );
+        }
+        (input, dest) => anyhow::bail!(
+            "cast has no ({} -> {}) arm",
+            input.type_name(),
+            dest.type_name()
+        ),
+    }
+    Ok(())
+}

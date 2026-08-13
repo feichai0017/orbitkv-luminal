@@ -195,3 +195,28 @@ impl OpMatcher for DivMutatingMatcher {
         Box::new(DivMutating)
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
+
+/// IEEE f32 division — a zero divisor yields inf/nan exactly as their
+/// runtime would; no special-casing. Int operands REFUSE here: integer
+/// division is a DIFFERENT mathematical function (truncation toward
+/// zero) and gets its own operators, LogicalTruncDiv/LogicalTruncRem
+/// (ruling 2026-08-11, landing D) — Div on Int would be a silent
+/// semantics substitution.
+pub(in crate::reference) fn kernel(_op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+    match &ctx.operands[0] {
+        TypedBuffer::F32(_) => ctx.binary_elementwise(|a, b| a / b),
+        other => anyhow::bail!(
+            "Div has no {} arm: integer division is TruncDiv, not Div",
+            other.type_name()
+        ),
+    }
+}

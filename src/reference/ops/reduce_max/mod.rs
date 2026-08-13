@@ -123,3 +123,24 @@ impl OpMatcher for ReduceMaxMatcher {
         Box::new(ReduceMax { axis: site.child_i64(1) })
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
+use crate::reference::kernels::expect_op;
+
+/// Axis reduce-max. Int max needs no overflow check (max never leaves
+/// the operand range).
+pub(in crate::reference) fn kernel(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+    let op = expect_op::<ReduceMaxDps>(op)?;
+    match &ctx.operands[0] {
+        TypedBuffer::F32(_) => ctx.reduce_axis(op.axis, f32::NEG_INFINITY, |acc, x| acc.max(x)),
+        TypedBuffer::I32(_) => ctx.reduce_axis_i32(op.axis, i32::MIN, |acc, x| Ok(acc.max(x))),
+        other => anyhow::bail!("reduce-max has no {} arm", other.type_name()),
+    }
+}

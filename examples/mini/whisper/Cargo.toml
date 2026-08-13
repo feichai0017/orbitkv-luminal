@@ -7,3 +7,6 @@ edition = "2021"
 luminal = { path = "../../.." }
 luminal_nn = { path = "../../../crates/luminal_nn" }
 rustc-hash = "2.1.1"
+
+[dev-dependencies]
+scalar_refs = { path = "../../../tests/scalar_refs" }

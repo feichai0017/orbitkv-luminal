@@ -22,30 +22,33 @@
 // `#![allow(dead_code)]` note in `layout_ir.rs`).
 #![allow(unused_imports)]
 
-mod add;
-mod cast;
-mod constant;
-mod div;
-mod trunc_div;
-mod trunc_rem;
-mod exp;
-mod exp2;
-mod gather;
-mod index_map_apply_materialize;
+// Kernel-bearing op modules are visible to the rest of `crate::reference`
+// (not the whole crate): the kernel registry's table rows point at
+// `<op_module>::kernel` (op-folder ruling 2026-08-13).
+pub(in crate::reference) mod add;
+pub(in crate::reference) mod cast;
+pub(in crate::reference) mod constant;
+pub(in crate::reference) mod div;
+pub(in crate::reference) mod trunc_div;
+pub(in crate::reference) mod trunc_rem;
+pub(in crate::reference) mod exp;
+pub(in crate::reference) mod exp2;
+pub(in crate::reference) mod gather;
+pub(in crate::reference) mod index_map_apply_materialize;
 mod index_map_apply_view;
-mod iota;
-mod less_than;
-mod log2;
-mod materialize_layout_copy;
-mod modulo;
-mod mul;
+pub(in crate::reference) mod iota;
+pub(in crate::reference) mod less_than;
+pub(in crate::reference) mod log2;
+pub(in crate::reference) mod materialize_layout_copy;
+pub(in crate::reference) mod modulo;
+pub(in crate::reference) mod mul;
 mod poison;
-mod recip;
-mod reduce_max;
-mod reduce_sum;
-mod scatter;
-mod sin;
-mod sqrt;
+pub(in crate::reference) mod recip;
+pub(in crate::reference) mod reduce_max;
+pub(in crate::reference) mod reduce_sum;
+pub(in crate::reference) mod scatter;
+pub(in crate::reference) mod sin;
+pub(in crate::reference) mod sqrt;
 
 // The functional forms, the mutating forms, and Poison are exported: a DPS
 // form is an implementation detail of its op pair, entering the world solely

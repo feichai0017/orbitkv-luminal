@@ -531,6 +531,40 @@ pub fn extract_fixture_with_genome(
     (graph, fingerprint)
 }
 
+/// TESTRUNTIME v0 (ruling 2026-08-13): a small tests-side runtime
+/// vocabulary — the reference registry PLUS the op variants tests need
+/// that the reference runtime deliberately does not implement (today:
+/// the view op; mutating/multi-output variants join it when the
+/// reference registry sheds them for CUDA-lite). Extraction and
+/// program assembly are runtime-injectable, so this is just a matcher
+/// list — no runtime machinery duplicated.
+pub fn test_runtime_matchers() -> Vec<Box<dyn crate::layout_ir::OpMatcher>> {
+    let mut matchers = crate::reference::ops::built_in_matchers();
+    matchers.push(Box::new(crate::reference::ops::IndexMapApplyViewMatcher));
+    matchers
+}
+
+/// [`extract_fixture`] on the TESTRUNTIME's vocabulary.
+pub fn extract_fixture_on_test_runtime(script: &str) -> ExtractedGraph {
+    use egglog::SerializeConfig;
+
+    let preamble = crate::egglog_snippet::assembled_program_for(&test_runtime_matchers());
+    let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
+        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
+    let program = format!("{preamble}
+
+{source}");
+
+    let mut egraph = crate::egglog_snippet::new_egraph();
+    egraph
+        .parse_and_run_program(Some(script.to_string()), &program)
+        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
+    let serialized = egraph.serialize(SerializeConfig::default()).egraph;
+    extractor::extract_layout_ir_with_matchers(&serialized, test_runtime_matchers())
+        .expect("extraction succeeds")
+        .unwrap_or_else(|| panic!("fixture {script} produced no extracted graph"))
+}
+
 /// Run `test_scripts/<script>` through egglog (with the full preamble) and the
 /// real extractor, returning the extracted graph. Panics on any failure — these
 /// are test fixtures.
@@ -1753,7 +1787,7 @@ mod harness_tests {
     /// no-op (same node and edge counts).
     #[test]
     fn dps_rewrite_is_idempotent() {
-        let graph = extract_fixture("basic_program.egg");
+        let graph = extract_fixture_on_test_runtime("basic_program.egg");
         let once = crate::dps::dps_rewrite(&graph);
         let twice = crate::dps::dps_rewrite(&once);
         assert_eq!(once.dag.node_count(), twice.dag.node_count());
@@ -1989,11 +2023,10 @@ mod harness_tests {
     /// against the composed layout) and writing its seeded output buffer.
     /// Zero allocations, zero copies.
     #[test]
-    #[ignore = "view op retired from the reference registry (non-mutating ruling 2026-08-13); re-enable on the TestRuntime with matcher-injectable extraction"]
     fn view_feeds_compute_fixture_runs_one_kernel_on_the_input_buffer() {
         use crate::bufferize::{BufferId, BufferNode};
 
-        let graph = extract_fixture("boundary_view_feeds_compute.egg");
+        let graph = extract_fixture_on_test_runtime("boundary_view_feeds_compute.egg");
         let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
@@ -2049,11 +2082,10 @@ mod harness_tests {
     /// after Exp's read by the WAR anti edge. Exp still reads the viewed
     /// buffer directly through the folded view.
     #[test]
-    #[ignore = "view op retired from the reference registry (non-mutating ruling 2026-08-13); re-enable on the TestRuntime with matcher-injectable extraction"]
     fn write_into_viewed_buffer_fixture_degrades_to_copy() {
         use crate::bufferize::{BufferId, BufferNode};
 
-        let graph = extract_fixture("boundary_write_into_viewed_buffer.egg");
+        let graph = extract_fixture_on_test_runtime("boundary_write_into_viewed_buffer.egg");
         let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         let launch: Vec<BufferId> = plan
@@ -2160,7 +2192,7 @@ mod harness_tests {
     /// a non-composed contiguous layout), and no Materialize survives
     /// anywhere.
     #[test]
-    #[ignore = "view op retired from the reference registry (non-mutating ruling 2026-08-13); re-enable on the TestRuntime with matcher-injectable extraction"]
+    #[ignore = "view PREFERENCE regressed under the injected TestRuntime registry (candidates elect materialize; the two behavioral view fixtures are green) — audit the preference/viability walk before re-enabling"]
     fn extraction_prefers_the_view_op_where_the_layout_is_composed() {
         use crate::layout_ir::ExtractedNode;
 

@@ -1,9 +1,9 @@
 //! The TRUSTED SCALAR VALIDATORS — plain-Rust reference kernels that
-//! fidelity tests compare the reference runtime's plans against
-//! (validator = trusted kernel, minimal-example-repo doctrine). They
-//! live WITH the runtime they validate (ruling 2026-08-13: luminal_nn
-//! is a collection of logical modules and nothing more — what a
-//! runtime compares to is outside its scope).
+//! fidelity tests compare runtime plans against (validator = trusted
+//! kernel, minimal-example-repo doctrine). Rulings 2026-08-13: what a
+//! runtime compares to is outside luminal_nn's scope, and validators
+//! do not live in the main tree at all — validation of the reference
+//! runtime is a TESTS concern, so this is a tests-only crate.
 #![allow(dead_code)]
 
 pub fn assert_close(ours: &[f32], expected: &[f32]) {

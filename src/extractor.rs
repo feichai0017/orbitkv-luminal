@@ -138,6 +138,15 @@ struct ProducerRef {
     output_index: usize,
 }
 
+/// [`extract_layout_ir`] with an explicit runtime matcher set (the
+/// TestRuntime seam — see `Extractor::new_with_matchers`).
+pub fn extract_layout_ir_with_matchers(
+    egraph: &EGraph,
+    matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
+) -> Result<Option<ExtractedGraph>> {
+    Extractor::new_with_matchers(egraph, None, None, matchers).extract()
+}
+
 pub fn extract_layout_ir(egraph: &EGraph) -> Result<Option<ExtractedGraph>> {
     extract_layout_ir_with_ops(egraph, None)
 }
@@ -653,7 +662,19 @@ impl<'a> Extractor<'a> {
         allowed_ops: Option<HashSet<String>>,
         genome: Option<&Genome>,
     ) -> Self {
-        let matchers: HashMap<&'static str, Box<dyn OpMatcher>> = built_in_matchers()
+        Self::new_with_matchers(egraph, allowed_ops, genome, built_in_matchers())
+    }
+
+    /// The runtime-injectable constructor (the TestRuntime seam, ruling
+    /// 2026-08-13): extraction consumes THE GIVEN runtime's matcher set —
+    /// the reference registry is just the default caller.
+    fn new_with_matchers(
+        egraph: &'a EGraph,
+        allowed_ops: Option<HashSet<String>>,
+        genome: Option<&Genome>,
+        matcher_set: Vec<Box<dyn OpMatcher>>,
+    ) -> Self {
+        let matchers: HashMap<&'static str, Box<dyn OpMatcher>> = matcher_set
             .into_iter()
             .filter(|matcher| {
                 allowed_ops

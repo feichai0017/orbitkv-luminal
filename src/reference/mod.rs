@@ -12,7 +12,6 @@
 //! HLIR node indices, so differential tests against `ReferenceRuntime`
 //! bind identically on both sides.
 
-pub mod scalar_refs;
 pub mod kernels;
 pub mod ops;
 

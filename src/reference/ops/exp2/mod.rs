@@ -191,3 +191,16 @@ impl OpMatcher for Exp2MutatingMatcher {
         Box::new(Exp2Mutating)
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::ReferenceKernelCtx;
+
+pub(in crate::reference) fn kernel(_op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+    ctx.unary_elementwise(|x| x.exp2())
+}

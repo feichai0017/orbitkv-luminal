@@ -193,3 +193,51 @@ impl OpMatcher for GatherMatcher {
         Box::new(Gather { rank })
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::ReferenceKernelCtx;
+use crate::reference::kernels::{coordinate_columns, expect_op, move_gathered};
+
+/// Coordinate gather: `dest[flat] = data[coords(flat)]` with loud
+/// bounds checks (out-of-bounds is UB per the scatter/gather ruling,
+/// surfaced loudly).
+pub(in crate::reference) fn kernel(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+    let op = expect_op::<GatherDps>(op)?;
+    let rank = op.rank;
+    let data_dims = &ctx.operand_dims[0];
+    anyhow::ensure!(
+        data_dims.len() == rank,
+        "gather kernel: data rank {} vs op rank {}",
+        data_dims.len(),
+        rank
+    );
+    let mut data_strides = vec![1usize; rank];
+    for k in (0..rank.saturating_sub(1)).rev() {
+        data_strides[k] = data_strides[k + 1] * data_dims[k + 1];
+    }
+    let coord_operands = coordinate_columns(&ctx.operands[1..1 + rank])?;
+    let numel = ctx.dests[0].len();
+    let mut index_of = vec![0usize; numel];
+    for (flat, slot) in index_of.iter_mut().enumerate() {
+        let mut data_flat = 0usize;
+        for axis in 0..rank {
+            let coord = coord_operands[axis][flat];
+            anyhow::ensure!(
+                coord >= 0 && (coord as usize) < data_dims[axis],
+                "gather coordinate {coord} out of bounds for axis {axis} (extent {}) — \
+                 UB per the scatter/gather ruling, surfaced loudly",
+                data_dims[axis]
+            );
+            data_flat += coord as usize * data_strides[axis];
+        }
+        *slot = data_flat;
+    }
+    let source = ctx.operands[0].clone();
+    move_gathered(&source, &mut ctx.dests[0], &index_of)
+}

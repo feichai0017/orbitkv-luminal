@@ -123,3 +123,34 @@ impl OpMatcher for MaterializeLayoutCopyMatcher {
         Box::new(MaterializeLayoutCopy)
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::ReferenceKernelCtx;
+use crate::reference::kernels::move_gathered;
+
+/// Dense same-geometry copy (CopyGeneric / MaterializeLayoutCopy). The
+/// reference runtime holds every buffer dense row-major (no view reads in
+/// its allow list), so materializing a copy IS an element copy — but only
+/// under identical geometry, which is checked loudly rather than assumed.
+pub(in crate::reference) fn kernel(_op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        ctx.operand_dims[0] == ctx.operand_dims[1],
+        "copy kernel: input geometry {:?} vs dest geometry {:?} — a shape-changing \
+         copy is not a dense copy and has no reference lowering",
+        ctx.operand_dims[0],
+        ctx.operand_dims[1]
+    );
+    anyhow::ensure!(
+        ctx.operands[0].len() == ctx.dests[0].len(),
+        "copy kernel length mismatch"
+    );
+    let index_of: Vec<usize> = (0..ctx.dests[0].len()).collect();
+    let source = ctx.operands[0].clone();
+    move_gathered(&source, &mut ctx.dests[0], &index_of)
+}

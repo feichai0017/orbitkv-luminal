@@ -106,3 +106,32 @@ impl OpMatcher for TruncRemFunctionalMatcher {
         Box::new(TruncRemFunctional)
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
+
+/// Truncated integer remainder (sign follows the dividend).
+pub(in crate::reference) fn kernel(
+    _op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
+    match &ctx.operands[0] {
+        TypedBuffer::I32(_) => ctx.binary_elementwise_i32(|a, b| {
+            a.checked_rem(b).ok_or_else(|| {
+                anyhow::anyhow!("i32 trunc-rem refuses: {a} % {b} (zero divisor or MIN/-1)")
+            })
+        }),
+        TypedBuffer::I64(_) => ctx.binary_elementwise_i64(|a, b| {
+            a.checked_rem(b).ok_or_else(|| {
+                anyhow::anyhow!("i64 trunc-rem refuses: {a} % {b} (zero divisor or MIN/-1)")
+            })
+        }),
+        other => anyhow::bail!("trunc-rem has no {} arm (Int only)", other.type_name()),
+    }
+}

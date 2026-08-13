@@ -143,6 +143,26 @@ pub fn assembled_program() -> &'static str {
     })
 }
 
+/// [`assembled_program`] for an arbitrary RUNTIME's matcher set — the
+/// TestRuntime seam (ruling 2026-08-13: test-only op variants live in a
+/// small tests-side runtime, and extraction takes the runtime's
+/// matchers instead of hardcoding the reference registry). Logical-op
+/// snippets are always included; the matcher contributions come from
+/// the caller.
+pub fn assembled_program_for(
+    matchers: &[Box<dyn crate::layout_ir::OpMatcher>],
+) -> String {
+    let core = include_str!("egglog/checkpoint_5/egglog_preamble.egg");
+    let mut snippets: Vec<EgglogSnippet> = Vec::new();
+    for op in crate::logical_op::built_in_logical_ops() {
+        snippets.extend(op.snippets());
+    }
+    for matcher in matchers {
+        snippets.extend(matcher.snippets());
+    }
+    assemble(core, &snippets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -123,3 +123,29 @@ impl OpMatcher for ReduceSumMatcher {
         Box::new(ReduceSum { axis: site.child_i64(1) })
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
+use crate::reference::kernels::expect_op;
+
+/// Axis reduce-sum. Typed arms 2026-08-11: Int sums are CHECKED
+/// (non-wrapping ruling — an accumulator overflow is a loud kernel
+/// error).
+pub(in crate::reference) fn kernel(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+    let op = expect_op::<ReduceSumDps>(op)?;
+    match &ctx.operands[0] {
+        TypedBuffer::F32(_) => ctx.reduce_axis(op.axis, 0.0, |acc, x| acc + x),
+        TypedBuffer::I32(_) => ctx.reduce_axis_i32(op.axis, 0, |acc, x| {
+            acc.checked_add(x).ok_or_else(|| {
+                anyhow::anyhow!("i32 reduce-sum overflow (ints are non-wrapping)")
+            })
+        }),
+        other => anyhow::bail!("reduce-sum has no {} arm", other.type_name()),
+    }
+}

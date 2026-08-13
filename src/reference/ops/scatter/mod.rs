@@ -273,3 +273,106 @@ impl OpMatcher for ScatterMutatingMatcher {
         Box::new(ScatterMutating { rank: coordinate_rank(site, 2) })
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
+use crate::reference::kernels::{coordinate_columns, expect_op};
+
+/// The CHECKED scatter kernel (ruling 2026-08-06): dest starts as a copy
+/// of init, then dest[coords(i)] = src[i] over the src iteration space.
+/// Out-of-bounds coordinates are UB by ruling — surfaced LOUDLY. Two src
+/// elements landing on one destination element is a runtime panic, not
+/// last-write-wins: write conflicts mean the coordinate tensors are not
+/// injective and the program's meaning is coordinate-order-dependent,
+/// which we refuse to silently define. (User-provided coordinate data may
+/// eventually carry an asserted-injective bit instead; until then the
+/// reference checks.)
+pub(in crate::reference) fn kernel(
+    op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
+    let op = expect_op::<ScatterFunctionalDps>(op)?;
+    let rank = op.rank;
+    let init_dims = ctx.operand_dims[0].clone();
+    anyhow::ensure!(
+        init_dims.len() == rank,
+        "scatter kernel: init rank {} vs op rank {rank}",
+        init_dims.len()
+    );
+    let mut strides = vec![1usize; rank];
+    for k in (0..rank.saturating_sub(1)).rev() {
+        strides[k] = strides[k + 1] * init_dims[k + 1];
+    }
+    let coord_operands = coordinate_columns(&ctx.operands[2..2 + rank])?;
+    let src_len = ctx.operands[1].len();
+    let dest_len = ctx.dests[0].len();
+    let mut target_of = vec![0usize; src_len];
+    let mut written = vec![false; dest_len];
+    for (i, target) in target_of.iter_mut().enumerate() {
+        let mut flat = 0usize;
+        for axis in 0..rank {
+            let coord = coord_operands[axis][i];
+            anyhow::ensure!(
+                coord >= 0 && (coord as usize) < init_dims[axis],
+                "scatter coordinate {coord} out of bounds for axis {axis} (extent {}) — \
+                 UB per ruling, surfaced loudly",
+                init_dims[axis]
+            );
+            flat += coord as usize * strides[axis];
+        }
+        anyhow::ensure!(
+            !written[flat],
+            "conflicting scatter writes: src element {i} targets destination element \
+             {flat}, which an earlier src element already wrote — coordinates must be \
+             injective (checked-scatter ruling 2026-08-06)"
+        );
+        written[flat] = true;
+        *target = flat;
+    }
+    // Payload move: dest = copy(init); dest[target[i]] = src[i].
+    match (&ctx.operands[0], &ctx.operands[1], &mut ctx.dests[0]) {
+        (TypedBuffer::F32(init), TypedBuffer::F32(src), TypedBuffer::F32(dest)) => {
+            dest.copy_from_slice(init);
+            for (i, target) in target_of.iter().enumerate() {
+                dest[*target] = src[i];
+            }
+        }
+        (TypedBuffer::I32(init), TypedBuffer::I32(src), TypedBuffer::I32(dest)) => {
+            dest.copy_from_slice(init);
+            for (i, target) in target_of.iter().enumerate() {
+                dest[*target] = src[i];
+            }
+        }
+        (TypedBuffer::I64(init), TypedBuffer::I64(src), TypedBuffer::I64(dest)) => {
+            dest.copy_from_slice(init);
+            for (i, target) in target_of.iter().enumerate() {
+                dest[*target] = src[i];
+            }
+        }
+        (TypedBuffer::Bool8(init), TypedBuffer::Bool8(src), TypedBuffer::Bool8(dest)) => {
+            dest.copy_from_slice(init);
+            for (i, target) in target_of.iter().enumerate() {
+                dest[*target] = src[i];
+            }
+        }
+        (TypedBuffer::F8E4M3(init), TypedBuffer::F8E4M3(src), TypedBuffer::F8E4M3(dest)) => {
+            dest.copy_from_slice(init);
+            for (i, target) in target_of.iter().enumerate() {
+                dest[*target] = src[i];
+            }
+        }
+        (init, src, dest) => anyhow::bail!(
+            "scatter payload dtypes disagree: init {}, src {}, dest {}",
+            init.type_name(),
+            src.type_name(),
+            dest.type_name()
+        ),
+    }
+    Ok(())
+}

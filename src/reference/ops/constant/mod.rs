@@ -124,3 +124,31 @@ impl OpMatcher for ConstantMatcher {
         Box::new(Constant { value: site.child_f64(0) })
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
+use crate::reference::kernels::expect_op;
+
+/// Constant fill — LogicalConstant is F32 by its dtype rule.
+pub(in crate::reference) fn kernel(
+    op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
+    let op = expect_op::<ConstantDps>(op)?;
+    match &mut ctx.dests[0] {
+        TypedBuffer::F32(dest) => dest.fill(op.value as f32),
+        // LogicalConstant is F32 by its dtype rule; integer dests would
+        // mean the plan annotated something the op cannot mean.
+        other => anyhow::bail!(
+            "constant fill has no {} arm (LogicalConstant is F32)",
+            other.type_name()
+        ),
+    }
+    Ok(())
+}

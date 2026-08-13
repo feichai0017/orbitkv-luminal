@@ -2,7 +2,7 @@
 //! test module, 2026-08-13).
 
 use luminal::prelude::*;
-use luminal::reference::scalar_refs::*;
+use scalar_refs::*;
 use mini_flux::*;
 
 /// MiniDit vs a full scalar reference: 1 double + 1 single block,

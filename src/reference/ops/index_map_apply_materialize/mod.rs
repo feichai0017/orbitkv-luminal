@@ -183,3 +183,65 @@ fn parse_entry_list(
     }
     None
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::ReferenceKernelCtx;
+use crate::reference::kernels::{expect_op, move_gathered};
+
+/// Index-map materialization: evaluate the parsed per-axis entry
+/// expressions at every OUT coordinate and copy the addressed parent
+/// elements.
+pub(in crate::reference) fn kernel(
+    op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
+    let op = expect_op::<IndexMapApplyMaterializeDps>(op)?;
+    let Some(entries) = &op.entries else {
+        anyhow::bail!(
+            "materialize reference kernel: index map beyond the parsed expression subset"
+        );
+    };
+    let parent_dims = &ctx.operand_dims[0];
+    let out_dims = &ctx.operand_dims[1];
+    anyhow::ensure!(
+        entries.len() == parent_dims.len(),
+        "index map arity {} vs parent rank {}",
+        entries.len(),
+        parent_dims.len()
+    );
+    let mut parent_strides = vec![1usize; parent_dims.len()];
+    for k in (0..parent_dims.len().saturating_sub(1)).rev() {
+        parent_strides[k] = parent_strides[k + 1] * parent_dims[k + 1];
+    }
+    let out_rank = out_dims.len();
+    let numel = ctx.dests[0].len();
+    let mut index_of = vec![0usize; numel];
+    for (flat, slot) in index_of.iter_mut().enumerate() {
+        // Decompose the flat OUT index into row-major coordinates.
+        let mut remainder = flat;
+        let mut coords = vec![0usize; out_rank];
+        for axis in (0..out_rank).rev() {
+            coords[axis] = remainder % out_dims[axis];
+            remainder /= out_dims[axis];
+        }
+        let mut parent_flat = 0usize;
+        for (k, entry) in entries.iter().enumerate() {
+            let index = entry.eval(&coords);
+            anyhow::ensure!(
+                index >= 0 && (index as usize) < parent_dims[k],
+                "materialize index {index} out of bounds for parent axis {k} (extent {})",
+                parent_dims[k]
+            );
+            parent_flat += index as usize * parent_strides[k];
+        }
+        *slot = parent_flat;
+    }
+    let parent = ctx.operands[0].clone();
+    move_gathered(&parent, &mut ctx.dests[0], &index_of)
+}

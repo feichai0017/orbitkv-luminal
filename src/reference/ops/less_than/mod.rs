@@ -122,3 +122,64 @@ impl OpMatcher for LessThanMatcher {
         Box::new(LessThan)
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---- kernel ----
+// Reference-runtime execution for this op, dispatched by TypeId from the
+// label->fn table in `crate::reference::kernels` (op-folder ruling
+// 2026-08-13: everything about an op lives in the op's folder).
+// ---------------------------------------------------------------------------
+
+use crate::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
+
+pub(in crate::reference) fn kernel(
+    _op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
+    // The comparison is the one op whose OUTPUT dtype differs from its
+    // inputs by construction: same-typed operands, a boolean result
+    // stored as Bool8 codes (exact 0x00/0x01 — the writer side of the
+    // Bool8 invariant; never a partial-bit write). Int comparisons are
+    // native and exact — no f32 detour (typed buffers 2026-08-11).
+    match (&ctx.operands[0], &ctx.operands[1]) {
+        (TypedBuffer::F32(lhs), TypedBuffer::F32(rhs)) => {
+            let (lhs, rhs) = (lhs.clone(), rhs.clone());
+            let dest = ctx.dests[0].as_bool8_mut()?;
+            anyhow::ensure!(
+                lhs.len() == rhs.len() && lhs.len() == dest.len(),
+                "less-than kernel length mismatch"
+            );
+            for (index, out) in dest.iter_mut().enumerate() {
+                *out = u8::from(lhs[index] < rhs[index]);
+            }
+        }
+        (TypedBuffer::I32(lhs), TypedBuffer::I32(rhs)) => {
+            let (lhs, rhs) = (lhs.clone(), rhs.clone());
+            let dest = ctx.dests[0].as_bool8_mut()?;
+            anyhow::ensure!(
+                lhs.len() == rhs.len() && lhs.len() == dest.len(),
+                "less-than kernel length mismatch"
+            );
+            for (index, out) in dest.iter_mut().enumerate() {
+                *out = u8::from(lhs[index] < rhs[index]);
+            }
+        }
+        (TypedBuffer::I64(lhs), TypedBuffer::I64(rhs)) => {
+            let (lhs, rhs) = (lhs.clone(), rhs.clone());
+            let dest = ctx.dests[0].as_bool8_mut()?;
+            anyhow::ensure!(
+                lhs.len() == rhs.len() && lhs.len() == dest.len(),
+                "less-than kernel length mismatch"
+            );
+            for (index, out) in dest.iter_mut().enumerate() {
+                *out = u8::from(lhs[index] < rhs[index]);
+            }
+        }
+        (lhs, rhs) => anyhow::bail!(
+            "less-than has no ({}, {}) arm (operands must share one dtype)",
+            lhs.type_name(),
+            rhs.type_name()
+        ),
+    }
+    Ok(())
+}

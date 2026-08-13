@@ -4,7 +4,7 @@
 
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use luminal::reference::scalar_refs::*;
+use scalar_refs::*;
 
 use mini_llama3::MiniLlama3;
 
