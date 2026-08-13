@@ -12,12 +12,13 @@ mod norm;
 pub use norm::*;
 mod pooling;
 pub use pooling::*;
-#[cfg(test)]
-mod test_refs;
+/// Scalar-reference helpers for fidelity tests (the trusted validators
+/// — minimal-example-repo doctrine). Public so the mini/example crates'
+/// fidelity tests share ONE set of reference kernels; compiled
+/// unconditionally (downstream test targets link the normal lib).
+pub mod test_refs;
 mod models;
 pub use models::*;
-mod mini;
-pub use mini::*;
 mod moe;
 pub use moe::*;
 mod attention;

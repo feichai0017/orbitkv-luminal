@@ -510,6 +510,28 @@ pub fn rms_norm_heads(
     scaled.merge_dims(1, 2)
 }
 
+/// Plain multi-head attention, no mask, no cache: q (sq, d) attends over
+/// k/v (sk, d) — the encoder/cross-attention primitive.
+pub fn attention(
+    q: GraphTensor,
+    k: GraphTensor,
+    v: GraphTensor,
+    n_heads: usize,
+    head_dim: usize,
+) -> GraphTensor {
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let sq = q.dims()[0];
+    let sk = k.dims()[0];
+    let q = q.split_dims(1, head_dim).permute((1, 0, 2)); // (nh, sq, hd)
+    let k = k.split_dims(1, head_dim).permute((1, 2, 0)); // (nh, hd, sk)
+    let v = v.split_dims(1, head_dim).permute((1, 0, 2)); // (nh, sk, hd)
+    let scores = q.matmul(k) * scale; // (nh, sq, sk)
+    let weights = scores.softmax(2);
+    let out = weights.matmul(v); // (nh, sq, hd)
+    let _ = (sq, sk);
+    out.permute((1, 0, 2)).merge_dims(1, 2) // (sq, nh·hd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{gather_rows, paged_attention, paged_attention_positional, scatter_rows};

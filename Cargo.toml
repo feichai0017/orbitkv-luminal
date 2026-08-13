@@ -66,6 +66,14 @@ members = [
     "examples/gemma4_moe",
     "examples/whisper",
     "examples/yolo_v11",
+    "examples/mini/llama3",
+    "examples/mini/qwen3",
+    "examples/mini/gemma3",
+    "examples/mini/qwen3_moe",
+    "examples/mini/gemma4_moe",
+    "examples/mini/whisper",
+    "examples/mini/conv",
+    "examples/mini/flux",
 ]
 
 [patch.crates-io]
@@ -74,34 +82,3 @@ candle-kernels = { git = "https://github.com/huggingface/candle.git", rev = "a0d
 # Mini-model demos (ruling 2026-08-07): models are DEFINED in core
 # (crates/luminal_nn); these runners belong to the reference runtime and
 # live in examples/mini/ beside the full-size example models.
-[[example]]
-name = "mini_llama3"
-path = "examples/mini/llama3/main.rs"
-
-[[example]]
-name = "mini_qwen3"
-path = "examples/mini/qwen3/main.rs"
-
-[[example]]
-name = "mini_gemma3"
-path = "examples/mini/gemma3/main.rs"
-
-[[example]]
-name = "mini_qwen3_moe"
-path = "examples/mini/qwen3_moe/main.rs"
-
-[[example]]
-name = "mini_gemma4_moe"
-path = "examples/mini/gemma4_moe/main.rs"
-
-[[example]]
-name = "mini_flux"
-path = "examples/mini/flux/main.rs"
-
-[[example]]
-name = "mini_whisper"
-path = "examples/mini/whisper/main.rs"
-
-[[example]]
-name = "mini_conv"
-path = "examples/mini/conv/main.rs"
