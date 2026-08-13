@@ -197,6 +197,45 @@ impl MoETopK {
         }
     }
 
+    /// Build the (E, 2I, H)/(E, H, I) stacks IN-GRAPH from per-expert
+    /// (gate, up, down) tensors — checkpoint anatomy enters unfused and
+    /// the graph performs the fusion (ruling 2026-08-12: no
+    /// value-transforming preparation steps). Dims derive from the
+    /// parts; gate/up are (I, H), down is (H, I).
+    pub fn from_per_expert(
+        router: Linear,
+        parts: &[(GraphTensor, GraphTensor, GraphTensor)],
+        top_k: usize,
+    ) -> Self {
+        let experts = parts.len();
+        let (gate0, _, _) = parts[0];
+        let intermediate = gate0.dims()[0].to_usize().expect("static intermediate");
+        let hidden = gate0.dims()[1].to_usize().expect("static hidden");
+        let mut gate_up_stack: Option<GraphTensor> = None;
+        let mut down_stack: Option<GraphTensor> = None;
+        for (gate, up, down) in parts {
+            let fused = gate.concat_along(*up, 0).expand_dim(0, 1); // (1, 2I, H)
+            let down_row = down.expand_dim(0, 1); // (1, H, I)
+            gate_up_stack = Some(match gate_up_stack {
+                Some(acc) => acc.concat_along(fused, 0),
+                None => fused,
+            });
+            down_stack = Some(match down_stack {
+                Some(acc) => acc.concat_along(down_row, 0),
+                None => down_row,
+            });
+        }
+        Self {
+            router,
+            gate_up: gate_up_stack.expect("at least one expert"),
+            down: down_stack.expect("at least one expert"),
+            experts,
+            top_k,
+            hidden,
+            intermediate,
+        }
+    }
+
     /// x (s, hidden) → (s, hidden).
     pub fn forward(&self, x: GraphTensor) -> GraphTensor {
         let s = x.dims()[0];
@@ -321,6 +360,95 @@ mod topk_tests {
                 (moe.down.id, down_vals.into()),
             ],
         );
+        assert_close(rt.get_f32(out.id).expect("moe out"), &expected);
+    }
+
+    /// THE IN-GRAPH STACKING SPELLING (ruling 2026-08-12: no
+    /// value-transforming preparation steps): per-expert gate/up/down
+    /// enter as separate named tensors — HF checkpoint anatomy — and
+    /// the graph itself builds (E, 2I, H)/(E, H, I) by concat, feeding
+    /// the same runtime-indexed gather. This is a DIVERGENCE PROBE as
+    /// much as a fidelity test: gather-downstream-of-concat is
+    /// structurally adjacent to the slice-of-concat rejoin family, so
+    /// first runs happen under the RSS watchdog.
+    #[test]
+    fn moe_topk_in_graph_stacking_matches_scalar_reference() {
+        const S: usize = 2;
+        const H: usize = 4;
+        const I: usize = 3;
+        const E: usize = 4;
+        const K: usize = 2;
+
+        let mut cx = Graph::new();
+        let per_expert: Vec<(GraphTensor, GraphTensor, GraphTensor)> = (0..E)
+            .map(|e| {
+                (
+                    cx.named_tensor(format!("experts.{e}.gate_proj.weight"), (I, H)),
+                    cx.named_tensor(format!("experts.{e}.up_proj.weight"), (I, H)),
+                    cx.named_tensor(format!("experts.{e}.down_proj.weight"), (H, I)),
+                )
+            })
+            .collect();
+        let router = crate::Linear::new_permuted(H, E, false, &mut cx);
+        let moe = MoETopK::from_per_expert(router, &per_expert, K);
+        let x = cx.tensor((S, H));
+        let out = moe.forward(x).output();
+
+        let x_vals = weights(S * H, 3);
+        let router_vals = weights(E * H, 5);
+        let gate_up_vals = weights(E * 2 * I * H, 7);
+        let down_vals = weights(E * H * I, 9);
+
+        // Identical scalar reference as the host-stacked test.
+        let mut expected = vec![0f32; S * H];
+        for s_i in 0..S {
+            let xr = &x_vals[s_i * H..(s_i + 1) * H];
+            let mut logits = vec![0f32; E];
+            for (e, logit) in logits.iter_mut().enumerate() {
+                *logit = (0..H).map(|j| xr[j] * router_vals[e * H + j]).sum();
+            }
+            let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = logits.iter().map(|l| (l - max).exp()).collect();
+            let denom: f32 = exps.iter().sum();
+            let probs: Vec<f32> = exps.iter().map(|e| e / denom).collect();
+            let mut order: Vec<usize> = (0..E).collect();
+            order.sort_by(|a, b| probs[*b].partial_cmp(&probs[*a]).unwrap().then(a.cmp(b)));
+            let picked: Vec<usize> = order[..K].to_vec();
+            let picked_sum: f32 = picked.iter().map(|e| probs[*e]).sum();
+            for expert in &picked {
+                let weight = probs[*expert] / picked_sum;
+                let w = &gate_up_vals[expert * 2 * I * H..(expert + 1) * 2 * I * H];
+                let mut projected = vec![0f32; 2 * I];
+                for (r, slot) in projected.iter_mut().enumerate() {
+                    *slot = (0..H).map(|j| xr[j] * w[r * H + j]).sum();
+                }
+                let hidden: Vec<f32> = (0..I)
+                    .map(|r| {
+                        let g = projected[r];
+                        let silu = g / (1.0 + (-g).exp());
+                        silu * projected[I + r]
+                    })
+                    .collect();
+                let d = &down_vals[expert * H * I..(expert + 1) * H * I];
+                for r in 0..H {
+                    let v: f32 = (0..I).map(|j| hidden[j] * d[r * I + j]).sum();
+                    expected[s_i * H + r] += weight * v;
+                }
+            }
+        }
+
+        // Stage the SLICES of the same value streams per expert.
+        let mut pairs: Vec<(petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer)> = vec![
+            (x.id, x_vals.into()),
+            (moe.router.weight.id, router_vals.into()),
+        ];
+        for (e, (gate, up, down)) in per_expert.iter().enumerate() {
+            let fused = &gate_up_vals[e * 2 * I * H..(e + 1) * 2 * I * H];
+            pairs.push((gate.id, fused[..I * H].to_vec().into()));
+            pairs.push((up.id, fused[I * H..].to_vec().into()));
+            pairs.push((down.id, down_vals[e * H * I..(e + 1) * H * I].to_vec().into()));
+        }
+        let rt = luminal::test_support::run_ssa(&cx, &pairs);
         assert_close(rt.get_f32(out.id).expect("moe out"), &expected);
     }
 }

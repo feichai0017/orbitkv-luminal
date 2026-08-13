@@ -117,13 +117,11 @@ fn model_shard_files(model_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::erro
     }
 }
 
-/// Combines shards into one bf16 file (norms + router F32) and STACKS
-/// the 128 experts per layer: gate;up rows per expert into
-/// mlp.gate_up_weights [E, 2·I, H] and down into mlp.down_weights
-/// [E, H, I]. (The stacking is HOST-side data prep for the MoETopK
-/// construct's coordinate-form fetches — the per-expert gate/up concat
-/// happens here, never in-graph.) Attention projections stay UNFUSED
-/// with original HF names.
+/// Combines shards into one bf16 file (norms + router F32). Every
+/// tensor keeps its original HF name and values — the per-expert
+/// gate/up/down projections included: the [E, 2·I, H] / [E, H, I]
+/// expert stacking happens IN-GRAPH (MoETopK::from_per_expert),
+/// never here (ruling 2026-08-12: adapters address, graphs compute).
 ///
 /// Llama-3-8B's lm_head is UNTIED — `lm_head.weight` is a real stored
 /// tensor and combines like any other (bf16).
@@ -168,61 +166,9 @@ pub fn combine_safetensors_to_bf16(
     println!("Extracted {} tensors", all_tensors.len());
     println!("Saving combined BF16 model to {}...", output_path.display());
 
-    // Stack the per-expert projections (gate;up then down) — see the
-    // module doc. Sizes are read off the tensors themselves.
-    let layer_count = (0..)
-        .take_while(|l| {
-            all_tensors.contains_key(&format!("model.layers.{l}.mlp.experts.0.gate_proj.weight"))
-        })
-        .count();
-    for l in 0..layer_count {
-        let expert_count = (0..)
-            .take_while(|e| {
-                all_tensors
-                    .contains_key(&format!("model.layers.{l}.mlp.experts.{e}.gate_proj.weight"))
-            })
-            .count();
-        let mut gate_up_data = Vec::new();
-        let mut shape_2i_h: Option<Vec<usize>> = None;
-        for e in 0..expert_count {
-            let gate = all_tensors
-                .remove(&format!("model.layers.{l}.mlp.experts.{e}.gate_proj.weight"))
-                .expect("gate_proj present");
-            let up = all_tensors
-                .remove(&format!("model.layers.{l}.mlp.experts.{e}.up_proj.weight"))
-                .expect("up_proj present");
-            assert_eq!(gate.shape, up.shape, "gate/up shapes agree");
-            assert_eq!(gate.dtype, Dtype::BF16);
-            shape_2i_h = Some(vec![expert_count, gate.shape[0] * 2, gate.shape[1]]);
-            gate_up_data.extend_from_slice(&gate.data);
-            gate_up_data.extend_from_slice(&up.data);
-        }
-        all_tensors.insert(
-            format!("model.layers.{l}.mlp.gate_up_weights"),
-            StoredTensor {
-                shape: shape_2i_h.expect("experts existed"),
-                dtype: Dtype::BF16,
-                data: gate_up_data,
-            },
-        );
-        let mut down_data = Vec::new();
-        let mut shape_h_i: Option<Vec<usize>> = None;
-        for e in 0..expert_count {
-            let down = all_tensors
-                .remove(&format!("model.layers.{l}.mlp.experts.{e}.down_proj.weight"))
-                .expect("down_proj present");
-            shape_h_i = Some(vec![expert_count, down.shape[0], down.shape[1]]);
-            down_data.extend_from_slice(&down.data);
-        }
-        all_tensors.insert(
-            format!("model.layers.{l}.mlp.down_weights"),
-            StoredTensor {
-                shape: shape_h_i.expect("experts existed"),
-                dtype: Dtype::BF16,
-                data: down_data,
-            },
-        );
-    }
+    // Per-expert projections pass through AS-IS: the (E, 2I, H) /
+    // (E, H, I) stacking happens IN-GRAPH (MoETopK::from_per_expert) —
+    // ruling 2026-08-12: no value-transforming preparation steps.
 
     let tensor_views: HashMap<String, TensorView<'_>> = all_tensors
         .iter()

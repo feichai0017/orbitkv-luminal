@@ -69,6 +69,9 @@ impl Qwen3MoeDims {
 }
 
 pub struct Qwen3MoeBlock {
+    /// Per-expert (gate, up, down) handles — the HF checkpoint
+    /// anatomy; the MoE stacks them IN-GRAPH.
+    pub expert_parts: Vec<(GraphTensor, GraphTensor, GraphTensor)>,
     pub attn_norm: LayerNorm,
     pub wq: Linear,
     pub wk: Linear,
@@ -86,6 +89,24 @@ pub struct Qwen3MoeBlock {
 impl Qwen3MoeBlock {
     fn new(l: usize, d: &Qwen3MoeDims, cx: &mut Graph) -> Self {
         let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
+        let expert_parts: Vec<(GraphTensor, GraphTensor, GraphTensor)> = (0..d.experts)
+            .map(|e| {
+                (
+                    cx.named_tensor(
+                        name(&format!("mlp.experts.{e}.gate_proj.weight")),
+                        (d.moe_intermediate, d.hidden),
+                    ),
+                    cx.named_tensor(
+                        name(&format!("mlp.experts.{e}.up_proj.weight")),
+                        (d.moe_intermediate, d.hidden),
+                    ),
+                    cx.named_tensor(
+                        name(&format!("mlp.experts.{e}.down_proj.weight")),
+                        (d.hidden, d.moe_intermediate),
+                    ),
+                )
+            })
+            .collect();
         Self {
             attn_norm: LayerNorm::new(
                 d.hidden,
@@ -109,7 +130,12 @@ impl Qwen3MoeBlock {
                 d.rms_eps,
                 cx,
             ),
-            moe: MoETopK::new(d.hidden, d.moe_intermediate, d.experts, d.top_k, cx),
+            moe: MoETopK::from_per_expert(
+                Linear::new_permuted(d.hidden, d.experts, false, cx),
+                &expert_parts,
+                d.top_k,
+            ),
+            expert_parts,
             n_heads: d.n_heads,
             n_kv_heads: d.n_kv_heads,
             head_dim: d.head_dim,
@@ -250,8 +276,11 @@ impl Qwen3Moe {
                 block.ffn_norm.weight.expect("learned norm"),
             ));
             map.push((name("mlp.gate.weight"), block.moe.router.weight));
-            map.push((name("mlp.gate_up_weights"), block.moe.gate_up));
-            map.push((name("mlp.down_weights"), block.moe.down));
+            for (e, (gate, up, down)) in block.expert_parts.iter().enumerate() {
+                map.push((name(&format!("mlp.experts.{e}.gate_proj.weight")), *gate));
+                map.push((name(&format!("mlp.experts.{e}.up_proj.weight")), *up));
+                map.push((name(&format!("mlp.experts.{e}.down_proj.weight")), *down));
+            }
         }
         map.push((
             "model.norm.weight".to_string(),
