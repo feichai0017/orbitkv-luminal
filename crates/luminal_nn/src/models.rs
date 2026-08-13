@@ -417,7 +417,9 @@ impl GemmaBlock {
     ) -> Self {
         let q_dim = n_heads * head_dim;
         let kv_dim = n_kv_heads * head_dim;
-        let rms = |cx: &mut Graph| crate::LayerNorm::new(d, Some("NormWeight"), None, false, 1e-6, cx);
+        let rms = |cx: &mut Graph| {
+            crate::LayerNorm::new(d, Some("NormWeight"), None, false, 1e-6, cx).with_unit_offset()
+        };
         Self {
             input_norm: rms(cx),
             post_attn_norm: rms(cx),
@@ -466,7 +468,7 @@ impl GemmaBlock {
         let scale = 1.0 / (self.head_dim as f32).sqrt();
         // QK-norm before RoPE; attention scale folded into q.
         let q = crate::rotary_apply(
-            crate::rms_norm_heads(self.wq.forward(normed), self.head_dim, self.q_norm, 1e-6)
+            crate::rms_norm_heads(self.wq.forward(normed), self.head_dim, self.q_norm + 1.0, 1e-6)
                 * scale,
             self.head_dim,
             rope_cos,
@@ -474,7 +476,7 @@ impl GemmaBlock {
             rope_rot,
         );
         let k = crate::rotary_apply(
-            crate::rms_norm_heads(self.wk.forward(normed), self.head_dim, self.k_norm, 1e-6),
+            crate::rms_norm_heads(self.wk.forward(normed), self.head_dim, self.k_norm + 1.0, 1e-6),
             self.head_dim,
             rope_cos,
             rope_sin,
@@ -522,7 +524,7 @@ impl GemmaBlock {
         let normed = self.input_norm.forward(x);
         let scale = 1.0 / (self.head_dim as f32).sqrt();
         let q = crate::rotary_apply(
-            crate::rms_norm_heads(self.wq.forward(normed), self.head_dim, self.q_norm, 1e-6)
+            crate::rms_norm_heads(self.wq.forward(normed), self.head_dim, self.q_norm + 1.0, 1e-6)
                 * scale,
             self.head_dim,
             rope_cos,
@@ -530,7 +532,7 @@ impl GemmaBlock {
             rope_rot,
         );
         let k = crate::rotary_apply(
-            crate::rms_norm_heads(self.wk.forward(normed), self.head_dim, self.k_norm, 1e-6),
+            crate::rms_norm_heads(self.wk.forward(normed), self.head_dim, self.k_norm + 1.0, 1e-6),
             self.head_dim,
             rope_cos,
             rope_sin,

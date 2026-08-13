@@ -118,8 +118,8 @@ fn model_shard_files(model_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::erro
 
 /// Combines the multimodal checkpoint's TEXT TOWER into a single bf16
 /// file (norms F32): strips the `language_model.` prefix, skips the
-/// vision tower, and PRE-ADDS 1.0 to every RMSNorm weight family (the
-/// Gemma (1+w) pattern) so the graph multiplies by a plain weight.
+/// vision tower. Norm weights are NOT transformed — the Gemma (1+w)
+/// parameterization is applied in-graph (model definition).
 /// The embedding table stays UNSCALED — the sqrt(hidden) normalizer is
 /// in-graph and the head ties via the same table (matching the HF
 /// config's tie_word_embeddings + normalizer directly; the parked
@@ -176,36 +176,9 @@ pub fn combine_safetensors_to_bf16(
     println!("Extracted {} tensors", all_tensors.len());
     println!("Saving combined BF16 model to {}...", output_path.display());
 
-    // The Gemma (1+w) RMSNorm pattern, pre-baked: all seven norm
-    // families store weight+1 so the graph's LayerNorm multiplies by a
-    // plain weight.
-    let norm_patterns = [
-        "input_layernorm.weight",
-        "post_attention_layernorm.weight",
-        "pre_feedforward_layernorm.weight",
-        "post_feedforward_layernorm.weight",
-        "model.norm.weight",
-        "q_norm.weight",
-        "k_norm.weight",
-    ];
-    let norm_keys: Vec<String> = all_tensors
-        .keys()
-        .filter(|key| norm_patterns.iter().any(|p| key.contains(p)))
-        .cloned()
-        .collect();
-    for key in &norm_keys {
-        let stored = all_tensors.get_mut(key).expect("norm key exists");
-        assert_eq!(stored.dtype, Dtype::F32, "norm weights stay F32");
-        let mut values: Vec<f32> = stored
-            .data
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
-        for value in &mut values {
-            *value += 1.0;
-        }
-        stored.data = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    }
+    // Norm weights pass through AS-IS: the Gemma (1+w) parameterization
+    // lives IN the graph (LayerNorm::with_unit_offset / q_norm + 1) —
+    // ruling 2026-08-12: no value-transforming preparation steps.
 
     let tensor_views: HashMap<String, TensorView<'_>> = all_tensors
         .iter()

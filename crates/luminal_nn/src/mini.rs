@@ -207,7 +207,8 @@ impl MiniGemma3 {
                     crate::GemmaBlock::new(d, ff, n_heads, n_kv_heads, head_dim, local, window, cx)
                 })
                 .collect(),
-            final_norm: crate::LayerNorm::new(d, Some("NormWeight"), None, false, 1e-6, cx),
+            final_norm: crate::LayerNorm::new(d, Some("NormWeight"), None, false, 1e-6, cx)
+                .with_unit_offset(),
             d,
         }
     }
@@ -1211,7 +1212,8 @@ mod tests {
 
         // ---- scalar reference ----
         let wrms = |x: &[f32], w: &[f32]| -> Vec<f32> {
-            ref_rms_norm(x, 1e-6).iter().zip(w).map(|(v, w)| v * w).collect()
+            // Gemma (1+w): the reference mirrors the in-graph unit offset.
+            ref_rms_norm(x, 1e-6).iter().zip(w).map(|(v, w)| v * (1.0 + w)).collect()
         };
         let mul = |a: &[f32], b: &[f32]| -> Vec<f32> {
             a.iter().zip(b).map(|(x, y)| x * y).collect()
@@ -1230,11 +1232,13 @@ mod tests {
             let (kc, vc) = &mut ref_caches[layer];
             let h = wrms(&x, &weights(D, seeds(layer, 7)));
             let q = ref_matmul(&h, &weights(D * Q_DIM, seeds(layer, 0)), D, Q_DIM);
-            let q = ref_rms_head_norm(&q, HD, &weights(HD, seeds(layer, 11)));
+            let qw1: Vec<f32> = weights(HD, seeds(layer, 11)).iter().map(|w| 1.0 + w).collect();
+            let q = ref_rms_head_norm(&q, HD, &qw1);
             let q: Vec<f32> = q.iter().map(|v| v * scale).collect(); // folded into Q
             let q = ref_rotary_apply(&q, HD, cos_table, sin_table, &rot_matrix);
             let k = ref_matmul(&h, &weights(D * KV_DIM, seeds(layer, 1)), D, KV_DIM);
-            let k = ref_rms_head_norm(&k, HD, &weights(HD, seeds(layer, 12)));
+            let kw1: Vec<f32> = weights(HD, seeds(layer, 12)).iter().map(|w| 1.0 + w).collect();
+            let k = ref_rms_head_norm(&k, HD, &kw1);
             let k = ref_rotary_apply(&k, HD, cos_table, sin_table, &rot_matrix);
             let v = ref_matmul(&h, &weights(D * KV_DIM, seeds(layer, 2)), D, KV_DIM);
             let attn = ref_paged_step_gqa(

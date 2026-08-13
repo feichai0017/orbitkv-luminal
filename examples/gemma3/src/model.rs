@@ -95,7 +95,8 @@ impl Gemma3 {
                 false,
                 dims.rms_eps,
                 cx,
-            ),
+            )
+            .with_unit_offset(),
         }
     }
 
@@ -104,6 +105,7 @@ impl Gemma3 {
         let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
         let rms = |suffix: &str, cx: &mut Graph| {
             LayerNorm::new(d.hidden, Some(&name(suffix)), None, false, d.rms_eps, cx)
+                .with_unit_offset()
         };
         GemmaBlock {
             input_norm: rms("input_layernorm.weight", cx),
