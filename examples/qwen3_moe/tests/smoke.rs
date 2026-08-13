@@ -28,7 +28,7 @@ fn tiny_decode_loop_is_deterministic_and_advances_the_cache() {
 
     let run = || {
         let step = DecodeStep::build(&dims, max_seq);
-        let pairs = weights::random_weights(&step.model);
+        let pairs = weights::random_weights(&step);
         let mut decoder = Decoder::start(step, &pairs, &smoke_search()).expect("search");
         let mut rows = Vec::new();
         for token in [1u32, 2, 0] {

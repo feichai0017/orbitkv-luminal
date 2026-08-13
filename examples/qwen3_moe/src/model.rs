@@ -272,38 +272,4 @@ impl Qwen3Moe {
         (logits, caches_out)
     }
 
-    pub fn weight_bindings(&self) -> Vec<(String, GraphTensor)> {
-        let mut map = vec![
-            ("model.embed_tokens.weight".to_string(), self.embed.weight),
-            ("lm_head.weight".to_string(), self.lm_head.weight),
-        ];
-        for (l, block) in self.blocks.iter().enumerate() {
-            let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
-            map.push((name("self_attn.q_proj.weight"), block.wq.weight));
-            map.push((name("self_attn.k_proj.weight"), block.wk.weight));
-            map.push((name("self_attn.v_proj.weight"), block.wv.weight));
-            map.push((name("self_attn.o_proj.weight"), block.wo.weight));
-            map.push((name("self_attn.q_norm.weight"), block.q_norm));
-            map.push((name("self_attn.k_norm.weight"), block.k_norm));
-            map.push((
-                name("input_layernorm.weight"),
-                block.attn_norm.weight.expect("learned norm"),
-            ));
-            map.push((
-                name("post_attention_layernorm.weight"),
-                block.ffn_norm.weight.expect("learned norm"),
-            ));
-            map.push((name("mlp.gate.weight"), block.moe.router.weight));
-            for (e, (gate, up, down)) in block.expert_parts.iter().enumerate() {
-                map.push((name(&format!("mlp.experts.{e}.gate_proj.weight")), *gate));
-                map.push((name(&format!("mlp.experts.{e}.up_proj.weight")), *up));
-                map.push((name(&format!("mlp.experts.{e}.down_proj.weight")), *down));
-            }
-        }
-        map.push((
-            "model.norm.weight".to_string(),
-            self.final_norm.weight.expect("learned final norm"),
-        ));
-        map
-    }
 }

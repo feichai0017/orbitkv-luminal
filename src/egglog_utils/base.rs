@@ -81,9 +81,6 @@ pub fn nelem_f(l: Term) -> Term {
 pub fn num(val: Term) -> Term {
     SORTS.m_num.call(("n", val))
 }
-pub fn float(val: Term) -> Term {
-    SORTS.m_float.call(("n", val))
-}
 pub fn iter() -> Term {
     SORTS.m_iter.call(())
 }
@@ -211,7 +208,6 @@ pub fn shape_to_elist(shape: impl ToShape) -> Term {
 pub struct BaseSorts {
     // Expression variants
     pub m_num: SortDef,
-    pub m_float: SortDef,
     pub m_iter: SortDef,
     pub m_var: SortDef,
     pub m_add: SortDef,
@@ -288,7 +284,6 @@ impl BaseSorts {
     pub fn new() -> Self {
         Self {
             m_num: sort(EXPRESSION, "MNum", &[("n", I64)]),
-            m_float: sort(EXPRESSION, "MFloat", &[("n", F64)]),
             m_iter: sort(EXPRESSION, "MIter", &[]),
             m_var: sort(EXPRESSION, "MVar", &[("name", STRING)]),
             m_add: sort(EXPRESSION, "MAdd", &[("a", EXPRESSION), ("b", EXPRESSION)]),
@@ -378,7 +373,6 @@ impl BaseSorts {
 
         for s in [
             &self.m_num,
-            &self.m_float,
             &self.m_iter,
             &self.m_var,
             &self.m_add,
@@ -725,9 +719,9 @@ fn base_expression_egglog_impl(use_interval_analysis: bool) -> String {
         .ruleset("expr"),
     );
 
-    // Float <-> Num for -1
-    p.add_rule(rewrite("float-neg1-to-num", float(f64(-1.0)), num(i64(-1))).ruleset("expr"));
-    p.add_rule(rewrite("num-neg1-to-float", num(i64(-1)), float(f64(-1.0))).ruleset("expr"));
+    // (The old MFloat(-1.0) <-> MNum(-1) rule pair is DELETED, 2026-08-13:
+    // the Rust extractor has no MFloat arm, so the pair only minted
+    // unextractable e-nodes into every simplification e-graph.)
 
     // Identity/zero rules
     p.add_rule(rewrite("add-zero", add(v("a"), num(i64(0))), v("a")).ruleset("expr"));

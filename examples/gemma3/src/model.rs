@@ -191,40 +191,4 @@ impl Gemma3 {
         (logits, caches_out)
     }
 
-    pub fn weight_bindings(&self) -> Vec<(String, GraphTensor)> {
-        let mut map = vec![("model.embed_tokens.weight".to_string(), self.embed.weight)];
-        for (l, block) in self.blocks.iter().enumerate() {
-            let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
-            map.push((name("self_attn.q_proj.weight"), block.wq.weight));
-            map.push((name("self_attn.k_proj.weight"), block.wk.weight));
-            map.push((name("self_attn.v_proj.weight"), block.wv.weight));
-            map.push((name("self_attn.o_proj.weight"), block.wo.weight));
-            map.push((name("self_attn.q_norm.weight"), block.q_norm));
-            map.push((name("self_attn.k_norm.weight"), block.k_norm));
-            map.push((
-                name("input_layernorm.weight"),
-                block.input_norm.weight.expect("learned norm"),
-            ));
-            map.push((
-                name("post_attention_layernorm.weight"),
-                block.post_attn_norm.weight.expect("learned norm"),
-            ));
-            map.push((
-                name("pre_feedforward_layernorm.weight"),
-                block.pre_ff_norm.weight.expect("learned norm"),
-            ));
-            map.push((
-                name("post_feedforward_layernorm.weight"),
-                block.post_ff_norm.weight.expect("learned norm"),
-            ));
-            map.push((name("mlp.gate_proj.weight"), block.gate.weight));
-            map.push((name("mlp.up_proj.weight"), block.up.weight));
-            map.push((name("mlp.down_proj.weight"), block.down.weight));
-        }
-        map.push((
-            "model.norm.weight".to_string(),
-            self.final_norm.weight.expect("learned final norm"),
-        ));
-        map
-    }
 }

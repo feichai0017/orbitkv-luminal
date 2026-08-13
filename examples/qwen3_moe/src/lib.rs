@@ -264,9 +264,9 @@ pub fn run_qwen3_moe(config: Qwen3MoeRunConfig) -> Result<(), Box<dyn Error>> {
     let pairs = match &model_dir {
         Some(dir) => {
             println!("Loading weights...");
-            weights::load_safetensors_weights(&step.model, dir)?
+            weights::load_safetensors_weights(&step.cx, dir)?
         }
-        None => weights::random_weights(&step.model),
+        None => weights::random_weights(&step),
     };
     println!("Searching (one step-invariant graph, profiled with real data)...");
     let mut decoder = Decoder::start(step, &pairs, &config.search)?;

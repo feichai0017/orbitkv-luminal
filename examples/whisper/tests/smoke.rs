@@ -25,7 +25,7 @@ fn tiny_transcribe_loop_is_deterministic_and_advances_the_cache() {
 
     let run = || {
         let step = TranscribeStep::build(&dims);
-        let pairs = weights::random_weights(&step.model);
+        let pairs = weights::random_weights(&step.cx);
         let mut transcriber =
             Transcriber::start(step, &mel, &pairs, &smoke_search()).expect("search");
         let mut rows = Vec::new();

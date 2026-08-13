@@ -1,17 +1,35 @@
 //! Host-side weight staging: the combined bf16 checkpoint (unfused,
-//! norms F32) converts to f32 on the way in, keyed by
-//! [`crate::model::Gemma3::weight_bindings`]. Loud bails on a missing
-//! key or a shape mismatch; no silent skips.
+//! norms F32) converts to f32 on the way in, LABEL-DRIVEN — every
+//! checkpoint-backed input's label IS its HF checkpoint key, so staging
+//! walks `cx.logical.input_specs()` and matches labels against the
+//! checkpoint. Runtime inputs (anonymous `arg.*` — token, q_pos, rope
+//! tables, gather/scatter — and the `cache.*` pool) stay handle-staged
+//! in the decoder. Loud bails on a missing weight key or a shape
+//! mismatch; no silent skips.
 
 use crate::hf::tensor_to_f32;
-use crate::model::Gemma3;
+use luminal::dtype::DType;
+use luminal::graph::Graph;
 use luminal::prelude::{NodeIndex, TypedBuffer};
 use safetensors::SafeTensors;
 use std::error::Error;
 use std::path::Path;
 
+/// Gemma3's runtime inputs by label: anonymous args (token, q_pos,
+/// rope tables, gather/scatter indices) and the kv-cache pool. These
+/// are never checkpoint keys — the decoder stages them by handle.
+fn is_runtime_label(label: &str) -> bool {
+    label.starts_with("arg.") || label.starts_with("cache.")
+}
+
+fn spec_numel(dims: &[luminal::prelude::Expression]) -> usize {
+    dims.iter()
+        .map(|d| d.to_usize().expect("model dims are static"))
+        .product()
+}
+
 pub fn load_safetensors_weights(
-    model: &Gemma3,
+    cx: &Graph,
     model_dir: &Path,
 ) -> Result<Vec<(NodeIndex, TypedBuffer)>, Box<dyn Error>> {
     let path = model_dir.join("model_combined_gemma3_text_v1.safetensors");
@@ -21,45 +39,63 @@ pub fn load_safetensors_weights(
     let tensors = SafeTensors::deserialize(&mmap)?;
 
     let mut pairs = Vec::new();
-    for (key, handle) in model.weight_bindings() {
-        let view = tensors
-            .tensor(&key)
-            .map_err(|e| format!("checkpoint is missing '{key}': {e}"))?;
-        let expected: usize = handle
-            .dims()
-            .iter()
-            .map(|d| d.to_usize().expect("model dims are static"))
-            .product();
+    for spec in cx.logical.input_specs() {
+        let view = match tensors.tensor(&spec.label) {
+            Ok(view) => view,
+            Err(e) => {
+                if is_runtime_label(&spec.label) {
+                    continue; // runtime input — staged by handle elsewhere
+                }
+                return Err(format!("checkpoint is missing '{}': {e}", spec.label).into());
+            }
+        };
+        let expected = spec_numel(&spec.dims);
         let numel: usize = view.shape().iter().product();
         if numel != expected {
             return Err(format!(
-                "'{key}': checkpoint shape {:?} has {numel} elements, model expects {expected}",
+                "'{}': checkpoint shape {:?} has {numel} elements, model expects {expected}",
+                spec.label,
                 view.shape()
             )
             .into());
         }
-        pairs.push((handle.id, tensor_to_f32(&view).into()));
+        let buffer: TypedBuffer = match spec.dtype {
+            DType::F32 => tensor_to_f32(&view).into(),
+            other => {
+                return Err(format!(
+                    "'{}': unsupported authored dtype {other:?} for checkpoint staging",
+                    spec.label
+                )
+                .into());
+            }
+        };
+        pairs.push((spec.id, buffer));
     }
     Ok(pairs)
 }
 
 /// Deterministic pseudo-random parameters for offline runs and smoke
-/// tests — anatomy-real, weights fake.
-pub fn random_weights(model: &Gemma3) -> Vec<(NodeIndex, TypedBuffer)> {
-    model
-        .weight_bindings()
+/// tests — anatomy-real, weights fake. Fills exactly the checkpoint-
+/// backed inputs (everything but the `arg.*`/`cache.*` runtime labels),
+/// shaped from the spec's declared dims.
+pub fn random_weights(cx: &Graph) -> Vec<(NodeIndex, TypedBuffer)> {
+    cx.logical
+        .input_specs()
         .into_iter()
+        .filter(|spec| !is_runtime_label(&spec.label))
         .enumerate()
-        .map(|(seed, (_, handle))| {
-            let n: usize = handle
-                .dims()
-                .iter()
-                .map(|d| d.to_usize().expect("model dims are static"))
-                .product();
+        .map(|(seed, spec)| {
+            assert_eq!(
+                spec.dtype,
+                DType::F32,
+                "'{}': random fill only supports F32 weights",
+                spec.label
+            );
+            let n = spec_numel(&spec.dims);
             let data: Vec<f32> = (0..n)
                 .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
                 .collect();
-            (handle.id, data.into())
+            (spec.id, data.into())
         })
         .collect()
 }

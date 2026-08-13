@@ -399,44 +399,4 @@ impl Gemma4Moe {
         let logits = (logits * (1.0 / softcap)).tanh() * softcap;
         (logits, caches_out)
     }
-
-    pub fn weight_bindings(&self) -> Vec<(String, GraphTensor)> {
-        let mut map = vec![("model.embed_tokens.weight".to_string(), self.embed.weight)];
-        for (l, block) in self.blocks.iter().enumerate() {
-            let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
-            map.push((name("self_attn.q_proj.weight"), block.wq.weight));
-            map.push((name("self_attn.k_proj.weight"), block.wk.weight));
-            if let Some(wv) = &block.wv {
-                map.push((name("self_attn.v_proj.weight"), wv.weight));
-            }
-            map.push((name("self_attn.o_proj.weight"), block.wo.weight));
-            map.push((name("self_attn.q_norm.weight"), block.q_norm));
-            map.push((name("self_attn.k_norm.weight"), block.k_norm));
-            for (suffix, norm) in [
-                ("input_layernorm.weight", &block.input_norm),
-                ("post_attention_layernorm.weight", &block.post_attn_norm),
-                ("pre_feedforward_layernorm.weight", &block.pre_ff_norm),
-                ("post_feedforward_layernorm.weight", &block.post_ff_norm),
-                ("post_feedforward_layernorm_1.weight", &block.post_ff_norm_1),
-                ("pre_feedforward_layernorm_2.weight", &block.pre_ff_norm_2),
-                ("post_feedforward_layernorm_2.weight", &block.post_ff_norm_2),
-            ] {
-                map.push((name(suffix), norm.weight.expect("learned norm")));
-            }
-            map.push((name("layer_scalar"), block.layer_scalar));
-            map.push((name("mlp.gate_proj.weight"), block.gate.weight));
-            map.push((name("mlp.up_proj.weight"), block.up.weight));
-            map.push((name("mlp.down_proj.weight"), block.down.weight));
-            map.push((name("router.proj.weight"), block.moe.router_proj.weight));
-            map.push((name("router.scale"), block.moe.router_scale));
-            map.push((name("router.per_expert_scale"), block.moe.per_expert_scale));
-            map.push((name("mlp.gate_up_weights"), block.moe.gate_up));
-            map.push((name("mlp.down_weights"), block.moe.down));
-        }
-        map.push((
-            "model.norm.weight".to_string(),
-            self.final_norm.weight.expect("learned final norm"),
-        ));
-        map
-    }
 }

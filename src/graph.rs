@@ -1483,6 +1483,7 @@ pub(crate) fn int_expr_term(
                     Term::Sub => format!("(IntAdd {left} (IntMul (IntLit -1) {right}))"),
                     Term::Div => format!("(IntTruncDiv {left} {right})"),
                     Term::Mod => format!("(IntTruncRem {left} {right})"),
+                    Term::CeilDiv => format!("(IntCeilDiv {left} {right})"),
                     Term::Min => format!("(IntMin {left} {right})"),
                     Term::Max => format!("(IntMax {left} {right})"),
                     // Comparisons arrive as 0/1 VALUES in their expressions;

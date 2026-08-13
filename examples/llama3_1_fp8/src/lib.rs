@@ -273,10 +273,10 @@ pub fn run_llama3_1_fp8(config: Fp8RunConfig) -> Result<(), Box<dyn Error>> {
     let step = DecodeStep::build(&dims, config.max_seq);
     let pairs = match &model_dir {
         Some(dir) => {
-            println!("Loading weights...");
-            weights::load_safetensors_weights(&step.model, dir)?
+            println!("Loading weights (label-keyed)...");
+            weights::load_safetensors_weights(&step.cx, dir)?
         }
-        None => weights::random_weights(&step.model),
+        None => weights::random_weights(&step.cx),
     };
     println!("Searching (one step-invariant graph, profiled with real data)...");
     let mut decoder = Decoder::start(step, &pairs, &config.search)?;

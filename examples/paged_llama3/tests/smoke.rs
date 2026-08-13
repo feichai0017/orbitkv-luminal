@@ -28,7 +28,7 @@ fn batched_sequences_isolate_exactly() {
     // Reference: A alone through the position-slots driver.
     let solo = {
         let step = llama3::DecodeStep::build(&dims, slots);
-        let pairs = weights::random_weights(&step.model);
+        let pairs = weights::random_weights(&step.cx);
         let mut decoder = llama3::Decoder::start(step, &pairs, &smoke_search()).expect("search");
         let mut rows = Vec::new();
         for token in [1u32, 2, 3] {
@@ -41,7 +41,7 @@ fn batched_sequences_isolate_exactly() {
     // Weight data is deterministic by construction, so both graphs
     // carry identical parameters.
     let step = BatchStep::build(&dims, slots);
-    let pairs = weights::random_weights(&step.model);
+    let pairs = weights::random_weights(&step.cx);
     let mut ticker = Ticker::start(step, &pairs, &smoke_search()).expect("search");
     let a = ticker.table.new_sequence();
     let b = ticker.table.new_sequence();

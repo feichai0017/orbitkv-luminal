@@ -77,8 +77,11 @@ impl QwenDims {
 
 /// The model: an embedding (tied to the lm head), a stack of
 /// rope-threaded [`LlamaBlock`]s with QK-norm, and the final RMS norm.
-/// Every parameter is a named input tensor; [`Qwen::weight_bindings`]
-/// is the HF-checkpoint-key → handle map the loader walks.
+/// Every parameter is a named input tensor whose LABEL is its HF
+/// checkpoint key — the loader walks `input_specs()` and matches labels
+/// against the checkpoint (label-driven staging, ruling 2026-08-13).
+/// Qwen3-4B ties lm_head to the embedding, so no lm_head.weight input
+/// exists.
 pub struct Qwen {
     pub dims: QwenDims,
     pub embed: Embedding,
@@ -197,36 +200,4 @@ impl Qwen {
         (logits, caches_out)
     }
 
-    /// The HF-checkpoint-key → input-handle map. Qwen3-4B ties lm_head
-    /// to the embedding, so the combined file has no lm_head.weight and
-    /// none is listed.
-    pub fn weight_bindings(&self) -> Vec<(String, GraphTensor)> {
-        let mut map = vec![("model.embed_tokens.weight".to_string(), self.embed.weight)];
-        for (l, block) in self.blocks.iter().enumerate() {
-            let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
-            let (q_norm, k_norm) = block.qk_norm.expect("qwen blocks carry qk-norm");
-            map.push((name("self_attn.q_proj.weight"), block.wq.weight));
-            map.push((name("self_attn.k_proj.weight"), block.wk.weight));
-            map.push((name("self_attn.v_proj.weight"), block.wv.weight));
-            map.push((name("self_attn.o_proj.weight"), block.wo.weight));
-            map.push((name("self_attn.q_norm.weight"), q_norm));
-            map.push((name("self_attn.k_norm.weight"), k_norm));
-            map.push((
-                name("input_layernorm.weight"),
-                block.attn_norm.weight.expect("learned attn norm"),
-            ));
-            map.push((
-                name("post_attention_layernorm.weight"),
-                block.ffn_norm.weight.expect("learned ffn norm"),
-            ));
-            map.push((name("mlp.gate_proj.weight"), block.gate.weight));
-            map.push((name("mlp.up_proj.weight"), block.up.weight));
-            map.push((name("mlp.down_proj.weight"), block.down.weight));
-        }
-        map.push((
-            "model.norm.weight".to_string(),
-            self.final_norm.weight.expect("learned final norm"),
-        ));
-        map
-    }
 }

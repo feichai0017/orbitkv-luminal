@@ -234,23 +234,6 @@ impl Term {
             _ => None,
         }
     }
-    pub fn as_float_op(self) -> Option<fn(f64, f64) -> f64> {
-        match self {
-            Term::Add => Some(|a, b| a + b),
-            Term::Sub => Some(|a, b| a - b),
-            Term::Mul => Some(|a, b| a * b),
-            Term::Div => Some(|a, b| a / b),
-            Term::Mod => Some(|a, b| a % b),
-            Term::Max => Some(|a, b| a.max(b)),
-            Term::Min => Some(|a, b| a.min(b)),
-            Term::And => Some(|a, b| (a.abs() > 1e-4 && b.abs() > 1e-4) as i32 as f64),
-            Term::Or => Some(|a, b| (a.abs() > 1e-4 || b.abs() > 1e-4) as i32 as f64),
-            Term::Gte => Some(|a, b| (a >= b) as i32 as f64),
-            Term::Lt => Some(|a, b| (a < b) as i32 as f64),
-            Term::CeilDiv => Some(|a, b| (a / b).ceil()),
-            _ => None,
-        }
-    }
     pub fn to_egglog(self) -> String {
         match self {
             Term::Add => "MAdd",

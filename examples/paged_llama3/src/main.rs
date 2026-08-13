@@ -43,7 +43,7 @@ fn main() {
     dims.layers = layers;
     println!("Recording the batched tick graph ({layers} layers, {slots} slots)...");
     let step = BatchStep::build(&dims, slots);
-    let pairs = weights::random_weights(&step.model);
+    let pairs = weights::random_weights(&step.cx);
     let mut ticker = Ticker::start(step, &pairs, &Default::default()).expect("search");
 
     let a = ticker.table.new_sequence();

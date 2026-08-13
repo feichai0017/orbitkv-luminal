@@ -220,27 +220,24 @@ impl GraphTensor {
     pub fn gather_elements(self, indexes: GraphTensor, axis: usize) -> GraphTensor {
         let dims = self.dims();
         let rank = dims.len();
-        let out_shape: Vec<usize> = indexes
-            .dims()
-            .iter()
-            .map(|d| {
-                d.to_usize()
-                    .expect("gather_elements: index dim must be concrete")
-            })
-            .collect();
+        let out_shape: Vec<Expression> = indexes.dims();
 
-        // Row-major strides: stride[i] = prod(dims[i+1..])
-        let strides: Vec<usize> = (0..rank)
+        // Row-major strides: stride[i] = prod(dims[i+1..]) — SYMBOLIC
+        // Expression products (ruling 2026-08-13: the frontend computes
+        // nothing eagerly that the expression language can carry; static
+        // dims still fold to literals via to_usize so the recorded text
+        // is unchanged for concrete shapes).
+        let strides: Vec<Expression> = (0..rank)
             .map(|i| {
-                dims[i + 1..]
+                let product = dims[i + 1..]
                     .iter()
-                    .map(|d| d.to_usize().unwrap())
-                    .product()
+                    .fold(Expression::from(1), |acc, d| acc * *d);
+                product.to_usize().map(Expression::from).unwrap_or(product)
             })
             .collect();
 
-        // Normalize negative indices for axis dim
-        let axis_dim = dims[axis].to_usize().unwrap();
+        // Normalize negative indices for axis dim (symbolic-capable).
+        let axis_dim = dims[axis];
         // Int-native normalization (2026-08-11): the comparison and the
         // adjustment stay in i32 end to end — the old f32 detour ended
         // in a cast back to Int, which the cast policy now refuses.
@@ -291,27 +288,21 @@ impl GraphTensor {
     ) -> GraphTensor {
         let data_dims = self.dims();
         let rank = data_dims.len();
-        let idx_shape: Vec<usize> = indices
-            .dims()
-            .iter()
-            .map(|d| {
-                d.to_usize()
-                    .expect("scatter_elements: index dim must be concrete")
-            })
-            .collect();
+        let idx_shape: Vec<Expression> = indices.dims();
 
-        // Row-major strides for data
-        let strides: Vec<usize> = (0..rank)
+        // Row-major strides for data — symbolic Expression products
+        // (see gather_elements; static dims fold to literals).
+        let strides: Vec<Expression> = (0..rank)
             .map(|i| {
-                data_dims[i + 1..]
+                let product = data_dims[i + 1..]
                     .iter()
-                    .map(|d| d.to_usize().unwrap())
-                    .product()
+                    .fold(Expression::from(1), |acc, d| acc * *d);
+                product.to_usize().map(Expression::from).unwrap_or(product)
             })
             .collect();
 
-        // Normalize negative indices for axis dim
-        let axis_dim = data_dims[axis].to_usize().unwrap();
+        // Normalize negative indices for axis dim (symbolic-capable).
+        let axis_dim = data_dims[axis];
         // Int-native normalization (2026-08-11) — see gather_elements.
         assert_eq!(indices.dtype, DType::Int, "index tensor must be Int");
         let zero = indices.graph().constant(0).expand_rhs(indices.dims());
@@ -364,32 +355,29 @@ impl GraphTensor {
         let idx_dims = indices.dims();
         let idx_rank = idx_dims.len();
 
-        let data_shape: Vec<usize> = data_dims
-            .iter()
-            .map(|d| d.to_usize().expect("scatter_nd: data dim must be concrete"))
-            .collect();
-        let idx_shape: Vec<usize> = idx_dims
-            .iter()
-            .map(|d| {
-                d.to_usize()
-                    .expect("scatter_nd: indices dim must be concrete")
-            })
-            .collect();
-
-        let k = idx_shape[idx_rank - 1]; // last dim of indices = number of index dimensions
+        // K is STRUCTURAL — it fixes how many slice extractions the
+        // recorder emits (a rank, not an extent) — so it alone must be
+        // concrete. Every other quantity stays a symbolic Expression
+        // (ruling 2026-08-13: nothing eager in the frontend that the
+        // expression language can carry; static dims fold to literals).
+        let k = idx_dims[idx_rank - 1]
+            .to_usize()
+            .expect("scatter_nd: K (last indices dim) is structural and must be concrete");
         assert!(k <= data_rank, "scatter_nd: K must be <= data rank");
 
-        // Batch shape = indices shape without last dim: [S0, ..., Sq-2]
-        let batch_shape: Vec<usize> = idx_shape[..idx_rank - 1].to_vec();
-        let batch_numel: usize = batch_shape.iter().product::<usize>().max(1);
+        let fold_product = |dims: &[Expression]| {
+            let product = dims.iter().fold(Expression::from(1), |acc, d| acc * *d);
+            product.to_usize().map(Expression::from).unwrap_or(product)
+        };
+        // Batch numel = product of indices shape without the last dim.
+        let batch_numel = fold_product(&idx_dims[..idx_rank - 1]);
+        // Trailing shape = data dims [K..].
+        let trailing_shape: Vec<Expression> = data_dims[k..].to_vec();
+        let trailing_numel = fold_product(&trailing_shape);
 
-        // Trailing shape = data_shape[K..]
-        let trailing_shape: Vec<usize> = data_shape[k..].to_vec();
-        let trailing_numel: usize = trailing_shape.iter().product::<usize>().max(1);
-
-        // Row-major strides for data
-        let data_strides: Vec<usize> = (0..data_rank)
-            .map(|i| data_shape[i + 1..].iter().product::<usize>().max(1))
+        // Row-major strides for data — symbolic products.
+        let data_strides: Vec<Expression> = (0..data_rank)
+            .map(|i| fold_product(&data_dims[i + 1..]))
             .collect();
 
         // Flatten batch dims of indices to [batch_numel, K] with recorded merges
@@ -401,7 +389,7 @@ impl GraphTensor {
 
         // For each k_dim, extract the slice and multiply by stride
         let mut flat_base: Option<GraphTensor> = None;
-        for (k_dim, &stride) in data_strides.iter().enumerate().take(k) {
+        for (k_dim, stride) in data_strides.iter().copied().enumerate().take(k) {
             let idx_k = indices_flat.slice_along(k_dim..k_dim + 1, indices_flat.dims().len() - 1);
             let idx_k = idx_k.squeeze(idx_k.dims().len() - 1);
 
@@ -417,7 +405,7 @@ impl GraphTensor {
         }
         let flat_base = flat_base.unwrap();
 
-        let mut full_flat_dest = if trailing_shape.is_empty() || trailing_numel == 1 {
+        let mut full_flat_dest = if trailing_shape.is_empty() || trailing_numel.to_usize() == Some(1) {
             flat_base
         } else {
             // Expand flat_base to [batch_numel, trailing_numel]
@@ -425,7 +413,7 @@ impl GraphTensor {
 
             let trailing_rank = trailing_shape.len();
             for (ti, d) in (k..data_rank).enumerate() {
-                let ar = self.graph().arange(data_shape[d]);
+                let ar = self.graph().arange(data_dims[d]);
                 let mut ar_shaped = ar;
                 for _ in ti + 1..trailing_rank {
                     let n = ar_shaped.dims().len();

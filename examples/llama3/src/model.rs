@@ -191,34 +191,4 @@ impl Llama3 {
         let logits = self.lm_head.forward(self.final_norm.forward(x));
         (logits, caches_out)
     }
-
-    pub fn weight_bindings(&self) -> Vec<(String, GraphTensor)> {
-        let mut map = vec![
-            ("model.embed_tokens.weight".to_string(), self.embed.weight),
-            ("lm_head.weight".to_string(), self.lm_head.weight),
-        ];
-        for (l, block) in self.blocks.iter().enumerate() {
-            let name = |suffix: &str| format!("model.layers.{l}.{suffix}");
-            map.push((name("self_attn.q_proj.weight"), block.wq.weight));
-            map.push((name("self_attn.k_proj.weight"), block.wk.weight));
-            map.push((name("self_attn.v_proj.weight"), block.wv.weight));
-            map.push((name("self_attn.o_proj.weight"), block.wo.weight));
-            map.push((
-                name("input_layernorm.weight"),
-                block.attn_norm.weight.expect("learned attn norm"),
-            ));
-            map.push((
-                name("post_attention_layernorm.weight"),
-                block.ffn_norm.weight.expect("learned ffn norm"),
-            ));
-            map.push((name("mlp.gate_proj.weight"), block.gate.weight));
-            map.push((name("mlp.up_proj.weight"), block.up.weight));
-            map.push((name("mlp.down_proj.weight"), block.down.weight));
-        }
-        map.push((
-            "model.norm.weight".to_string(),
-            self.final_norm.weight.expect("learned final norm"),
-        ));
-        map
-    }
 }

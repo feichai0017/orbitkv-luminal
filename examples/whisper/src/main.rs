@@ -1,5 +1,5 @@
 use luminal::implementation_search::ImplementationSearchOptions;
-use whisper::model::{Whisper, WhisperDims};
+use whisper::model::WhisperDims;
 use whisper::{TOKEN_EOT, TOKEN_NO_TIMESTAMPS, TOKEN_SOT, TranscribeStep, Transcriber, audio, greedy_pick, hf, weights};
 
 const USAGE: &str = "\
@@ -51,13 +51,13 @@ fn main() {
     println!("Recording the transcribe-step graph...");
     let step = TranscribeStep::build(&dims);
     let (pairs, tokenizer) = if random_weights {
-        (weights::random_weights(&step.model), None)
+        (weights::random_weights(&step.cx), None)
     } else {
         let dir = hf::prepare_hf_model("openai/whisper-tiny.en").expect("download");
         let tokenizer =
             tokenizers::Tokenizer::from_file(dir.join("tokenizer.json")).expect("tokenizer");
         (
-            weights::load_safetensors_weights(&step.model, &dir).expect("weights load"),
+            weights::load_safetensors_weights(&step.cx, &dir).expect("weights load"),
             Some(tokenizer),
         )
     };
