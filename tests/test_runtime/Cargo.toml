@@ -8,6 +8,6 @@ luminal = { path = "../.." }
 # Versions track luminal's Cargo.toml exactly — the egglog/egraph-serialize/
 # petgraph types must UNIFY with luminal's so the fixture runners can hand
 # this crate's egraphs to luminal's extractor and bufferizer.
-egglog = { git = "https://github.com/egraphs-good/egglog", rev = "53b9721b9706741edff2b7c1e379fc37137184d9" }
+egglog = { git = "https://github.com/egraphs-good/egglog", rev = "c2c0f1510a3633b768fb3d30ad284b211290e4b2" }
 rustc-hash = "2.1.1"
 anyhow = "1.0"
