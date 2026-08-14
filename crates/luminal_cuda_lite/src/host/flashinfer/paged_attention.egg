@@ -255,3 +255,79 @@
     :ruleset kernel_fuse_late2
     :name "PagedAttention (sink-free) op"
 )
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Diagnostics: one observer per premise group that pa_island inlines.
+;
+; pa_island is a single conjunction, so a failure says only "something did not
+; match". The staged facts (pa_masked, pa_qk_scores, pa_v_operand) are visible
+; individually; these give the same visibility to the groups that are written
+; out inline. Produced and never consumed, so they cannot change what is built.
+; ─────────────────────────────────────────────────────────────────────────────
+
+(relation pa_dbg_scatters (IR IR))
+(rule
+    (
+        (= ?k_pool (Op (Scatter ?ksd ?ksdst ?ksis ?ksistr ?ksss)
+            (ICons ?k_dest (ICons ?scat_idx (ICons ?k_src (INil))))))
+        (= ?v_pool (Op (Scatter ?vsd ?vsdst ?vsis ?vsistr ?vsss)
+            (ICons ?v_dest (ICons ?scat_idx (ICons ?v_src (INil))))))
+    )
+    ((pa_dbg_scatters ?k_pool ?v_pool))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: paired pool scatters on one index"
+)
+
+(relation pa_dbg_gathers (IR IR))
+(rule
+    (
+        (= ?k_gathered (Op (Gather
+            (ECons ?context_tokens (ECons ?kvdim (ENil)))
+            ?kg_a
+            (ECons ?nslots (ECons ?kvdim2 (ENil)))
+            ?kg_b)
+            (ICons ?flat_gidx (ICons ?k_pool (INil)))))
+        (= ?v_gathered (Op (Gather
+            (ECons ?context_tokens (ECons ?kvdim3 (ENil)))
+            ?vg_a
+            (ECons ?nslots2 (ECons ?kvdim4 (ENil)))
+            ?vg_b)
+            (ICons ?flat_gidx (ICons ?v_pool (INil)))))
+    )
+    ((pa_dbg_gathers ?k_gathered ?v_gathered))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: paired 2-D context gathers on one index"
+)
+
+(relation pa_dbg_gqa (IR))
+(rule
+    (
+        (= ?k_gqa (Op (Mul ?kq_s ?kq_a ?kq_b ?kq_o)
+            (ICons ?k_gathered (ICons ?k_one (INil)))))
+        (const_like ?k_one 1.000000)
+    )
+    ((pa_dbg_gqa ?k_gqa))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: GQA broadcast barrier Mul(_, 1.0)"
+)
+
+(relation pa_dbg_qk (IR))
+(rule
+    (
+        (= ?qk (Op (Mul
+            (ECons ?nheads (ECons ?input_tokens (ECons ?context_tokens (ECons ?hdim (ENil)))))
+            ?qk_a ?qk_b ?qk_o)
+            (ICons ?q_bf (ICons ?k_gqa (INil)))))
+    )
+    ((pa_dbg_qk ?qk))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: 4-D QK matmul shape"
+)
+
+(relation pa_dbg_headdim (Expression))
+(rule
+    ((flashinfer_head_dim_ok_16bit ?hdim))
+    ((pa_dbg_headdim ?hdim))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: head_dim accepted by the 16-bit kernel"
+)
