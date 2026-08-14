@@ -2107,6 +2107,59 @@ impl CudaRuntime {
             arena_end = slot.offset + slot.capacity_bytes;
         }
         bucket.arena_bytes = arena_end;
+
+        // `LUMINAL_ARENA_REPORT=1`: name what the arena is actually for.
+        //
+        // A violation reports one number, which says nothing about whether it
+        // is one oversized buffer or many ordinary ones — and that is the
+        // difference between a single unfused op and a systemic problem.
+        if std::env::var_os("LUMINAL_ARENA_REPORT").is_some() {
+            let mut slots: Vec<(usize, usize, usize)> = bucket
+                .arena_slots
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.capacity_bytes, i, s.members.len()))
+                .collect();
+            slots.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            let total = arena_end.max(1);
+            println!(
+                "[arena] {:.2} GiB across {} slots",
+                arena_end as f64 / (1 << 30) as f64,
+                bucket.arena_slots.len()
+            );
+            for (bytes, idx, members) in slots.iter().take(8) {
+                let slot = &bucket.arena_slots[*idx];
+                let node = slot.members.first().map(|m| m.node).unwrap_or_default();
+                // Live range and conflict count: the two reasons a slot cannot
+                // take another member. A giant that occupies a slot alone is
+                // either alive too long or explicitly conflicted.
+                let (lo, hi) = slot
+                    .members
+                    .iter()
+                    .fold((usize::MAX, 0usize), |(a, b), m| (a.min(m.start), b.max(m.end)));
+                let conflicts = bucket
+                    .arena_conflicts
+                    .iter()
+                    .filter(|(x, y)| *x == node || *y == node)
+                    .count();
+                println!(
+                    "[arena]   {:>8.2} MiB  {:>5.1}%  llir={:?} live=[{}..{}] members={} conflicts={}",
+                    *bytes as f64 / (1 << 20) as f64,
+                    *bytes as f64 * 100.0 / total as f64,
+                    node,
+                    lo,
+                    hi,
+                    members,
+                    conflicts
+                );
+            }
+            let giants = slots.iter().filter(|(b, _, _)| *b >= (1 << 28)).count();
+            println!(
+                "[arena]   {} slots >= 256 MiB, {} conflict pairs total",
+                giants,
+                bucket.arena_conflicts.len()
+            );
+        }
     }
 
     fn planned_intermediate_buffers(
