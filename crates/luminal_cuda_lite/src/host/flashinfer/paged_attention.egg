@@ -331,3 +331,66 @@
     :ruleset kernel_fuse_late_pre
     :name "dbg: head_dim accepted by the 16-bit kernel"
 )
+
+; The softmax chain and P.V, staged the same way. Each is a verbatim copy of
+; the corresponding pa_island premises with the upstream bindings left free, so
+; an observer is strictly MORE permissive than the conjunct: if it does not
+; fire, the conjunct certainly cannot.
+
+(relation pa_dbg_smax_shift (IR))
+(rule
+    (
+        (= ?rmax (Op (Max ?rm_shape ?context_tokens ?rm_in ?rm_iter ?rm_out)
+            (ICons ?masked (INil))))
+        (= ?negmax (Op (Mul ?nm_s ?nm_a ?nm_b ?nm_o)
+            (ICons ?rmax (ICons ?neg1 (INil)))))
+        (const_like ?neg1 -1.000000)
+        (= ?shifted (Op (Add ?sh_s ?sh_a ?sh_b ?sh_o)
+            (ICons ?masked (ICons ?negmax (INil)))))
+    )
+    ((pa_dbg_smax_shift ?shifted))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: softmax max-subtract"
+)
+
+(relation pa_dbg_smax_exp (IR))
+(rule
+    (
+        (= ?sc2 (Op (Mul ?s2_s ?s2_a ?s2_b ?s2_o)
+            (ICons ?shifted (ICons ?log2e (INil)))))
+        (const_like ?log2e 1.442695)
+        (= ?num (Op (Exp2 ?ex_s ?ex_in ?ex_out) (ICons ?sc2 (INil))))
+    )
+    ((pa_dbg_smax_exp ?num))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: softmax exp2 with log2(e) rescale"
+)
+
+(relation pa_dbg_smax_norm (IR))
+(rule
+    (
+        (= ?numsum (Op (Sum ?ns_shape ?context_tokens ?ns_in ?ns_iter ?ns_out)
+            (ICons ?num (INil))))
+        (= ?rdenom (Op (Recip ?r_s ?r_in ?r_out) (ICons ?numsum (INil))))
+        (= ?probs (Op (Mul ?p_s ?p_a ?p_b ?p_o)
+            (ICons ?num (ICons ?rdenom (INil)))))
+    )
+    ((pa_dbg_smax_norm ?probs))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: softmax sum + reciprocal normalise"
+)
+
+(relation pa_dbg_pv (IR))
+(rule
+    (
+        (= ?pv (Op (Mul
+            (ECons ?nheads2 (ECons ?input_tokens (ECons ?hdim2 (ECons ?context_tokens (ENil)))))
+            ?pv_a ?pv_b ?pv_o)
+            (ICons ?probs (ICons ?v_ctx (INil)))))
+        (= ?out (Op (Sum ?o_shape ?context_tokens ?o_in ?o_iter ?o_out)
+            (ICons ?pv (INil))))
+    )
+    ((pa_dbg_pv ?out))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: P.V mul + reduce over context"
+)
