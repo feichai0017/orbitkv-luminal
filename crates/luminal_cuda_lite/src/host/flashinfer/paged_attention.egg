@@ -394,3 +394,47 @@
     :ruleset kernel_fuse_late_pre
     :name "dbg: P.V mul + reduce over context"
 )
+
+; Candidate 4-D binding for the translated spelling, staged as an observer
+; before being wired into pa_island. transformers stores the pool
+; [slots, kv_heads, head_dim] and reads k_cache[read_index, :, :]; the
+; attention wrapper then does transpose(0,1).unsqueeze(0), and the translator
+; folds that movement into the Gather. So the op that reads the pool carries
+; [batch, kv_heads, context, head_dim] on both sides rather than a flat 2-D row
+; gather. Same computation, movement absorbed.
+(relation pa_dbg_gathers4 (IR IR))
+(rule
+    (
+        (= ?k_gathered (Op (Gather
+            (ECons ?kb (ECons ?kh (ECons ?context_tokens (ECons ?khd (ENil)))))
+            ?kg_a
+            (ECons ?kb2 (ECons ?kh2 (ECons ?knslots (ECons ?khd2 (ENil)))))
+            ?kg_b)
+            (ICons ?flat_gidx (ICons ?k_pool (INil)))))
+        (= ?v_gathered (Op (Gather
+            (ECons ?vb (ECons ?vh (ECons ?context_tokens (ECons ?vhd (ENil)))))
+            ?vg_a
+            (ECons ?vb2 (ECons ?vh2 (ECons ?vnslots (ECons ?vhd2 (ENil)))))
+            ?vg_b)
+            (ICons ?flat_gidx (ICons ?v_pool (INil)))))
+    )
+    ((pa_dbg_gathers4 ?k_gathered ?v_gathered))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: paired 4-D context gathers (translated spelling)"
+)
+
+; And the same with no arity assumption at all: only that both gathers read
+; the SAME index. If this fires and the shaped ones do not, the mismatch is
+; purely the ShapeTracker and not the dataflow.
+(relation pa_dbg_gathers_any (IR IR))
+(rule
+    (
+        (= ?k_gathered (Op (Gather ?ka ?kb ?kc ?kd)
+            (ICons ?flat_gidx (ICons ?k_pool (INil)))))
+        (= ?v_gathered (Op (Gather ?va ?vb ?vc ?vd)
+            (ICons ?flat_gidx (ICons ?v_pool (INil)))))
+    )
+    ((pa_dbg_gathers_any ?k_gathered ?v_gathered))
+    :ruleset kernel_fuse_late_pre
+    :name "dbg: paired context gathers, any shape"
+)
