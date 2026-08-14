@@ -2938,7 +2938,19 @@ mod stage4b_probes {
                 .expect("sizes");
             let mut map = std::collections::HashMap::new();
             for chunk in &out {
-                for line in chunk.to_string().lines() {
+                let text = chunk.to_string();
+                // Post-bump engine prints parenthesized pairs:
+                // ((name count) (name count) ...). The old `name: count`
+                // line format is parsed as fallback.
+                for fragment in text.split('(') {
+                    let fragment = fragment.trim().trim_end_matches(')');
+                    if let Some((name, count)) = fragment.rsplit_once(' ') {
+                        if let Ok(count) = count.trim().parse::<isize>() {
+                            map.insert(name.trim().to_string(), count);
+                        }
+                    }
+                }
+                for line in text.lines() {
                     if let Some((name, count)) = line.rsplit_once(": ") {
                         if let Ok(count) = count.trim().parse::<isize>() {
                             map.insert(name.trim().to_string(), count);
@@ -3059,6 +3071,36 @@ mod stage4b_probes {
             previous = current;
         }
         }
+    }
+
+    /// EXTENT-1 SPECIMEN (subst experiment, 2026-08-14): the
+    /// composition-rows dossier's batch matmul (1,2,3)x(3,5) — the
+    /// extent-1 lead that detonated the UNCOMMITTED derived-rows block.
+    /// Committed roads must saturate it; this times the full schedule.
+    /// Run: cargo test specimen_1235_full_schedule -- --ignored --nocapture
+    #[test]
+    #[ignore = "diagnostic — run explicitly by name"]
+    fn specimen_1235_full_schedule() {
+        let mut cx = crate::graph::Graph::new();
+        let a = cx.tensor((1usize, 2usize, 3usize));
+        let b = cx.tensor((3usize, 5usize));
+        let _out = a.matmul(b).output();
+        let (pre, _is, _os, post, _labeled) =
+            cx.logical.native_parts().expect("recorder clean");
+        let program = format!(
+            "{}\n\n{pre}{}{post}",
+            crate::egglog_snippet::assembled_program(),
+            crate::reference_binding::SCHEDULE
+        );
+        let start = std::time::Instant::now();
+        let mut egraph = crate::egglog_snippet::new_egraph();
+        egraph
+            .parse_and_run_program(None, &program)
+            .expect("specimen saturates");
+        eprintln!(
+            "[specimen-1235] full schedule green in {:.2}s",
+            start.elapsed().as_secs_f64()
+        );
     }
 
     /// SATURATION PROFILER (Austin commissioned 2026-08-05): run each

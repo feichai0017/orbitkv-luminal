@@ -1,0 +1,184 @@
+diff --git a/src/egglog/checkpoint_5/egglog_preamble.egg b/src/egglog/checkpoint_5/egglog_preamble.egg
+index 526bea89..5fd6ca78 100644
+--- a/src/egglog/checkpoint_5/egglog_preamble.egg
++++ b/src/egglog/checkpoint_5/egglog_preamble.egg
+@@ -3563,14 +3563,6 @@
+   )
+   ((union (int-subst-of ?expr ?map) ?entry))
+ )
+-(rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntAdd ?lhs ?rhs)))
+-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
+-)
+-(rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs)))
+-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
+-)
+ ; IntMul images are ZERO-AWARE (the foldr zero-stride precedent, one level
+ ; up): a zero factor image collapses the product image to (IntLit 0) DIRECTLY
+ ; instead of minting IntMul(0, <symbolic>) scaffolding.
+@@ -3616,26 +3608,6 @@
+ ; identity needing no premises (the partiality clause: the image is as
+ ; partial as the original, and consumers gate definedness where they
+ ; union). Unconditional, like the IntAdd case.
+-(rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntTruncDiv ?lhs ?rhs)))
+-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
+-)
+-(rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs)))
+-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
+-)
+-(rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs)))
+-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
+-)
+-(rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntMin ?lhs ?rhs)))
+-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
+-)
+-(rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs)))
+-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
+-)
+ 
+ ; --- the bool bridge crosses substitution (Austin's ruling 2026-07-29;
+ ; PRIMITIVE ROAD 2026-08-14) --- IntCastFromBool's child is a BoolExpr,
+@@ -3647,14 +3619,6 @@
+ ; witness-only closedness mirror in the road block below.
+ (relation bool-subst-demand (BoolExpr IndexMap))
+ 
+-(rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntCastFromBool ?bool)))
+-  ((bool-subst-demand ?bool ?map))
+-)
+-(rule
+-  ((bool-subst-demand ?bool ?map) (= ?bool (BoolLessThanInt ?lhs ?rhs)))
+-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
+-)
+ 
+ ; ========== SUBST-PRIMITIVE ROAD (prototype branch, 2026-08-14) =========
+ ; The compound IMAGE arms (the per-constructor combine family) are gone:
+@@ -3686,6 +3650,57 @@
+ ; simply never completes a σ — fail-closed, and the map-tag coherence
+ ; tripwire panics on the loud version of that corruption.
+ (relation int-subst-closed (IntExpr IndexMap))
++; ARM C (root-only measurement): closedness traversal is its own
++; WITNESS-ONLY demand family — rows, never terms, never walks.
++(relation int-subst-closed-demand (IntExpr IndexMap))
++(relation bool-subst-closed-demand (BoolExpr IndexMap))
++(rule ((int-subst-demand ?e ?m)) ((int-subst-closed-demand ?e ?m)))
++(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntAdd ?l ?r)))
++      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
++(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntMul ?l ?r)))
++      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
++(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntTruncDiv ?l ?r)))
++      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
++(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntTruncRem ?l ?r)))
++      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
++(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntCeilDiv ?l ?r)))
++      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
++(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntMin ?l ?r)))
++      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
++(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntMax ?l ?r)))
++      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
++(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntCastFromBool ?b)))
++      ((bool-subst-closed-demand ?b ?m)))
++(rule ((bool-subst-closed-demand ?b ?m) (= ?b (BoolLessThanInt ?l ?r)))
++      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
++; leaf closedness witnesses (the memo arms only serve leaf ROOTS now):
++(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntLit ?v)))
++      ((int-subst-closed ?e ?m)))
++(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntVar ?n)))
++      ((int-subst-closed ?e ?m)))
++(rule ((int-subst-closed-demand ?e ?m)
++       (= ?e (CoordVar ?source_shape ?axis))
++       (= ?m (IndexMapLit ?entries ?source_shape))
++       (= ?entry (expr-list-nth-from-end ?entries ?axis))
++       (= ?source_shape (ShapeLit ?source_dims))
++       (= ?extent (expr-list-nth-from-end ?source_dims ?axis))
++       (= ?entry_lower (lower-bound-of ?entry))
++       (= ?entry_upper (upper-bound-of ?entry))
++       (>= ?entry_lower (bigint 0))
++       (= ?extent_lower (lower-bound-of ?extent))
++       (<= ?entry_upper (- ?extent_lower (bigint 1))))
++      ((int-subst-closed ?e ?m)))
++(rule ((int-subst-closed-demand ?e ?m)
++       (= ?e (CoordVar ?source_shape ?axis))
++       (= ?m (IndexMapLit ?entries ?source_shape))
++       (= ?entry (expr-list-nth-from-end ?entries ?axis))
++       (= ?source_shape (ShapeLit ?source_dims))
++       (= ?extent (expr-list-nth-from-end ?source_dims ?axis))
++       (= ?entry (CoordVar ?entry_shape ?entry_axis))
++       (= ?entry_shape (ShapeLit ?entry_dims))
++       (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))
++       (= ?entry_extent ?extent))
++      ((int-subst-closed ?e ?m)))
+ (relation bool-subst-closed (BoolExpr IndexMap))
+ (sort SigmaMap (Map IntExpr IntExpr))
+ (relation sigma-walk (IndexMap IntExprList i64 SigmaMap))
+@@ -3700,42 +3715,42 @@
+ ; --- compound witnesses: closed over closed children, one arm per
+ ; constructor the old combine family covered ---
+ (rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntAdd ?lhs ?rhs))
++  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntAdd ?lhs ?rhs))
+    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+   ((int-subst-closed ?expr ?map))
+ )
+ (rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs))
++  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs))
+    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+   ((int-subst-closed ?expr ?map))
+ )
+ (rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntTruncDiv ?lhs ?rhs))
++  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntTruncDiv ?lhs ?rhs))
+    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+   ((int-subst-closed ?expr ?map))
+ )
+ (rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs))
++  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs))
+    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+   ((int-subst-closed ?expr ?map))
+ )
+ (rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs))
++  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs))
+    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+   ((int-subst-closed ?expr ?map))
+ )
+ (rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntMin ?lhs ?rhs))
++  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntMin ?lhs ?rhs))
+    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+   ((int-subst-closed ?expr ?map))
+ )
+ (rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs))
++  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs))
+    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+   ((int-subst-closed ?expr ?map))
+ )
+ (rule
+-  ((int-subst-demand ?expr ?map) (= ?expr (IntCastFromBool ?bool))
++  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntCastFromBool ?bool))
+    (bool-subst-closed ?bool ?map))
+   ((int-subst-closed ?expr ?map))
+ )
+@@ -3743,11 +3758,11 @@
+ ; arms are deleted; the WALK crosses the cast natively — it traverses
+ ; constructor rows of every eq-sort) ---
+ (rule
+-  ((bool-subst-demand ?bool ?map) (= ?bool (BoolLit ?value)))
++  ((bool-subst-closed-demand ?bool ?map) (= ?bool (BoolLit ?value)))
+   ((bool-subst-closed ?bool ?map))
+ )
+ (rule
+-  ((bool-subst-demand ?bool ?map) (= ?bool (BoolLessThanInt ?lhs ?rhs))
++  ((bool-subst-closed-demand ?bool ?map) (= ?bool (BoolLessThanInt ?lhs ?rhs))
+    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+   ((bool-subst-closed ?bool ?map))
+ )
