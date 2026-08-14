@@ -548,7 +548,7 @@ pub fn test_runtime_matchers() -> Vec<Box<dyn crate::layout_ir::OpMatcher>> {
 pub fn extract_fixture_on_test_runtime(script: &str) -> ExtractedGraph {
     use egglog::SerializeConfig;
 
-    let preamble = crate::egglog_snippet::assembled_program_for(&test_runtime_matchers());
+    let preamble = crate::egglog_snippet::assembled_program_for(&crate::test_support::test_runtime_matchers());
     let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
         .unwrap_or_else(|_| panic!("fixture script {script} readable"));
     let program = format!("{preamble}
@@ -560,7 +560,7 @@ pub fn extract_fixture_on_test_runtime(script: &str) -> ExtractedGraph {
         .parse_and_run_program(Some(script.to_string()), &program)
         .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
     let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-    extractor::extract_layout_ir_with_matchers(&serialized, test_runtime_matchers())
+    extractor::extract_layout_ir_with_matchers(&serialized, crate::test_support::test_runtime_matchers())
         .expect("extraction succeeds")
         .unwrap_or_else(|| panic!("fixture {script} produced no extracted graph"))
 }
@@ -1787,7 +1787,7 @@ mod harness_tests {
     /// no-op (same node and edge counts).
     #[test]
     fn dps_rewrite_is_idempotent() {
-        let graph = extract_fixture_on_test_runtime("basic_program.egg");
+        let graph = extract_fixture("basic_program.egg");
         let once = crate::dps::dps_rewrite(&graph);
         let twice = crate::dps::dps_rewrite(&once);
         assert_eq!(once.dag.node_count(), twice.dag.node_count());
@@ -2192,11 +2192,10 @@ mod harness_tests {
     /// a non-composed contiguous layout), and no Materialize survives
     /// anywhere.
     #[test]
-    #[ignore = "view PREFERENCE regressed under the injected TestRuntime registry (candidates elect materialize; the two behavioral view fixtures are green) — audit the preference/viability walk before re-enabling"]
     fn extraction_prefers_the_view_op_where_the_layout_is_composed() {
         use crate::layout_ir::ExtractedNode;
 
-        let graph = extract_fixture("basic_program.egg");
+        let graph = extract_fixture_on_test_runtime("basic_program.egg");
         let mut views = 0;
         let mut materializes = 0;
         let mut conversion_copies = 0;
@@ -3488,4 +3487,5 @@ mod subst_guard_study {
             "the labeled door names the unfold contract: {err:#}"
         );
     }
+
 }
