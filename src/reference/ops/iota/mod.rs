@@ -338,7 +338,7 @@ pub(in crate::reference) fn kernel(op: &dyn BufferTensorIrOp, ctx: &mut Referenc
     let rank = out_dims.len();
     let numel = ctx.dests[0].len();
     let mut coords = vec![0usize; rank];
-    let mut eval_at = |flat: usize, coords: &mut Vec<usize>| {
+    let eval_at = |flat: usize, coords: &mut Vec<usize>| {
         let mut remainder = flat;
         for axis in (0..rank).rev() {
             coords[axis] = remainder % out_dims[axis];
