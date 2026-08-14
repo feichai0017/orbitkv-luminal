@@ -517,7 +517,6 @@
     :ruleset kernel_fuse_late_pre
     :name "dbg: paired context gathers, any shape"
 )
-
 ; Link tests. Every observer above leaves its upstream variables free, so they
 ; cannot see a premise pair that each match alone but not on a SHARED binding.
 ; These chain pa_island's premises in order; the last one that fires is where
@@ -561,4 +560,67 @@
     ((pa_dbg_l3 ?qk))
     :ruleset kernel_fuse_late
     :name "dbg link3: gathers -> k GQA -> QK matmul"
+)
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Link tests: pa_island's premises chained in order, sharing bindings.
+; Every premise fires standalone on both graphs, so the failure is a shared
+; binding. The last Lk that fires is where the conjunction breaks.
+; ─────────────────────────────────────────────────────────────────────────────
+
+(relation pa_dbg_k1 (IR))
+(rule
+    (
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_gqa_operand ?k_gqa ?kg)
+    )
+    ((pa_dbg_k1 ?k_gqa))
+    :ruleset kernel_fuse_late2
+    :name "dbg K1: gathers + k operand"
+)
+
+(relation pa_dbg_k2 (IR))
+(rule
+    (
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_gqa_operand ?k_gqa ?kg)
+        (pa_gqa_operand ?v_gqa ?vg)
+        (pa_v_operand ?v_ctx ?v_gqa)
+    )
+    ((pa_dbg_k2 ?v_ctx))
+    :ruleset kernel_fuse_late2
+    :name "dbg K2: + v operand chain"
+)
+
+(relation pa_dbg_k3 (IR))
+(rule
+    (
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_gqa_operand ?k_gqa ?kg)
+        (= ?qk (Op (Mul
+            (ECons ?nheads (ECons ?in_tok (ECons ?ctx (ECons ?hdim (ENil)))))
+            ?a ?b ?c)
+            (ICons ?q_bf (ICons ?k_gqa (INil)))))
+    )
+    ((pa_dbg_k3 ?qk))
+    :ruleset kernel_fuse_late2
+    :name "dbg K3: + QK matmul on the k operand"
+)
+
+(relation pa_dbg_k4 (IR))
+(rule
+    (
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_gqa_operand ?k_gqa ?kg)
+        (= ?qk (Op (Mul
+            (ECons ?nheads (ECons ?in_tok (ECons ?ctx (ECons ?hdim (ENil)))))
+            ?a ?b ?c)
+            (ICons ?q_bf (ICons ?k_gqa (INil)))))
+        (pa_qk_scores ?scores ?qk)
+        (flashinfer_head_dim_ok_16bit ?hdim)
+        (pa_masked ?masked ?scores ?scale_val ?window_val)
+    )
+    ((pa_dbg_k4 ?masked))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4: + scores + head_dim + mask"
 )
