@@ -151,17 +151,22 @@
     :name "PagedAttention v operand (bf16 upcast)"
 )
 
-(relation pa_island (IR IR IR IR IR Expression Expression Expression Expression f64 f64))
+; The paired context gathers, staged so the spelling can vary.
+;
+; Both operands come from the same flat gather index; what differs is whether
+; the surrounding movement is a separate op or absorbed into the Gather's
+; ShapeTracker. A hand-built graph gathers 2-D rows and reshapes afterwards; a
+; translated one carries [batch, kv_heads, context, head_dim] because
+; transformers stores the pool 3-D and the attention wrapper transposes and
+; unsqueezes, all of which the translator folds in.
+;
+; The op is handed `k_pool.ptr()` and told num_kv_heads/head_dim/page_size
+; separately, so both spellings address the same bytes in the same order and
+; the kernel cannot distinguish them. Only ?kvdim has to be reconstructed.
+(relation pa_kv_gathers (IR IR IR IR IR Expression Expression))
 
 (rule
     (
-        ; ── K/V pool scatters sharing one flat scatter index ──
-        (= ?k_pool (Op (Scatter ?ksd ?ksdst ?ksis ?ksistr ?ksss)
-            (ICons ?k_dest (ICons ?scat_idx (ICons ?k_src (INil))))))
-        (= ?v_pool (Op (Scatter ?vsd ?vsdst ?vsis ?vsistr ?vsss)
-            (ICons ?v_dest (ICons ?scat_idx (ICons ?v_src (INil))))))
-
-        ; ── Context gathers from both pools via ONE flat gather index ──
         (= ?k_gathered (Op (Gather
             (ECons ?context_tokens (ECons ?kvdim (ENil)))
             ?kg_a
@@ -174,6 +179,48 @@
             (ECons ?nslots2 (ECons ?kvdim4 (ENil)))
             ?vg_b)
             (ICons ?flat_gidx (ICons ?v_pool (INil)))))
+    )
+    ((pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?flat_gidx
+        ?context_tokens ?kvdim))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention kv gathers (2-D row spelling)"
+)
+
+(rule
+    (
+        (= ?k_gathered (Op (Gather
+            (ECons ?kb (ECons ?kh (ECons ?context_tokens (ECons ?khd (ENil)))))
+            ?kg_a
+            (ECons ?kb2 (ECons ?kh2 (ECons ?knslots (ECons ?khd2 (ENil)))))
+            ?kg_b)
+            (ICons ?flat_gidx (ICons ?k_pool (INil)))))
+        (= ?v_gathered (Op (Gather
+            (ECons ?vb (ECons ?vh (ECons ?context_tokens (ECons ?vhd (ENil)))))
+            ?vg_a
+            (ECons ?vb2 (ECons ?vh2 (ECons ?vnslots (ECons ?vhd2 (ENil)))))
+            ?vg_b)
+            (ICons ?flat_gidx (ICons ?v_pool (INil)))))
+    )
+    ((pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?flat_gidx
+        ?context_tokens (MMul ?kh ?khd)))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention kv gathers (4-D absorbed-movement spelling)"
+)
+
+(relation pa_island (IR IR IR IR IR Expression Expression Expression Expression f64 f64))
+
+(rule
+    (
+        ; ── K/V pool scatters sharing one flat scatter index ──
+        (= ?k_pool (Op (Scatter ?ksd ?ksdst ?ksis ?ksistr ?ksss)
+            (ICons ?k_dest (ICons ?scat_idx (ICons ?k_src (INil))))))
+        (= ?v_pool (Op (Scatter ?vsd ?vsdst ?vsis ?vsistr ?vsss)
+            (ICons ?v_dest (ICons ?scat_idx (ICons ?v_src (INil))))))
+
+        ; ── Context gathers from both pools via ONE flat gather index ──
+        ; Staged fact: 2-D rows or the 4-D absorbed-movement spelling.
+        (pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?flat_gidx
+            ?context_tokens ?kvdim)
 
         ; ── GQA broadcast barriers: Mul(gathered, 1.0) ──
         (= ?k_gqa (Op (Mul ?kq_s ?kq_a ?kq_b ?kq_o)
@@ -437,4 +484,49 @@
     ((pa_dbg_gathers_any ?k_gathered ?v_gathered))
     :ruleset kernel_fuse_late_pre
     :name "dbg: paired context gathers, any shape"
+)
+
+; Link tests. Every observer above leaves its upstream variables free, so they
+; cannot see a premise pair that each match alone but not on a SHARED binding.
+; These chain pa_island's premises in order; the last one that fires is where
+; the conjunction breaks.
+(relation pa_dbg_l1 (IR))
+(rule
+    (
+        (pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?g ?ctx ?kvdim)
+        (= ?k_gqa (Op (Mul ?a ?b ?c ?d) (ICons ?k_gathered (ICons ?k_one (INil)))))
+        (const_like ?k_one 1.000000)
+    )
+    ((pa_dbg_l1 ?k_gqa))
+    :ruleset kernel_fuse_late
+    :name "dbg link1: gathers -> k GQA barrier"
+)
+
+(relation pa_dbg_l2 (IR))
+(rule
+    (
+        (pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?g ?ctx ?kvdim)
+        (= ?v_gqa (Op (Mul ?a ?b ?c ?d) (ICons ?v_gathered (ICons ?v_one (INil)))))
+        (const_like ?v_one 1.000000)
+        (pa_v_operand ?v_ctx ?v_gqa)
+    )
+    ((pa_dbg_l2 ?v_ctx))
+    :ruleset kernel_fuse_late
+    :name "dbg link2: gathers -> v GQA barrier -> v operand"
+)
+
+(relation pa_dbg_l3 (IR))
+(rule
+    (
+        (pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?g ?ctx ?kvdim)
+        (= ?k_gqa (Op (Mul ?a ?b ?c ?d) (ICons ?k_gathered (ICons ?k_one (INil)))))
+        (const_like ?k_one 1.000000)
+        (= ?qk (Op (Mul
+            (ECons ?nheads (ECons ?input_tokens (ECons ?ctx (ECons ?hdim (ENil)))))
+            ?qk_a ?qk_b ?qk_o)
+            (ICons ?q_bf (ICons ?k_gqa (INil)))))
+    )
+    ((pa_dbg_l3 ?qk))
+    :ruleset kernel_fuse_late
+    :name "dbg link3: gathers -> k GQA -> QK matmul"
 )
