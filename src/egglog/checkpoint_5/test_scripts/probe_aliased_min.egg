@@ -1,0 +1,29 @@
+; TEMPORARY PROBE (subst-primitive experiment): minimal recreation of
+; the boundary_aliased_views crossed-bounds weld — a (2,3) row-major
+; offset substituted under BOTH single-row maps. If the tripwire fires
+; here, the weld needs only two sigmas over one region.
+
+(let probe_src (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
+(let probe_c_row (CoordVar probe_src 1))
+(let probe_c_col (CoordVar probe_src 0))
+(let probe_off (IntAdd (IntMul probe_c_row (IntLit 3)) probe_c_col))
+
+(let probe_view (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
+(let probe_v (CoordVar probe_view 0))
+
+(let probe_row0_map
+  (IndexMapLit (IntExprCons (IntLit 0) (IntExprCons probe_v (IntExprNil))) probe_src))
+(let probe_row1_map
+  (IndexMapLit (IntExprCons (IntLit 1) (IntExprCons probe_v (IntExprNil))) probe_src))
+
+(int-subst-demand probe_off probe_row0_map)
+(int-subst-demand probe_off probe_row1_map)
+
+(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+
+; expected images: row0 -> probe_v (0*3 + v folds), row1 -> 3 + v
+(check (= (int-subst-of probe_off probe_row0_map) probe_v))
+(check (= (int-subst-of probe_off probe_row1_map) (IntAdd (IntLit 3) probe_v)))
+; and the two images must NOT weld:
+(fail (check (= (int-subst-of probe_off probe_row0_map)
+                (int-subst-of probe_off probe_row1_map))))

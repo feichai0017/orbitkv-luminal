@@ -3466,9 +3466,15 @@
 ; evidence) are congruence-safe by construction; TRANSFORM-style rules
 ; (build new expressions from representative syntax and union the
 ; outputs) carry a proof obligation that the transform is well-defined
-; on functions. int-subst-of and its bool-level mirror bool-subst-of are the
-; only transform-style rules in this file; this comment is their proof.
-; The scaffolding representative left in the result class is inert.
+; on functions. PRIMITIVE ROAD (2026-08-14): the per-constructor image
+; arms and the bool-subst-of mirror are gone — images are built by the
+; vendored unstable-subst walk (see the road block below), so the
+; transform-style rule census in this file is now ZERO; the proof
+; obligation lives in the walk's contract (all spellings copied under
+; one simultaneous σ) plus the closedness gate that carries this
+; contract's guards. The leaf arms that remain (literal, IntVar,
+; guarded CoordVar) union a class's own image — witness-shaped, and
+; the CoordVar arms carry the in-range/domain premises above.
 ;
 ; An out-of-range axis leaves expr-list-nth-from-end unset and the rule
 ; silently unmatched — a missed entry on one representative is mere
@@ -3562,15 +3568,6 @@
   ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
 )
 (rule
-  (
-    (int-subst-demand ?expr ?map)
-    (= ?expr (IntAdd ?lhs ?rhs))
-    (= ?lhs_image (int-subst-of ?lhs ?map))
-    (= ?rhs_image (int-subst-of ?rhs ?map))
-  )
-  ((union (int-subst-of ?expr ?map) (IntAdd ?lhs_image ?rhs_image)))
-)
-(rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs)))
   ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
 )
@@ -3613,15 +3610,6 @@
   )
   ((union (int-subst-of ?expr ?map) (IntLit 0)))
 )
-(rule
-  (
-    (int-subst-demand ?expr ?map)
-    (= ?expr (IntMul ?lhs ?rhs))
-    (= ?lhs_image (int-subst-of ?lhs ?map))
-    (= ?rhs_image (int-subst-of ?rhs ?map))
-  )
-  ((union (int-subst-of ?expr ?map) (IntMul ?lhs_image ?rhs_image)))
-)
 
 ; Division-family descent (Stage D3): substitution commutes with every
 ; division constructor wherever the division is defined — a function
@@ -3633,26 +3621,8 @@
   ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
 )
 (rule
-  (
-    (int-subst-demand ?expr ?map)
-    (= ?expr (IntTruncDiv ?lhs ?rhs))
-    (= ?lhs_image (int-subst-of ?lhs ?map))
-    (= ?rhs_image (int-subst-of ?rhs ?map))
-  )
-  ((union (int-subst-of ?expr ?map) (IntTruncDiv ?lhs_image ?rhs_image)))
-)
-(rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs)))
   ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
-)
-(rule
-  (
-    (int-subst-demand ?expr ?map)
-    (= ?expr (IntTruncRem ?lhs ?rhs))
-    (= ?lhs_image (int-subst-of ?lhs ?map))
-    (= ?rhs_image (int-subst-of ?rhs ?map))
-  )
-  ((union (int-subst-of ?expr ?map) (IntTruncRem ?lhs_image ?rhs_image)))
 )
 (rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs)))
@@ -3663,80 +3633,183 @@
   ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
 )
 (rule
-  (
-    (int-subst-demand ?expr ?map)
-    (= ?expr (IntMin ?lhs ?rhs))
-    (= ?lhs_image (int-subst-of ?lhs ?map))
-    (= ?rhs_image (int-subst-of ?rhs ?map))
-  )
-  ((union (int-subst-of ?expr ?map) (IntMin ?lhs_image ?rhs_image)))
-)
-(rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs)))
   ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
 )
-(rule
-  (
-    (int-subst-demand ?expr ?map)
-    (= ?expr (IntMax ?lhs ?rhs))
-    (= ?lhs_image (int-subst-of ?lhs ?map))
-    (= ?rhs_image (int-subst-of ?rhs ?map))
-  )
-  ((union (int-subst-of ?expr ?map) (IntMax ?lhs_image ?rhs_image)))
-)
-(rule
-  (
-    (int-subst-demand ?expr ?map)
-    (= ?expr (IntCeilDiv ?lhs ?rhs))
-    (= ?lhs_image (int-subst-of ?lhs ?map))
-    (= ?rhs_image (int-subst-of ?rhs ?map))
-  )
-  ((union (int-subst-of ?expr ?map) (IntCeilDiv ?lhs_image ?rhs_image)))
-)
 
-; --- the bool bridge crosses substitution (Austin's ruling 2026-07-29) ---
-; IntCastFromBool's child is a BoolExpr, outside int-subst-of's IntExpr
-; typing, so the bool level carries its own image constructor — the
-; SECOND transform-style constructor in this file. Its well-definedness
-; rides the same contract with nothing new to prove: the only σ
-; definition site is the guarded CoordVar arm above (the comparison arm
-; below re-enters int-subst-demand on its INTEGER children), so every
-; bool-level image is composition with the same in-box assignment map,
-; and bool-level unions (a decided comparison welded to its BoolLit by
-; bounds) are box-true equations preserved by in-range instantiation.
+; --- the bool bridge crosses substitution (Austin's ruling 2026-07-29;
+; PRIMITIVE ROAD 2026-08-14) --- IntCastFromBool's child is a BoolExpr,
+; outside int-subst-of's IntExpr typing. The old bool-level image
+; constructor (bool-subst-of) is GONE: the walk primitive traverses
+; constructor rows of every eq-sort, so the cast is crossed natively.
+; What remains at the bool level is the demand decomposition (so the
+; comparison's INTEGER children join the closedness lattice) and the
+; witness-only closedness mirror in the road block below.
 (relation bool-subst-demand (BoolExpr IndexMap))
-(constructor bool-subst-of (BoolExpr IndexMap) BoolExpr)
 
 (rule
   ((int-subst-demand ?expr ?map) (= ?expr (IntCastFromBool ?bool)))
   ((bool-subst-demand ?bool ?map))
 )
 (rule
-  (
-    (int-subst-demand ?expr ?map)
-    (= ?expr (IntCastFromBool ?bool))
-    (= ?bool_image (bool-subst-of ?bool ?map))
-  )
-  ((union (int-subst-of ?expr ?map) (IntCastFromBool ?bool_image)))
-)
-; A bool literal is coordinate-free: substitution is the identity on it.
-(rule
-  ((bool-subst-demand ?bool ?map) (= ?bool (BoolLit ?value)))
-  ((union (bool-subst-of ?bool ?map) (BoolLit ?value)))
-)
-(rule
   ((bool-subst-demand ?bool ?map) (= ?bool (BoolLessThanInt ?lhs ?rhs)))
   ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
 )
+
+; ========== SUBST-PRIMITIVE ROAD (prototype branch, 2026-08-14) =========
+; The compound IMAGE arms (the per-constructor combine family) are gone:
+; images are built by ONE call to the vendored `unstable-subst` primitive
+; (egglog-experimental PR #60) — a root-keyed walk that copies the
+; reachable region under σ, every spelling at once, simultaneous by
+; construction. It runs in a :naive rule (the primitive is Context::Full;
+; :naive re-fires each round, which IS the staleness re-walk contract:
+; spellings the ring breeds after a walk are copied on a later round).
+;
+; COMPLETION SEMANTICS ARE UNCHANGED. The walk is gated on
+; int-subst-closed — the old completion lattice reborn as a WITNESS
+; family: a demanded class is closed when every leaf beneath it is
+; admissible (a literal, an IntVar, or a coordinate whose GUARDED arm
+; above published its row — the in-range/domain guards stay exactly
+; where they were, per-occurrence). An expression containing an
+; out-of-domain axis or a foreign box's coordinate never closes, the
+; walk never fires, and the composition stalls fail-closed — the
+; subst_example P7/P8 refusal pins hold verbatim. The zero-absorption
+; arms above keep writing memo rows directly (absorption completes a
+; product even when the sibling image is underivable), and the base
+; closedness rule folds those in.
+;
+; σ itself is UNGUARDED — admissibility gates the WALK (through
+; closedness), not the map. σ is derived from IndexMapLit by the fold
+; below: entries walked head (= highest axis) to tail with an explicit
+; axis counter seeded from the source rank; the done arm pins the
+; counter at -1, so a rank/entry-length mismatch (a malformed map)
+; simply never completes a σ — fail-closed, and the map-tag coherence
+; tripwire panics on the loud version of that corruption.
+(relation int-subst-closed (IntExpr IndexMap))
+(relation bool-subst-closed (BoolExpr IndexMap))
+(sort SigmaMap (Map IntExpr IntExpr))
+(relation sigma-walk (IndexMap IntExprList i64 SigmaMap))
+(function sigma-out (IndexMap) SigmaMap :no-merge)
+
+; --- closedness: base arm = a memo row exists (the leaf arms and the
+; zero-absorption arms write those directly) ---
 (rule
-  (
-    (bool-subst-demand ?bool ?map)
-    (= ?bool (BoolLessThanInt ?lhs ?rhs))
-    (= ?lhs_image (int-subst-of ?lhs ?map))
-    (= ?rhs_image (int-subst-of ?rhs ?map))
-  )
-  ((union (bool-subst-of ?bool ?map) (BoolLessThanInt ?lhs_image ?rhs_image)))
+  ((int-subst-demand ?expr ?map) (= ?img (int-subst-of ?expr ?map)))
+  ((int-subst-closed ?expr ?map))
 )
+; --- compound witnesses: closed over closed children, one arm per
+; constructor the old combine family covered ---
+(rule
+  ((int-subst-demand ?expr ?map) (= ?expr (IntAdd ?lhs ?rhs))
+   (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+  ((int-subst-closed ?expr ?map))
+)
+(rule
+  ((int-subst-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs))
+   (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+  ((int-subst-closed ?expr ?map))
+)
+(rule
+  ((int-subst-demand ?expr ?map) (= ?expr (IntTruncDiv ?lhs ?rhs))
+   (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+  ((int-subst-closed ?expr ?map))
+)
+(rule
+  ((int-subst-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs))
+   (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+  ((int-subst-closed ?expr ?map))
+)
+(rule
+  ((int-subst-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs))
+   (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+  ((int-subst-closed ?expr ?map))
+)
+(rule
+  ((int-subst-demand ?expr ?map) (= ?expr (IntMin ?lhs ?rhs))
+   (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+  ((int-subst-closed ?expr ?map))
+)
+(rule
+  ((int-subst-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs))
+   (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+  ((int-subst-closed ?expr ?map))
+)
+(rule
+  ((int-subst-demand ?expr ?map) (= ?expr (IntCastFromBool ?bool))
+   (bool-subst-closed ?bool ?map))
+  ((int-subst-closed ?expr ?map))
+)
+; --- the bool mirror is now witness-only (bool-subst-of and its image
+; arms are deleted; the WALK crosses the cast natively — it traverses
+; constructor rows of every eq-sort) ---
+(rule
+  ((bool-subst-demand ?bool ?map) (= ?bool (BoolLit ?value)))
+  ((bool-subst-closed ?bool ?map))
+)
+(rule
+  ((bool-subst-demand ?bool ?map) (= ?bool (BoolLessThanInt ?lhs ?rhs))
+   (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
+  ((bool-subst-closed ?bool ?map))
+)
+
+; --- the σ fold ---
+(rule
+  ((int-subst-demand ?expr ?map) (= ?map (IndexMapLit ?entries ?src))
+   (= ?rank (rank-of ?src)))
+  ((sigma-walk ?map ?entries (- ?rank 1) (map-empty)))
+)
+; Each fold step ADMITS its entry through the same two guard arms as
+; the CoordVar memo arms above — σ exists only if EVERY entry is legal.
+; (Refuted alternative, sg1_tighten: an unguarded σ plus root-closedness
+; arriving via a pin-collapsed re-spelling let the walk's root-is-key
+; fast path return an out-of-range entry into a memo slot the IntLit
+; arm had soundly pinned to 0 — a crossed-bounds weld. Guards must live
+; on σ ITSELF, not only on the occurrence lattice.) Both arms are
+; monotone-stable (minbox lower bounds only rise; class equality never
+; unhappens), so σ completion is shrink-stable. An illegal entry stalls
+; the whole map — stricter than the old per-occurrence road for maps
+; whose bad axis never occurs in the offset, which the G7 range lock
+; already declares corrupt when provable.
+(rule
+  ((sigma-walk ?map (IntExprCons ?e ?et) ?axis ?m)
+   (= ?map (IndexMapLit ?entries ?src))
+   (= ?src (ShapeLit ?source_dims))
+   (= ?extent (expr-list-nth-from-end ?source_dims ?axis))
+   (= ?entry_lower (lower-bound-of ?e))
+   (= ?entry_upper (upper-bound-of ?e))
+   (>= ?entry_lower (bigint 0))
+   (= ?extent_lower (lower-bound-of ?extent))
+   (<= ?entry_upper (- ?extent_lower (bigint 1))))
+  ((sigma-walk ?map ?et (- ?axis 1) (map-insert ?m (CoordVar ?src ?axis) ?e)))
+)
+(rule
+  ((sigma-walk ?map (IntExprCons ?e ?et) ?axis ?m)
+   (= ?map (IndexMapLit ?entries ?src))
+   (= ?src (ShapeLit ?source_dims))
+   (= ?extent (expr-list-nth-from-end ?source_dims ?axis))
+   (= ?e (CoordVar ?entry_shape ?entry_axis))
+   (= ?entry_shape (ShapeLit ?entry_dims))
+   (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))
+   (= ?entry_extent ?extent))
+  ((sigma-walk ?map ?et (- ?axis 1) (map-insert ?m (CoordVar ?src ?axis) ?e)))
+)
+(rule
+  ((sigma-walk ?map (IntExprNil) -1 ?m))
+  ((set (sigma-out ?map) ?m))
+)
+
+; --- the walk: one image per demanded closed class — all spellings of
+; the region copied, untouched subgraphs shared, keys replaced
+; simultaneously from the ORIGINAL map ---
+(rule
+  ((int-subst-demand ?expr ?map)
+   (int-subst-closed ?expr ?map)
+   (= ?sigma (sigma-out ?map)))
+  ((union (int-subst-of ?expr ?map) (unstable-subst ?expr ?sigma)))
+  :naive
+)
+; ================== END SUBST-PRIMITIVE ROAD BLOCK ==================
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; INDEX-MAP / LAYOUT COMPOSITION (the header TODO — Step 2 of the views

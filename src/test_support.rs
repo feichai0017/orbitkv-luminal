@@ -2827,10 +2827,75 @@ mod stage4b_probes {
         assert_eq!(v[2], Some(ChainStride::Unit), "{v:?}");
     }
 
-    /// Dump THE assembled program — the core preamble plus every
-    /// registered op's spliced snippets, i.e. exactly what every
-    /// pipeline run and fixture executes — to target/assembled_program.egg.
-    /// The preamble FILE alone is one shard; this is the authority.
+    /// THE SCRIPT CORPUS GATE (restored 2026-08-14 for the subst-
+    /// primitive experiment): every test_scripts/*.egg is self-driving
+    /// (carries its own run-schedule and checks), so each runs verbatim
+    /// against the assembled program on a fresh e-graph. This is the
+    /// merge-tree home of the old prototype's `cargo run corpus` gate;
+    /// subst_example P1-P9 and subst_range_guard_example live here and
+    /// pin the substitution guard semantics.
+    #[test]
+    fn corpus_scripts_all_green() {
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/egglog/checkpoint_5/test_scripts"
+        );
+        let mut scripts: Vec<_> = std::fs::read_dir(dir)
+            .expect("test_scripts dir")
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.ends_with(".egg").then_some(name)
+            })
+            .collect();
+        scripts.sort();
+        // CORPUS_ONLY=a.egg,b.egg filters to a subset — the targeted-run
+        // knob for diagnosing a single script without the whole sweep.
+        if let Ok(only) = std::env::var("CORPUS_ONLY") {
+            let keep: std::collections::HashSet<&str> = only.split(',').collect();
+            scripts.retain(|s| keep.contains(s.as_str()));
+        }
+        assert!(!scripts.is_empty(), "corpus found no scripts");
+        // Bit-rotted scripts, skipped LOUDLY: foldr_example references
+        // element-to-strided-demand, deleted by the affine migration
+        // (2026-08-05); nothing ran the corpus in the merge tree until
+        // this gate existed, so the rot went unnoticed. Deletion or
+        // rewrite is a ruling.
+        const STALE_SCRIPTS: &[&str] = &["foldr_example.egg"];
+        // The corpus assembles against the TESTRUNTIME matcher set (the
+        // superset: built-ins + view + test-only ops) — the assembly the
+        // view-dependent boundary scripts actually run under in the lib
+        // suite, and the shape of the old prototype's corpus runner.
+        let program_head = crate::egglog_snippet::assembled_program_for(&crate::test_support::test_runtime_matchers());
+        let mut failures = Vec::new();
+        for script in &scripts {
+            if STALE_SCRIPTS.contains(&script.as_str()) {
+                eprintln!("[corpus] SKIPPING stale script {script} (see STALE_SCRIPTS)");
+                continue;
+            }
+            let started = std::time::Instant::now();
+            eprintln!("[corpus] running {script}");
+            let source = std::fs::read_to_string(format!("{dir}/{script}"))
+                .expect("script readable");
+            let program = format!("{program_head}\n\n{source}");
+            let mut egraph = crate::egglog_snippet::new_egraph();
+            if let Err(err) = egraph.parse_and_run_program(Some(script.clone()), &program)
+            {
+                failures.push(format!("{script}: {err}"));
+            }
+            eprintln!("[corpus]   {script} done in {:.1}s", started.elapsed().as_secs_f64());
+        }
+        assert!(
+            failures.is_empty(),
+            "corpus scripts failed ({}/{}):\n  {}",
+            failures.len(),
+            scripts.len(),
+            failures.join("\n  ")
+        );
+        eprintln!("[corpus] {} scripts green", scripts.len());
+    }
+
+    /// Dump THE assembled program (core preamble + spliced op snippets —
+    /// exactly what every run executes) to target/assembled_program.egg.
     /// Run: cargo test --release dump_assembled_program -- --ignored --nocapture
     #[test]
     #[ignore = "utility — run explicitly by name"]
