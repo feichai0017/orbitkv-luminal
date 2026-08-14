@@ -207,6 +207,42 @@
     :name "PagedAttention kv gathers (4-D absorbed-movement spelling)"
 )
 
+; The K operand handed to the QK matmul.
+;
+; A hand-written model writes `expand_dim(..).merge_dims(..) * 1.0`, where the
+; trailing multiply is a CONTIGUITY BARRIER that keeps the broadcast a distinct
+; node. transformers' repeat_kv does the same broadcast with expand + reshape
+; and no multiply -- and it does it in Python, before SDPA is called, so the
+; lowering cannot supply one. Bind either.
+;
+; This is a structural link only: pa_island hands the op ?k_pool and the gather
+; index, never the gathered tensor, so which of the two the operand resolves to
+; does not change what the kernel reads.
+(relation pa_gqa_operand (IR IR))
+(rule
+    (
+        (= ?k_gqa (Op (Mul ?ks ?ka ?kb ?ko) (ICons ?k_gathered (ICons ?k_one (INil)))))
+        (const_like ?k_one 1.000000)
+    )
+    ((pa_gqa_operand ?k_gqa ?k_gathered))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention gqa operand (contiguity barrier)"
+)
+(rule
+    ((pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?g ?ctx ?kvdim))
+    ((pa_gqa_operand ?k_gathered ?k_gathered))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention gqa operand (no barrier)"
+)
+(rule
+    ((pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?g ?ctx ?kvdim))
+    ((pa_gqa_operand ?v_gathered ?v_gathered))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention gqa operand (no barrier, v)"
+)
+
+; Same for V: pa_v_operand already has upcast/no-upcast forms, both of which
+; require the barrier. Add the barrier-absent one.
 (relation pa_island (IR IR IR IR IR Expression Expression Expression Expression f64 f64))
 
 (rule
@@ -222,13 +258,9 @@
         (pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?flat_gidx
             ?context_tokens ?kvdim)
 
-        ; ── GQA broadcast barriers: Mul(gathered, 1.0) ──
-        (= ?k_gqa (Op (Mul ?kq_s ?kq_a ?kq_b ?kq_o)
-            (ICons ?k_gathered (ICons ?k_one (INil)))))
-        (const_like ?k_one 1.000000)
-        (= ?v_gqa (Op (Mul ?vq_s ?vq_a ?vq_b ?vq_o)
-            (ICons ?v_gathered (ICons ?v_one (INil)))))
-        (const_like ?v_one 1.000000)
+        ; ── GQA operands: barrier present (hand-written) or absent (repeat_kv)
+        (pa_gqa_operand ?k_gqa ?k_gathered)
+        (pa_gqa_operand ?v_gqa ?v_gathered)
         ; ?v_ctx is ?v_gqa itself (F32 chain) or its upcast (bf16 chain).
         (pa_v_operand ?v_ctx ?v_gqa)
 
