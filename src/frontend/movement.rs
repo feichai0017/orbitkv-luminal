@@ -631,6 +631,27 @@ impl GraphTensor {
         // legacy flat iota+gather lowering for the existing pipeline.
         let window_counts = final_shape[..n].to_vec();
         let id = self.graph().mint_id();
+        // WINDOW CONTRACTS (ruling 2026-08-13, same rail as squeeze):
+        // a symbolic window count must reach 1 — the kernel fits within
+        // dim + padding, or the binding's bucket refuses with the named
+        // door. Static counts are checked right here, loudly.
+        for (axis, count) in window_counts.iter().enumerate() {
+            match count.to_usize() {
+                Some(0) => panic!(
+                    "unfold axis {axis}: kernel does not fit (window count 0)"
+                ),
+                Some(_) => {}
+                None => {
+                    let at = id.index();
+                    self.graph().logical.require_extent_at_least(
+                        at,
+                        count,
+                        1,
+                        &format!("unfold window on axis {axis} (kernel must fit within dim + padding)"),
+                    );
+                }
+            }
+        }
         // Out shape [win..., k...] (rank 2n): parent axis p reads
         // win_p·stride_p + k_p·dilation_p — window arithmetic straight
         // from the unfold's own parameters.
@@ -1210,7 +1231,7 @@ mod tests {
         let a = cx.tensor((2, 3));
         let repeated = (a.repeat((2, 2)) * 1.0).output();
 
-        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].into())]);
+        let rt = crate::test_support::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].into())]);
 
         assert_exact(
             rt.get_f32(repeated.id).unwrap(),

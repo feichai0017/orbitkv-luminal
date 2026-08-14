@@ -342,6 +342,12 @@ pub struct LogicalGraph {
     /// Anonymous-input counter — mints "arg.{k}" labels (Stage 3).
     anon_inputs: usize,
     post_checks: String,
+    /// The same checks as LABELED units (label carries the named door —
+    /// what failed and how to unblock it): on a saturation CheckError
+    /// the runtime re-runs these one by one to name the culprit
+    /// (ruling 2026-08-13: contract failures never surface as a bare
+    /// "native saturation failed").
+    labeled_checks: Vec<(String, String)>,
     poisoned: Option<String>,
 }
 
@@ -465,10 +471,14 @@ impl LogicalGraph {
         };
         let dims = &self.values[id.0 as usize].dims;
         if dims.len() != tracker_dims.len()
-            || dims
-                .iter()
-                .zip(tracker_dims)
-                .any(|(a, b)| a.to_usize() != b.to_usize() || a.to_usize().is_none() && a != b)
+            || dims.iter().zip(tracker_dims).any(|(a, b)| {
+                // Static: value equality. Symbolic: structural equality
+                // is the fast path, PROPER equality saturation the
+                // fallback (ruling 2026-08-13 — (s+t) and (t+s) are the
+                // same extent; only a genuine divergence trips).
+                a.to_usize() != b.to_usize()
+                    || a.to_usize().is_none() && *a != *b && !a.egglog_equal(b)
+            })
         {
             return Err(format!(
                 "{at}: tracker dims {tracker_dims:?} diverged from recorded dims {dims:?} \
@@ -793,7 +803,7 @@ impl LogicalGraph {
             dims.to_vec(),
             DType::Int,
         );
-        self.post_check(&format!(
+        self.post_check(format!("iota value-bounds contract at t{at}"), &format!(
             "(check (= ?reclo{at} (lower-bound-of {value_expr})))\n\
              (check (= ?rechi{at} (upper-bound-of {value_expr})))\n"
         ));
@@ -870,7 +880,7 @@ impl LogicalGraph {
         // The authoring-contract bounds pair — uniform with record_iota
         // (Design A fold-in, 2026-08-06): every recorded iota's value
         // expression must have derivable bounds, or the fixpoint refuses.
-        self.post_check(&format!(
+        self.post_check(format!("iota value-bounds contract at t{at}"), &format!(
             "(check (= ?reclo{at} (lower-bound-of {expr})))\n\
              (check (= ?rechi{at} (upper-bound-of {expr})))\n"
         ));
@@ -1206,10 +1216,13 @@ impl LogicalGraph {
     /// refuses loudly. Static extents discharge trivially.
     pub(crate) fn require_extent_eq_one(&mut self, at: usize, dim: &IntExpr, what: &str) {
         match Self::dim_term(dim) {
-            Ok(term) => self.post_check(&format!(
-                "; {what} at t{at}: the axis extent is CONTRACTED to 1\n\
-                 (check (= {term} (IntLit 1)))\n"
-            )),
+            Ok(term) => self.post_check(
+                format!(
+                    "{what} at t{at}: axis extent must be exactly 1 — \
+                     bind or bucket the dim to [1,1]"
+                ),
+                &format!("(check (= {term} (IntLit 1)))\n"),
+            ),
             Err(reason) => self.poison(format!("{what} at t{at}: {reason}")),
         }
     }
@@ -1225,20 +1238,17 @@ impl LogicalGraph {
         what: &str,
     ) {
         match Self::dim_term(dim) {
-            Ok(term) => self.post_check(&format!(
-                "; {what} at t{at}: extent lower bound must reach {min}\n\
-                 (check (>= (lower-bound-of {term}) (bigint {min})))\n"
-            )),
+            Ok(term) => self.post_check(
+                format!(
+                    "{what} at t{at}: extent lower bound must reach {min} — \
+                     bind the dim's range to exclude smaller values"
+                ),
+                &format!("(check (>= (lower-bound-of {term}) (bigint {min})))\n"),
+            ),
             Err(reason) => self.poison(format!("{what} at t{at}: {reason}")),
         }
     }
 
-    pub fn post_check(&mut self, text: &str) {
-        self.post_checks.push_str(text);
-    }
-
-    /// Record an output designation. Phase A: views stay refused until
-    /// the native view-output story is proven.
     pub fn output(&mut self, at: usize, operand: &Operand, key: usize, label: Option<&str>) {
         if self.poisoned.is_some() {
             return;
@@ -1350,6 +1360,11 @@ impl LogicalGraph {
     }
 
     /// The post-schedule authoring checks.
+    pub fn post_check(&mut self, label: impl Into<String>, text: &str) {
+        self.labeled_checks.push((label.into(), text.to_string()));
+        self.post_checks.push_str(text);
+    }
+
     pub fn post_checks(&self) -> &str {
         &self.post_checks
     }
@@ -1366,6 +1381,7 @@ impl LogicalGraph {
             Vec<InputSlot>,
             Vec<OutputSlot>,
             String,
+            Vec<(String, String)>,
         ),
         String,
     > {
@@ -1423,12 +1439,12 @@ impl LogicalGraph {
             "nat_input_boundary",
             "nat_output_boundary",
         ));
-        Ok((text, input_slots, output_slots, self.post_checks.clone()))
+        Ok((text, input_slots, output_slots, self.post_checks.clone(), self.labeled_checks.clone()))
     }
 
     /// The assembled native program (model + reference-binding defaults).
     pub fn native_program(&self) -> Result<LogicalProgram, String> {
-        let (pre, input_slots, output_slots, post_checks) = self.native_parts()?;
+        let (pre, input_slots, output_slots, post_checks, _labeled) = self.native_parts()?;
         Ok(LogicalProgram {
             text: format!("{pre}{}{post_checks}", crate::reference_binding::SCHEDULE),
             input_slots,

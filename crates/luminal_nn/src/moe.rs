@@ -142,7 +142,7 @@ mod tests {
             }
         }
 
-        let rt = luminal::test_support::run_ssa(
+        let rt = luminal::test_support::run_reference(
             &cx,
             &[
                 (x.id, x_vals.into()),
@@ -352,7 +352,7 @@ mod topk_tests {
             }
         }
 
-        let rt = luminal::test_support::run_ssa(
+        let rt = luminal::test_support::run_reference(
             &cx,
             &[
                 (x.id, x_vals.into()),
@@ -449,7 +449,7 @@ mod topk_tests {
             pairs.push((up.id, fused[I * H..].to_vec().into()));
             pairs.push((down.id, down_vals[e * H * I..(e + 1) * H * I].to_vec().into()));
         }
-        let rt = luminal::test_support::run_ssa(&cx, &pairs);
+        let rt = luminal::test_support::run_reference(&cx, &pairs);
         assert_close(rt.get_f32(out.id).expect("moe out"), &expected);
     }
 }

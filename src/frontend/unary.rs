@@ -539,7 +539,7 @@ pub(super) mod tests {
         let b = func(a).output();
 
         let v = random_vec(shape.iter().copied().product());
-        let rt = crate::test_support::run_ssa(&cx, &[(a.id, v.clone().into())]);
+        let rt = crate::test_support::run_reference(&cx, &[(a.id, v.clone().into())]);
 
         // Reference
         let device = Device::Cpu;
@@ -709,7 +709,7 @@ pub(super) mod tests {
         //        stable → idx 0 before idx 1
         let x_vals = vec![0.1f32, 3.0, 2.0, -1.0, 5.0, 5.0, 0.0, 7.0];
         let expected = [1.0f32, 2.0, 3.0, 0.0];
-        let rt = crate::test_support::run_ssa(&cx, &[(x.id, x_vals.into())]);
+        let rt = crate::test_support::run_reference(&cx, &[(x.id, x_vals.into())]);
         let got = rt.get_f32(out.id).unwrap();
         assert_eq!(got.len(), expected.len());
         for (index, (a, b)) in got.iter().zip(expected).enumerate() {

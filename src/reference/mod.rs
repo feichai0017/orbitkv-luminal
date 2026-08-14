@@ -53,6 +53,7 @@ struct NativeSpec {
     input_slots: Vec<crate::graph::InputSlot>,
     output_slots: Vec<crate::graph::OutputSlot>,
     post_checks: String,
+    labeled_checks: Vec<(String, String)>,
     binding_seeds: String,
     ops: Option<Vec<&'static str>>,
 }
@@ -102,7 +103,7 @@ impl ReferenceRuntime {
     /// (the model + reference-binding defaults; loud if the recorder is
     /// poisoned) — then bind, choose allowable ops, and `search`.
     pub fn load(graph: &crate::graph::Graph) -> Result<Self> {
-        let (pre_schedule, input_slots, output_slots, post_checks) = graph
+        let (pre_schedule, input_slots, output_slots, post_checks, labeled_checks) = graph
             .logical
             .native_parts()
             .map_err(|reason| anyhow!("native load refused: {reason}"))?;
@@ -112,6 +113,7 @@ impl ReferenceRuntime {
             input_slots,
             output_slots,
             post_checks,
+            labeled_checks,
             binding_seeds: String::new(),
             ops: None,
         });
@@ -193,9 +195,37 @@ impl ReferenceRuntime {
         );
         let mut egraph = crate::egglog_snippet::new_egraph();
         let saturation_start = std::time::Instant::now();
-        egraph
-            .parse_and_run_program(None, &full)
-            .map_err(|err| anyhow!("native saturation failed: {err}"))?;
+        if let Err(err) = egraph.parse_and_run_program(None, &full) {
+            // NAME THE DOOR (ruling 2026-08-13): a failed authoring
+            // contract must never surface as a bare saturation error.
+            // Re-saturate WITHOUT the checks, then run each labeled
+            // check alone to isolate the culprits — the label carries
+            // what failed and how to unblock it. (Failure path only;
+            // the green path pays nothing.)
+            let unchecked = format!(
+                "{}\n\n{}{}{}",
+                crate::egglog_snippet::assembled_program(),
+                spec.pre_schedule,
+                spec.binding_seeds,
+                crate::reference_binding::SCHEDULE,
+            );
+            let mut probe = crate::egglog_snippet::new_egraph();
+            if probe.parse_and_run_program(None, &unchecked).is_ok() {
+                let mut failed: Vec<&str> = Vec::new();
+                for (label, text) in &spec.labeled_checks {
+                    if probe.parse_and_run_program(None, text).is_err() {
+                        failed.push(label);
+                    }
+                }
+                if !failed.is_empty() {
+                    return Err(anyhow!(
+                        "shape contracts failed:\n  - {}",
+                        failed.join("\n  - ")
+                    ));
+                }
+            }
+            return Err(anyhow!("native saturation failed: {err}"));
+        }
         let saturation_nanos = saturation_start.elapsed().as_nanos();
         let serialize_start = std::time::Instant::now();
         let serialized = egraph
@@ -448,7 +478,7 @@ mod tests {
     use crate::dtype::DType;
     use crate::graph::Graph;
     use crate::reference::ReferenceRuntime;
-    use crate::test_support::run_ssa;
+    use crate::test_support::run_reference;
     use rustc_hash::FxHashMap;
 
     /// The allow list is DERIVED from the kernel registry; this pins the
@@ -534,7 +564,7 @@ mod tests {
         let expected_a = vec![4.5, 8.5, 20.5];
         let expected_d = vec![0.9092974, 0.5984721, 0.7780732];
         let (cx2, b2, c2, g2, e2, a2, d2) = build();
-        let ours = run_ssa(
+        let ours = run_reference(
             &cx2,
             &[
                 (b2.id, b_data.into()),
@@ -564,7 +594,7 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![10.0, 80.0, 60.0, 200.0, 150.0, 360.0];
         let (cx2, x2, y2, out2) = build();
-        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
+        let ours = run_reference(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -585,7 +615,7 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![9.0, 18.0, 27.0, 36.0];
         let (cx2, x2, y2, out2) = build();
-        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
+        let ours = run_reference(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -607,7 +637,7 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![38.0, 44.0, 50.0, 56.0, 83.0, 98.0, 113.0, 128.0];
         let (cx2, a2, b2, c2) = build();
-        let ours = run_ssa(&cx2, &[(a2.id, a_data.into()), (b2.id, b_data.into())]);
+        let ours = run_reference(&cx2, &[(a2.id, a_data.into()), (b2.id, b_data.into())]);
         assert_close(ours.get_f32(c2.id).unwrap(), &expected);
     }
 
@@ -638,10 +668,10 @@ mod tests {
                 "the model must stay symbolic:\n{}",
                 program.text
             );
-            // The pin arrives as BINDING seeds, not model content: run_ssa
+            // The pin arrives as BINDING seeds, not model content: run_reference
             // injects (bigint {pin}) bounds from the graph's dyn_map — the
             // execution below at both pins is the proof.
-            let ours = run_ssa(&cx2, &[(x2.id, data_x.into()), (y2.id, data_y.into())]);
+            let ours = run_reference(&cx2, &[(x2.id, data_x.into()), (y2.id, data_y.into())]);
             assert_close(ours.get_f32(out2.id).unwrap(), &expected);
         }
     }
@@ -669,7 +699,7 @@ mod tests {
             "the slice must arrive as a view:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(x2.id, x_data.into())]);
+        let ours = run_reference(&cx2, &[(x2.id, x_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -696,7 +726,7 @@ mod tests {
             "the slice must arrive as a view:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(x2.id, x_data.into())]);
+        let ours = run_reference(&cx2, &[(x2.id, x_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -727,7 +757,7 @@ mod tests {
             "unfold must arrive as a view:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
+        let ours = run_reference(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         assert_close(ours.get_f32(plain2.id).unwrap(), &expected_plain);
         assert_close(
             ours.get_f32(dilated2.id).unwrap(),
@@ -761,7 +791,7 @@ mod tests {
                 "the mask must ride the bool bridge:\n{}",
                 program.text
             );
-            let ours = run_ssa(&cx2, &[(x2.id, x_data.into())]);
+            let ours = run_reference(&cx2, &[(x2.id, x_data.into())]);
             assert_close(ours.get_f32(out2.id).unwrap(), &expected);
         }
     }
@@ -790,7 +820,7 @@ mod tests {
                 "clamp view + indicator mask expected:\n{}",
                 program.text
             );
-            let ours = run_ssa(&cx2, &[(x2.id, x_data.into())]);
+            let ours = run_reference(&cx2, &[(x2.id, x_data.into())]);
             assert_close(ours.get_f32(out2.id).unwrap(), &expected);
         }
     }
@@ -826,7 +856,7 @@ mod tests {
             "coordinate-form gather expected in the model:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2,
+        let ours = run_reference(&cx2,
             &[
                 (data2.id, data_vals.into()),
                 (row2.id, row_vals.into()),
@@ -866,7 +896,7 @@ mod tests {
             "coordinate-form scatter expected in the model:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2,
+        let ours = run_reference(&cx2,
             &[
                 (dest2.id, dest_vals.into()),
                 (row2.id, row_vals.into()),
@@ -899,7 +929,7 @@ mod tests {
             "flat sugar lowers to coordinate gather:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx, &[(data.id, data_vals.into()), (idx.id, idx_vals.into())]);
+        let ours = run_reference(&cx, &[(data.id, data_vals.into()), (idx.id, idx_vals.into())]);
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
     }
 
@@ -925,7 +955,7 @@ mod tests {
             "flat sugar lowers to coordinate scatter:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx,
+        let ours = run_reference(&cx,
             &[(dest.id, dest_vals.into()), (idx.id, idx_vals.into()), (src.id, src_vals.into())],
         );
         assert_close(ours.get_f32(out.id).unwrap(), &expected);
@@ -953,7 +983,7 @@ mod tests {
             program.text
         );
         let expected = vec![0i32, 2, 4, 6, 8, 10];
-        let ours = run_ssa(&cx, &[]);
+        let ours = run_reference(&cx, &[]);
         assert_eq!(ours.get_i32(out.id).unwrap(), &expected);
     }
 
@@ -970,7 +1000,7 @@ mod tests {
             .output();
 
         let expected = vec![0i32, 1, 2, 3, 4];
-        let ours = run_ssa(&cx, &[]);
+        let ours = run_reference(&cx, &[]);
         assert_eq!(ours.get_i32(out.id).unwrap(), &expected);
     }
 
@@ -985,7 +1015,7 @@ mod tests {
         let out = cx.iota(3, |c| c[0] + 'a').output();
 
         let expected = vec![10i32, 11, 12];
-        let ours = run_ssa(&cx, &[]);
+        let ours = run_reference(&cx, &[]);
         assert_eq!(ours.get_i32(out.id).unwrap(), &expected);
     }
 
@@ -1007,7 +1037,7 @@ mod tests {
         // Landing D: plain Int assembly is proof-gated — the caller
         // ATTESTS the index range (gather semantics require it in
         // [-d, d) anyway; the attestation states the contract).
-        let ours = crate::test_support::run_ssa_with_ranges(
+        let ours = crate::test_support::run_reference_with_ranges(
             &cx,
             &[(data.id, data_vals.into()), (idx.id, idx_vals.into())],
             &[(idx.id, -3, 2)],
@@ -1033,7 +1063,7 @@ mod tests {
         let expected = vec![0.0, 200.0, 2.0, 3.0, 100.0, 5.0];
 
         cx.logical.native_program().expect("native program");
-        let ours = crate::test_support::run_ssa_with_ranges(
+        let ours = crate::test_support::run_reference_with_ranges(
             &cx,
             &[(data.id, data_vals.into()), (idx.id, idx_vals.into()), (upd.id, upd_vals.into())],
             &[(idx.id, -3, 2)],
@@ -1058,7 +1088,7 @@ mod tests {
         let expected = vec![200.0, 201.0, 2.0, 3.0, 100.0, 101.0];
 
         cx.logical.native_program().expect("native program");
-        let ours = crate::test_support::run_ssa_with_ranges(
+        let ours = crate::test_support::run_reference_with_ranges(
             &cx,
             &[(data.id, data_vals.into()), (idx.id, idx_vals.into()), (upd.id, upd_vals.into())],
             &[(idx.id, 0, 2)],
@@ -1077,7 +1107,7 @@ mod tests {
         let src = cx.tensor(3);
         let out = src.scatter1d(idx, dest).output();
 
-        let (pre, input_slots, output_slots, post) =
+        let (pre, input_slots, output_slots, post, _labeled) =
             cx.logical.native_parts().expect("recorder clean");
         let program = crate::graph::LogicalProgram {
             text: format!("{pre}{}{post}", crate::reference_binding::SCHEDULE),
@@ -1156,7 +1186,7 @@ mod tests {
         let expected_d = vec![0.9092974, 0.5984721, 0.7780732];
         let (cx2, b2, c2, g2, e2, a2, d2) = build();
         cx2.logical.native_program().expect("native program");
-        let ours = run_ssa(&cx2,
+        let ours = run_reference(&cx2,
             &[
                 (b2.id, b_data.into()),
                 (c2.id, c_data.into()),
@@ -1195,7 +1225,7 @@ mod tests {
             "comparison + cast expected in the model:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
+        let ours = run_reference(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -1230,7 +1260,7 @@ mod tests {
             "Bool8 boundary layout width expected:\n{}",
             program.text
         );
-        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
+        let ours = run_reference(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         let codes = ours.get_bool8(out2.id).expect("bool8 boundary");
         assert_eq!(codes.len(), expected.len());
         for (index, (code, truth)) in codes.iter().zip(&expected).enumerate() {
@@ -1275,7 +1305,7 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected_split = vec![-2.0, -3.0, -3.0, -2.0, 0.0, 3.0, 7.0, 12.0, 18.0, 25.0, 33.0, 42.0];
         let (cx2, a2, b2, c2, d2, e2, f2, split2, merge2, flatten2) = build();
-        let ours = run_ssa(
+        let ours = run_reference(
             &cx2,
             &[
                 (a2.id, v12a.into()),
@@ -1311,7 +1341,7 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![0.5, 3.0, 7.5, 3.5, 9.0, 16.5, 6.5, 15.0, 25.5, 9.5, 21.0, 34.5];
         let (cx2, x2, y2, out2) = build();
-        let ours = run_ssa(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
+        let ours = run_reference(&cx2, &[(x2.id, x_data.into()), (y2.id, y_data.into())]);
         assert_close(ours.get_f32(out2.id).unwrap(), &expected);
     }
 
@@ -1330,7 +1360,7 @@ mod tests {
         // GOLDEN (pinned from their ReferenceRuntime before its deletion — Step 4b ruling).
         let expected = vec![11.0, 22.0, 33.0];
         let (cx2, x2, s2) = build();
-        let ours = run_ssa(&cx2, &[(x2.id, x_data.into())]);
+        let ours = run_reference(&cx2, &[(x2.id, x_data.into())]);
         assert_close(ours.get_f32(s2.id).unwrap(), &expected);
     }
 
@@ -1350,7 +1380,7 @@ mod tests {
 
         let x_vals = vec![2.0f32, 3.0, 5.0, 7.0];
         let codes = TypedBuffer::bool8(vec![1u8, 0, 1, 0]).expect("legal codes");
-        let rt = crate::test_support::run_ssa(
+        let rt = crate::test_support::run_reference(
             &cx,
             &[(mask.id, codes), (x.id, x_vals.clone().into())],
         );

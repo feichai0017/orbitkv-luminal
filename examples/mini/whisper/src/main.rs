@@ -32,6 +32,6 @@ fn main() {
         (model.dec_up.weight.id, weights(D * FF, 13).into()),
         (model.dec_down.weight.id, weights(FF * D, 14).into()),
     ];
-    let rt = luminal::test_support::run_ssa(&cx, &pairs);
+    let rt = luminal::test_support::run_reference(&cx, &pairs);
     println!("decoder out: {:?}", rt.get_f32(out.id).unwrap());
 }

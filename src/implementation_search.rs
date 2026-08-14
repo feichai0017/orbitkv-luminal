@@ -498,7 +498,7 @@ pub fn bucketed_search_implementations(
     // bucket binding seeds (ranges for the bucket-wide validation render,
     // tight [n,n] pins for the representative render). The model text
     // never changes across buckets; only the binding does.
-    let (pre, input_slots, output_slots, post) = graph
+    let (pre, input_slots, output_slots, post, _labeled) = graph
         .logical
         .native_parts()
         .map_err(|reason| anyhow!("native load refused: {reason}"))?;

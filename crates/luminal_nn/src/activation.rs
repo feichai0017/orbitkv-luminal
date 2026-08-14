@@ -59,10 +59,8 @@ mod tests {
     use super::{ReLU, Sigmoid};
     use luminal::prelude::*;
 
-    /// The M3 ladder end-to-end. The search's first generation is
-    /// seeded with the plain cost walk's genome (2026-08-05): scalar
-    /// constants broadcast through pure-view classes, and the executable
-    /// route threads materialize ops that uniform random genomes miss.
+    /// The M3 ladder end-to-end (full genetic search; scalar-constant
+    /// broadcasts route via materialize — rediagnosis 2026-08-12).
     fn run_unary(
         build: impl Fn(GraphTensor) -> GraphTensor,
         input: Vec<f32>,

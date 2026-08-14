@@ -1155,7 +1155,7 @@ mod tests {
         let (_, pairs) = block_data(&fx);
         let (ref_logits, ref_kc, ref_vc) = block_reference(&fx);
 
-        let rt = luminal::test_support::run_ssa(&fx.cx, &pairs);
+        let rt = luminal::test_support::run_reference(&fx.cx, &pairs);
         assert_close(rt.get_f32(logits.id).expect("logits"), &ref_logits);
         assert_close(rt.get_f32(kc.id).expect("k cache"), &ref_kc);
         assert_close(rt.get_f32(vc.id).expect("v cache"), &ref_vc);
@@ -1438,7 +1438,7 @@ mod forward_rope_tests {
             pairs.push((tensor.id, weights(n, 10 + seed).into()));
         }
 
-        let rt = luminal::test_support::run_ssa(&cx, &pairs);
+        let rt = luminal::test_support::run_reference(&cx, &pairs);
         let rope_out = rt.get_f32(out_rope.id).expect("rope out").clone();
         let expr_out = rt.get_f32(out_expr.id).expect("expr out").clone();
         assert_close(&rope_out, &expr_out);

@@ -78,6 +78,6 @@ fn mini_whisper_matches_scalar_reference() {
     let ffo = ref_matmul(&hidden, &weights(FF * D, 513), FF, D);
     let expected: Vec<f32> = x1.iter().zip(&ffo).map(|(a, b)| a + b).collect();
 
-    let rt = luminal::test_support::run_ssa(&cx, &pairs);
+    let rt = luminal::test_support::run_reference(&cx, &pairs);
     assert_close(rt.get_f32(out.id).expect("out"), &expected);
 }

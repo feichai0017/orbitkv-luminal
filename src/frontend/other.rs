@@ -164,7 +164,7 @@ mod tests {
         let mut cx = Graph::new();
         let b = func(&mut cx).output();
 
-        let rt = crate::test_support::run_ssa(&cx, &[]);
+        let rt = crate::test_support::run_reference(&cx, &[]);
 
         // Reference
         let device = Device::Cpu;
@@ -234,7 +234,7 @@ mod tests {
         let a_data = random_vec(6);
         let b_data = random_vec(6);
         let c_data = random_vec(6);
-        let rt = crate::test_support::run_ssa(
+        let rt = crate::test_support::run_reference(
             &cx,
             &[
                 (a.id, a_data.clone().into()),

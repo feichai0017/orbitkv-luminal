@@ -231,7 +231,7 @@ mod fp8_tests {
             *row = acc * (input_scale * weight_scale);
         }
 
-        let rt = luminal::test_support::run_ssa(
+        let rt = luminal::test_support::run_reference(
             &cx,
             &[
                 (x.id, x_vals.into()),

@@ -91,7 +91,7 @@ fn embedding_scale_row_gather_stays_exact() {
     }
     let idx_vals: Vec<i32> = picks.iter().map(|r| *r as i32).collect();
 
-    let rt = luminal::test_support::run_ssa(
+    let rt = luminal::test_support::run_reference(
         &cx,
         &[(table.id, data.into()), (idx.id, idx_vals.into())],
     );

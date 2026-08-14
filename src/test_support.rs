@@ -2689,20 +2689,20 @@ pub fn plain_plan_exists(cx: &crate::graph::Graph) -> anyhow::Result<()> {
 /// output reads. The frontend candle differentials and the reference
 /// differentials both run through here — the same load → bind → search →
 /// execute ladder as the nn module tests, on the harness budget above.
-pub fn run_ssa(
+pub fn run_reference(
     cx: &crate::graph::Graph,
     inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
 ) -> crate::reference::ReferenceRuntime {
-    run_ssa_with_ranges(cx, inputs, &[])
+    run_reference_with_ranges(cx, inputs, &[])
 }
 
-/// [`run_ssa`] with VALUE-RANGE ATTESTATIONS (typed-buffers landing D):
+/// [`run_reference`] with VALUE-RANGE ATTESTATIONS (typed-buffers landing D):
 /// plain Int arithmetic is proof-gated, so a graph doing arithmetic
 /// over caller Int data implements only when the caller attests the
 /// data's range — no attestation, no proof, and the search refuses
 /// loudly. `ranges` entries are (tensor, lower, upper), seeded via
 /// `bind_value_range` between load and search.
-pub fn run_ssa_with_ranges(
+pub fn run_reference_with_ranges(
     cx: &crate::graph::Graph,
     inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
     ranges: &[(petgraph::graph::NodeIndex, i64, i64)],
@@ -2749,7 +2749,7 @@ mod stage4b_probes {
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor(2);
         let b = a.output();
-        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
+        let rt = crate::test_support::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
         let got = rt.get_f32(b.id).unwrap();
         assert_eq!(got, &vec![1.0, 2.0]);
     }
@@ -2863,7 +2863,7 @@ mod stage4b_probes {
         let x1 = heads.slice_along(0..2, 2);
         let x2 = heads.slice_along(2..4, 2);
         let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
-        let (pre, _inputs, _outputs, _post) =
+        let (pre, _inputs, _outputs, _post, _labeled) =
             cx.logical.native_parts().expect("recorder clean");
         let full = format!("{}\n\n{pre}", crate::egglog_snippet::assembled_program());
         let mut egraph = crate::egglog_snippet::new_egraph();
@@ -3014,7 +3014,7 @@ mod stage4b_probes {
                     .slice((2..6, 7..10))
                     .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
                     .output();
-                let (pre, _is, _os, post) = cx.logical.native_parts().expect("recorder clean");
+                let (pre, _is, _os, post, _labeled) = cx.logical.native_parts().expect("recorder clean");
                 format!("{pre}{}{post}", crate::reference_binding::SCHEDULE)
             }),
             ("batch_matmul(2,3,4,5)", {
@@ -3022,7 +3022,7 @@ mod stage4b_probes {
                 let a = cx.tensor((2usize, 3usize, 4usize));
                 let b = cx.tensor((4usize, 5usize));
                 let _out = a.matmul(b).output();
-                let (pre, _is, _os, post) = cx.logical.native_parts().expect("recorder clean");
+                let (pre, _is, _os, post, _labeled) = cx.logical.native_parts().expect("recorder clean");
                 format!("{pre}{}{post}", crate::reference_binding::SCHEDULE)
             }),
         ];
@@ -3131,7 +3131,7 @@ mod stage4b_probes {
         let mut cx = crate::graph::Graph::new();
         let a = cx.tensor(1);
         let b = (a * 2.0).output();
-        let rt = crate::test_support::run_ssa(&cx, &[(a.id, vec![0.5f32].into())]);
+        let rt = crate::test_support::run_reference(&cx, &[(a.id, vec![0.5f32].into())]);
         let got = rt.get_f32(b.id).unwrap();
         assert!((got[0] - 1.0).abs() < 1e-6, "{got:?}");
     }
@@ -3374,7 +3374,7 @@ mod subst_guard_study {
 
         let x_vals = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let y_vals = vec![2.0f32, 3.0, 4.0, 5.0, 6.0];
-        let rt = crate::test_support::run_ssa(
+        let rt = crate::test_support::run_reference(
             &cx,
             &[(x.id, x_vals.clone().into()), (y.id, y_vals.clone().into())],
         );
@@ -3403,7 +3403,7 @@ mod subst_guard_study {
         cx.set_dim('s', 1);
         let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
         let out = (x.squeeze(0) * 2.0).output();
-        let rt = crate::test_support::run_ssa(&cx, &[(x.id, vec![1.0f32, 2.0, 3.0].into())]);
+        let rt = crate::test_support::run_reference(&cx, &[(x.id, vec![1.0f32, 2.0, 3.0].into())]);
         assert_eq!(rt.get_f32(out.id).unwrap(), &[2.0, 4.0, 6.0]);
 
         let mut cx = Graph::default();
@@ -3423,8 +3423,69 @@ mod subst_guard_study {
             )
             .expect_err("extent 2 violates the squeeze contract");
         assert!(
-            format!("{err:#}").contains("saturation"),
-            "refusal surfaces through the check: {err:#}"
+            format!("{err:#}").contains("axis extent must be exactly 1"),
+            "the labeled door names the squeeze contract: {err:#}"
+        );
+    }
+
+    /// SYMBOLIC-EXTENT PAD + CONCAT (the dim-grammar widening's
+    /// proving test): both record, saturate under pins, and execute.
+    #[test]
+    fn symbolic_pad_and_concat_record_and_run() {
+        use crate::prelude::{DType, Graph};
+        let mut cx = Graph::default();
+        cx.set_dim('s', 3);
+        cx.set_dim('t', 2);
+        let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
+        let y = cx.named_tensor_dtyped("y", ('t',), DType::F32);
+        let padded = x.pad_along(1, 1, 0, 0.0).output();
+        let joined = x.concat_along(y, 0).output();
+        let rt = crate::test_support::run_reference(
+            &cx,
+            &[
+                (x.id, vec![1.0f32, 2.0, 3.0].into()),
+                (y.id, vec![10.0f32, 20.0].into()),
+            ],
+        );
+        assert_eq!(rt.get_f32(padded.id).unwrap(), &[0.0, 1.0, 2.0, 3.0, 0.0]);
+        assert_eq!(rt.get_f32(joined.id).unwrap(), &[1.0, 2.0, 3.0, 10.0, 20.0]);
+    }
+
+    /// UNFOLD WINDOW CONTRACT: a symbolic dim records with the
+    /// kernel-fits invariant; the fitting pin runs, the violating pin
+    /// refuses with the NAMED door.
+    #[test]
+    fn unfold_window_contract_discharges_and_names_its_door() {
+        use crate::prelude::{DType, Graph};
+        let mut cx = Graph::default();
+        cx.set_dim('s', 5);
+        let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
+        let out = x.unfold((3usize,), (1usize,), (1usize,)).sum(1).output();
+        let rt = crate::test_support::run_reference(
+            &cx,
+            &[(x.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0].into())],
+        );
+        assert_eq!(rt.get_f32(out.id).unwrap(), &[6.0, 9.0, 12.0]);
+
+        let mut cx = Graph::default();
+        cx.set_dim('s', 2);
+        let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
+        let _ = x.unfold((3usize,), (1usize,), (1usize,)).sum(1).output();
+        let mut rt = crate::reference::ReferenceRuntime::load(&cx).expect("records + loads");
+        let data: rustc_hash::FxHashMap<_, _> =
+            [(x.id, crate::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 2]))]
+                .into_iter()
+                .collect();
+        rt.bind_dyn_range('s', 2, 2).expect("bind");
+        let err = rt
+            .search(
+                &data,
+                &crate::implementation_search::ImplementationSearchOptions::default(),
+            )
+            .expect_err("kernel 3 cannot fit in extent 2");
+        assert!(
+            format!("{err:#}").contains("unfold window on axis 0"),
+            "the labeled door names the unfold contract: {err:#}"
         );
     }
 }

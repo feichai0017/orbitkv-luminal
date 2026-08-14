@@ -465,6 +465,30 @@ pub fn extract_layout_ir_with_genome_and_ops(
     extractor.extract()
 }
 
+/// Genome-driven extraction with an EXPLICIT runtime matcher set — the
+/// TestRuntime seam's genome form (ruling 2026-08-13; deletes the
+/// tests-side vendored-source workaround).
+pub fn extract_layout_ir_with_genome_and_matchers(
+    egraph: &EGraph,
+    genome: &Genome,
+    matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
+) -> Result<Option<ExtractedGraph>> {
+    let mut extractor = Extractor::new_with_matchers(egraph, None, Some(genome), matchers);
+    extractor.apply_viability_filter();
+    extractor.extract()
+}
+
+/// [`producer_index`] over an EXPLICIT runtime matcher set (the
+/// TestRuntime seam).
+pub fn producer_index_with_matchers(
+    egraph: &EGraph,
+    matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
+) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
+    let mut extractor = Extractor::new_with_matchers(egraph, None, None, matchers);
+    extractor.apply_viability_filter();
+    producer_index_from(extractor)
+}
+
 /// Every LayoutTensor class's candidate producers, as
 /// `(implementation constructor name, choice)` pairs sorted for
 /// determinism — the raw material genome construction and mutation draw
@@ -486,7 +510,12 @@ pub fn producer_index_with_ops(
     let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
     let mut extractor = Extractor::new(egraph, allowed, None);
     extractor.apply_viability_filter();
-    let extractor = extractor;
+    producer_index_from(extractor)
+}
+
+fn producer_index_from(
+    extractor: Extractor<'_>,
+) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
     let mut index = std::collections::BTreeMap::new();
     for (class, producers) in &extractor.producer_index {
         let mut entries: Vec<(String, ProducerChoice)> = Vec::new();

@@ -1,6 +1,8 @@
 //! String-backed symbolic-dimension names (our landing of PR #396's
-//! design, ruling 2026-08-13): `Symbol` is a Copy handle into a
-//! process-global interner, so `Term` stays Copy while names are
+//! design, ruling 2026-08-13): `Symbol` is a Copy handle — a
+//! `GenerationalBox<String, SyncStorage>` owned by a process-global
+//! owner, the same generational_box pattern `IntegerExpression` uses
+//! for its terms — so `Term` stays Copy while names are
 //! arbitrary-length. Names validate against `[A-Za-z][A-Za-z0-9_]*`
 //! with no doubled underscore and are REJECTED, never sanitized
 //! (sanitizing is not injective — "a.b" and "a-b" must not collide).
@@ -10,29 +12,37 @@
 //! retired 'z' (z-var retirement, 2026-08-06) — every name is an
 //! ordinary symbol.
 //!
-//! Equality/hash are by interner index (interning makes name-equality
-//! coincide with index-equality); Ord is BY NAME, so any
-//! order-dependent downstream (slot assignment on real backends) is
-//! deterministic in the name vocabulary, not in interning order.
+//! Equality/hash read THROUGH the handle and compare/hash the NAME
+//! string (never the arena slot + generation — derived impls would
+//! break the moment two handles named the same thing); Ord is BY
+//! NAME, so any order-dependent downstream (slot assignment on real
+//! backends) is deterministic in the name vocabulary, not in
+//! interning order. Construction still interns — one arena slot per
+//! distinct name — but that is a leak-avoidance optimization, not a
+//! correctness requirement.
 
+use generational_box::{AnyStorage, GenerationalBox, GenerationalBoxId, Owner, SyncStorage};
 use rustc_hash::FxHashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{
+    OnceLock, RwLock,
+    atomic::{AtomicU64, Ordering},
+};
 
-struct Interner {
-    names: Vec<&'static str>,
-    index: FxHashMap<&'static str, u32>,
-    fresh: u64,
+type NameBox = GenerationalBox<String, SyncStorage>;
+
+static NAME_OWNER: OnceLock<Owner<SyncStorage>> = OnceLock::new();
+static NAME_INTERNER: OnceLock<RwLock<FxHashMap<String, NameBox>>> = OnceLock::new();
+/// One bounded leak per interned name so `name()` can keep handing out
+/// `&'static str` (exactly the leak the old `u32`-index interner made).
+static LEAKED_NAMES: OnceLock<RwLock<FxHashMap<GenerationalBoxId, &'static str>>> = OnceLock::new();
+static FRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn interner() -> &'static RwLock<FxHashMap<String, NameBox>> {
+    NAME_INTERNER.get_or_init(|| RwLock::new(FxHashMap::default()))
 }
 
-fn interner() -> &'static RwLock<Interner> {
-    static INTERNER: OnceLock<RwLock<Interner>> = OnceLock::new();
-    INTERNER.get_or_init(|| {
-        RwLock::new(Interner {
-            names: Vec::new(),
-            index: FxHashMap::default(),
-            fresh: 0,
-        })
-    })
+fn leaked_names() -> &'static RwLock<FxHashMap<GenerationalBoxId, &'static str>> {
+    LEAKED_NAMES.get_or_init(|| RwLock::new(FxHashMap::default()))
 }
 
 fn is_well_formed(name: &str) -> bool {
@@ -46,8 +56,8 @@ fn is_well_formed(name: &str) -> bool {
 }
 
 /// An interned symbolic-dimension name.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Symbol(u32);
+#[derive(Clone, Copy)]
+pub struct Symbol(NameBox);
 
 impl Symbol {
     /// Intern a validated name — panics loudly on malformed input.
@@ -62,33 +72,52 @@ impl Symbol {
     }
 
     fn intern(name: &str) -> Self {
-        if let Some(&idx) = interner().read().unwrap().index.get(name) {
-            return Symbol(idx);
+        // Fast path: the name is already interned (read lock only).
+        if let Some(&existing) = interner().read().unwrap().get(name) {
+            return Symbol(existing);
         }
+        // Slow path: insert (write lock), double-checked because another
+        // thread may have interned the name between the two locks.
         let mut guard = interner().write().unwrap();
-        if let Some(&idx) = guard.index.get(name) {
-            return Symbol(idx);
+        if let Some(&existing) = guard.get(name) {
+            return Symbol(existing);
         }
-        let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-        let idx = guard.names.len() as u32;
-        guard.names.push(leaked);
-        guard.index.insert(leaked, idx);
-        Symbol(idx)
+        let box_ = NAME_OWNER
+            .get_or_init(SyncStorage::owner)
+            .insert(name.to_string());
+        leaked_names()
+            .write()
+            .unwrap()
+            .insert(box_.id(), Box::leak(name.to_string().into_boxed_str()));
+        guard.insert(name.to_string(), box_);
+        Symbol(box_)
     }
 
     /// A fresh symbol no prior name can collide with — replaces the old
     /// private-use-char trick for internal temporaries.
     pub fn fresh(stem: &str) -> Self {
-        let n = {
-            let mut guard = interner().write().unwrap();
-            guard.fresh += 1;
-            guard.fresh
-        };
+        let n = FRESH_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
         Self::new(format!("{stem}{n}"))
     }
 
     pub fn name(&self) -> &'static str {
-        interner().read().unwrap().names[self.0 as usize]
+        leaked_names().read().unwrap()[&self.0.id()]
+    }
+}
+
+impl PartialEq for Symbol {
+    fn eq(&self, other: &Self) -> bool {
+        // Same arena slot is definitionally the same name; otherwise
+        // compare the name strings through the handles.
+        self.0.ptr_eq(&other.0) || *self.0.read() == *other.0.read()
+    }
+}
+
+impl Eq for Symbol {}
+
+impl std::hash::Hash for Symbol {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.read().hash(state);
     }
 }
 
@@ -100,19 +129,22 @@ impl PartialOrd for Symbol {
 
 impl Ord for Symbol {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.name().cmp(other.name())
+        if self.0.ptr_eq(&other.0) {
+            return std::cmp::Ordering::Equal;
+        }
+        self.0.read().cmp(&other.0.read())
     }
 }
 
 impl std::fmt::Display for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
+        f.write_str(&self.0.read())
     }
 }
 
 impl std::fmt::Debug for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
+        f.write_str(&self.0.read())
     }
 }
 
@@ -136,7 +168,7 @@ impl From<&str> for Symbol {
 
 impl serde::Serialize for Symbol {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.name())
+        serializer.serialize_str(&self.0.read())
     }
 }
 

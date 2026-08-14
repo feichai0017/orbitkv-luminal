@@ -75,6 +75,7 @@ members = [
     "examples/mini/conv",
     "examples/mini/flux",
     "tests/scalar_refs",
+    "tests/test_runtime",
 ]
 
 [patch.crates-io]

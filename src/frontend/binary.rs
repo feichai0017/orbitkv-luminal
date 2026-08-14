@@ -516,7 +516,7 @@ pub(super) mod tests {
 
         let lhs_values = lhs_transform(random_vec(a_shape.iter().copied().product()));
         let rhs_values = rhs_transform(random_vec(b_shape.iter().copied().product()));
-        let rt = crate::test_support::run_ssa(
+        let rt = crate::test_support::run_reference(
             &cx,
             &[(a.id, lhs_values.clone().into()), (b.id, rhs_values.clone().into())],
         );
