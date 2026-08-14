@@ -75,6 +75,26 @@
     :name "PagedAttention masked fact (host mask)"
 )
 
+; Same fact for a bf16 host mask. A translated chain carries the mask at the
+; activation dtype, so the F32 producer above cannot see it, and every other
+; premise (pa_qk_scores, pa_v_operand) already has a bf16 counterpart. The mask
+; is a RECOGNITION premise only -- pa_island does not pass it to the op, which
+; derives causality from the indptrs -- so admitting bf16 changes what is
+; matched, not what is built.
+(rule
+    (
+        (= ?masked (Op (Add ?m_s ?m_a ?m_b ?m_o)
+            (ICons ?scaled (ICons ?mask (INil)))))
+        (= ?scaled (Op (Mul ?sc_s ?sc_a ?sc_b ?sc_o)
+            (ICons ?scores (ICons ?scale_c (INil)))))
+        (const_like ?scale_c ?scale_val)
+        (= ?mask (Input ?mask_idx ?mask_name (Bf16)))
+    )
+    ((pa_masked ?masked ?scores ?scale_val -1.0))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention masked fact (bf16 host mask)"
+)
+
 ; Triu-gather producer: Add(Mul(scores, 1/sqrt(d)), triu_mask). window_left is
 ; -1 (full attention) — a triu causal mask carries no sliding window.
 (rule
