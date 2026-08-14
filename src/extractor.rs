@@ -1016,7 +1016,14 @@ impl<'a> Extractor<'a> {
                         let Some(Some(child_plan)) = self.memo.get(&child.class) else {
                             continue 'candidates;
                         };
-                        heuristic_cost += child_plan.heuristic_cost;
+                        // Saturating: child costs are memoized per CLASS but
+                        // accumulated per plan EDGE, so a deep graph with shared
+                        // subgraphs (whisper's decode loop) counts paths, not
+                        // nodes, and overflows u64 (wrapped silently in release,
+                        // panicked in debug). Saturation stops the panic; the
+                        // path-vs-node cost model itself is a recorded follow-up.
+                        heuristic_cost =
+                            heuristic_cost.saturating_add(child_plan.heuristic_cost);
                         child_plans.push(child.clone());
                     }
                     let plan = Plan {
