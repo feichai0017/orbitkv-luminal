@@ -226,6 +226,31 @@
     :name "PagedAttention kv gathers (4-D absorbed-movement spelling)"
 )
 
+; The loop-ROLLED spelling: the roller rewrites the layer body so the context
+; gather reads the 2-D pool but emits a 3-D (heads, context, head_dim) view
+; with iterator-bearing strides. Same pairing, same flat index; kvdim comes
+; from the pool as in the 2-D rule.
+(rule
+    (
+        (= ?k_gathered (Op (Gather
+            (ECons ?kh (ECons ?context_tokens (ECons ?khd (ENil))))
+            ?kg_a
+            (ECons ?nslots (ECons ?kvdim (ENil)))
+            ?kg_b)
+            (ICons ?flat_gidx (ICons ?k_pool (INil)))))
+        (= ?v_gathered (Op (Gather
+            (ECons ?vh (ECons ?context_tokens (ECons ?vhd (ENil))))
+            ?vg_a
+            (ECons ?nslots2 (ECons ?kvdim2 (ENil)))
+            ?vg_b)
+            (ICons ?flat_gidx (ICons ?v_pool (INil)))))
+    )
+    ((pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?flat_gidx
+        ?context_tokens ?kvdim))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention kv gathers (rolled 3-D from 2-D pool)"
+)
+
 ; The K operand handed to the QK matmul.
 ;
 ; A hand-written model writes `expand_dim(..).merge_dims(..) * 1.0`, where the
@@ -816,4 +841,100 @@
     ((pa_dbg_k4e ?scores))
     :ruleset kernel_fuse_late2
     :name "dbg K4e: the chain's qk consumed by a raw Sum"
+)
+
+(relation pa_dbg_k4g (IR))
+(rule
+    (
+        (pa_qk_mul ?qk ?q ?k ?nh ?it ?ct ?hd)
+        (= ?scores (Op (Sum ?a ?b ?c ?d ?e) (ICons ?qk (INil))))
+        (flashinfer_head_dim_ok_16bit ?hd)
+    )
+    ((pa_dbg_k4g ?qk))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4g: Sum-consumed staged mul passing the head-dim gate"
+)
+(relation pa_dbg_k4h (IR))
+(rule
+    (
+        (pa_qk_mul ?qk ?q ?k ?nh ?it ?ct ?hd)
+        (= ?scores (Op (Sum ?a ?b ?c ?d ?e) (ICons ?qk (INil))))
+        (pa_gqa_operand ?k ?anyg)
+    )
+    ((pa_dbg_k4h ?qk))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4h: Sum-consumed staged mul whose K is an operand"
+)
+(relation pa_dbg_k4i (IR))
+(rule
+    (
+        (pa_qk_mul ?qk ?q ?k ?nh ?it ?ct ?hd)
+        (= ?scores (Op (Sum ?a ?b ?c ?d ?e) (ICons ?qk (INil))))
+        (pa_gqa_operand ?q ?anyg)
+    )
+    ((pa_dbg_k4i ?qk))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4i: Sum-consumed staged mul whose Q is an operand"
+)
+
+; Shape-FREE version of the whole chain: if this fires where K4e does not,
+; the ECons shape pattern on the mul is what excludes the Sum-consumed
+; instance -- e.g. a rolled-body shape with loop-dependent dims.
+(relation pa_dbg_k4k (IR))
+(rule
+    (
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_gqa_operand ?kop ?kg)
+        (= ?qk (Op (Mul ?sh ?ma ?mb ?mo) (ICons ?x (ICons ?kop (INil)))))
+        (= ?scores (Op (Sum ?a ?b ?c ?d ?e) (ICons ?qk (INil))))
+    )
+    ((pa_dbg_k4k ?scores))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4k: shape-free chain to Sum (k second)"
+)
+(rule
+    (
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_gqa_operand ?kop ?kg)
+        (= ?qk (Op (Mul ?sh ?ma ?mb ?mo) (ICons ?kop (ICons ?x (INil)))))
+        (= ?scores (Op (Sum ?a ?b ?c ?d ?e) (ICons ?qk (INil))))
+    )
+    ((pa_dbg_k4k ?scores))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4k: shape-free chain to Sum (k first)"
+)
+
+(relation pa_dbg_k4m (IR))
+(rule
+    (
+        (pa_qk_scores ?scores ?qk)
+        (pa_qk_mul ?qk ?q ?k ?nh ?it ?ct ?hd)
+    )
+    ((pa_dbg_k4m ?qk))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4m: qk_scores and staged mul agree on qk"
+)
+(relation pa_dbg_k4n (IR))
+(rule
+    (
+        (pa_qk_scores ?scores ?qk)
+        (pa_qk_mul ?qk ?q ?k ?nh ?it ?ct ?hd)
+        (pa_gqa_operand ?k ?anyg)
+    )
+    ((pa_dbg_k4n ?qk))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4n: ...and its K is an operand"
+)
+
+(relation pa_dbg_k4p (IR))
+(rule
+    (
+        (pa_dbg_gathers_any ?kg ?vg)
+        (pa_gqa_operand ?kop ?kg)
+        (pa_qk_mul ?qk ?q ?kop ?nh ?it ?ct ?hd)
+        (pa_qk_scores ?scores ?qk)
+    )
+    ((pa_dbg_k4p ?scores))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4p: shape-agnostic pairing joined all the way to scores"
 )
