@@ -460,14 +460,30 @@ def _strip_symint_placeholders(gm, example_inputs):
     return new_inputs, kept_indices, True
 
 
-def _build_dynamic_shapes_from_gm(gm):
+def _build_dynamic_shapes_from_gm(gm, share_symbols=True):
     """Construct a torch.export.export `dynamic_shapes` spec from FX metadata.
 
     Walks each tensor placeholder's `meta['example_value']` FakeTensor and
-    marks every SymInt dim as `Dim.AUTO`. Sharing/equality relationships
-    between symbolic dims are already encoded in the FakeTensor shapes —
-    torch.export's symbolic-shape engine recovers them during the trace, so
-    we don't need to allocate named `Dim` objects ourselves.
+    marks every SymInt dim as dynamic.
+
+    `share_symbols` decides whether dims that Dynamo already knows are the
+    *same* symbol are exported as one symbol or as independent ones.
+    `Dim.AUTO` means "infer this dim, unconstrained", so export mints a fresh
+    symbol per marked dim and does not rediscover the equalities: measured on
+    a 16-layer Llama decoding against a populated DynamicCache, the 32 KV
+    cache tensors — every one of them the same `past_length` — came out as 31
+    distinct symbols, while Dynamo's own graph had exactly one. That is 31
+    dyn_dims slots, 31 host uploads per call, and a simplifier that cannot
+    relate any of them. Allocating one named `Dim` per distinct SymInt keeps
+    the sharing Dynamo already proved.
+
+    A named `Dim` is a constraint rather than a hint, so a wrong guess is a
+    hard `ConstraintViolationError` instead of a silent specialization. The
+    caller degrades to `share_symbols=False` on failure.
+
+    Compound dims (`s21 + 1`) stay `Dim.AUTO`: they are derived, so
+    constraining them directly would duplicate a relationship export will
+    infer from the root symbol anyway.
 
     The returned spec is wrapped under `{"args": (...)}` because Dynamo's
     `GraphModule.forward(*args, **kwargs)` signature treats positional inputs
@@ -479,6 +495,19 @@ def _build_dynamic_shapes_from_gm(gm):
 
     placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
 
+    shared_dims = {}
+
+    def dim_for(sym):
+        if not share_symbols:
+            return Dim.AUTO
+        expr = getattr(getattr(sym, "node", None), "expr", None)
+        if expr is None or not getattr(expr, "is_Symbol", False):
+            return Dim.AUTO
+        name = str(expr)
+        if name not in shared_dims:
+            shared_dims[name] = Dim(f"pt2_{name}")
+        return shared_dims[name]
+
     per_input_spec = []
     saw_dynamic = False
     for node in placeholders:
@@ -489,7 +518,7 @@ def _build_dynamic_shapes_from_gm(gm):
         spec = {}
         for d, s in enumerate(ev.shape):
             if isinstance(s, torch.SymInt):
-                spec[d] = Dim.AUTO
+                spec[d] = dim_for(s)
                 saw_dynamic = True
         per_input_spec.append(spec if spec else None)
 
@@ -797,7 +826,19 @@ def _eager_pt2_compile(
         # dynamic-dim optimization than to hand the user a hard failure.
         if dynamic_shapes is None:
             raise
-        ep = torch.export.export(gm, tuple(user_inputs), **_export_kwargs())
+        # Step down one rung first: the shared-symbol spec constrains dims
+        # Dynamo believed equal, so a violation means that belief was wrong
+        # for this call. Independent `Dim.AUTO`s keep the dims dynamic; only
+        # if that also fails do we give up dynamism entirely.
+        try:
+            ep = torch.export.export(
+                gm,
+                tuple(user_inputs),
+                dynamic_shapes=_build_dynamic_shapes_from_gm(gm, share_symbols=False),
+                **_export_kwargs(),
+            )
+        except Exception:
+            ep = torch.export.export(gm, tuple(user_inputs), **_export_kwargs())
     # LUM-499: drop dynamo-emitted input guards before run_decompositions
     # calls ep.module(), which would otherwise emit a `_guards_fn` containing
     # data-dependent .item() calls and unresolved `L[...]` references.
