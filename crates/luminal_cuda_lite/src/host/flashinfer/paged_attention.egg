@@ -95,6 +95,25 @@
     :name "PagedAttention masked fact (bf16 host mask)"
 )
 
+; The same fact when the mask is upcast to meet F32 scores. translate_sdpa
+; casts Q/K to F32 before the matmul, so the scores are F32 and a bf16 mask
+; arrives behind a Cast; binding the Input through it keeps the mask a
+; recognition premise for that spelling too.
+(rule
+    (
+        (= ?masked (Op (Add ?m_s ?m_a ?m_b ?m_o)
+            (ICons ?scaled (ICons ?mc (INil)))))
+        (= ?scaled (Op (Mul ?sc_s ?sc_a ?sc_b ?sc_o)
+            (ICons ?scores (ICons ?scale_c (INil)))))
+        (const_like ?scale_c ?scale_val)
+        (= ?mc (Op (Cast ?cz (F32)) (ICons ?mask (INil))))
+        (= ?mask (Input ?mask_idx ?mask_name (Bf16)))
+    )
+    ((pa_masked ?masked ?scores ?scale_val -1.0))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention masked fact (bf16 mask upcast)"
+)
+
 ; Triu-gather producer: Add(Mul(scores, 1/sqrt(d)), triu_mask). window_left is
 ; -1 (full attention) — a triu causal mask carries no sliding window.
 (rule
@@ -228,6 +247,69 @@
     :ruleset kernel_fuse_late_pre
     :name "PagedAttention gqa operand (contiguity barrier)"
 )
+
+; A zero, possibly behind a Cast: the translated graph materialises the same
+; broadcast as `Add(gathered, 0.0)` where a hand-written one uses
+; `Mul(gathered, 1.0)` -- the other identity element -- and its zero arrives
+; as Cast(Constant(0.0) -> bf16).
+(relation pa_zero (IR))
+(rule
+    ((const_like ?z 0.000000))
+    ((pa_zero ?z))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention zero"
+)
+(rule
+    (
+        (pa_zero ?z)
+        (= ?c (Op (Cast ?cz ?dt) (ICons ?z (INil))))
+    )
+    ((pa_zero ?c))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention zero through cast"
+)
+
+; Add-zero barrier, both operand orders (the traced graph puts the zero first).
+(rule
+    (
+        (= ?k_gqa (Op (Add ?ks ?ka ?kb ?ko) (ICons ?k_gathered (ICons ?z (INil)))))
+        (pa_zero ?z)
+    )
+    ((pa_gqa_operand ?k_gqa ?k_gathered))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention gqa operand (add-zero barrier)"
+)
+(rule
+    (
+        (= ?k_gqa (Op (Add ?ks ?ka ?kb ?ko) (ICons ?z (ICons ?k_gathered (INil)))))
+        (pa_zero ?z)
+    )
+    ((pa_gqa_operand ?k_gqa ?k_gathered))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention gqa operand (add-zero barrier, zero first)"
+)
+
+; The operand survives an upcast: translate_sdpa casts to F32 BEFORE the
+; matmul, where the hand-written chain casts after. Closing over Cast keeps
+; one fact family for both placements.
+(rule
+    (
+        (pa_gqa_operand ?op ?g)
+        (= ?c (Op (Cast ?cz (F32)) (ICons ?op (INil))))
+    )
+    ((pa_gqa_operand ?c ?g))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention gqa operand (through F32 upcast)"
+)
+
+; And the V-side fact follows from the operand fact, so the barrier variants
+; do not have to be restated there.
+(rule
+    ((pa_gqa_operand ?op ?g))
+    ((pa_v_operand ?op ?op))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention v operand (from gqa operand)"
+)
 (rule
     ((pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?g ?ctx ?kvdim))
     ((pa_gqa_operand ?k_gathered ?k_gathered))
@@ -243,6 +325,70 @@
 
 ; Same for V: pa_v_operand already has upcast/no-upcast forms, both of which
 ; require the barrier. Add the barrier-absent one.
+; The QK and P.V broadcast-muls, staged for rank. A hand-written graph writes
+; them 4-D (heads, q, c, hd); a translated one carries a leading batch dim.
+; Everything else in the island binds reduce SIZES, not ranks, so these two
+; are the only rank-sensitive premises.
+(relation pa_qk_mul (IR IR IR Expression Expression Expression Expression))
+(rule
+    ((= ?qk (Op (Mul
+        (ECons ?nheads (ECons ?in_tok (ECons ?ctx (ECons ?hd (ENil)))))
+        ?a ?b ?c)
+        (ICons ?q (ICons ?k (INil))))))
+    ((pa_qk_mul ?qk ?q ?k ?nheads ?in_tok ?ctx ?hd))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention qk mul (4-D)"
+)
+(rule
+    ((= ?qk (Op (Mul
+        (ECons ?batch (ECons ?nheads (ECons ?in_tok (ECons ?ctx (ECons ?hd (ENil))))))
+        ?a ?b ?c)
+        (ICons ?q (ICons ?k (INil))))))
+    ((pa_qk_mul ?qk ?q ?k ?nheads ?in_tok ?ctx ?hd))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention qk mul (batched)"
+)
+
+; Operand order is not fixed: the traced graph puts K first. Emit both role
+; assignments; the join with pa_gqa_operand / the probs chain picks the one
+; whose operand actually has the right producer behind it.
+(rule
+    ((pa_qk_mul ?qk ?q ?k ?nh ?it ?ct ?hd))
+    ((pa_qk_mul ?qk ?k ?q ?nh ?it ?ct ?hd))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention qk mul (commuted)"
+)
+
+(relation pa_pv_mul (IR IR IR Expression Expression Expression Expression))
+(rule
+    ((= ?pv (Op (Mul
+        (ECons ?nheads (ECons ?in_tok (ECons ?hd (ECons ?ctx (ENil)))))
+        ?a ?b ?c)
+        (ICons ?probs (ICons ?v (INil))))))
+    ((pa_pv_mul ?pv ?probs ?v ?nheads ?in_tok ?ctx ?hd))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention pv mul (4-D)"
+)
+(rule
+    ((= ?pv (Op (Mul
+        (ECons ?batch (ECons ?nheads (ECons ?in_tok (ECons ?hd (ECons ?ctx (ENil))))))
+        ?a ?b ?c)
+        (ICons ?probs (ICons ?v (INil))))))
+    ((pa_pv_mul ?pv ?probs ?v ?nheads ?in_tok ?ctx ?hd))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention pv mul (batched)"
+)
+
+; Operand order is not fixed: the traced graph puts K first. Emit both role
+; assignments; the join with pa_gqa_operand / the probs chain picks the one
+; whose operand actually has the right producer behind it.
+(rule
+    ((pa_pv_mul ?pv ?probs ?v ?nh ?it ?ct ?hd))
+    ((pa_pv_mul ?pv ?v ?probs ?nh ?it ?ct ?hd))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention pv mul (commuted)"
+)
+
 (relation pa_island (IR IR IR IR IR Expression Expression Expression Expression f64 f64))
 
 (rule
@@ -272,10 +418,7 @@
         ; which reads src heads-major — would then double-transpose it.
 
         ; ── Q·K^T: bf16 mul + reduce over hd, then cast up ──
-        (= ?qk (Op (Mul
-            (ECons ?nheads (ECons ?input_tokens (ECons ?context_tokens (ECons ?hdim (ENil)))))
-            ?qk_a ?qk_b ?qk_o)
-            (ICons ?q_bf (ICons ?k_gqa (INil)))))
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?input_tokens ?context_tokens ?hdim)
         (pa_qk_scores ?scores ?qk)
         (flashinfer_head_dim_ok_16bit ?hdim)
 
@@ -301,10 +444,7 @@
             (ICons ?num (ICons ?rdenom (INil)))))
 
         ; ── P·V: mul + reduce over c → the F32 output point ──
-        (= ?pv (Op (Mul
-            (ECons ?nheads2 (ECons ?input_tokens (ECons ?hdim2 (ECons ?context_tokens (ENil)))))
-            ?pv_a ?pv_b ?pv_o)
-            (ICons ?probs (ICons ?v_ctx (INil)))))
+        (pa_pv_mul ?pv ?probs ?v_ctx ?nheads2 ?input_tokens ?context_tokens ?hdim2)
         (= ?out (Op (Sum ?o_shape ?context_tokens ?o_in ?o_iter ?o_out)
             (ICons ?pv (INil))))
     )
@@ -597,10 +737,7 @@
     (
         (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
         (pa_gqa_operand ?k_gqa ?kg)
-        (= ?qk (Op (Mul
-            (ECons ?nheads (ECons ?in_tok (ECons ?ctx (ECons ?hdim (ENil)))))
-            ?a ?b ?c)
-            (ICons ?q_bf (ICons ?k_gqa (INil)))))
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?ctx ?hdim)
     )
     ((pa_dbg_k3 ?qk))
     :ruleset kernel_fuse_late2
@@ -612,10 +749,7 @@
     (
         (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
         (pa_gqa_operand ?k_gqa ?kg)
-        (= ?qk (Op (Mul
-            (ECons ?nheads (ECons ?in_tok (ECons ?ctx (ECons ?hdim (ENil)))))
-            ?a ?b ?c)
-            (ICons ?q_bf (ICons ?k_gqa (INil)))))
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?ctx ?hdim)
         (pa_qk_scores ?scores ?qk)
         (flashinfer_head_dim_ok_16bit ?hdim)
         (pa_masked ?masked ?scores ?scale_val ?window_val)
@@ -623,4 +757,63 @@
     ((pa_dbg_k4 ?masked))
     :ruleset kernel_fuse_late2
     :name "dbg K4: + scores + head_dim + mask"
+)
+
+(relation pa_dbg_k4a (IR))
+(rule
+    (
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_gqa_operand ?k_gqa ?kg)
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?ctx ?hdim)
+        (pa_qk_scores ?scores ?qk)
+    )
+    ((pa_dbg_k4a ?scores))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4a: + qk scores"
+)
+(relation pa_dbg_k4b (IR))
+(rule
+    (
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_gqa_operand ?k_gqa ?kg)
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?ctx ?hdim)
+        (flashinfer_head_dim_ok_16bit ?hdim)
+    )
+    ((pa_dbg_k4b ?qk))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4b: + head_dim gate"
+)
+(relation pa_dbg_k4c (IR))
+(rule
+    (
+        (pa_qk_scores ?scores ?qk)
+        (pa_masked ?masked ?scores ?sv ?wv)
+    )
+    ((pa_dbg_k4c ?masked))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4c: scores joined to mask"
+)
+
+(relation pa_dbg_k4d (IR))
+(rule
+    (
+        (pa_qk_mul ?qk ?q ?k ?nh ?it ?ct ?hd)
+        (= ?scores (Op (Sum ?a ?b ?c ?d ?e) (ICons ?qk (INil))))
+    )
+    ((pa_dbg_k4d ?scores))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4d: staged mul consumed by a raw Sum"
+)
+
+(relation pa_dbg_k4e (IR))
+(rule
+    (
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_gqa_operand ?k_gqa ?kg)
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nh ?it ?ctx ?hd)
+        (= ?scores (Op (Sum ?a ?b ?c ?d ?e) (ICons ?qk (INil))))
+    )
+    ((pa_dbg_k4e ?scores))
+    :ruleset kernel_fuse_late2
+    :name "dbg K4e: the chain's qk consumed by a raw Sum"
 )

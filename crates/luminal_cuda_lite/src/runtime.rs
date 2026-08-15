@@ -2153,6 +2153,75 @@ impl CudaRuntime {
                     conflicts
                 );
             }
+            // Per-MEMBER lifetimes for the giant buffers. Slot aggregates
+            // (min start, max end over members) were misread once already: a
+            // slot with many disjoint members legitimately spans the program.
+            // Only individual [start..end] ranges say whether giants overlap.
+            if std::env::var_os("LUMINAL_ARENA_REPORT_MEMBERS").is_some() {
+                // member.bytes is set at INITIAL planning and never updated;
+                // capacities refresh per dyn map. Print both, because a slot
+                // whose capacity dwarfs every member means the packing was
+                // decided at sizes that no longer describe anything.
+                let mut all: Vec<&PlannedBuffer> = bucket
+                    .arena_slots
+                    .iter()
+                    .flat_map(|s| s.members.iter())
+                    .collect();
+                all.sort_by_key(|m| std::cmp::Reverse(m.bytes));
+                println!("[arena]   ── largest members by PLANNING-TIME bytes ──");
+                for m in all.iter().take(8) {
+                    let cap = bucket
+                        .logical_buffer_capacity_bytes
+                        .get(&m.node)
+                        .copied()
+                        .unwrap_or(0);
+                    println!(
+                        "[arena]   plan {:>9.2} MiB  now {:>9.2} MiB  node={:<5} live=[{:>5}..{:>5}]",
+                        m.bytes as f64 / (1 << 20) as f64,
+                        cap as f64 / (1 << 20) as f64,
+                        m.node.index(),
+                        m.start,
+                        m.end
+                    );
+                }
+                // and the members of the largest slot, with their refreshed sizes
+                if let Some((idx, slot)) = bucket
+                    .arena_slots
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, s)| s.capacity_bytes)
+                {
+                    println!(
+                        "[arena]   ── slot {idx} ({:.1} MiB): members by refreshed size ──",
+                        slot.capacity_bytes as f64 / (1 << 20) as f64
+                    );
+                    let mut mem: Vec<_> = slot.members.iter().collect();
+                    mem.sort_by_key(|m| {
+                        std::cmp::Reverse(
+                            bucket
+                                .logical_buffer_capacity_bytes
+                                .get(&m.node)
+                                .copied()
+                                .unwrap_or(0),
+                        )
+                    });
+                    for m in mem.iter().take(4) {
+                        let cap = bucket
+                            .logical_buffer_capacity_bytes
+                            .get(&m.node)
+                            .copied()
+                            .unwrap_or(0);
+                        println!(
+                            "[arena]     plan {:>9.2} MiB  now {:>9.2} MiB  node={:<5} live=[{:>5}..{:>5}]",
+                            m.bytes as f64 / (1 << 20) as f64,
+                            cap as f64 / (1 << 20) as f64,
+                            m.node.index(),
+                            m.start,
+                            m.end
+                        );
+                    }
+                }
+            }
             let giants = slots.iter().filter(|(b, _, _)| *b >= (1 << 28)).count();
             println!(
                 "[arena]   {} slots >= 256 MiB, {} conflict pairs total",
