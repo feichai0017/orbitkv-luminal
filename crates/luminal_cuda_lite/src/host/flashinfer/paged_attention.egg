@@ -251,6 +251,51 @@
     :name "PagedAttention kv gathers (rolled 3-D from 2-D pool)"
 )
 
+; Rolled form over a 3-D pool (the translated layout): 4-D iterator-bearing
+; view from a 4-D stacked pool.
+(rule
+    (
+        (= ?k_gathered (Op (Gather
+            (ECons ?ka (ECons ?kh (ECons ?context_tokens (ECons ?khd (ENil)))))
+            ?kg_a
+            (ECons ?kb (ECons ?kc (ECons ?kd (ECons ?ke (ENil)))))
+            ?kg_b)
+            (ICons ?flat_gidx (ICons ?k_pool (INil)))))
+        (= ?v_gathered (Op (Gather
+            (ECons ?va (ECons ?vh (ECons ?context_tokens (ECons ?vhd (ENil)))))
+            ?vg_a
+            (ECons ?vb (ECons ?vc (ECons ?vd (ECons ?ve (ENil)))))
+            ?vg_b)
+            (ICons ?flat_gidx (ICons ?v_pool (INil)))))
+    )
+    ((pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?flat_gidx
+        ?context_tokens (MMul ?kh ?khd)))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention kv gathers (rolled 4-D from 4-D pool)"
+)
+
+; And 3-D from 3-D, kvdim reconstructed the same way.
+(rule
+    (
+        (= ?k_gathered (Op (Gather
+            (ECons ?kh (ECons ?context_tokens (ECons ?khd (ENil))))
+            ?kg_a
+            (ECons ?kb (ECons ?kc (ECons ?kd (ENil))))
+            ?kg_b)
+            (ICons ?flat_gidx (ICons ?k_pool (INil)))))
+        (= ?v_gathered (Op (Gather
+            (ECons ?vh (ECons ?context_tokens (ECons ?vhd (ENil))))
+            ?vg_a
+            (ECons ?vb (ECons ?vc (ECons ?vd (ENil))))
+            ?vg_b)
+            (ICons ?flat_gidx (ICons ?v_pool (INil)))))
+    )
+    ((pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?flat_gidx
+        ?context_tokens (MMul ?kh ?khd)))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention kv gathers (rolled 3-D from 3-D pool)"
+)
+
 ; The K operand handed to the QK matmul.
 ;
 ; A hand-written model writes `expand_dim(..).merge_dims(..) * 1.0`, where the
