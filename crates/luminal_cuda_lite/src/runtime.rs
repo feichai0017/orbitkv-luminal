@@ -14,9 +14,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use luminal::buffer_tensor_ir::TypedBuffer;
 use luminal::bufferize::BufferIrGraph;
 use luminal::graph;
-use luminal::implementation_search::{
-    search_implementations_with_ops, ImplementationSearchOptions, SearchOutcome,
-};
+use luminal::implementation_search::{ImplementationSearchOptions, SearchOutcome};
 use luminal::prelude::{FxHashMap, NodeIndex};
 use luminal::shape;
 
@@ -86,7 +84,7 @@ impl CudaRuntime {
     pub fn allow_list() -> Vec<&'static str> {
         let labels: Vec<&'static str> =
             crate::kernels::cuda_kernels().iter().map(|k| k.label).collect();
-        luminal::reference::ops::built_in_matchers()
+        crate::ops::cuda_matchers()
             .iter()
             .map(|m| m.egglog_constructor())
             .filter(|ctor| {
@@ -121,7 +119,7 @@ impl CudaRuntime {
         };
         let full = format!(
             "{}\n\n{}",
-            luminal::egglog_snippet::assembled_program(),
+            luminal::egglog_snippet::assembled_program_for(&crate::ops::cuda_matchers()),
             program.text
         );
         let mut egraph = luminal::egglog_snippet::new_egraph();
@@ -131,7 +129,7 @@ impl CudaRuntime {
             let mut doors = Vec::new();
             let unchecked = format!(
                 "{}\n\n{}\n{}\n{}",
-                luminal::egglog_snippet::assembled_program(),
+                luminal::egglog_snippet::assembled_program_for(&crate::ops::cuda_matchers()),
                 native.pre_schedule,
                 native.binding_seeds,
                 luminal::reference_binding::SCHEDULE
@@ -151,12 +149,17 @@ impl CudaRuntime {
         }
         let serialized = egraph.serialize(luminal::prelude::egglog::SerializeConfig::default());
 
-        let outcome = search_implementations_with_ops(
+        // Own matchers, own allow list, and a profiler that never
+        // touches another runtime: candidates rank by the heuristic
+        // byte-move estimate (device profiling arrives with CL-3).
+        let outcome = luminal::implementation_search::search_implementations_with_runtime(
             &serialized.egraph,
             &program,
             input_data,
             options,
             Some(Self::allow_list()),
+            Some(crate::ops::cuda_matchers()),
+            &mut luminal::implementation_search::StaticProfiler,
         )?;
 
         self.input_buffers = native

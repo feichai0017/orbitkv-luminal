@@ -14,6 +14,7 @@ pub mod buffer_tensor_ir;
 pub mod bufferize;
 pub mod dps;
 pub mod egglog_snippet;
+pub mod index_expr;
 pub mod subst_primitive;
 pub mod extractor;
 pub mod layout_ir;

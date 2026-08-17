@@ -150,12 +150,99 @@ pub fn search_implementations(
 
 /// As [`search_implementations`], with the runtime's ALLOWABLE-OPS
 /// inventory made explicit (M3 Step 2: per-runtime, unstandardized).
+/// How search prices a candidate plan. Runtimes supply their own
+/// (ruling 2026-08-17: every runtime owns its execution — including
+/// how its candidates are timed); the in-core implementations are the
+/// reference host executor (the historical behavior) and a static
+/// ranker that never executes.
+pub trait PlanProfiler {
+    /// Best-of-`trials` cost for the plan with buffer-keyed inputs;
+    /// smaller wins. `heuristic_cost` is the extracted graph's summed
+    /// bytes-moved estimate, for profilers that rank without running.
+    fn profile(
+        &mut self,
+        plan: &crate::bufferize::BufferIrGraph,
+        input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
+        trials: usize,
+        heuristic_cost: u64,
+    ) -> Result<u128>;
+}
+
+/// The historical profiler: execute on the reference host runtime.
+#[derive(Default)]
+pub struct ReferenceProfiler;
+
+impl PlanProfiler for ReferenceProfiler {
+    fn profile(
+        &mut self,
+        plan: &crate::bufferize::BufferIrGraph,
+        input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
+        trials: usize,
+        _heuristic_cost: u64,
+    ) -> Result<u128> {
+        let mut runtime = ReferenceRuntime::default();
+        runtime.load_plan(plan.clone());
+        for (id, data) in input_data {
+            runtime.set_data_buffer(*id, data.clone());
+        }
+        runtime.execute()?; // warmup + validity
+        let mut best_nanos = u128::MAX;
+        for _ in 0..trials.max(1) {
+            let start = Instant::now();
+            runtime.execute()?;
+            best_nanos = best_nanos.min(start.elapsed().as_nanos());
+        }
+        Ok(best_nanos)
+    }
+}
+
+/// Rank by the heuristic byte-move estimate without executing —
+/// deterministic, device-free search for runtimes that cannot (or
+/// need not) run candidates on the searching host.
+#[derive(Default)]
+pub struct StaticProfiler;
+
+impl PlanProfiler for StaticProfiler {
+    fn profile(
+        &mut self,
+        _plan: &crate::bufferize::BufferIrGraph,
+        _input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
+        _trials: usize,
+        heuristic_cost: u64,
+    ) -> Result<u128> {
+        Ok(u128::from(heuristic_cost).saturating_add(1))
+    }
+}
+
 pub fn search_implementations_with_ops(
     egraph: &egraph_serialize::EGraph,
     program: &LogicalProgram,
     input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
     allow_override: Option<Vec<&'static str>>,
+) -> Result<SearchOutcome> {
+    search_implementations_with_runtime(
+        egraph,
+        program,
+        input_data,
+        options,
+        allow_override,
+        None,
+        &mut ReferenceProfiler,
+    )
+}
+
+/// The runtime-owned search entry (ruling 2026-08-17): the caller
+/// supplies its OWN matcher set (None = the in-core reference
+/// registry, which Step B moves out) and its OWN profiler.
+pub fn search_implementations_with_runtime(
+    egraph: &egraph_serialize::EGraph,
+    program: &LogicalProgram,
+    input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
+    options: &ImplementationSearchOptions,
+    allow_override: Option<Vec<&'static str>>,
+    matchers: Option<Vec<Box<dyn crate::layout_ir::OpMatcher>>>,
+    profiler: &mut dyn PlanProfiler,
 ) -> Result<SearchOutcome> {
     // Tensor-keyed at the boundary (the retired-HLIR-keyspace design);
     // buffer-keyed internally via the program's slots.
@@ -174,8 +261,18 @@ pub fn search_implementations_with_ops(
     let allow = allow_override.unwrap_or_else(crate::reference::reference_allow_list);
     let mut timings = SearchTimings::default();
     let analysis_start = Instant::now();
-    let mut session = extractor::ExtractionSession::new(egraph, Some(&allow));
-    let index = extractor::producer_index_with_ops(egraph, Some(&allow));
+    let (mut session, index) = match matchers {
+        Some(matchers) => {
+            let session =
+                extractor::ExtractionSession::new_with_matcher_set(egraph, Some(&allow), matchers);
+            let index = session.producer_index();
+            (session, index)
+        }
+        None => (
+            extractor::ExtractionSession::new(egraph, Some(&allow)),
+            extractor::producer_index_with_ops(egraph, Some(&allow)),
+        ),
+    };
     timings.analysis_nanos = analysis_start.elapsed().as_nanos();
     // An empty index is NOT an error: a graph with no searchable producer
     // classes (pure identity — every output is an input value) has a
@@ -322,21 +419,6 @@ pub fn search_implementations_with_ops(
     let mut breakdown = RefusalBreakdown::default();
     let mut best: Option<(u128, Genome, BufferIrGraph)> = None;
 
-    let profile_plan = |plan: &BufferIrGraph, trials: usize| -> Result<u128> {
-        let mut runtime = ReferenceRuntime::default();
-        runtime.load_plan(plan.clone());
-        for (id, data) in input_data {
-            runtime.set_data_buffer(*id, data.clone());
-        }
-        runtime.execute()?; // warmup + validity
-        let mut best_nanos = u128::MAX;
-        for _ in 0..trials.max(1) {
-            let start = Instant::now();
-            runtime.execute()?;
-            best_nanos = best_nanos.min(start.elapsed().as_nanos());
-        }
-        Ok(best_nanos)
-    };
 
     for generation in 0..options.generations {
         let mut candidates: Vec<Genome> = Vec::with_capacity(options.generation_size);
@@ -410,8 +492,17 @@ pub fn search_implementations_with_ops(
                             continue;
                         }
                     };
+                    let heuristic_total: u64 = graph
+                        .dag
+                        .node_weights()
+                        .map(|node| match node {
+                            crate::layout_ir::ExtractedNode::LayoutOp(op) => op.heuristic_cost,
+                            _ => 0,
+                        })
+                        .sum();
                     let profile_start = Instant::now();
-                    let profiled = profile_plan(&plan, options.trials);
+                    let profiled =
+                        profiler.profile(&plan, input_data, options.trials, heuristic_total);
                     timings.profile_nanos += profile_start.elapsed().as_nanos();
                     let nanos = match profiled {
                         Ok(nanos) => nanos,

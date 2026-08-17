@@ -177,6 +177,28 @@ impl<'a> ExtractionSession<'a> {
         Self { extractor }
     }
 
+    /// The runtime-owned constructor (ruling 2026-08-17): extraction
+    /// over the CALLER's matcher set, intersected with its allow list.
+    pub fn new_with_matcher_set(
+        egraph: &'a EGraph,
+        allowed_ops: Option<&[&str]>,
+        matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
+    ) -> Self {
+        let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
+        let mut extractor = Extractor::new_with_matchers(egraph, allowed, None, matchers);
+        extractor.apply_viability_filter();
+        Self { extractor }
+    }
+
+    /// The genome sampling index over this session's matcher set —
+    /// derivable without consuming the session, so runtime callers
+    /// need not supply their matchers twice.
+    pub fn producer_index(
+        &self,
+    ) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
+        producer_index_from(&self.extractor)
+    }
+
     /// Classify the last failed extraction's blockage (diagnosis ruling
     /// 2026-08-07: understand refusals, never auto-repair). Returns
     /// (has_choice_cycle, has_dead_end, summary): choice-cycles are
@@ -486,7 +508,7 @@ pub fn producer_index_with_matchers(
 ) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
     let mut extractor = Extractor::new_with_matchers(egraph, None, None, matchers);
     extractor.apply_viability_filter();
-    producer_index_from(extractor)
+    producer_index_from(&extractor)
 }
 
 /// Every LayoutTensor class's candidate producers, as
@@ -510,11 +532,11 @@ pub fn producer_index_with_ops(
     let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
     let mut extractor = Extractor::new(egraph, allowed, None);
     extractor.apply_viability_filter();
-    producer_index_from(extractor)
+    producer_index_from(&extractor)
 }
 
 fn producer_index_from(
-    extractor: Extractor<'_>,
+    extractor: &Extractor<'_>,
 ) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
     let mut index = std::collections::BTreeMap::new();
     for (class, producers) in &extractor.producer_index {

@@ -94,7 +94,7 @@ fn codegen_emits_wellformed_sources() {
         dest_dims: vec![vec![2, 3]],
         dest_dtypes: vec![PlanDtype::F32],
     };
-    let add = luminal::reference::ops::AddFunctionalDps;
+    let add = luminal_cuda_lite::ops::add::AddFunctionalDps;
     let kernel = kernels::codegen_for(&add).expect("add has a row");
     let launches = (kernel.codegen)(&add, &ctx).expect("codegen");
     assert_eq!(launches.len(), 1);

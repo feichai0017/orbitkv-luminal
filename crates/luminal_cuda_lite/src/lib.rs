@@ -1,6 +1,6 @@
 //! CUDA-lite on the native ladder.
 //!
-//! The same six-method ladder as `luminal::reference::ReferenceRuntime`
+//! The same six-method ladder as the reference `ReferenceRuntime`
 //! (`load → bind_* → search → set_data → execute → get_*`), consuming
 //! the same `BufferIrGraph` plans, claiming ops through the same
 //! allow-list seam — but executing on a CUDA device with
@@ -27,6 +27,7 @@
 //! toposort order but no in-place claim is made.
 
 pub mod kernels;
+pub mod ops;
 pub mod runtime;
 
 #[cfg(feature = "device")]
