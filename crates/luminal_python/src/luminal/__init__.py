@@ -1,21 +1,19 @@
-"""Luminal Python bindings - PyTorch backend using Luminal."""
+"""Luminal's public Python frontend."""
 
-# Import Python components
-# Register DynamicCache pytree serialization once at import time
-from .cache_utils import _register_cache_serialization
-from .compiled_model import CompiledModel
+from .api import compile
+from .backend import backend, luminal_backend, make_backend, register_backend
+from .compiled_model import CompiledModel as CompiledModel
+from .luminal import CompiledGraph as CompiledGraph
+from .luminal import process_pt2 as process_pt2
+from .pytree_compat import register_optional_pytrees
 
-# Import Rust extension components (built by maturin)
-from .luminal import CompiledGraph, process_pt2
-from .main import luminal_backend, register_backend
+register_optional_pytrees()
 
-_register_cache_serialization()
-
-# Re-export everything for clean package interface
 __all__ = [
-    "CompiledModel",
+    "backend",
+    "compile",
+    "make_backend",
+    # Compatibility aliases. Prefer the names above in new code.
     "luminal_backend",
     "register_backend",
-    "CompiledGraph",
-    "process_pt2",
 ]

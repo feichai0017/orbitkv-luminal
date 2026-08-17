@@ -32,7 +32,7 @@ from transformers import (
     WhisperTokenizer,
 )
 
-from luminal.pt2 import compile as luminal_compile
+from luminal import compile as luminal_compile
 
 REPO_ID = "openai/whisper-tiny.en"
 

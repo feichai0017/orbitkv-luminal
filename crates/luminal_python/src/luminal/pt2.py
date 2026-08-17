@@ -1,8 +1,8 @@
 """PT2 compilation pipeline for Luminal.
 
-Provides:
-  - compile(model, example_input, ...) — standalone PT2 path
-  - pt2_backend(gm, example_inputs)    — torch.compile compatible backend
+This module currently owns capture, translation, and compilation. Public code
+should enter through ``luminal.compile`` or ``luminal.backend``; this module
+will be split along those responsibilities in the next frontend phase.
 """
 
 import inspect
@@ -13,85 +13,12 @@ import tempfile
 import torch
 
 from .compiled_model import CompiledModel
+from .factories import (
+    collect_weight_pointers,
+    detect_factory,
+    load_cpu_weights,
+)
 from .luminal import process_pt2
-from .main import _collect_weight_pointers, _detect_factory_capsule, _load_cpu_weights
-
-# ---------------------------------------------------------------------------
-# DynamicCache <> pytree registration
-#
-# Without this, torch.export.export raises when handed an HF model that
-# returns CausalLMOutputWithPast(past_key_values=DynamicCache(...)), which
-# is every model with use_cache=True. The registration mirrors the one in
-# transformers.integrations.executorch.register_dynamic_cache_export_support
-# — same dict-based flatten (key_cache / value_cache lists), same replay via
-# cache.update(k, v, idx), and the matching torch.fx._pytree spec for FX
-# graphs. Done at module import so both entry points (pt2_backend via
-# torch.compile and the direct compile() call) get it for free.
-# ---------------------------------------------------------------------------
-
-
-def _get_cache_dict(cache):
-    """Flatten a DynamicCache to a dict of parallel key/value lists."""
-    return {
-        "key_cache": [layer.keys for layer in cache.layers if layer.keys is not None],
-        "value_cache": [
-            layer.values for layer in cache.layers if layer.values is not None
-        ],
-    }
-
-
-def _flatten_dynamic_cache(cache):
-    return torch.utils._pytree._dict_flatten(_get_cache_dict(cache))
-
-
-def _flatten_with_keys_dynamic_cache(cache):
-    return torch.utils._pytree._dict_flatten_with_keys(_get_cache_dict(cache))
-
-
-def _unflatten_dynamic_cache(values, context):
-    from transformers.cache_utils import DynamicCache
-
-    dictionary = torch.utils._pytree._dict_unflatten(values, context)
-    cache = DynamicCache()
-    key_list = dictionary.get("key_cache", [])
-    value_list = dictionary.get("value_cache", [])
-    for idx in range(max(len(key_list), len(value_list))):
-        k = key_list[idx] if idx < len(key_list) else None
-        v = value_list[idx] if idx < len(value_list) else None
-        cache.update(k, v, idx)
-    return cache
-
-
-def _register_cache_serialization():
-    """Register DynamicCache with both torch.utils._pytree and torch.fx._pytree.
-
-    Idempotent: a second call is a no-op. Silently skipped if transformers is
-    not installed.
-    """
-    try:
-        from transformers.cache_utils import DynamicCache
-    except ImportError:
-        return
-
-    if DynamicCache in torch.utils._pytree.SUPPORTED_NODES:
-        return
-
-    torch.utils._pytree.register_pytree_node(
-        DynamicCache,
-        _flatten_dynamic_cache,
-        _unflatten_dynamic_cache,
-        serialized_type_name=f"{DynamicCache.__module__}.{DynamicCache.__name__}",
-        flatten_with_keys_fn=_flatten_with_keys_dynamic_cache,
-    )
-    torch.fx._pytree.register_pytree_flatten_spec(
-        DynamicCache,
-        lambda cache, spec: torch.fx._pytree._dict_flatten_spec(
-            _get_cache_dict(cache), spec
-        ),
-    )
-
-
-_register_cache_serialization()
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +244,7 @@ def _save_and_compile(
             weight_source = {}
 
         # Collect weight pointers for Rust (avoids duplicate GPU buffer allocation)
-        keep_alive, weight_device_ptrs, cpu_weights = _collect_weight_pointers(
+        keep_alive, weight_device_ptrs, cpu_weights = collect_weight_pointers(
             weight_source
         )
         if input_device_ptrs:
@@ -329,7 +256,7 @@ def _save_and_compile(
         )
 
         # Load CPU weights after compilation
-        _load_cpu_weights(compiled, cpu_weights)
+        load_cpu_weights(compiled, cpu_weights)
 
         return CompiledModel(
             compiled,
@@ -538,7 +465,7 @@ def compile(
         A CompiledModel callable.
     """
     if factory is None:
-        factory = _detect_factory_capsule(
+        factory = detect_factory(
             example_input
             if isinstance(example_input, (list, tuple))
             else [example_input]
@@ -758,7 +685,7 @@ def translate_module(gm, example_inputs, dynamic_shapes=None):
             for name, tensor in zip(placeholders, user_inputs)
             if isinstance(tensor, torch.Tensor) and tensor.is_cuda
         }
-        keep_alive, weight_device_ptrs, _cpu = _collect_weight_pointers(named)
+        keep_alive, weight_device_ptrs, _cpu = collect_weight_pointers(named)
         module = _translate_module(pt2_path, "", weight_device_ptrs)
         # `keep_alive` is returned, not attached: the bound pointers borrow from
         # these tensors — including any contiguous copies made here — and the
@@ -921,7 +848,7 @@ class _LazyDynamicCompiledModel:
 def pt2_backend(gm, example_inputs, factory=None, search_iterations=None):
     """torch.compile backend using PT2 pipeline.
 
-    Usage: torch.compile(model, backend=luminal.register_backend(capsule))
+    Usage: torch.compile(model, backend=luminal.make_backend(capsule))
 
     `search_iterations`: schedule-search budget; None means
     _BACKEND_DEFAULT_SEARCH_ITERATIONS. (The direct `compile()` API keeps its
@@ -932,7 +859,7 @@ def pt2_backend(gm, example_inputs, factory=None, search_iterations=None):
     import copy as _copy
 
     if factory is None:
-        factory = _detect_factory_capsule(example_inputs)
+        factory = detect_factory(example_inputs)
 
     # Work on a private copy of the GraphModule. Dynamo holds onto the
     # original to install guards and to retrace on shape changes; mutating it

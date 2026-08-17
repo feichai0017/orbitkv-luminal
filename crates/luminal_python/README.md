@@ -2,6 +2,30 @@
 
 PyTorch `torch.compile` integration for Luminal.
 
+## Frontends
+
+Luminal exposes two compilation entry points over the same compiler pipeline.
+Use the generic backend when normal PyTorch replacement and mutation semantics
+must be preserved for every runtime tensor:
+
+```python
+import luminal
+import torch
+
+compiled = torch.compile(model, backend=luminal.backend)
+```
+
+Use Luminal's direct, inference-oriented frontend when preparing a model for
+Luminal-managed execution:
+
+```python
+compiled = luminal.compile(model, example_input)
+```
+
+Custom native backend factories can be configured with
+`luminal.make_backend(factory)`. The older names `luminal_backend` and
+`register_backend` remain compatibility aliases.
+
 ## CUDA Tests
 
 The Python CUDA CI job builds the Rust extension with the CUDA feature and runs

@@ -186,7 +186,7 @@ def test_kv_cache_growing_r1_mla(device: torch.device):
 
     Exercises MLA: q_lora / kv_lora low-rank projections, decoupled RoPE split
     (qk_nope_head_dim + qk_rope_head_dim), and DynamicCache crossing the compile
-    boundary through the MLA update path (`cache_utils.py:102-121`).
+    boundary through the MLA update path.
 
     Runs in fp32 — in bf16, MLA's empty-tensor-cat inside DynamicLayer.update
     has a precision drift on the compiled path (logits ~3.7 on 1 layer) that
