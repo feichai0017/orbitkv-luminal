@@ -173,7 +173,7 @@ def test_bound_replay_keeps_python_scalar_output_on_device(device, monkeypatch):
 
     model = PythonScalarOutput().to(device)
     input_buffer = torch.randn(3, 4, device=device)
-    expected = input_buffer.sum()
+    expected = model(input_buffer)
     artifact = _capture_artifact(model, input_buffer)
     bound = artifact.bind(input_buffer)
 
@@ -187,10 +187,14 @@ def test_bound_replay_keeps_python_scalar_output_on_device(device, monkeypatch):
     assert isinstance(output, torch.Tensor)
     assert output.is_cuda
     assert output.ndim == 0
-    torch.testing.assert_close(output, expected)
+    assert output.dtype == torch.float64
+    torch.testing.assert_close(
+        output,
+        torch.scalar_tensor(expected, dtype=output.dtype, device=device),
+    )
 
 
-def test_bound_replay_commits_non_direct_writebacks(device):
+def test_bound_replay_commits_writebacks(device):
     if device.type != "cuda":
         pytest.skip("bound execution requires CUDA")
 
