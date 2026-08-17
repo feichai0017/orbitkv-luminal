@@ -15,6 +15,7 @@ struct BoundDestination {
     node: luminal::prelude::NodeIndex,
     data_ptr: u64,
     n_bytes: usize,
+    always_copy: bool,
 }
 
 #[pyclass(unsendable)]
@@ -143,6 +144,7 @@ pub(crate) fn bind(
             node: output_node,
             data_ptr: metadata.data_ptr,
             n_bytes: metadata.n_bytes(),
+            always_copy: false,
         });
     }
 
@@ -154,15 +156,22 @@ pub(crate) fn bind(
         let output_node = output_plan.node;
         let output = api.empty(py, shape, dtype_code, &device)?;
         let metadata = api.observe(py, &output)?;
-        unsafe {
-            graph
-                .runtime
-                .set_output_device_ptr(output_node, metadata.data_ptr, metadata.n_bytes())
-        };
+        // Generic invocation may have left a prior caller-owned destination
+        // registered. Returned bound outputs currently execute into runtime
+        // storage and are copied into their retained tensors after replay;
+        // writebacks above remain directly registered.
+        if !plan
+            .writebacks
+            .iter()
+            .any(|writeback| writeback.output.node == output_node)
+        {
+            graph.runtime.clear_output_device_ptr(output_node);
+        }
         destinations.push(BoundDestination {
             node: output_node,
             data_ptr: metadata.data_ptr,
             n_bytes: metadata.n_bytes(),
+            always_copy: true,
         });
         outputs.push(BoundOutput {
             tensor: output.unbind(),
@@ -193,7 +202,9 @@ impl BoundExecutable {
         let output_copies = self.output_copies.get_or_insert_with(|| {
             self.destinations
                 .iter()
-                .filter(|output| !graph.runtime.output_is_zero_copy(output.node))
+                .filter(|output| {
+                    output.always_copy || !graph.runtime.output_is_zero_copy(output.node)
+                })
                 .map(|output| (output.node, output.data_ptr, output.n_bytes))
                 .collect()
         });

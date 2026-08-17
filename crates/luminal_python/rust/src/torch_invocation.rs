@@ -372,14 +372,6 @@ fn invoke_with_state(
             if is_zero_copy_output_dtype(dtype_code) {
                 let output = api.empty(py, shape, dtype_code, &input_device)?;
                 let metadata = api.observe(py, &output)?;
-                unsafe {
-                    graph.runtime.set_output_device_ptr(
-                        output_plan.node,
-                        metadata.data_ptr,
-                        metadata.n_bytes(),
-                    )
-                };
-                state.external_outputs_registered = true;
                 state.prepared_outputs.push(Some(PreparedOutput {
                     tensor: output.unbind(),
                     data_ptr: metadata.data_ptr,
@@ -455,11 +447,9 @@ fn invoke_with_state(
                         "missing preallocated output at position {position}"
                     ))
                 })?;
-            if !graph.runtime.output_is_zero_copy(output_node) {
-                state
-                    .gpu_output_copies
-                    .push((output_node, output.data_ptr, output.n_bytes));
-            }
+            state
+                .gpu_output_copies
+                .push((output_node, output.data_ptr, output.n_bytes));
             output.tensor
         } else {
             read_output(

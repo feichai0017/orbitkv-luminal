@@ -53,6 +53,8 @@ def test_generic_invoke_observes_replaced_storage(device):
     # Preserve Python object identity while replacing its underlying storage.
     rebound = replacement.clone()
     rebound.set_(torch.full_like(replacement, 7.0))
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     torch.testing.assert_close(artifact(rebound)[0], model(rebound))
 
 
@@ -199,16 +201,16 @@ def test_bound_replay_commits_writebacks(device):
         pytest.skip("bound execution requires CUDA")
 
     model = UpdateState().to(device)
-    state_buffer = torch.empty(4, device=device)
+    state_buffer = torch.zeros(4, device=device)
     positions = torch.tensor([1, 3], device=device)
-    values = torch.randn(2, device=device)
+    values = torch.tensor([10.0, 20.0], device=device)
     artifact = _capture_artifact(model, (state_buffer, positions, values))
     bound = artifact.bind(state_buffer, positions, values)
 
     state_buffer.zero_()
-    values.copy_(torch.randn_like(values))
-    expected_state = torch.zeros_like(state_buffer)
-    expected_state[positions] = values
+    values.copy_(torch.tensor([2.0, 4.0], device=device))
+    expected_state = torch.tensor([0.0, 2.0, 0.0, 4.0], device=device)
+    torch.cuda.synchronize()
     output = bound.replay()[0]
 
     torch.testing.assert_close(state_buffer, expected_state)
