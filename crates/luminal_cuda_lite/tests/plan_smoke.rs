@@ -15,11 +15,11 @@ fn allow_list_is_a_strict_subset_of_the_reference_inventory() {
     for op in &cuda {
         assert!(reference.contains(op), "{op} not in the reference inventory");
     }
-    // Expression-carrying ops are CL-1b: the table must not claim them.
-    for absent in ["Iota", "Gather", "Scatter", "IndexMapApplyMaterialize"] {
+    // CL-1b: the expression-carrying ops are claimed now.
+    for present in ["Iota", "Gather", "ScatterFunctional", "IndexMapApplyMaterialize"] {
         assert!(
-            !cuda.iter().any(|op| op.contains(absent)),
-            "{absent} claimed before its codegen exists"
+            cuda.iter().any(|op| op.contains(present)),
+            "{present} missing from the CL-1b claim set"
         );
     }
 }
@@ -96,8 +96,9 @@ fn codegen_emits_wellformed_sources() {
     };
     let add = luminal::reference::ops::AddFunctionalDps;
     let kernel = kernels::codegen_for(&add).expect("add has a row");
-    let generated = (kernel.codegen)(&add, &ctx).expect("codegen");
-    assert_eq!(generated.n, 6);
-    assert!(generated.source.contains("__global__ void k("));
-    assert!(generated.source.contains("a[i] + b[i]"));
+    let launches = (kernel.codegen)(&add, &ctx).expect("codegen");
+    assert_eq!(launches.len(), 1);
+    assert_eq!(launches[0].n, 6);
+    assert!(launches[0].source.contains("__global__ void k("));
+    assert!(launches[0].source.contains("a[i] + b[i]"));
 }

@@ -190,13 +190,14 @@ pub fn execute_plan(
                         .collect::<Option<Vec<_>>>()
                         .ok_or_else(|| anyhow!("{label} dest lacks dtype"))?,
                 };
-                let generated = (kernel.codegen)(op.as_ref(), &ctxinfo)
+                let launches = (kernel.codegen)(op.as_ref(), &ctxinfo)
                     .with_context(|| format!("codegen for {label}"))?;
-                let func = cache.function(&generated.source)?;
 
                 // Kernel inputs are the non-destination operands; the
                 // destination is a fresh zeroed slice (out-of-place),
-                // swapped into storage after the launch.
+                // swapped into storage after the sequence. Launches in
+                // one sequence share the stream, so phase ordering
+                // (e.g. scatter's init-copy then writes) is free.
                 if writes.len() != 1 {
                     bail!("{label}: CL-2 handles single-destination ops, got {}", writes.len());
                 }
@@ -207,20 +208,34 @@ pub fn execute_plan(
                 let dest_bytes =
                     dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
                 let mut dest = stream.alloc_zeros::<u8>(dest_bytes.max(1)).context("dest alloc")?;
+                let mut scratch: Option<CudaSlice<u8>> = None;
 
-                let n = generated.n as u64;
-                let cfg = LaunchConfig {
-                    grid_dim: (((generated.n as u32).max(1) + 255) / 256, 1, 1),
-                    block_dim: (256, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                let mut builder = stream.launch_builder(&func);
-                for input in &inputs {
-                    builder.arg(input);
+                for generated in &launches {
+                    let func = cache.function(&generated.source)?;
+                    if generated.scratch_bytes > 0 && scratch.is_none() {
+                        scratch = Some(
+                            stream
+                                .alloc_zeros::<u8>(generated.scratch_bytes)
+                                .context("scratch alloc")?,
+                        );
+                    }
+                    let n = generated.n as u64;
+                    let cfg = LaunchConfig {
+                        grid_dim: (((generated.n as u32).max(1) + 255) / 256, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    let mut builder = stream.launch_builder(&func);
+                    for input in &inputs {
+                        builder.arg(input);
+                    }
+                    if generated.scratch_bytes > 0 {
+                        builder.arg(scratch.as_mut().unwrap());
+                    }
+                    builder.arg(&mut dest);
+                    builder.arg(&n);
+                    unsafe { builder.launch(cfg) }.with_context(|| format!("launch {label}"))?;
                 }
-                builder.arg(&mut dest);
-                builder.arg(&n);
-                unsafe { builder.launch(cfg) }.with_context(|| format!("launch {label}"))?;
                 storage.insert(writes[0].clone(), dest);
             }
         }

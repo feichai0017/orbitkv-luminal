@@ -93,7 +93,7 @@ pub use exp::ExpFunctionalDps;
 pub use exp2::Exp2FunctionalDps;
 pub use gather::GatherDps;
 pub use index_map_apply_materialize::IndexMapApplyMaterializeDps;
-pub use iota::IotaDps;
+pub use iota::{IotaDps, IotaExpr};
 pub use less_than::LessThanDps;
 pub use log2::Log2FunctionalDps;
 pub use materialize_layout_copy::MaterializeLayoutCopyDps;
