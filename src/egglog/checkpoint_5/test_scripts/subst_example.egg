@@ -156,6 +156,10 @@
       (IntExprCons (CoordVar p7_out_shape 0)
         (IntExprNil))) p7_source_shape))
 (int-subst-demand p7_parent p7_map)
+; ARM C delta: the P7 subterm check below reads this coordinate's own
+; memo row — demand it as a root (root-only substitution mints no
+; per-subterm rows).
+(int-subst-demand (CoordVar p7_source_shape 0) p7_map)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P8 — DOMAIN TARGETING (ruling 2026-07-29): a FOREIGN coordinate —
@@ -187,7 +191,7 @@
   (IntCastFromBool (BoolLessThanInt (CoordVar p9_source_shape 0) (IntLit 2))))
 (int-subst-demand p9_parent p9_map)
 
-(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (saturate (run)) (run subst-walk)) (saturate (run fixpoint-invariants)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; P1: swap lands both variables at once: 3*v0 + v1.

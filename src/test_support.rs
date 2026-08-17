@@ -1411,7 +1411,7 @@ mod harness_tests {
     (LogicalTensorCons row_iota (LogicalTensorCons col_iota (LogicalTensorNil)))))
 (let data_layout (RightMajorContiguousElementLayoutLit data_shape (bits-of (F32))))
 (let data_layout_tensor (LayoutTensorLit data_logical data_layout))
-(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let full = format!("{}\n\n{}", crate::egglog_snippet::assembled_program(), body);
         crate::egglog_snippet::new_egraph()
@@ -1608,7 +1608,7 @@ mod harness_tests {
   (LogicalScatter cache
     (LogicalTensorCons position (LogicalTensorCons column (LogicalTensorNil)))
     src))
-(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (saturate (run)) (run subst-walk)) (saturate (run fixpoint-invariants)))
 "#;
         let program = format!("{preamble}
 
@@ -1742,7 +1742,7 @@ mod harness_tests {
 (set (buffer-freed-by out_buffer) (CallerFrees))
 (let output
   (BufferOutputLit (BufferTensorCons (BufferTensorLit out_lt out_buffer) (BufferTensorNil))))
-(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let program = format!("{preamble}\n\n{script}");
         let mut egraph = crate::egglog_snippet::new_egraph();
@@ -1768,7 +1768,7 @@ mod harness_tests {
 (let mystery_var (IntVar "mystery_var"))
 (let unsafe_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
 (let unbounded_iota (LogicalIota mystery_var unsafe_shape))
-(run-schedule (saturate (run)) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (saturate (run)) (run subst-walk)) (saturate (run fixpoint-invariants)))
 (check (= ?demanded_lower (lower-bound-of mystery_var)))
 (check (= ?demanded_upper (upper-bound-of mystery_var)))
 "#;
@@ -2580,7 +2580,7 @@ mod intcoordvar_probe {
   (IndexMapLit (IntExprCons (CoordVar out_shape 0) (IntExprNil)) vec_shape) out_shape))
 (let v_layout (RightMajorContiguousElementLayoutLit vec_shape (bits-of (F32))))
 (let v_lt (LayoutTensorLit v_in v_layout))
-(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#,
         );
         let mut egraph = crate::egglog_snippet::new_egraph();
@@ -2770,7 +2770,7 @@ mod stage4b_probes {
 (let v (LogicalIndexMapApply plog (IndexMapLit (IntExprCons (CoordVar osh 2) (IntExprCons (CoordVar osh 0) (IntExprNil))) psh) osh))
 (let dsh (ShapeLit (IntExprCons (IntLit 1) (IntExprCons (IntLit 2) (IntExprNil)))))
 (let d (RightMajorContiguousElementLayoutLit dsh (bits-of (F32))))
-(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
         let mut egraph = crate::egglog_snippet::new_egraph();
@@ -3103,6 +3103,97 @@ mod stage4b_probes {
         );
     }
 
+    /// SATURATION A/B REPORT (subst experiment): per specimen, time the
+    /// run-schedule ALONE (program pre-loaded) and report e-graph size —
+    /// total tuples (print-size sum) and distinct e-classes (serialized).
+    /// Run: cargo test --release saturation_ab_report -- --ignored --nocapture
+    #[test]
+    #[ignore = "measurement — run explicitly by name (release)"]
+    fn saturation_ab_report() {
+        let specimens: Vec<(&str, String)> = vec![
+            ("slice_pad(27x10)", {
+                let mut cx = crate::graph::Graph::new();
+                let a = cx.tensor((27usize, 10usize));
+                let _out = a
+                    .slice((2..6, 7..10))
+                    .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
+                    .output();
+                let (pre, _is, _os, _post, _labeled) =
+                    cx.logical.native_parts().expect("recorder clean");
+                pre
+            }),
+            ("batch_matmul(2,3,4)x(4,5)", {
+                let mut cx = crate::graph::Graph::new();
+                let a = cx.tensor((2usize, 3usize, 4usize));
+                let b = cx.tensor((4usize, 5usize));
+                let _out = a.matmul(b).output();
+                let (pre, _is, _os, _post, _labeled) =
+                    cx.logical.native_parts().expect("recorder clean");
+                pre
+            }),
+            ("specimen(1,2,3)x(3,5)", {
+                let mut cx = crate::graph::Graph::new();
+                let a = cx.tensor((1usize, 2usize, 3usize));
+                let b = cx.tensor((3usize, 5usize));
+                let _out = a.matmul(b).output();
+                let (pre, _is, _os, _post, _labeled) =
+                    cx.logical.native_parts().expect("recorder clean");
+                pre
+            }),
+            ("rejoin_lead1(1,8)", {
+                let mut cx = crate::graph::Graph::new();
+                let x = cx.tensor((1usize, 8usize));
+                let heads = x.split_dims(1, 4);
+                let x1 = heads.slice_along(0..2, 2);
+                let x2 = heads.slice_along(2..4, 2);
+                let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
+                let (pre, _is, _os, _post, _labeled) =
+                    cx.logical.native_parts().expect("recorder clean");
+                pre
+            }),
+        ];
+        for (name, pre) in &specimens {
+            let mut egraph = crate::egglog_snippet::new_egraph();
+            let body = format!("{}\n\n{pre}", crate::egglog_snippet::assembled_program());
+            egraph.parse_and_run_program(None, &body).expect("body loads");
+            let start = std::time::Instant::now();
+            egraph
+                .parse_and_run_program(None, crate::reference_binding::SCHEDULE)
+                .expect("schedule saturates");
+            let sat = start.elapsed().as_secs_f64();
+            let out = egraph
+                .parse_and_run_program(None, "(print-size)")
+                .expect("sizes");
+            let mut tuples: isize = 0;
+            for chunk in &out {
+                let text = chunk.to_string();
+                for fragment in text.split('(') {
+                    let fragment = fragment.trim().trim_end_matches(')');
+                    if let Some((_, count)) = fragment.rsplit_once(' ') {
+                        if let Ok(count) = count.trim().parse::<isize>() {
+                            tuples += count;
+                        }
+                    }
+                }
+            }
+            use egglog::SerializeConfig;
+            let serialized = egraph.serialize(SerializeConfig::default()).egraph;
+            let mut classes = std::collections::HashSet::new();
+            let mut intadd = 0usize;
+            for node in serialized.nodes.values() {
+                classes.insert(node.eclass.clone());
+                if node.op == "IntAdd" {
+                    intadd += 1;
+                }
+            }
+            eprintln!(
+                "[sat-ab] {name}: saturation {sat:.3}s | tuples {tuples} | \
+                 classes {} | IntAdd nodes {intadd}",
+                classes.len()
+            );
+        }
+    }
+
     /// SATURATION PROFILER (Austin commissioned 2026-08-05): run each
     /// specimen's FULL schedule once and read egglog's own RunReport —
     /// per-rule search+apply times and per-ruleset totals. Suspect under
@@ -3214,7 +3305,7 @@ mod stage4b_probes {
 (let plt (LayoutTensorLit plog p))
 (let osh (ShapeLit (IntExprCons (IntLit 5) (IntExprCons (IntLit 4) (IntExprNil)))))
 (let v (LogicalIndexMapApply plog (IndexMapLit (IntExprCons (CoordVar osh 1) (IntExprCons (CoordVar osh 0) (IntExprNil))) psh) osh))
-(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
         let err = crate::egglog_snippet::new_egraph()
@@ -3299,7 +3390,7 @@ mod subst_guard_study {
 (let sg_map (IndexMapLit (IntExprCons sg_entry (IntExprNil)) sg_src))\n\
 (let sg_coord (CoordVar sg_src 0))\n\
 (int-subst-demand sg_coord sg_map)\n\
-(run-schedule (saturate (run)))\n";
+(run-schedule (saturate (saturate (run)) (run subst-walk)))\n";
         let sg4_common = "\
 (let s4n (IntVar \"s4n\"))\n\
 (set (lower-bound-of s4n) (bigint 1))\n\
@@ -3309,10 +3400,10 @@ mod subst_guard_study {
 (let s4_map (IndexMapLit (IntExprCons s4_entry (IntExprNil)) s4_src))\n\
 (let s4_coord (CoordVar s4_src 0))\n\
 (int-subst-demand s4_coord s4_map)\n\
-(run-schedule (saturate (run)))\n";
+(run-schedule (saturate (saturate (run)) (run subst-walk)))\n";
         vec![
             ("sg1_admits", format!("{sg1_common}(check (= (int-subst-of sg_coord sg_map) sg_entry))\n")),
-            ("sg1_tighten", format!("{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (run)))\n")),
+            ("sg1_tighten", format!("{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (saturate (run)) (run subst-walk)))\n")),
             ("sg2_static", "\
 (let s2_cout_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))\n\
 (let s2_cout (CoordVar s2_cout_shape 0))\n\
@@ -3321,7 +3412,7 @@ mod subst_guard_study {
 (let s2_map (IndexMapLit (IntExprCons s2_entry (IntExprNil)) s2_src))\n\
 (let s2_coord (CoordVar s2_src 0))\n\
 (int-subst-demand s2_coord s2_map)\n\
-(run-schedule (saturate (run)))\n\
+(run-schedule (saturate (saturate (run)) (run subst-walk)))\n\
 (check (= (int-subst-of s2_coord s2_map) s2_entry))\n".to_string()),
             ("sg3_identity", "\
 (let s3n (IntVar \"s3n\"))\n\
@@ -3333,10 +3424,10 @@ mod subst_guard_study {
 (let s3_map (IndexMapLit (IntExprCons s3_entry (IntExprNil)) s3_src))\n\
 (let s3_coord (CoordVar s3_src 0))\n\
 (int-subst-demand s3_coord s3_map)\n\
-(run-schedule (saturate (run)))\n\
+(run-schedule (saturate (saturate (run)) (run subst-walk)))\n\
 (check (= (int-subst-of s3_coord s3_map) s3_entry))\n".to_string()),
             ("sg4_admits", format!("{s4}(check (= (int-subst-of s4_coord s4_map) s4_entry))\n", s4 = sg4_common)),
-            ("sg4_tighten", format!("{s4}(set (upper-bound-of s4n) (bigint 1))\n(run-schedule (saturate (run)))\n", s4 = sg4_common)),
+            ("sg4_tighten", format!("{s4}(set (upper-bound-of s4n) (bigint 1))\n(run-schedule (saturate (saturate (run)) (run subst-walk)))\n", s4 = sg4_common)),
         ]
     }
 

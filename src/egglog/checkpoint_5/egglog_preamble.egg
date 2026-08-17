@@ -3563,14 +3563,6 @@
   )
   ((union (int-subst-of ?expr ?map) ?entry))
 )
-(rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntAdd ?lhs ?rhs)))
-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
-)
-(rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs)))
-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
-)
 ; IntMul images are ZERO-AWARE (the foldr zero-stride precedent, one level
 ; up): a zero factor image collapses the product image to (IntLit 0) DIRECTLY
 ; instead of minting IntMul(0, <symbolic>) scaffolding.
@@ -3616,26 +3608,6 @@
 ; identity needing no premises (the partiality clause: the image is as
 ; partial as the original, and consumers gate definedness where they
 ; union). Unconditional, like the IntAdd case.
-(rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntTruncDiv ?lhs ?rhs)))
-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
-)
-(rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs)))
-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
-)
-(rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs)))
-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
-)
-(rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntMin ?lhs ?rhs)))
-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
-)
-(rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs)))
-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
-)
 
 ; --- the bool bridge crosses substitution (Austin's ruling 2026-07-29;
 ; PRIMITIVE ROAD 2026-08-14) --- IntCastFromBool's child is a BoolExpr,
@@ -3647,45 +3619,109 @@
 ; witness-only closedness mirror in the road block below.
 (relation bool-subst-demand (BoolExpr IndexMap))
 
-(rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntCastFromBool ?bool)))
-  ((bool-subst-demand ?bool ?map))
-)
-(rule
-  ((bool-subst-demand ?bool ?map) (= ?bool (BoolLessThanInt ?lhs ?rhs)))
-  ((int-subst-demand ?lhs ?map) (int-subst-demand ?rhs ?map))
-)
 
-; ========== SUBST-PRIMITIVE ROAD (prototype branch, 2026-08-14) =========
-; The compound IMAGE arms (the per-constructor combine family) are gone:
-; images are built by ONE call to the vendored `unstable-subst` primitive
-; (egglog-experimental PR #60) — a root-keyed walk that copies the
-; reachable region under σ, every spelling at once, simultaneous by
-; construction. It runs in a :naive rule (the primitive is Context::Full;
-; :naive re-fires each round, which IS the staleness re-walk contract:
-; spellings the ring breeds after a walk are copied on a later round).
+; ================= THE SUBSTITUTION WALK (landed 2026-08-17) ============
+; Images are built by ONE call per composition site to the vendored
+; `unstable-subst` primitive (egglog-experimental #60, vendored in
+; src/subst_primitive.rs with three audited deltas: subsumed source
+; rows copy BORN-RETIRED via the local add_subsumed engine patch; memo
+; constructors are skipped as term structure; walk errors print their
+; reason). The walk copies the reachable region under σ — every
+; spelling at once, simultaneous by construction — from a :naive rule
+; in the subst-walk ruleset. The schedule runs that ruleset as an
+; OUTER STRATUM ((saturate (saturate (run)) (run subst-walk))): the
+; ring saturates between walk generations, so re-walks happen per
+; GENERATION, not per round. Both halves are load-bearing: per-round
+; re-walks cost 2-9x on model-scale searches, and per-generation
+; arrival is what lets the rejoin family saturate.
 ;
-; COMPLETION SEMANTICS ARE UNCHANGED. The walk is gated on
-; int-subst-closed — the old completion lattice reborn as a WITNESS
-; family: a demanded class is closed when every leaf beneath it is
-; admissible (a literal, an IntVar, or a coordinate whose GUARDED arm
-; above published its row — the in-range/domain guards stay exactly
-; where they were, per-occurrence). An expression containing an
-; out-of-domain axis or a foreign box's coordinate never closes, the
-; walk never fires, and the composition stalls fail-closed — the
-; subst_example P7/P8 refusal pins hold verbatim. The zero-absorption
-; arms above keep writing memo rows directly (absorption completes a
-; product even when the sibling image is underivable), and the base
-; closedness rule folds those in.
+; DEMANDS ARE ROOT-ONLY (the old operand-demand decomposition is gone
+; — it was the divergence's transmission channel: every ring-bred
+; spelling of a demanded class filed fresh demands on fresh partial
+; sums). Composition sites demand their offset roots; nothing else is
+; demanded, walked, or memoized. A check that wants a SUBTERM's memo
+; row demands that subterm as its own root (see the ARM C deltas in
+; subst_example/dynamic_dim_example). The zero-absorption Mul arms
+; above remain sound but only fire when both factor and product are
+; demanded roots; general absorption-completion (a zero factor
+; completing past an unclosable sibling) was retired with the
+; decomposition — it was a documented C1 "economy", exercised by
+; nothing, and shadowed the G7 degenerate bypass.
 ;
-; σ itself is UNGUARDED — admissibility gates the WALK (through
-; closedness), not the map. σ is derived from IndexMapLit by the fold
-; below: entries walked head (= highest axis) to tail with an explicit
-; axis counter seeded from the source rank; the done arm pins the
-; counter at -1, so a rank/entry-length mismatch (a malformed map)
-; simply never completes a σ — fail-closed, and the map-tag coherence
-; tripwire panics on the loud version of that corruption.
+; REFUSAL SEMANTICS (P7/P8) live in the closedness lattice below: the
+; walk is gated on int-subst-closed, derived by a witness-only
+; recursion (rows, never terms) — a class is closed when every leaf
+; beneath it is admissible (literal, IntVar, or a coordinate passing
+; the SAME two guard arms as the memo arms). Out-of-domain axes and
+; foreign coordinates never close; the composition stalls fail-closed.
+;
+; σ CARRIES THE GUARDS ITSELF: the fold below admits each entry through
+; the interval minbox arm or the structural same-extent arm, so a map
+; with any illegal entry never becomes a σ at all. Gating only the
+; walk was REFUTED (subst_guard_study sg1_tighten): a pin-collapse
+; re-spelling (extent-1 coordinate ≡ 0) opens closedness through the
+; IntLit leaf arm while an unguarded σ still holds an out-of-range
+; entry, and the walk's root-is-key fast path welds the zero class to
+; the entry's class. Both guard arms are monotone-stable (minbox lower
+; bounds only rise; class equality never unhappens), so σ completion
+; is shrink-stable. The fold walks entries head (= highest axis) to
+; tail with an axis counter seeded from the source rank; the done arm
+; pins the counter at -1, so a rank/entry-length mismatch never
+; completes a σ — fail-closed, with the map-tag coherence tripwire
+; panicking on the loud version of that corruption.
 (relation int-subst-closed (IntExpr IndexMap))
+; Closedness traversal is its own WITNESS-ONLY demand family — rows,
+; never terms, never walks: the traversal cost of the refusal lattice
+; without the old decomposition's image-minting.
+(relation int-subst-closed-demand (IntExpr IndexMap))
+(relation bool-subst-closed-demand (BoolExpr IndexMap))
+(rule ((int-subst-demand ?e ?m)) ((int-subst-closed-demand ?e ?m)))
+(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntAdd ?l ?r)))
+      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
+(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntMul ?l ?r)))
+      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
+(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntTruncDiv ?l ?r)))
+      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
+(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntTruncRem ?l ?r)))
+      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
+(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntCeilDiv ?l ?r)))
+      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
+(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntMin ?l ?r)))
+      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
+(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntMax ?l ?r)))
+      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
+(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntCastFromBool ?b)))
+      ((bool-subst-closed-demand ?b ?m)))
+(rule ((bool-subst-closed-demand ?b ?m) (= ?b (BoolLessThanInt ?l ?r)))
+      ((int-subst-closed-demand ?l ?m) (int-subst-closed-demand ?r ?m)))
+; leaf closedness witnesses (the memo arms only serve leaf ROOTS now):
+(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntLit ?v)))
+      ((int-subst-closed ?e ?m)))
+(rule ((int-subst-closed-demand ?e ?m) (= ?e (IntVar ?n)))
+      ((int-subst-closed ?e ?m)))
+(rule ((int-subst-closed-demand ?e ?m)
+       (= ?e (CoordVar ?source_shape ?axis))
+       (= ?m (IndexMapLit ?entries ?source_shape))
+       (= ?entry (expr-list-nth-from-end ?entries ?axis))
+       (= ?source_shape (ShapeLit ?source_dims))
+       (= ?extent (expr-list-nth-from-end ?source_dims ?axis))
+       (= ?entry_lower (lower-bound-of ?entry))
+       (= ?entry_upper (upper-bound-of ?entry))
+       (>= ?entry_lower (bigint 0))
+       (= ?extent_lower (lower-bound-of ?extent))
+       (<= ?entry_upper (- ?extent_lower (bigint 1))))
+      ((int-subst-closed ?e ?m)))
+(rule ((int-subst-closed-demand ?e ?m)
+       (= ?e (CoordVar ?source_shape ?axis))
+       (= ?m (IndexMapLit ?entries ?source_shape))
+       (= ?entry (expr-list-nth-from-end ?entries ?axis))
+       (= ?source_shape (ShapeLit ?source_dims))
+       (= ?extent (expr-list-nth-from-end ?source_dims ?axis))
+       (= ?entry (CoordVar ?entry_shape ?entry_axis))
+       (= ?entry_shape (ShapeLit ?entry_dims))
+       (= ?entry_extent (expr-list-nth-from-end ?entry_dims ?entry_axis))
+       (= ?entry_extent ?extent))
+      ((int-subst-closed ?e ?m)))
 (relation bool-subst-closed (BoolExpr IndexMap))
 (sort SigmaMap (Map IntExpr IntExpr))
 (relation sigma-walk (IndexMap IntExprList i64 SigmaMap))
@@ -3700,42 +3736,42 @@
 ; --- compound witnesses: closed over closed children, one arm per
 ; constructor the old combine family covered ---
 (rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntAdd ?lhs ?rhs))
+  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntAdd ?lhs ?rhs))
    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
   ((int-subst-closed ?expr ?map))
 )
 (rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs))
+  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntMul ?lhs ?rhs))
    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
   ((int-subst-closed ?expr ?map))
 )
 (rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntTruncDiv ?lhs ?rhs))
+  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntTruncDiv ?lhs ?rhs))
    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
   ((int-subst-closed ?expr ?map))
 )
 (rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs))
+  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntTruncRem ?lhs ?rhs))
    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
   ((int-subst-closed ?expr ?map))
 )
 (rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs))
+  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntCeilDiv ?lhs ?rhs))
    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
   ((int-subst-closed ?expr ?map))
 )
 (rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntMin ?lhs ?rhs))
+  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntMin ?lhs ?rhs))
    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
   ((int-subst-closed ?expr ?map))
 )
 (rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs))
+  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntMax ?lhs ?rhs))
    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
   ((int-subst-closed ?expr ?map))
 )
 (rule
-  ((int-subst-demand ?expr ?map) (= ?expr (IntCastFromBool ?bool))
+  ((int-subst-closed-demand ?expr ?map) (= ?expr (IntCastFromBool ?bool))
    (bool-subst-closed ?bool ?map))
   ((int-subst-closed ?expr ?map))
 )
@@ -3743,11 +3779,11 @@
 ; arms are deleted; the WALK crosses the cast natively — it traverses
 ; constructor rows of every eq-sort) ---
 (rule
-  ((bool-subst-demand ?bool ?map) (= ?bool (BoolLit ?value)))
+  ((bool-subst-closed-demand ?bool ?map) (= ?bool (BoolLit ?value)))
   ((bool-subst-closed ?bool ?map))
 )
 (rule
-  ((bool-subst-demand ?bool ?map) (= ?bool (BoolLessThanInt ?lhs ?rhs))
+  ((bool-subst-closed-demand ?bool ?map) (= ?bool (BoolLessThanInt ?lhs ?rhs))
    (int-subst-closed ?lhs ?map) (int-subst-closed ?rhs ?map))
   ((bool-subst-closed ?bool ?map))
 )
@@ -3801,11 +3837,13 @@
 ; --- the walk: one image per demanded closed class — all spellings of
 ; the region copied, untouched subgraphs shared, keys replaced
 ; simultaneously from the ORIGINAL map ---
+(ruleset subst-walk)
 (rule
   ((int-subst-demand ?expr ?map)
    (int-subst-closed ?expr ?map)
    (= ?sigma (sigma-out ?map)))
   ((union (int-subst-of ?expr ?map) (unstable-subst ?expr ?sigma)))
+  :ruleset subst-walk
   :naive
 )
 ; ================== END SUBST-PRIMITIVE ROAD BLOCK ==================

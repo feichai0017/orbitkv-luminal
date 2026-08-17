@@ -162,7 +162,11 @@
 ; SOURCE SEAM rows for list-authored strided layouts (affine migration)
 (strided-lists skip_layout skip_shape (IntExprCons (IntLit 12) (IntExprCons (IntLit 4) (IntExprNil))) (IntExprCons compound_zero_stride (IntExprCons (IntLit 1) (IntExprNil))) (bits-of storage_dtype))
 
-(run-schedule (saturate (run)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+; ARM C delta: checks below read these exprs' own memo rows — demand
+; each as a root (root-only substitution mints no per-subterm rows).
+(int-subst-demand seq_len row0_map)
+(int-subst-demand gap_probe_offset gap_transpose_map)
+(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 
 ; The right-major fold over [4, seq_len] produces SYMBOLIC strides
 ; [seq_len, 1]...
@@ -178,6 +182,12 @@
 ; outer_coord*seq_len + inner_coord.
 (let storage_offset
   (IntAdd (IntMul (CoordVar storage_shape 1) seq_len) (CoordVar storage_shape 0)))
+; ARM C delta: the element-level checks below read storage_offset's
+; own memo rows; it is named only after the main schedule, so demand
+; it here and re-saturate.
+(int-subst-demand storage_offset row0_map)
+(int-subst-demand storage_offset transpose_map)
+(run-schedule (saturate (saturate (run)) (run subst-walk)))
 (check
   (= storage_layout
      (ElementOffsetExpressionLayoutLit storage_offset storage_shape (bits-of storage_dtype))))

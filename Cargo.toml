@@ -93,11 +93,13 @@ candle-kernels = { git = "https://github.com/huggingface/candle.git", rev = "a0d
 [profile.dev.package."*"]
 opt-level = 3
 
-# LOCAL ENGINE PATCH (subst-primitive experiment 2026-08-14): adds the
-# atomic add_subsumed write (insert-born-retired) the vendored walk
-# needs — a copied subsumed row must never be live, even for one round
-# (the orbit our :subsume termination discipline exists to prevent).
-# Proposed upstream alongside egglog-experimental #60; drop when merged.
+# LOCAL ENGINE PATCH: adds the atomic add_subsumed write
+# (insert-born-retired) the vendored substitution walk needs — a copied
+# subsumed row must never be live, even for one round (the orbit our
+# :subsume termination discipline exists to prevent). The patched
+# checkout's provenance and regeneration recipe: vendor/README.md.
+# NEEDS A REAL HOME (fork or upstream, proposed alongside
+# egglog-experimental #60) before this branch is shared.
 [patch."https://github.com/egraphs-good/egglog"]
-egglog = { path = "/private/tmp/claude-501/-Users-austin-Desktop-egglog-layout-trial/6be55b70-b389-461d-b783-a76723a249a5/scratchpad/egglog-patched" }
-egglog-ast = { path = "/private/tmp/claude-501/-Users-austin-Desktop-egglog-layout-trial/6be55b70-b389-461d-b783-a76723a249a5/scratchpad/egglog-patched/egglog-ast" }
+egglog = { path = "/Users/austin/Desktop/egglog-add-subsumed" }
+egglog-ast = { path = "/Users/austin/Desktop/egglog-add-subsumed/egglog-ast" }
