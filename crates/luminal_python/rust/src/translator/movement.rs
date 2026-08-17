@@ -310,15 +310,15 @@ impl<'a> Translator<'a> {
         })
     }
 
-    /// `aten.clone` (and the copy a reshape of a strided tensor implies):
-    /// materialise a strided/broadcast view. The barrier is `* 1.0` — the
-    /// contiguity barrier the hand-written models use, so the same e-graph
-    /// rules see the same node. When the copy feeds exactly one `view` whose
-    /// shape is a merge of adjacent axes, the merge is done FIRST as a
-    /// ShapeTracker view and the barrier lands at the merged shape: an
+    /// `aten.clone` of a strided/broadcast view: materialise it. The barrier
+    /// is `* 1.0` — the contiguity barrier the hand-written models use, so the
+    /// same e-graph rules see the same node. When the copy feeds exactly one
+    /// `view` whose shape is a merge of adjacent axes, the merge is done FIRST
+    /// as a ShapeTracker view and the barrier lands at the merged shape: an
     /// `expand(kvh, g, d, c).reshape(kvh*g, d, c)` GQA broadcast then lowers
     /// to `Mul((kvh*g, d, c) with group stride i/g*.., 1.0)` — the native
-    /// spelling — instead of a rank-4 copy followed by a free view.
+    /// spelling — instead of a rank-4 copy followed by a free view. (The
+    /// following `view` then sees a contiguous tensor already at its shape.)
     pub(crate) fn materialize_copy(&mut self, node: &Node, a: GraphTensor) -> Result<GraphTensor> {
         if !has_broadcast_axis(&a.shape) && a.shape.is_contiguous() {
             return Ok(a);
@@ -341,21 +341,15 @@ impl<'a> Translator<'a> {
             resolve_neg1_dim_exprs(&exprs, &a.shape.dims)
         };
 
-        // Already at the target (a preceding `materialize_copy` landed there).
-        if a.shape.dims.as_slice() == shape.as_slice()
-            && a.shape.is_contiguous()
-            && !has_broadcast_axis(&a.shape)
-        {
-            return Ok(a);
-        }
+        let has_broadcast = a
+            .shape
+            .dims
+            .iter()
+            .zip(a.shape.strides.iter())
+            .any(|(d, s)| s.to_usize() == Some(0) && d.to_usize() != Some(1));
 
-        let a = if has_broadcast_axis(&a.shape) || !a.shape.is_contiguous() {
-            // A strided view: torch copies. Merge as a view where possible so
-            // the barrier lands at the target shape (see `materialize_copy`).
-            if let Some(view) = merge_view(a, &shape) {
-                return Ok(view * 1.0);
-            }
-            a * 1.0
+        let a = if has_broadcast || !a.shape.is_contiguous() {
+            a + 0.0
         } else {
             a
         };

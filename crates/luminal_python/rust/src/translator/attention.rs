@@ -115,31 +115,18 @@ impl<'a> Translator<'a> {
         }
 
         // ── The native attention spelling ──
-        //
-        // From here on the chain is spelled the way luminal's hand-written
-        // paged models spell it (`examples/paged_llama`, and the serving
-        // engine's llama3), so that the SAME e-graph rules — the FlashInfer
-        // islands in `luminal_cuda_lite` — see the same nodes whether the
-        // graph was written by hand or translated:
-        //
-        // * leading unit dims are squeezed away (a view) so the chain is
-        //   rank 3 — `(heads, s, d)`, `(heads, d, c)`, `(heads, s, c)`; the
-        //   islands' patterns are rank 3, and a size-1 batch axis is a fourth
-        //   dim with a nonzero stride that matches none of them;
-        // * K is permuted to `(heads, d, c)` and V kept `(heads, c, d)`
-        //   BEFORE their GQA expand, and each gets a `* 1.0` contiguity
-        //   barrier after `expand_dim + merge_dims` — the barrier is on the
-        //   operand the matmul consumes, with the group replication in its
-        //   merged-axis stride;
-        // * q is re-materialised TOKEN-major (`(s, heads, d)` in memory,
-        //   viewed back as `(heads, s, d)`): the FlashInferAttention host op
-        //   reads q as `(tokens, heads, dim)`;
-        // * Q/K are upcast to F32 after their barriers so QK^T, scale, mask
-        //   and softmax are F32 (torch parity, unchanged); V is upcast so P.V
-        //   runs in F32 too (previously probs were rounded to the value dtype
-        //   — strictly more precise now); the output is cast back to the
-        //   value dtype right after P.V. The hand-written models spell the
-        //   same casts.
+        // Spelled the way luminal's hand-written paged models spell it
+        // (`examples/paged_llama`), so the same e-graph rules — the FlashInfer
+        // islands — see the same nodes whether the graph was written by hand
+        // or translated: rank 3 (leading unit dims squeezed; the islands'
+        // patterns are rank 3), K permuted to (heads, d, c) and V kept
+        // (heads, c, d) BEFORE the GQA expand with a `* 1.0` barrier after
+        // (the barrier on the operand the matmul consumes, group replication
+        // in the merged stride), q re-materialised token-major (what the
+        // FlashInferAttention op reads), Q/K upcast to F32 after their
+        // barriers (torch parity, unchanged), V upcast so P.V is F32 too
+        // (previously probs were rounded to the value dtype — strictly more
+        // precise now), output cast back to the value dtype after P.V.
         let (mut q, mut k, mut v) = (query, key, value);
         let mut squeezed = 0usize;
         while q.shape.len() > 3

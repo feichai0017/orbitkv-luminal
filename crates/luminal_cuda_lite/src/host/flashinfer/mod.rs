@@ -265,48 +265,36 @@ impl FlashInferResolvedDecode {
         }
     }
 
-    /// Read the explicit indptr contents into the spec, once per distinct
-    /// device buffer per tick (`memo` is keyed by device pointer and lives for
-    /// one runtime step). Every attention layer of a model shares the same two
-    /// indptr Inputs, so this is one readback + one stream sync per tick
-    /// instead of one per layer. No-op for derived-indptr islands.
+    /// Read the explicit indptr contents into the spec. `memo` is keyed by
+    /// device pointer and lives for one runtime step: every attention layer
+    /// shares the same two indptr Inputs, so this is one readback (and one
+    /// stream sync) per tick, not one per layer. No-op for derived islands.
     pub(crate) fn fill_explicit_indptrs(
         &mut self,
         stream: &Arc<CudaStream>,
         memo: &mut FxHashMap<u64, Vec<i32>>,
     ) -> anyhow::Result<()> {
-        let Some(kv_ptr) = self.ptrs.explicit_kv_indptr else {
-            return Ok(());
-        };
         let rows = self.spec.batch_size + 1;
-        let mut pending: Vec<(u64, Vec<u8>)> = Vec::new();
-        let mut want = vec![kv_ptr];
-        if self.spec.is_prefill()
-            && let Some(qo_ptr) = self.ptrs.explicit_qo_indptr
-        {
-            want.push(qo_ptr);
-        }
-        for ptr in want {
-            if memo.contains_key(&ptr) {
-                continue;
+        let mut read = |ptr: u64| -> anyhow::Result<Vec<i32>> {
+            if let Some(v) = memo.get(&ptr) {
+                return Ok(v.clone());
             }
             let mut host_bytes = vec![0u8; rows * std::mem::size_of::<i32>()];
             unsafe {
                 result::memcpy_dtoh_async(&mut host_bytes, ptr, stream.cu_stream())?;
             }
-            pending.push((ptr, host_bytes));
-        }
-        if !pending.is_empty() {
             stream.synchronize()?;
-            for (ptr, bytes) in pending {
-                memo.insert(ptr, bytes_to_i32_vec(bytes));
-            }
+            let v = bytes_to_i32_vec(host_bytes);
+            memo.insert(ptr, v.clone());
+            Ok(v)
+        };
+        if let Some(kv_ptr) = self.ptrs.explicit_kv_indptr {
+            self.spec.kv_indptr_host = read(kv_ptr)?;
         }
-        self.spec.kv_indptr_host = memo[&kv_ptr].clone();
         if self.spec.is_prefill()
             && let Some(qo_ptr) = self.ptrs.explicit_qo_indptr
         {
-            self.spec.qo_indptr_host = memo[&qo_ptr].clone();
+            self.spec.qo_indptr_host = read(qo_ptr)?;
         }
         Ok(())
     }
@@ -1054,23 +1042,22 @@ impl PreparedFlashInferDecode {
     /// Also copies the live slot indices, bounded by the live context length,
     /// so the captured island never reads past this tick's `gather_idx`.
     ///
-    /// Returns `false` when the island must be recaptured instead: the plan
-    /// layout moved (should not happen for a fixed spec — defensive), or the
-    /// live context outgrew the planned capacity.
+    /// The plan layout cannot move for a fixed spec, and the capture
+    /// signature carries the capacity, so a live context past it never
+    /// reaches here — both are invariants, and both bail.
     pub(crate) fn refresh_explicit_decode(
         &self,
         stream: &Arc<CudaStream>,
         kv_indptr_host: &[i32],
         gather_idx_ptr: u64,
         live_c: usize,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.explicit_graph_decode,
-            "refresh_explicit_decode on a non-explicit-decode plan"
+            self.explicit_graph_decode && live_c <= self.spec.c,
+            "FlashInfer explicit refresh: live c {live_c} vs planned {} (explicit decode: {})",
+            self.spec.c,
+            self.explicit_graph_decode
         );
-        if live_c > self.spec.c {
-            return Ok(false);
-        }
         anyhow::ensure!(
             kv_indptr_host.len() == self.spec.batch_size + 1,
             "FlashInfer explicit refresh: kv_indptr has {} rows, plan has batch {}",
@@ -1106,9 +1093,10 @@ impl PreparedFlashInferDecode {
             plan_ret == 0,
             "FlashInfer decode replan failed with error code {plan_ret}"
         );
-        if plan_info_buf[..plan_info_len as usize] != self.plan_info[..] {
-            return Ok(false);
-        }
+        anyhow::ensure!(
+            plan_info_buf[..plan_info_len as usize] == self.plan_info[..],
+            "FlashInfer explicit refresh: the plan layout moved for an unchanged spec"
+        );
         if live_c > 0 {
             unsafe {
                 (self.lib.extract_slot_indices)(
@@ -1120,7 +1108,7 @@ impl PreparedFlashInferDecode {
                 );
             }
         }
-        Ok(true)
+        Ok(())
     }
 
     pub(crate) fn update_current_c(

@@ -1982,71 +1982,29 @@ impl CudaGraphOp {
                         .map(|prepared| prepared.plan_c());
                     let plan_c = resolved.graph_plan_capacity(old_plan_c);
                     let signature = resolved.signature_for_graph_plan(plan_c);
-                    let mut needs_recapture =
+                    let needs_recapture =
                         state.flashinfer_ops[idx].signature != Some(signature.clone());
-                    // Explicit-indptr decode: the captured island is planned at
-                    // capacity and REPLAYED across ticks; the plan contents
-                    // (split-KV partition, live slot indices) are refreshed on
-                    // the host every tick — FlashInfer's own CUDA-graph
-                    // contract — instead of recapturing. Whatever prepared plan
-                    // this op ends up using this tick (kept, cache hit, or
-                    // fresh) must be refreshed exactly once for this tick.
-                    let explicit_decode = explicit_indptr && !resolved.is_prefill();
-                    let refresh_args = explicit_decode.then(|| {
+                    // Explicit-indptr decode replays its captured island across
+                    // ticks (capacity-planned, contents not in the signature);
+                    // its plan is refreshed on the host each tick instead —
+                    // FlashInfer's own CUDA-graph contract. Captured before
+                    // `resolved` moves into the prepare closure below.
+                    let refresh_args = (explicit_indptr && !resolved.is_prefill()).then(|| {
                         (
                             resolved.kv_indptr_host().to_vec(),
                             resolved.gather_idx_ptr(),
                             current_c,
                         )
                     });
-                    let mut refresh = |prepared: &Rc<PreparedFlashInferDecode>,
-                                       profile: &mut RecaptureProfile|
-                     -> anyhow::Result<bool> {
-                        let Some((kv_host, gather_idx_ptr, live_c)) = refresh_args.as_ref() else {
-                            return Ok(true);
-                        };
-                        if !refreshed_plans.insert(Rc::as_ptr(prepared) as usize) {
-                            return Ok(true);
-                        }
-                        let timer = Instant::now();
-                        let ok = prepared.refresh_explicit_decode(
-                            stream,
-                            kv_host,
-                            *gather_idx_ptr,
-                            *live_c,
-                        )?;
-                        profile.cublaslt_prepare += timer.elapsed();
-                        Ok(ok)
-                    };
-                    // A stale prepared plan that must not be handed back by
-                    // the prepare cache (its layout no longer matches).
-                    let mut evict_stale = false;
-                    if !needs_recapture && explicit_decode {
-                        match state.flashinfer_ops[idx].prepared.as_ref() {
-                            Some(prepared) => {
-                                if !refresh(prepared, &mut profile)? {
-                                    needs_recapture = true;
-                                    evict_stale = true;
-                                }
-                            }
-                            None => needs_recapture = true,
-                        }
-                    }
+                    let mut prepared_for_capture = None;
                     if needs_recapture {
-                        let needs_prepare = evict_stale
-                            || state.flashinfer_ops[idx]
-                                .signature
-                                .as_ref()
-                                .is_none_or(|old| old.spec != signature.spec);
-                        let prepared = if needs_prepare {
+                        let needs_prepare = state.flashinfer_ops[idx]
+                            .signature
+                            .as_ref()
+                            .is_none_or(|old| old.spec != signature.spec);
+                        if needs_prepare {
                             let step = state.flashinfer_step_indices[idx];
                             remove_flashinfer_prepare_cache_user(&mut prepared_cache_plan, step);
-                            if evict_stale
-                                && let Some(stale) = state.flashinfer_ops[idx].prepared.as_ref()
-                            {
-                                prepared_cache_plan
-                                    .retain(|entry| !Rc::ptr_eq(&entry.prepared, stale));
-                            }
                             let key = FlashInferPrepareKey::for_inputs(
                                 signature.spec.clone(),
                                 &state.flashinfer_ops[idx].inputs,
@@ -2068,40 +2026,47 @@ impl CudaGraphOp {
                                 profile.prepare_cache_hits += 1;
                             } else {
                                 profile.prepared_count += 1;
+                                // A fresh prepare seeded its own plan and slot indices.
+                                refreshed_plans.insert(Rc::as_ptr(&prepared) as usize);
                             }
-                            // A cache hit may be a plan last refreshed ticks
-                            // ago (a batch size seen before): bring it current
-                            // before it is captured. (A fresh prepare already
-                            // seeded itself; the extra host plan is a few
-                            // tens of microseconds, only on a batch change.)
-                            anyhow::ensure!(
-                                refresh(&prepared, &mut profile)?,
-                                "FlashInfer explicit-decode plan from the prepare cache does not \
-                                 fit this tick (layout moved or capacity exceeded)"
-                            );
-                            Some(prepared)
-                        } else {
-                            if let Some(prepared) = state.flashinfer_ops[idx].prepared.as_ref() {
-                                prepared.update_current_c(stream, current_c)?;
-                                // Signature moved (pointers) but the plan is
-                                // kept: it still needs this tick's contents.
-                                anyhow::ensure!(
-                                    refresh(prepared, &mut profile)?,
-                                    "FlashInfer explicit-decode plan kept across a recapture \
-                                     does not fit this tick"
-                                );
-                            }
-                            None
-                        };
+                            prepared_for_capture = Some(prepared);
+                        } else if let Some(prepared) = state.flashinfer_ops[idx].prepared.as_ref() {
+                            prepared.update_current_c(stream, current_c)?;
+                        }
+                    } else if let Some(prepared) = state.flashinfer_ops[idx].prepared.as_ref() {
+                        prepared.update_current_c(stream, current_c)?;
+                    }
+                    // Whatever plan this op uses this tick — kept, a prepare-cache
+                    // hit (possibly last refreshed ticks ago: a batch size seen
+                    // before), or fresh — carries this tick's contents exactly once.
+                    if let Some((kv_host, gather_idx_ptr, live_c)) = &refresh_args {
+                        let in_use = prepared_for_capture
+                            .as_ref()
+                            .or(state.flashinfer_ops[idx].prepared.as_ref())
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "explicit-indptr FlashInfer island has no prepared plan"
+                                )
+                            })?;
+                        if refreshed_plans.insert(Rc::as_ptr(in_use) as usize) {
+                            let timer = Instant::now();
+                            in_use.refresh_explicit_decode(
+                                stream,
+                                kv_host,
+                                *gather_idx_ptr,
+                                *live_c,
+                            )?;
+                            profile.cublaslt_prepare += timer.elapsed();
+                        }
+                    }
+                    if needs_recapture {
                         pending_recaptures.push((
                             idx,
                             PendingFlashInferDecodeRecapture {
-                                prepared,
+                                prepared: prepared_for_capture,
                                 signature,
                             },
                         ));
-                    } else if let Some(prepared) = state.flashinfer_ops[idx].prepared.as_ref() {
-                        prepared.update_current_c(stream, current_c)?;
                     }
                 }
                 profile.pending_count += pending_recaptures.len();
