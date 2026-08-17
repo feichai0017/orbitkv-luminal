@@ -11,7 +11,7 @@ use pyo3::{
 
 use crate::{
     compiled_graph::{CompiledGraph, SingleVarDimSolver, copy_host_bytes},
-    tensor_bridge::{TensorObservation, TorchApi, is_zero_copy_output_dtype},
+    tensor_bridge::{TensorObservation, TorchApi, supports_device_output_copy},
     torch_dtype::TorchDType,
     typed_data::TypedData,
 };
@@ -176,22 +176,16 @@ pub(crate) struct TorchInvocationState {
     pub plan: Option<ExecutionPlan>,
     torch_api: Option<TorchApi>,
     input_bindings: Vec<Option<CachedBinding>>,
-    writeback_bindings: Vec<Option<CachedBinding>>,
     prepared_outputs: Vec<Option<PreparedOutput>>,
-    direct_writebacks: Vec<bool>,
     gpu_output_copies: Vec<(NodeIndex, u64, usize)>,
-    external_outputs_registered: bool,
 }
 
 impl TorchInvocationState {
     pub(crate) fn configure(&mut self, plan: ExecutionPlan) {
         self.input_bindings = (0..plan.inputs.len()).map(|_| None).collect();
-        self.writeback_bindings = (0..plan.writebacks.len()).map(|_| None).collect();
         self.prepared_outputs = Vec::with_capacity(plan.returned_outputs.len());
-        self.direct_writebacks = vec![false; plan.writebacks.len()];
         self.gpu_output_copies =
             Vec::with_capacity(plan.writebacks.len() + plan.returned_outputs.len());
-        self.external_outputs_registered = false;
         self.plan = Some(plan);
     }
 }
@@ -318,58 +312,11 @@ fn invoke_with_state(
     };
 
     state.prepared_outputs.clear();
-    state.direct_writebacks.fill(false);
     if use_zero_copy {
-        state.external_outputs_registered = false;
-        for (writeback_position, writeback) in plan.writebacks.iter().enumerate() {
-            let output_plan = &writeback.output;
-            let position = output_plan.position;
-            let shape = &output_shapes[position];
-            let dtype_code = output_plan.dtype_code;
-            let output_node = output_plan.node;
-            let target = inputs.get_item(plan.inputs[writeback.input_position].argument_index)?;
-            let metadata = api.observe(py, &target)?;
-            let expected_numel = shape.iter().product::<usize>();
-            if metadata.is_cuda()
-                && metadata.is_contiguous
-                && metadata.dtype_code == dtype_code
-                && metadata.numel == expected_numel
-            {
-                let changed = state.writeback_bindings[writeback_position]
-                    .as_ref()
-                    .is_none_or(|previous| binding_changed(previous, &metadata));
-                if changed {
-                    unsafe {
-                        graph.runtime.set_output_device_ptr(
-                            output_node,
-                            metadata.data_ptr,
-                            metadata.n_bytes(),
-                        )
-                    };
-                }
-                state.external_outputs_registered = true;
-                let n_bytes = metadata.n_bytes();
-                state.writeback_bindings[writeback_position] = Some(CachedBinding {
-                    device_type: metadata.device_type,
-                    device_id: metadata.device_id,
-                    pointer: metadata.data_ptr,
-                    n_bytes,
-                    dtype_code: metadata.dtype_code,
-                    _tensor: target.unbind(),
-                });
-                state.direct_writebacks[writeback_position] = true;
-            } else if state.writeback_bindings[writeback_position]
-                .take()
-                .is_some()
-            {
-                graph.runtime.clear_output_device_ptr(output_node);
-            }
-        }
-
         for output_plan in &plan.returned_outputs {
             let shape = &output_shapes[output_plan.position];
             let dtype_code = output_plan.dtype_code;
-            if is_zero_copy_output_dtype(dtype_code) {
+            if supports_device_output_copy(dtype_code) {
                 let output = api.empty(py, shape, dtype_code, &input_device)?;
                 let metadata = api.observe(py, &output)?;
                 state.prepared_outputs.push(Some(PreparedOutput {
@@ -381,33 +328,18 @@ fn invoke_with_state(
                 state.prepared_outputs.push(None);
             }
         }
-    } else if supports_external_buffers && state.external_outputs_registered {
-        for output_plan in &plan.returned_outputs {
-            graph.runtime.clear_output_device_ptr(output_plan.node);
-        }
-        for writeback in &plan.writebacks {
-            graph.runtime.clear_output_device_ptr(writeback.output.node);
-        }
-        state
-            .writeback_bindings
-            .iter_mut()
-            .for_each(|slot| *slot = None);
-        state.external_outputs_registered = false;
     }
 
     graph.execute_runtime();
 
     let mut outputs = Vec::with_capacity(plan.returned_outputs.len());
     state.gpu_output_copies.clear();
-    for (writeback_position, writeback) in plan.writebacks.iter().enumerate() {
+    for writeback in &plan.writebacks {
         let output_plan = &writeback.output;
         let position = output_plan.position;
         let shape = &output_shapes[position];
         let dtype_code = output_plan.dtype_code;
         let output_node = output_plan.node;
-        if state.direct_writebacks[writeback_position] {
-            continue;
-        }
         let target = inputs.get_item(plan.inputs[writeback.input_position].argument_index)?;
         let metadata = api.observe(py, &target)?;
         let expected_numel = shape.iter().product::<usize>();
@@ -439,7 +371,7 @@ fn invoke_with_state(
         let shape = &output_shapes[position];
         let dtype_code = output_plan.dtype_code;
         let output_node = output_plan.node;
-        let output = if use_zero_copy && is_zero_copy_output_dtype(dtype_code) {
+        let output = if use_zero_copy && supports_device_output_copy(dtype_code) {
             let output = state.prepared_outputs[return_position]
                 .take()
                 .ok_or_else(|| {

@@ -441,9 +441,18 @@ fn unsupported_dtype(code: u32) -> PyErr {
     ))
 }
 
-pub(crate) fn is_zero_copy_output_dtype(code: u32) -> bool {
+pub(crate) fn supports_device_output_copy(code: u32) -> bool {
     matches!(
         TorchDType::from_code(code),
-        Ok(TorchDType::Float | TorchDType::Half | TorchDType::BFloat16)
+        Ok(TorchDType::Byte
+            | TorchDType::Char
+            | TorchDType::Short
+            | TorchDType::Int
+            | TorchDType::Long
+            | TorchDType::Half
+            | TorchDType::Float
+            | TorchDType::Double
+            | TorchDType::Bool
+            | TorchDType::BFloat16)
     )
 }
