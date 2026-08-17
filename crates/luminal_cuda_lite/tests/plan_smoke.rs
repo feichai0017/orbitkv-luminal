@@ -62,14 +62,25 @@ fn search_produces_a_codegen_complete_plan() {
     }
     assert!(computes > 0, "plan has no compute nodes");
 
-    // Without the device feature, execute refuses loudly.
     rt.set_data(a.id, vec![1.0f32, 2., 3., 4., 5., 6.]);
     rt.set_data(b.id, vec![10.0f32, 20., 30., 40., 50., 60.]);
-    let err = rt.execute().expect_err("execute must refuse without a device");
-    assert!(
-        err.to_string().contains("device"),
-        "refusal must name the missing feature: {err}"
-    );
+    #[cfg(not(feature = "device"))]
+    {
+        // Without the device feature, execute refuses loudly.
+        let err = rt.execute().expect_err("execute must refuse without a device");
+        assert!(
+            err.to_string().contains("device"),
+            "refusal must name the missing feature: {err}"
+        );
+    }
+    #[cfg(feature = "device")]
+    {
+        // With a device: NVRTC-compile, launch on the GPU, and match
+        // the hand-computed numerics: (a+b)*a.
+        rt.execute().expect("device execute");
+        let got = rt.get_f32(_out.id).expect("output payload");
+        assert_eq!(got, &vec![11.0f32, 44., 99., 176., 275., 396.]);
+    }
 }
 
 #[test]
