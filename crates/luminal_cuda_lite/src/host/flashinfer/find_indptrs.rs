@@ -7,16 +7,50 @@ use luminal::egglog_utils::{ClassId, NodeId, SerializedEGraph};
 /// `gather_rows(data, indices, d)` lowers the index tensor as:
 /// `indices * d + arange(d)`. FlashInfer wants `indices`, not the expanded
 /// `(c, d)` flat index.
+/// Peel dtype casts: a translated graph indexes with i64 where the engine
+/// holds i32, so Casts appear at arbitrary levels of the index arithmetic.
+fn peel_casts<'a>(egraph: &'a SerializedEGraph, node: &'a NodeId) -> &'a NodeId {
+    let mut cur = node;
+    for _ in 0..8 {
+        // Elementwise fusion wraps index arithmetic in FusionStart/End regions
+        // before the op decodes its inputs; step through them like casts.
+        let wrapper = resolve_op_with_kind(egraph, cur, "Cast")
+            .or_else(|| resolve_op_with_kind(egraph, cur, "FusionEnd"))
+            .or_else(|| resolve_op_with_kind(egraph, cur, "FusionStart"));
+        let Some(cast) = wrapper else {
+            return cur;
+        };
+        let (_, children) = &egraph.enodes[cast];
+        // Ops differ in whether a dtype child sits between the kind and the
+        // input list; find the child that actually IS the IList.
+        let ilist = children.iter().skip(1).find(|c| {
+            egraph.eclasses.get(*c).is_some_and(|(_, members)| {
+                members
+                    .iter()
+                    .any(|m| matches!(egraph.enodes[m].0.as_str(), "ICons" | "INil"))
+            })
+        });
+        let Some(ilist) = ilist else { return cur };
+        let inner = walk_ilist_simple(egraph, ilist);
+        let Some(first) = inner.first() else { return cur };
+        cur = first;
+    }
+    cur
+}
+
 pub fn try_find_compact_gather_idx<'a>(
     egraph: &'a SerializedEGraph,
     flat_idx_node: &'a NodeId,
 ) -> Option<&'a NodeId> {
-    let add_inputs = logical_binary_inputs(egraph, flat_idx_node, "Add")?;
+    let flat = peel_casts(egraph, flat_idx_node);
+    let add_inputs = logical_binary_inputs(egraph, flat, "Add")?;
     for input in add_inputs {
+        let input = peel_casts(egraph, input);
         let Some(mul_inputs) = logical_binary_inputs(egraph, input, "Mul") else {
             continue;
         };
         for mul_input in mul_inputs {
+            let mul_input = peel_casts(egraph, mul_input);
             if let Some(input_node) = resolve_input_node(egraph, mul_input) {
                 return Some(input_node);
             }

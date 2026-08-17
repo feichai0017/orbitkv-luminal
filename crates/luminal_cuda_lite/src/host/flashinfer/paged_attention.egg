@@ -296,6 +296,31 @@
     :name "PagedAttention kv gathers (rolled 3-D from 3-D pool)"
 )
 
+; Shape-AGNOSTIC pairing. K4p proved the full chain joins when the pairing
+; drops its shape patterns; the only thing the shapes provided was ?kvdim.
+; The scatter that writes the pools carries it instead: its flat index has
+; one element per scattered SCALAR, so its shape is (tokens * kvdim), and
+; destructuring the product recovers kvdim without naming the gather's rank.
+; The ctx field is vestigial here (see the island: the operand dataflow join
+; ties gather to matmul, making ctx equality through the pairing redundant).
+(rule
+    (
+        (= ?k_pool (Op (Scatter ?ksd ?ksdst ?ksis ?ksistr ?ksss)
+            (ICons ?k_dest (ICons ?scat_idx (ICons ?k_src (INil))))))
+        (= ?v_pool (Op (Scatter ?vsd ?vsdst ?vsis2 ?vsistr2 ?vsss2)
+            (ICons ?v_dest (ICons ?scat_idx (ICons ?v_src (INil))))))
+        (= ?ksis (ECons (MMul ?stok ?kvdim) (ENil)))
+        (= ?k_gathered (Op (Gather ?g1 ?g2 ?g3 ?g4)
+            (ICons ?flat_gidx (ICons ?k_pool (INil)))))
+        (= ?v_gathered (Op (Gather ?h1 ?h2 ?h3 ?h4)
+            (ICons ?flat_gidx (ICons ?v_pool (INil)))))
+    )
+    ((pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?flat_gidx
+        ?stok ?kvdim))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention kv gathers (shape-agnostic, kvdim from scatter)"
+)
+
 ; The K operand handed to the QK matmul.
 ;
 ; A hand-written model writes `expand_dim(..).merge_dims(..) * 1.0`, where the
@@ -318,45 +343,50 @@
     :name "PagedAttention gqa operand (contiguity barrier)"
 )
 
-; A zero, possibly behind a Cast: the translated graph materialises the same
-; broadcast as `Add(gathered, 0.0)` where a hand-written one uses
-; `Mul(gathered, 1.0)` -- the other identity element -- and its zero arrives
-; as Cast(Constant(0.0) -> bf16).
-(relation pa_zero (IR))
-(rule
-    ((const_like ?z 0.000000))
-    ((pa_zero ?z))
-    :ruleset kernel_fuse_late_pre
-    :name "PagedAttention zero"
-)
-(rule
-    (
-        (pa_zero ?z)
-        (= ?c (Op (Cast ?cz ?dt) (ICons ?z (INil))))
-    )
-    ((pa_zero ?c))
-    :ruleset kernel_fuse_late
-    :name "PagedAttention zero through cast"
-)
-
-; Add-zero barrier, both operand orders (the traced graph puts the zero first).
+; The add-zero barrier, all four spellings flattened into _pre.
+;
+; Staging depth is the constraint: the schedule is _pre x1 -> late x3 ->
+; late2 x1, and a fact chain barrier -> cast-closure -> v-operand -> island
+; needs four late passes if the barrier itself stages in late. Matching the
+; zero (plain constant or Cast of one) inline keeps the barrier in _pre and
+; the island reachable at late pass 3.
 (rule
     (
         (= ?k_gqa (Op (Add ?ks ?ka ?kb ?ko) (ICons ?k_gathered (ICons ?z (INil)))))
-        (pa_zero ?z)
+        (const_like ?z 0.000000)
     )
     ((pa_gqa_operand ?k_gqa ?k_gathered))
-    :ruleset kernel_fuse_late
-    :name "PagedAttention gqa operand (add-zero barrier)"
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention gqa operand (add-zero)"
 )
 (rule
     (
         (= ?k_gqa (Op (Add ?ks ?ka ?kb ?ko) (ICons ?z (ICons ?k_gathered (INil)))))
-        (pa_zero ?z)
+        (const_like ?z 0.000000)
     )
     ((pa_gqa_operand ?k_gqa ?k_gathered))
-    :ruleset kernel_fuse_late
-    :name "PagedAttention gqa operand (add-zero barrier, zero first)"
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention gqa operand (add-zero, zero first)"
+)
+(rule
+    (
+        (= ?k_gqa (Op (Add ?ks ?ka ?kb ?ko) (ICons ?k_gathered (ICons ?zc (INil)))))
+        (= ?zc (Op (Cast ?cz ?dt) (ICons ?z (INil))))
+        (const_like ?z 0.000000)
+    )
+    ((pa_gqa_operand ?k_gqa ?k_gathered))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention gqa operand (add cast-zero)"
+)
+(rule
+    (
+        (= ?k_gqa (Op (Add ?ks ?ka ?kb ?ko) (ICons ?zc (ICons ?k_gathered (INil)))))
+        (= ?zc (Op (Cast ?cz ?dt) (ICons ?z (INil))))
+        (const_like ?z 0.000000)
+    )
+    ((pa_gqa_operand ?k_gqa ?k_gathered))
+    :ruleset kernel_fuse_late_pre
+    :name "PagedAttention gqa operand (add cast-zero, zero first)"
 )
 
 ; The operand survives an upcast: translate_sdpa casts to F32 BEFORE the
@@ -379,6 +409,15 @@
     ((pa_v_operand ?op ?op))
     :ruleset kernel_fuse_late
     :name "PagedAttention v operand (from gqa operand)"
+)
+(rule
+    (
+        (pa_gqa_operand ?op ?g)
+        (= ?c (Op (Cast ?cz (F32)) (ICons ?op (INil))))
+    )
+    ((pa_v_operand ?c ?op))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention v operand (upcast of gqa operand)"
 )
 (rule
     ((pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?g ?ctx ?kvdim))
@@ -458,6 +497,18 @@
     :ruleset kernel_fuse_late
     :name "PagedAttention pv mul (commuted)"
 )
+; translate_sdpa rounds the probs back to the input dtype before P.V
+; ("torch parity, part two"), so the mul's first input is Cast(probs) and the
+; island's join from the softmax's probs crosses that cast. See through it.
+(rule
+    (
+        (pa_pv_mul ?pv ?pc ?v ?nh ?it ?ct ?hd)
+        (= ?pc (Op (Cast ?cz ?dt) (ICons ?probs (INil))))
+    )
+    ((pa_pv_mul ?pv ?probs ?v ?nh ?it ?ct ?hd))
+    :ruleset kernel_fuse_late
+    :name "PagedAttention pv mul (probs through cast)"
+)
 
 (relation pa_island (IR IR IR IR IR Expression Expression Expression Expression f64 f64))
 
@@ -471,8 +522,10 @@
 
         ; ── Context gathers from both pools via ONE flat gather index ──
         ; Staged fact: 2-D rows or the 4-D absorbed-movement spelling.
+        ; ctx through the pairing is NOT joined: the operand chain below ties
+        ; the gathered tensor to the matmul physically, which subsumes it.
         (pa_kv_gathers ?k_gathered ?v_gathered ?k_pool ?v_pool ?flat_gidx
-            ?context_tokens ?kvdim)
+            ?ctx_pair ?kvdim)
 
         ; ── GQA operands: barrier present (hand-written) or absent (repeat_kv)
         (pa_gqa_operand ?k_gqa ?k_gathered)
@@ -781,7 +834,7 @@
 (relation pa_dbg_k1 (IR))
 (rule
     (
-        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctxp ?kvdim)
         (pa_gqa_operand ?k_gqa ?kg)
     )
     ((pa_dbg_k1 ?k_gqa))
@@ -792,7 +845,7 @@
 (relation pa_dbg_k2 (IR))
 (rule
     (
-        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctxp ?kvdim)
         (pa_gqa_operand ?k_gqa ?kg)
         (pa_gqa_operand ?v_gqa ?vg)
         (pa_v_operand ?v_ctx ?v_gqa)
@@ -805,9 +858,9 @@
 (relation pa_dbg_k3 (IR))
 (rule
     (
-        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctxp ?kvdim)
         (pa_gqa_operand ?k_gqa ?kg)
-        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?ctx ?hdim)
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?anyct ?hdim)
     )
     ((pa_dbg_k3 ?qk))
     :ruleset kernel_fuse_late2
@@ -817,9 +870,9 @@
 (relation pa_dbg_k4 (IR))
 (rule
     (
-        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctxp ?kvdim)
         (pa_gqa_operand ?k_gqa ?kg)
-        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?ctx ?hdim)
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?anyct ?hdim)
         (pa_qk_scores ?scores ?qk)
         (flashinfer_head_dim_ok_16bit ?hdim)
         (pa_masked ?masked ?scores ?scale_val ?window_val)
@@ -832,9 +885,9 @@
 (relation pa_dbg_k4a (IR))
 (rule
     (
-        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctxp ?kvdim)
         (pa_gqa_operand ?k_gqa ?kg)
-        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?ctx ?hdim)
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?anyct ?hdim)
         (pa_qk_scores ?scores ?qk)
     )
     ((pa_dbg_k4a ?scores))
@@ -844,9 +897,9 @@
 (relation pa_dbg_k4b (IR))
 (rule
     (
-        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctxp ?kvdim)
         (pa_gqa_operand ?k_gqa ?kg)
-        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?ctx ?hdim)
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nheads ?in_tok ?anyct ?hdim)
         (flashinfer_head_dim_ok_16bit ?hdim)
     )
     ((pa_dbg_k4b ?qk))
@@ -878,7 +931,7 @@
 (relation pa_dbg_k4e (IR))
 (rule
     (
-        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctxp ?kvdim)
         (pa_gqa_operand ?k_gqa ?kg)
         (pa_qk_mul ?qk ?q_bf ?k_gqa ?nh ?it ?ctx ?hd)
         (= ?scores (Op (Sum ?a ?b ?c ?d ?e) (ICons ?qk (INil))))
@@ -928,7 +981,7 @@
 (relation pa_dbg_k4k (IR))
 (rule
     (
-        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctxp ?kvdim)
         (pa_gqa_operand ?kop ?kg)
         (= ?qk (Op (Mul ?sh ?ma ?mb ?mo) (ICons ?x (ICons ?kop (INil)))))
         (= ?scores (Op (Sum ?a ?b ?c ?d ?e) (ICons ?qk (INil))))
@@ -939,7 +992,7 @@
 )
 (rule
     (
-        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctx ?kvdim)
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctxp ?kvdim)
         (pa_gqa_operand ?kop ?kg)
         (= ?qk (Op (Mul ?sh ?ma ?mb ?mo) (ICons ?kop (ICons ?x (INil)))))
         (= ?scores (Op (Sum ?a ?b ?c ?d ?e) (ICons ?qk (INil))))
@@ -982,4 +1035,35 @@
     ((pa_dbg_k4p ?scores))
     :ruleset kernel_fuse_late2
     :name "dbg K4p: shape-agnostic pairing joined all the way to scores"
+)
+
+(relation pa_dbg_k6 (IR))
+(rule
+    (
+        (pa_kv_gathers ?kg ?vg ?kp ?vp ?g ?ctxp ?kvdim)
+        (pa_gqa_operand ?k_gqa ?kg)
+        (pa_qk_mul ?qk ?q_bf ?k_gqa ?nh ?it ?ct ?hd)
+        (pa_qk_scores ?scores ?qk)
+        (flashinfer_head_dim_ok_16bit ?hd)
+        (pa_masked ?masked ?scores ?sv ?wv)
+    )
+    ((pa_dbg_k6 ?masked))
+    :ruleset kernel_fuse_late
+    :name "dbg K6: chain through the mask"
+)
+(relation pa_dbg_k7 (IR))
+(rule
+    (
+        (pa_dbg_k6 ?masked)
+        (= ?rmax (Op (Max ?rm_shape ?ct2 ?rm_in ?rm_iter ?rm_out)
+            (ICons ?masked (INil))))
+        (= ?negmax (Op (Mul ?nm_s ?nm_a ?nm_b ?nm_o)
+            (ICons ?rmax (ICons ?neg1 (INil)))))
+        (const_like ?neg1 -1.000000)
+        (= ?shifted (Op (Add ?sh_s ?sh_a ?sh_b ?sh_o)
+            (ICons ?masked (ICons ?negmax (INil)))))
+    )
+    ((pa_dbg_k7 ?shifted))
+    :ruleset kernel_fuse_late2
+    :name "dbg K7: + softmax shift on the chain's mask"
 )

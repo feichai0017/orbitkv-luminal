@@ -239,7 +239,26 @@ impl EgglogOp for SinkAttention {
         // compact per-token page table the kernel consumes.
         let flat_idx_node = input_enodes[3];
         let gather_idx = super::find_indptrs::try_find_compact_gather_idx(egraph, flat_idx_node)
-            .expect("SinkAttention matched a gather without recoverable compact gather_idx");
+            .unwrap_or_else(|| {
+                // Print the actual arithmetic before dying: the recovery has
+                // failed on multiple guessed spellings, and the tree is the
+                // only way to stop guessing.
+                fn dump(egraph: &luminal::egglog_utils::SerializedEGraph,
+                        n: &luminal::egglog_utils::NodeId, depth: usize) {
+                    if depth > 5 { return; }
+                    let (name, ch) = &egraph.enodes[n];
+                    eprintln!("[gather-idx]{:indent$}{name}", "", indent = depth * 2);
+                    for c in ch {
+                        if let Some((_, members)) = egraph.eclasses.get(c) {
+                            if let Some(m) = members.first() {
+                                dump(egraph, m, depth + 1);
+                            }
+                        }
+                    }
+                }
+                dump(egraph, flat_idx_node, 0);
+                panic!("SinkAttention matched a gather without recoverable compact gather_idx")
+            });
         let mut final_inputs = vec![
             input_enodes[0], // q (bf16)
             input_enodes[1], // k_pool
