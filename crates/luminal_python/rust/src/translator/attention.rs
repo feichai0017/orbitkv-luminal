@@ -91,6 +91,7 @@ impl<'a> Translator<'a> {
         // pipeline emits only the unified op (sdpa decomps are stripped).
         // Flagless graphs with mismatched heads fail the ensure below.
         let enable_gqa = bool_arg("enable_gqa").unwrap_or(false);
+        let mut gqa_group: Option<Expression> = None;
         if enable_gqa && q_ndim >= 3 && query.shape.dims[q_ndim - 3] != key.shape.dims[q_ndim - 3] {
             let h_axis = q_ndim - 3;
             let h_q = query.shape.dims[h_axis]
@@ -103,13 +104,7 @@ impl<'a> Translator<'a> {
                 h_kv > 0 && h_q % h_kv == 0,
                 "SDPA GQA: query heads ({h_q}) must be a positive multiple of kv heads ({h_kv})"
             );
-            let group = Expression::from(h_q / h_kv);
-            key = key
-                .expand_dim(h_axis + 1, group)
-                .merge_dims(h_axis, h_axis + 1);
-            value = value
-                .expand_dim(h_axis + 1, group)
-                .merge_dims(h_axis, h_axis + 1);
+            gqa_group = Some(Expression::from(h_q / h_kv));
         } else if q_ndim >= 3 {
             anyhow::ensure!(
                 query.shape.dims[q_ndim - 3] == key.shape.dims[q_ndim - 3],
@@ -119,22 +114,80 @@ impl<'a> Translator<'a> {
             );
         }
 
-        // scores = (Q @ K^T) * scale.
-        let mut perm: Vec<usize> = (0..q_ndim).collect();
-        perm.swap(q_ndim - 2, q_ndim - 1);
-        let (q_for_mm, k_for_mm) = ensure_same_dtype(query, key.permute(perm));
-        // torch parity: fused kernels accumulate QK^T in fp32 and never
-        // materialize low-precision scores (CPU: opmath_type = f32, see
-        // pytorch's FlashAttentionKernel.cpp; CUDA likewise via tensor-core
-        // fp32 accumulators — FA2 paper, arXiv:2307.08691 §3). Cast Q/K
-        // before the matmul; scale, masks, and softmax inherit F32 from here.
+        // ── The native attention spelling ──
+        //
+        // From here on the chain is spelled the way luminal's hand-written
+        // paged models spell it (`examples/paged_llama`, and the serving
+        // engine's llama3), so that the SAME e-graph rules — the FlashInfer
+        // islands in `luminal_cuda_lite` — see the same nodes whether the
+        // graph was written by hand or translated:
+        //
+        // * leading unit dims are squeezed away (a view) so the chain is
+        //   rank 3 — `(heads, s, d)`, `(heads, d, c)`, `(heads, s, c)`; the
+        //   islands' patterns are rank 3, and a size-1 batch axis is a fourth
+        //   dim with a nonzero stride that matches none of them;
+        // * K is permuted to `(heads, d, c)` and V kept `(heads, c, d)`
+        //   BEFORE their GQA expand, and each gets a `* 1.0` contiguity
+        //   barrier after `expand_dim + merge_dims` — the barrier is on the
+        //   operand the matmul consumes, with the group replication in its
+        //   merged-axis stride;
+        // * q is re-materialised TOKEN-major (`(s, heads, d)` in memory,
+        //   viewed back as `(heads, s, d)`): the FlashInferAttention host op
+        //   reads q as `(tokens, heads, dim)`;
+        // * Q/K are upcast to F32 after their barriers so QK^T, scale, mask
+        //   and softmax are F32 (torch parity, unchanged); V is upcast so P.V
+        //   runs in F32 too (previously probs were rounded to the value dtype
+        //   — strictly more precise now); the output is cast back to the
+        //   value dtype right after P.V. The hand-written models spell the
+        //   same casts.
+        let (mut q, mut k, mut v) = (query, key, value);
+        let mut squeezed = 0usize;
+        while q.shape.len() > 3
+            && q.shape.dims[0].to_usize() == Some(1)
+            && k.shape.dims[0].to_usize() == Some(1)
+            && v.shape.dims[0].to_usize() == Some(1)
+        {
+            q = q.squeeze(0);
+            k = k.squeeze(0);
+            v = v.squeeze(0);
+            squeezed += 1;
+        }
+        let n = q.shape.len();
+        let mut perm: Vec<usize> = (0..n).collect();
+        perm.swap(n - 2, n - 1);
+        // K: (…, kvh, c, d) -> (…, kvh, d, c), then GQA, then the barrier.
+        let mut k_t = k.permute(perm.clone());
+        if let Some(group) = gqa_group {
+            let h_axis = n - 3;
+            k_t = k_t
+                .expand_dim(h_axis + 1, group)
+                .merge_dims(h_axis, h_axis + 1);
+            v = v
+                .expand_dim(h_axis + 1, group)
+                .merge_dims(h_axis, h_axis + 1);
+        }
+        let k_t = k_t * 1.0;
+        let v = v * 1.0;
+        // q: token-major buffer, viewed heads-major.
+        let mut q_perm: Vec<usize> = (0..n).collect();
+        q_perm.swap(n - 3, n - 2);
+        let q = (q.permute(q_perm.clone()) * 1.0).permute(q_perm);
+        let (q_for_mm, k_for_mm) = ensure_same_dtype(q, k_t);
         let low_precision = matches!(q_for_mm.dtype, DType::Bf16 | DType::F16);
+        // torch parity: fused kernels accumulate QK^T in fp32 and never
+        // materialise low-precision scores (CPU: opmath_type = f32, see
+        // pytorch's FlashAttentionKernel.cpp; CUDA likewise via tensor-core
+        // fp32 accumulators — FA2 paper, arXiv:2307.08691 §3). Q/K are cast
+        // AFTER their barriers, so the barriers stay in the input dtype and
+        // are what a fused op consumes; scale, mask and softmax are F32.
         let (q_for_mm, k_for_mm) = if low_precision {
             (q_for_mm.cast(DType::F32), k_for_mm.cast(DType::F32))
         } else {
             (q_for_mm, k_for_mm)
         };
         let mut scores = self.apply_scalar_op(q_for_mm.matmul(k_for_mm), scale, BinaryOp::Mul);
+        let value = v;
+        let q_ndim = n;
 
         if is_causal {
             let s_q = scores.shape.dims[q_ndim - 2];
@@ -149,7 +202,11 @@ impl<'a> Translator<'a> {
         // Bool masks: track per-row any-keep to zero fully-masked rows
         // after softmax (see doc comment).
         let mut row_any_keep: Option<GraphTensor> = None;
-        if let Some(mask) = additive {
+        if let Some(mut mask) = additive {
+            while mask.shape.len() > scores.shape.len() && mask.shape.dims[0].to_usize() == Some(1)
+            {
+                mask = mask.squeeze(0);
+            }
             let offset = if mask.dtype == DType::Bool {
                 let keep = mask.cast(DType::F32);
                 let key_axis = keep.shape.len() - 1;
@@ -187,9 +244,21 @@ impl<'a> Translator<'a> {
             let (a, i) = broadcast_binary(a, i);
             attn = a * i;
         }
-        // torch parity, part two: probs round back to the input dtype for
-        // the P@V GEMM (keeps V out of an fp32 matmul). No-op on fp32.
-        let out = attn.cast(value.dtype).matmul(value);
+        // P.V in F32 (probs stay F32, V upcast), cast back to the value dtype
+        // right after — where the hand-written models cast.
+        let out_dtype = value.dtype;
+        let v_mm = if low_precision {
+            value.cast(DType::F32)
+        } else {
+            value
+        };
+        let mut out = attn.matmul(v_mm);
+        if low_precision {
+            out = out.cast(out_dtype);
+        }
+        for _ in 0..squeezed {
+            out = out.unsqueeze(0);
+        }
 
         match output_names.first().filter(|n| !n.is_empty()) {
             Some(name) => {

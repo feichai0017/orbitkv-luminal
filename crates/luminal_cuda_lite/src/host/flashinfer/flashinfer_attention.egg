@@ -1055,8 +1055,9 @@
         ; are wired as op inputs 5/6, selecting the explicit-indptr execute
         ; path. Two more deltas from the triu-gather island, matching both
         ; the hand-written serving models and translated HF graphs:
-        ;   - scores are Cast to F32 between the QK Sum and the scale Mul
-        ;     (QK runs in bf16, softmax in F32);
+        ;   - q and the gathered K's GQA barrier are each Cast to F32
+        ;     before the QK matmul (QK, scale, mask, softmax all F32; the
+        ;     op consumes the bf16 tensors UNDER the casts);
         ;   - the gathered V's GQA barrier is Cast to F32 before P.V
         ;     (probs stay F32; P.V runs in F32).
         (flashinfer_prefill_dt ?dt)
@@ -1109,12 +1110,16 @@
             ?v_src_strides)
             (ICons ?k_idx (ICons ?v_cache (INil)))))
 
+        ; QK in F32: q and K's barrier each behind a Cast. The op binds the
+        ; bf16 tensors under the casts.
+        (= ?q_f (Op (Cast ?qf_sz (F32)) (ICons ?q (INil))))
+        (= ?k_f (Op (Cast ?kf_sz (F32)) (ICons ?k_gqa (INil))))
         (= ?mul1 (Op (Mul
             (ECons ?nheads4 (ECons ?input_tokens (ECons ?context_tokens (ECons ?hdim4 (ENil)))))
             ?mul1_a_strides
             ?mul1_b_strides
             ?mul1_out_strides)
-            (ICons ?q (ICons ?k_gqa (INil)))))
+            (ICons ?q_f (ICons ?k_f (INil)))))
 
         (= ?qk (Op (Sum
             (ECons ?nheads5 (ECons ?input_tokens (ECons ?context_tokens (ENil))))
@@ -1124,8 +1129,7 @@
             ?qk_out_strides)
             (ICons ?mul1 (INil))))
 
-        ; Scores: QK Sum (bf16) -> Cast F32 -> * scale -> + host mask.
-        (= ?scores_f (Op (Cast ?cf_sz (F32)) (ICons ?qk (INil))))
+        ; Scores: QK Sum (F32) -> * scale -> + host mask.
         (= ?masked (Op (Add
             (ECons ?nheads8 (ECons ?input_tokens (ECons ?context_tokens (ENil))))
             ?mask_add_a_strides
@@ -1133,7 +1137,7 @@
             ?mask_add_out_strides)
             (ICons ?scaled_qk (ICons ?mask (INil)))))
         (= ?scaled_qk (Op (Mul ?sq_shape ?sq_a ?sq_b ?sq_o)
-            (ICons ?scores_f (ICons ?sq_scale (INil)))))
+            (ICons ?qk (ICons ?sq_scale (INil)))))
         (const_like ?sq_scale ?sq_scale_val)
 
         ; The mask itself proves nothing about layout — the indptrs carry it.
