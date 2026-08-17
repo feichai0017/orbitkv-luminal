@@ -20,6 +20,6 @@ device = ["dep:cudarc"]
 luminal = { path = "../.." }
 anyhow = "1"
 rustc-hash = "2"
-cudarc = { version = "0.19.8", optional = true, features = ["cuda-version-from-build-system"] }
+cudarc = { version = "0.19.8", optional = true, features = ["cuda-version-from-build-system", "fallback-latest"] }
 
 [dev-dependencies]

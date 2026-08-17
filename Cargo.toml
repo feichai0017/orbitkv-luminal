@@ -102,5 +102,5 @@ opt-level = 3
 # NEEDS A REAL HOME (fork or upstream, proposed alongside
 # egglog-experimental #60) before this branch is shared.
 [patch."https://github.com/egraphs-good/egglog"]
-egglog = { path = "/Users/austin/Desktop/egglog-add-subsumed" }
-egglog-ast = { path = "/Users/austin/Desktop/egglog-add-subsumed/egglog-ast" }
+egglog = { path = "vendor/egglog-checkout" }
+egglog-ast = { path = "vendor/egglog-checkout/egglog-ast" }

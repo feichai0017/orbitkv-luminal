@@ -8,9 +8,9 @@ a one-round live window for a copied retired spelling re-arms the
 orbits the `:subsume` termination discipline prevents).
 
 The patch is applied to a checkout of egglog @ c2c0f151 living at
-`/Users/austin/Desktop/egglog-add-subsumed`, referenced by the
+`vendor/egglog-checkout (gitignored)`, referenced by the
 `[patch]` section in the workspace `Cargo.toml`. BEFORE this branch
-goes anywhere shared, that checkout needs a real home — a luminal-ai
+goes anywhere shared, the fork/upstream ask still stands; meanwhile every machine clones+patches into the SAME relative path — a luminal-ai
 egglog fork or the upstream ask (proposed alongside
 egglog-experimental #60). Regenerate the checkout by cloning egglog at
 c2c0f151 and applying this patch file.

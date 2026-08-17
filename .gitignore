@@ -38,3 +38,4 @@ dist/
 build/
 uv.lock
 crates/luminal_training/examples/mnist_data/
+vendor/egglog-checkout/
