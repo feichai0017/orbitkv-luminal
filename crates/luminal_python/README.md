@@ -30,7 +30,7 @@ bindings or allocating outputs:
 bound = compiled.bind(input_buffer)
 
 input_buffer.copy_(next_input)
-outputs = bound.run()
+outputs = bound.replay()
 ```
 
 Bound execution currently requires contiguous CUDA inputs and float32,

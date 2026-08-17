@@ -1,8 +1,6 @@
 """PT2 compilation pipeline for Luminal.
 
-This module currently owns capture, translation, and compilation. Public code
-should enter through ``luminal.compile`` or ``luminal.backend``; this module
-will be split along those responsibilities in the next frontend phase.
+Public code should enter through ``luminal.compile`` or ``luminal.backend``.
 """
 
 import inspect

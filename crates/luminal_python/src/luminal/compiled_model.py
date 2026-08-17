@@ -32,14 +32,6 @@ class CompiledModel:
         self._writeback_by_pos = dict(graph_result.writeback_outputs)
         self._has_dynamic_dims = getattr(graph_result, "has_dynamic_dims", False)
         self._weight_refs = weight_refs or []
-        input_dtype_codes = graph_result.input_dtypes
-        if len(input_dtype_codes) != len(self._input_names):
-            raise RuntimeError(
-                f"CompiledGraph returned {len(input_dtype_codes)} input dtype "
-                f"codes for {len(self._input_names)} declared inputs "
-                f"({self._input_names!r}) — every declared input needs a "
-                f"matching dtype."
-            )
         self._graph.configure_invocation(
             list(self._input_names),
             list(user_indices) if user_indices is not None else None,

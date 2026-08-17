@@ -16,9 +16,7 @@ import pytest
 import torch
 import torch._dynamo
 
-from luminal import backend
-
-luminal_backend = backend
+from luminal import backend as luminal_backend
 
 
 def _compile(model, count_holder):

@@ -33,8 +33,7 @@ def backend(graph_module, example_inputs, options=None):
 
 
 def _compile_graph(graph_module, example_inputs, factory, *, search_iterations=None):
-    # Keep PT2 lazy at package import time. It is still the implementation for
-    # both front doors until the next frontend phase splits capture/lowering.
+    # Keep the capture and translation pipeline lazy at package import time.
     from .pt2 import pt2_backend
 
     return pt2_backend(

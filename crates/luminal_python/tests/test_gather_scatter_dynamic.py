@@ -19,9 +19,7 @@ from __future__ import annotations
 
 import torch
 
-from luminal import backend
-
-luminal_backend = backend
+from luminal import backend as luminal_backend
 
 
 def _compile(model):

@@ -7,10 +7,6 @@ use pyo3::{
 
 use crate::{compiled_graph::CompiledGraph, tensor_bridge::TorchApi};
 
-struct BoundOutput {
-    tensor: Py<PyAny>,
-}
-
 struct BoundDestination {
     node: luminal::prelude::NodeIndex,
     data_ptr: u64,
@@ -23,8 +19,8 @@ pub struct BoundExecutable {
     graph: Py<CompiledGraph>,
     // These references are the storage-lifetime contract. The runtime borrows
     // their pointers until this executable is dropped.
-    input_refs: Vec<Py<PyAny>>,
-    outputs: Vec<BoundOutput>,
+    _input_refs: Vec<Py<PyAny>>,
+    outputs: Vec<Py<PyAny>>,
     destinations: Vec<BoundDestination>,
     // The selected runtime graph is stable after its first execution, so its
     // non-zero-copy outputs only need to be discovered once.
@@ -173,16 +169,14 @@ pub(crate) fn bind(
             n_bytes: metadata.n_bytes(),
             always_copy: true,
         });
-        outputs.push(BoundOutput {
-            tensor: output.unbind(),
-        });
+        outputs.push(output.unbind());
     }
 
     graph.is_bound = true;
     drop(graph);
     Ok(BoundExecutable {
         graph: graph_object,
-        input_refs,
+        _input_refs: input_refs,
         outputs,
         destinations,
         output_copies: None,
@@ -214,43 +208,10 @@ impl BoundExecutable {
             }
         }
         drop(graph);
-        Ok(PyTuple::new(
-            py,
-            self.outputs
-                .iter()
-                .map(|output| output.tensor.clone_ref(py)),
-        )?
-        .into_any()
-        .unbind())
-    }
-
-    /// Compatibility alias for callers using the initial bound API.
-    fn run(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.replay(py)
-    }
-
-    fn __call__(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.replay(py)
-    }
-
-    #[getter]
-    fn inputs(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(
-            PyTuple::new(py, self.input_refs.iter().map(|value| value.clone_ref(py)))?
+            PyTuple::new(py, self.outputs.iter().map(|output| output.clone_ref(py)))?
                 .into_any()
                 .unbind(),
         )
-    }
-
-    #[getter]
-    fn outputs(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(PyTuple::new(
-            py,
-            self.outputs
-                .iter()
-                .map(|output| output.tensor.clone_ref(py)),
-        )?
-        .into_any()
-        .unbind())
     }
 }

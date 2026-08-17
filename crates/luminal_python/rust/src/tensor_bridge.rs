@@ -18,6 +18,18 @@ use crate::torch_dtype::TorchDType;
 const DLPACK_CAPSULE_NAME: &[u8] = b"dlpack_exchange_api\0";
 const DL_DEVICE_CPU: i32 = 1;
 const DL_DEVICE_CUDA: i32 = 2;
+const SUPPORTED_DTYPES: [TorchDType; 10] = [
+    TorchDType::Byte,
+    TorchDType::Char,
+    TorchDType::Short,
+    TorchDType::Int,
+    TorchDType::Long,
+    TorchDType::Half,
+    TorchDType::Float,
+    TorchDType::Double,
+    TorchDType::Bool,
+    TorchDType::BFloat16,
+];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -109,7 +121,7 @@ pub(crate) struct TorchApi {
 impl TorchApi {
     pub fn new(py: Python<'_>) -> PyResult<Self> {
         let torch = PyModule::import(py, "torch")?;
-        let dtypes = supported_dtypes()
+        let dtypes = SUPPORTED_DTYPES
             .into_iter()
             .map(|dtype| {
                 torch
@@ -404,21 +416,6 @@ fn dlpack_dtype_code(dtype: DlDataType) -> Option<u32> {
     )
 }
 
-fn supported_dtypes() -> [TorchDType; 10] {
-    [
-        TorchDType::Byte,
-        TorchDType::Char,
-        TorchDType::Short,
-        TorchDType::Int,
-        TorchDType::Long,
-        TorchDType::Half,
-        TorchDType::Float,
-        TorchDType::Double,
-        TorchDType::Bool,
-        TorchDType::BFloat16,
-    ]
-}
-
 fn dtype_attribute(code: u32) -> PyResult<&'static str> {
     match TorchDType::from_code(code) {
         Ok(TorchDType::Byte) => Ok("uint8"),
@@ -442,17 +439,5 @@ fn unsupported_dtype(code: u32) -> PyErr {
 }
 
 pub(crate) fn supports_device_output_copy(code: u32) -> bool {
-    matches!(
-        TorchDType::from_code(code),
-        Ok(TorchDType::Byte
-            | TorchDType::Char
-            | TorchDType::Short
-            | TorchDType::Int
-            | TorchDType::Long
-            | TorchDType::Half
-            | TorchDType::Float
-            | TorchDType::Double
-            | TorchDType::Bool
-            | TorchDType::BFloat16)
-    )
+    TorchDType::from_code(code).is_ok_and(|dtype| SUPPORTED_DTYPES.contains(&dtype))
 }
