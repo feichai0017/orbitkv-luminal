@@ -22,6 +22,21 @@ Luminal-managed execution:
 compiled = luminal.compile(model, example_input)
 ```
 
+The returned artifact still supports generic calls. CUDA inference servers can
+instead bind fixed storage explicitly and replay it without rescanning tensor
+bindings or allocating outputs:
+
+```python
+bound = compiled.bind(input_buffer)
+
+input_buffer.copy_(next_input)
+outputs = bound.run()
+```
+
+Bound execution currently requires contiguous CUDA inputs and float32,
+float16, or bfloat16 ordinary outputs. Binding is exclusive: once an artifact
+has produced a bound executable, it no longer accepts generic calls.
+
 Custom native backend factories can be configured with
 `luminal.make_backend(factory)`. The older names `luminal_backend` and
 `register_backend` remain compatibility aliases.

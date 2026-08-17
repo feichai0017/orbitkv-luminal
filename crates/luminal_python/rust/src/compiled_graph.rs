@@ -9,6 +9,13 @@ use pyo3::types::PyBytes;
 use std::collections::HashMap;
 
 use crate::typed_data::TypedData;
+use crate::{
+    bound_execution::BoundExecutable,
+    torch_invocation::{
+        DynamicDimPlan, ExecutionPlan, InputPlan, OutputPlan, StaticDimPlan, TorchInvocationState,
+        WritebackPlan,
+    },
+};
 
 /// Copy a CPU buffer into Rust-owned storage.
 ///
@@ -16,7 +23,7 @@ use crate::typed_data::TypedData;
 /// null pointer is valid exactly when there are no bytes to read.  Keeping
 /// this check in one helper gives inputs and weights the same boundary
 /// contract and prevents `from_raw_parts` from ever receiving a null pointer.
-fn copy_host_bytes(ptr: u64, n_bytes: usize, buffer_kind: &str) -> PyResult<Vec<u8>> {
+pub(crate) fn copy_host_bytes(ptr: u64, n_bytes: usize, buffer_kind: &str) -> PyResult<Vec<u8>> {
     if n_bytes == 0 {
         return Ok(Vec::new());
     }
@@ -35,71 +42,80 @@ fn copy_host_bytes(ptr: u64, n_bytes: usize, buffer_kind: &str) -> PyResult<Vec<
 /// Maps symbolic dimension parameter names (e.g. "seq_len") to their dim symbol.
 pub type DimParamMap = HashMap<String, Symbol>;
 
-/// Recover a single-variable dim's variable value from an observed runtime size.
-///
-/// Returns `Some((var, value))` when the expression contains exactly one
-/// variable, is affine in that variable, and `value` round-trips through
-/// `exec_single_var_checked` to reproduce `dim_val`. Returns `None` otherwise
-/// — multi-variable expressions, non-affine forms, slope==0, and inversions
-/// that don't divide cleanly are all rejected so we never write a wrong
-/// guess into `dyn_map`.
-fn solve_single_var_dim(expr: &Expression, dim_val: usize) -> Option<(Symbol, usize)> {
-    use luminal::shape::Term;
-    let terms = expr.terms.read();
+#[derive(Clone)]
+pub(crate) struct SingleVarDimSolver {
+    variable: Symbol,
+    expression: Expression,
+    slope: i64,
+    intercept: i64,
+}
 
-    // Identify the unique variable, if any.
-    let mut var: Option<Symbol> = None;
-    for t in terms.iter() {
-        if let Term::Var(c) = t {
-            match var {
-                None => var = Some(*c),
-                Some(existing) if existing == *c => {}
-                Some(_) => return None, // multi-var — bail out
+impl SingleVarDimSolver {
+    /// Compile a safely invertible single-variable shape expression once.
+    pub(crate) fn from_expression(expression: Expression) -> Option<Self> {
+        use luminal::shape::Term;
+        let terms = expression.terms.read();
+
+        let mut variable = None;
+        for term in terms.iter() {
+            if let Term::Var(candidate) = term {
+                match variable {
+                    None => variable = Some(*candidate),
+                    Some(existing) if existing == *candidate => {}
+                    Some(_) => return None,
+                }
             }
         }
-    }
-    let var = var?;
+        let variable = variable?;
 
-    // Bare-var fast path — terms is exactly `[Var]`.
-    if terms.len() == 1 {
-        return Some((var, dim_val));
+        if terms.len() == 1 {
+            return Some(Self {
+                variable,
+                expression,
+                slope: 1,
+                intercept: 0,
+            });
+        }
+
+        // Probe two points to compile f(x) = slope*x + intercept. Calls still
+        // round-trip through the expression so a non-affine form that happens
+        // to be collinear at the probe points cannot produce a wrong binding.
+        drop(terms);
+        let f2 = expression.exec_single_var_checked(2)? as i64;
+        let f3 = expression.exec_single_var_checked(3)? as i64;
+        let slope = f3 - f2;
+        if slope == 0 {
+            return None;
+        }
+        Some(Self {
+            variable,
+            expression,
+            slope,
+            intercept: f2 - 2 * slope,
+        })
     }
 
-    // Probe two points to recover slope/intercept of an assumed affine form
-    // `f(x) = slope*x + intercept`. We use 2 and 3 (luminal's default
-    // dynamic-dim min is 2, and 3 keeps the inputs small in case the
-    // expression includes a multiplication that could overflow at scale).
-    drop(terms);
-    let f2 = expr.exec_single_var_checked(2)? as i64;
-    let f3 = expr.exec_single_var_checked(3)? as i64;
-    let slope = f3 - f2;
-    if slope == 0 {
-        return None;
+    pub(crate) fn solve(&self, observed: usize) -> Option<(Symbol, usize)> {
+        let target = observed as i128 - self.intercept as i128;
+        let slope = self.slope as i128;
+        if target % slope != 0 {
+            return None;
+        }
+        let value = usize::try_from(target / slope).ok()?;
+        (self.expression.exec_single_var_checked(value)? == observed)
+            .then_some((self.variable, value))
     }
-    let intercept = f2 - 2 * slope;
-    let target = dim_val as i64 - intercept;
-    if slope == 0 || target % slope != 0 {
-        return None;
-    }
-    let candidate = target / slope;
-    if candidate < 0 {
-        return None;
-    }
-    let candidate = candidate as usize;
+}
 
-    // Verify by re-evaluating with the candidate value. Catches non-affine
-    // forms whose probe points happen to be collinear (e.g. `min(s, 100)`
-    // would look affine for s ∈ {2, 3} but flatten beyond 100).
-    if expr.exec_single_var_checked(candidate)? != dim_val {
-        return None;
-    }
-    Some((var, candidate))
+/// Recover a single-variable dim's variable value from an observed runtime size.
+pub(crate) fn solve_single_var_dim(expr: &Expression, dim_val: usize) -> Option<(Symbol, usize)> {
+    SingleVarDimSolver::from_expression(*expr)?.solve(dim_val)
 }
 
 /// Convert luminal `DType` to a PT2 dtype code via `TorchDType`. Panics
 /// for luminal-specific dtypes that have no PyTorch counterpart (`I4`,
 /// `U4`, the F6 / F4 families, ...).
-fn luminal_dtype_to_pt2_code(dtype: DType) -> u32 {
+pub(crate) fn luminal_dtype_to_pt2_code(dtype: DType) -> u32 {
     crate::torch_dtype::TorchDType::try_from(dtype)
         .map(|t| t.code())
         .unwrap_or_else(|d| panic!("luminal_dtype_to_pt2_code: unsupported dtype {d:?}"))
@@ -157,6 +173,8 @@ pub struct CompiledGraph {
     pub dim_param_map: DimParamMap,
     /// See [`GraphTranslation::writeback_outputs`].
     pub writeback_outputs: Vec<(usize, String)>,
+    pub(crate) torch_invocation: TorchInvocationState,
+    pub(crate) is_bound: bool,
 }
 
 impl CompiledGraph {
@@ -226,7 +244,58 @@ impl CompiledGraph {
             input_shape_exprs,
             dim_param_map,
             writeback_outputs,
+            torch_invocation: TorchInvocationState::default(),
+            is_bound: false,
         })
+    }
+
+    pub(crate) fn input_dtype_codes(&self) -> Vec<u32> {
+        self.input_names
+            .iter()
+            .map(|name| {
+                if let Some(&node_id) = self.tensor_ids.get(name)
+                    && let Some(input) = (*self.graph.graph[node_id])
+                        .as_any()
+                        .downcast_ref::<luminal::hlir::Input>()
+                {
+                    return luminal_dtype_to_pt2_code(input.dtype);
+                }
+                7
+            })
+            .collect()
+    }
+
+    pub(crate) fn resolve_output_shapes_native(&self) -> PyResult<Vec<Vec<usize>>> {
+        let dyn_map = &self.graph.dyn_map;
+        self.output_shape_exprs
+            .iter()
+            .map(|shape_exprs| {
+                shape_exprs
+                    .iter()
+                    .map(|expression| {
+                        expression.exec(dyn_map).ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "Cannot resolve dimension expression {expression:?}. Set all dynamic dims first."
+                            ))
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    pub(crate) fn auto_set_dims_native(&mut self, input_shapes: &[Vec<usize>]) {
+        for (shape_exprs, shape) in self.input_shape_exprs.iter().zip(input_shapes) {
+            for (dim_expr, &dim_value) in shape_exprs.iter().zip(shape) {
+                if let Some((variable, value)) = solve_single_var_dim(dim_expr, dim_value) {
+                    self.graph.set_dim(variable, value);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn execute_runtime(&mut self) {
+        self.runtime.execute(&self.graph.dyn_map);
     }
 
     fn output_node_at(&self, position: usize) -> PyResult<NodeIndex> {
@@ -269,19 +338,7 @@ impl CompiledGraph {
     /// Get the PT2 dtype codes for all inputs (in order of input_names).
     #[getter]
     fn input_dtypes(&self) -> Vec<u32> {
-        self.input_names
-            .iter()
-            .map(|name| {
-                if let Some(&node_id) = self.tensor_ids.get(name)
-                    && let Some(input) = (*self.graph.graph[node_id])
-                        .as_any()
-                        .downcast_ref::<luminal::hlir::Input>()
-                {
-                    return luminal_dtype_to_pt2_code(input.dtype);
-                }
-                7 // default to f32
-            })
-            .collect()
+        self.input_dtype_codes()
     }
 
     /// Get the list of output tensor names.
@@ -370,35 +427,178 @@ impl CompiledGraph {
     /// Multi-variable dims are skipped here; another input's shape — or an
     /// explicit `set_dim` call — is expected to bind those.
     fn auto_set_dims_from_input_shapes(&mut self, input_shapes: Vec<Vec<usize>>) {
-        for (shape_exprs, shape) in self.input_shape_exprs.iter().zip(input_shapes.iter()) {
-            for (dim_expr, &dim_val) in shape_exprs.iter().zip(shape.iter()) {
-                if let Some((var, value)) = solve_single_var_dim(dim_expr, dim_val) {
-                    self.graph.set_dim(var, value);
-                }
-            }
-        }
+        self.auto_set_dims_native(&input_shapes);
     }
 
     /// Resolve output shapes using current dynamic dimension values.
     /// Returns concrete shapes after substituting all symbolic dims.
     fn resolve_output_shapes(&self) -> PyResult<Vec<Vec<usize>>> {
-        let dyn_map = &self.graph.dyn_map;
-        let mut result = Vec::new();
-        for shape_exprs in &self.output_shape_exprs {
-            let shape: Vec<usize> = shape_exprs
-                .iter()
-                .map(|e| {
-                    e.exec(dyn_map).ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                            "Cannot resolve dimension expression {:?}. Set all dynamic dims first.",
-                            e
+        self.resolve_output_shapes_native()
+    }
+
+    /// Configure the immutable positional plan used by native invocation.
+    fn configure_invocation(
+        &mut self,
+        input_names: Vec<String>,
+        user_indices: Option<Vec<usize>>,
+        scalar_output_positions: Vec<usize>,
+    ) -> PyResult<()> {
+        if input_names.len() != self.input_names.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invocation plan has {} input names for {} compiled inputs",
+                input_names.len(),
+                self.input_names.len()
+            )));
+        }
+        let exact_argument_count = user_indices.is_none().then_some(input_names.len());
+        let argument_indices = match user_indices {
+            Some(indices) => {
+                if indices.len() != input_names.len() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "invocation plan has {} user indices for {} compiled inputs",
+                        indices.len(),
+                        input_names.len()
+                    )));
+                }
+                indices
+            }
+            None => (0..input_names.len()).collect(),
+        };
+        let input_plans = input_names
+            .into_iter()
+            .zip(argument_indices)
+            .zip(self.input_dtype_codes())
+            .zip(&self.input_shape_exprs)
+            .map(|(((name, argument_index), dtype_code), shape)| {
+                let mut dynamic_dims = Vec::new();
+                let mut static_dims = Vec::new();
+                for (dimension_position, &expression) in shape.iter().enumerate() {
+                    if let Some(dynamic) =
+                        DynamicDimPlan::from_expression(dimension_position, expression)
+                    {
+                        dynamic_dims.push(dynamic);
+                    } else if let Some(expected) = expression.to_usize() {
+                        static_dims.push(StaticDimPlan {
+                            dimension_position,
+                            expected,
+                        });
+                    }
+                }
+                self.tensor_ids
+                    .get(&name)
+                    .copied()
+                    .map(|node| InputPlan {
+                        name: name.clone(),
+                        argument_index,
+                        node,
+                        dtype_code,
+                        expected_rank: shape.len(),
+                        static_dims,
+                        dynamic_dims,
+                    })
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyKeyError::new_err(format!(
+                            "Unknown input tensor: {name}"
                         ))
                     })
-                })
-                .collect::<PyResult<Vec<usize>>>()?;
-            result.push(shape);
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        if self.output_names.len() != self.output_ids.len()
+            || self.output_names.len() != self.output_dtypes.len()
+            || self.output_names.len() != self.output_shape_exprs.len()
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "compiled output metadata lengths disagree: names={}, nodes={}, dtypes={}, shapes={}",
+                self.output_names.len(),
+                self.output_ids.len(),
+                self.output_dtypes.len(),
+                self.output_shape_exprs.len()
+            )));
         }
-        Ok(result)
+        let input_positions: HashMap<&str, usize> = input_plans
+            .iter()
+            .enumerate()
+            .map(|(position, input)| (input.name.as_str(), position))
+            .collect();
+        let mut writeback_inputs = vec![None; self.output_names.len()];
+        for (output_position, input_name) in &self.writeback_outputs {
+            let destination = writeback_inputs.get_mut(*output_position).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "writeback output position {output_position} is out of range"
+                ))
+            })?;
+            let input_position = input_positions
+                .get(input_name.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "writeback output {output_position} refers to unknown input '{input_name}'"
+                    ))
+                })?;
+            *destination = Some(input_position);
+        }
+        let mut scalar_outputs = vec![false; self.output_names.len()];
+        for position in scalar_output_positions {
+            let scalar = scalar_outputs.get_mut(position).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "scalar output position {position} is out of range"
+                ))
+            })?;
+            *scalar = true;
+        }
+        let mut returned_outputs = Vec::new();
+        let mut writebacks = Vec::new();
+        for position in 0..self.output_names.len() {
+            let output = OutputPlan {
+                position,
+                name: self.output_names[position].clone(),
+                node: self.output_ids[position],
+                dtype_code: self.output_dtypes[position],
+                scalar: scalar_outputs[position],
+            };
+            if let Some(input_position) = writeback_inputs[position] {
+                writebacks.push(WritebackPlan {
+                    output,
+                    input_position,
+                });
+            } else {
+                returned_outputs.push(output);
+            }
+        }
+        self.torch_invocation.configure(ExecutionPlan {
+            inputs: input_plans,
+            exact_argument_count,
+            returned_outputs,
+            writebacks,
+            has_dynamic_dims: !self.dim_param_map.is_empty(),
+            static_output_shapes: self.output_shapes.clone(),
+        });
+        Ok(())
+    }
+
+    /// Fully generic PyTorch invocation. Every external tensor binding is
+    /// observed on every call; only changed runtime bindings are reinstalled.
+    fn invoke(
+        &mut self,
+        py: Python<'_>,
+        inputs: &Bound<'_, pyo3::types::PyTuple>,
+    ) -> PyResult<Py<PyAny>> {
+        if self.is_bound {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "this CompiledGraph has been consumed by bound execution",
+            ));
+        }
+        crate::torch_invocation::invoke(self, py, inputs)
+    }
+
+    /// Bind stable CUDA resources once and return an exclusive executable.
+    fn bind(
+        slf: Py<Self>,
+        py: Python<'_>,
+        inputs: &Bound<'_, pyo3::types::PyTuple>,
+    ) -> PyResult<BoundExecutable> {
+        crate::bound_execution::bind(slf, py, inputs)
     }
 
     /// Set input tensor data by name (f32, for backward compatibility).
@@ -564,7 +764,7 @@ impl CompiledGraph {
 
     /// Execute the graph.
     fn run(&mut self) {
-        self.runtime.execute(&self.graph.dyn_map);
+        self.execute_runtime();
     }
 
     /// Return the HLIR graph as a DOT string for visualization.

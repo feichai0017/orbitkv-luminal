@@ -1,6 +1,9 @@
+mod bound_execution;
 pub mod compiled_graph;
 mod dim_arith;
+mod tensor_bridge;
 pub mod torch_dtype;
+mod torch_invocation;
 pub mod typed_data;
 
 // PT2 modules
@@ -11,6 +14,7 @@ pub mod pt2_schema;
 mod pt2_util;
 pub mod translator;
 
+use bound_execution::BoundExecutable;
 use compiled_graph::CompiledGraph;
 use pt2_compiled_model::{TranslatedModule, process_pt2, translate_module};
 use pyo3::prelude::*;
@@ -24,6 +28,7 @@ pub fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(translate_module, m)?)?;
     m.add_class::<TranslatedModule>()?;
     m.add_class::<CompiledGraph>()?;
+    m.add_class::<BoundExecutable>()?;
     m.add_function(wrap_pyfunction!(_reference_factory_capsule, m)?)?;
     m.add_function(wrap_pyfunction!(_torch_dtype_codes, m)?)?;
     #[cfg(feature = "cuda")]
