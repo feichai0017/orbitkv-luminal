@@ -569,29 +569,44 @@ def compile(
     # disagreement (e.g. the user marked a dim as dynamic but their model
     # specialises it to a constant). Fall back to a static export so the
     # caller still gets a usable CompiledModel rather than a hard error.
-    ep = None
-    if dynamic_shapes is not None:
-        try:
+    # Swap compile-hostile implementations for traceable ones before export.
+    # This is the only entry point that still holds the live nn.Module -- a
+    # torch.compile backend is handed an already-traced graph, by which point
+    # e.g. the delta-rule loop has been unrolled and the damage is done.
+    #
+    # Restoring is not optional: unlike `pt2_backend` this path does not
+    # deepcopy, so it exports the caller's own module and must hand it back
+    # unmodified.
+    from .model_patches import patch_model, unpatch_model
+
+    patched = patch_model(model)
+    try:
+        ep = None
+        if dynamic_shapes is not None:
+            try:
+                ep = torch.export.export(
+                    model,
+                    example_args,
+                    kwargs=kwargs,
+                    dynamic_shapes=dynamic_shapes,
+                    **extra,
+                )
+                ep = ep.run_decompositions(_decomp_table())
+            except Exception:
+                ep = None
+
+        if ep is None:
             ep = torch.export.export(
                 model,
                 example_args,
                 kwargs=kwargs,
-                dynamic_shapes=dynamic_shapes,
+                dynamic_shapes=None,
                 **extra,
             )
             ep = ep.run_decompositions(_decomp_table())
-        except Exception:
-            ep = None
-
-    if ep is None:
-        ep = torch.export.export(
-            model,
-            example_args,
-            kwargs=kwargs,
-            dynamic_shapes=None,
-            **extra,
-        )
-        ep = ep.run_decompositions(_decomp_table())
+    finally:
+        if patched:
+            unpatch_model(model)
 
     return _save_and_compile(ep, factory, search_iterations)
 

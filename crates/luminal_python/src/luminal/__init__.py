@@ -8,6 +8,7 @@ from .compiled_model import CompiledModel
 # Import Rust extension components (built by maturin)
 from .luminal import CompiledGraph, process_pt2
 from .main import luminal_backend, register_backend
+from .model_patches import patch_model, unpatch_model
 
 _register_cache_serialization()
 
@@ -18,4 +19,6 @@ __all__ = [
     "register_backend",
     "CompiledGraph",
     "process_pt2",
+    "patch_model",
+    "unpatch_model",
 ]
