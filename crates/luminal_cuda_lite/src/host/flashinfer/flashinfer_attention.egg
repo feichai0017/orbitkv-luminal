@@ -1041,3 +1041,139 @@
     :ruleset kernel_fuse_late2
     :name "FlashInfer gemma sliding triu-gather attention"
 )
+
+(rule
+    (
+        ; Host-mask + explicit-indptr variant of the 16-bit island above.
+        ;
+        ; A serving engine that batches multiple sequences into one tick
+        ; cannot spell its mask in-graph: causal-within-sequence plus
+        ; cross-sequence isolation depends on the batch layout, so the mask
+        ; arrives as a precomputed F32 Input and per-sequence boundaries
+        ; arrive as named qo_indptr/kv_indptr Inputs. The mask is a
+        ; PROOF-ONLY anchor (the op never reads it at runtime); the indptrs
+        ; are wired as op inputs 5/6, selecting the explicit-indptr execute
+        ; path. Two more deltas from the triu-gather island, matching both
+        ; the hand-written serving models and translated HF graphs:
+        ;   - scores are Cast to F32 between the QK Sum and the scale Mul
+        ;     (QK runs in bf16, softmax in F32);
+        ;   - the gathered V's GQA barrier is Cast to F32 before P.V
+        ;     (probs stay F32; P.V runs in F32).
+        (flashinfer_prefill_dt ?dt)
+
+        (= ?smax (Op (Max ?smax_shape ?context_tokens ?smax_in ?smax_iter ?smax_out)
+            (ICons ?masked (INil))))
+        (= ?negmax (Op (Mul ?nm_shape ?nm_a ?nm_b ?nm_o)
+            (ICons ?smax (ICons ?nm_negone (INil)))))
+        (= ?shifted (Op (Add ?sh_shape ?sh_a ?sh_b ?sh_o)
+            (ICons ?masked (ICons ?negmax (INil)))))
+        (= ?sc (Op (Mul ?sc_shape ?sc_a ?sc_b ?sc_o)
+            (ICons ?shifted (ICons ?sc_log2e (INil)))))
+        (const_like ?sc_log2e 1.442695)
+        (= ?sexp (Op (Exp2 ?se_shape ?se_in ?se_out) (ICons ?sc (INil))))
+        (= ?sexpsum (Op (Sum ?ss_shape ?context_tokens ?ss_in ?ss_iter ?ss_out)
+            (ICons ?sexp (INil))))
+        (= ?srecip (Op (Recip ?sr_shape ?sr_in ?sr_out) (ICons ?sexpsum (INil))))
+        (= ?soft (Op (Mul ?sf_shape ?sf_a ?sf_b ?sf_o)
+            (ICons ?sexp (ICons ?srecip (INil)))))
+
+        (= ?mul2 (Op (Mul
+            (ECons ?nheads (ECons ?input_tokens (ECons ?hdim (ECons ?context_tokens (ENil)))))
+            ?mul2_a_strides
+            ?mul2_b_strides
+            ?mul2_out_strides)
+            (ICons ?soft (ICons ?v_f32 (INil)))))
+
+        (= ?output (Op (Sum
+            (ECons ?nheads2 (ECons ?input_tokens (ECons ?hdim2 (ENil))))
+            ?context_tokens
+            ?out_in_strides
+            (MIter)
+            ?out_out_strides)
+            (ICons ?mul2 (INil))))
+
+        ; V: gather -> *1.0 GQA barrier (bf16) -> Cast F32 for the P.V chain.
+        (= ?v_f32 (Op (Cast ?vf_sz (F32)) (ICons ?v_gqa (INil))))
+        (const_like ?v_gqa_const 1.000000)
+        (= ?v_gqa (Op (Mul
+            (ECons ?nheads3 (ECons ?context_tokens (ECons ?hdim3 (ENil))))
+            ?v_gqa_a_strides
+            (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
+            ?v_gqa_out_strides)
+            (ICons ?v_gathered (ICons ?v_gqa_const (INil)))))
+
+        (= ?v_gathered (Op (Gather
+            (ECons ?context_tokens (ECons ?kvdim (ENil)))
+            ?v_gather_strides
+            (ECons ?num_slots_v (ECons ?kvdim2 (ENil)))
+            ?v_src_strides)
+            (ICons ?k_idx (ICons ?v_cache (INil)))))
+
+        (= ?mul1 (Op (Mul
+            (ECons ?nheads4 (ECons ?input_tokens (ECons ?context_tokens (ECons ?hdim4 (ENil)))))
+            ?mul1_a_strides
+            ?mul1_b_strides
+            ?mul1_out_strides)
+            (ICons ?q (ICons ?k_gqa (INil)))))
+
+        (= ?qk (Op (Sum
+            (ECons ?nheads5 (ECons ?input_tokens (ECons ?context_tokens (ENil))))
+            ?hdim5
+            ?qk_in_strides
+            (MIter)
+            ?qk_out_strides)
+            (ICons ?mul1 (INil))))
+
+        ; Scores: QK Sum (bf16) -> Cast F32 -> * scale -> + host mask.
+        (= ?scores_f (Op (Cast ?cf_sz (F32)) (ICons ?qk (INil))))
+        (= ?masked (Op (Add
+            (ECons ?nheads8 (ECons ?input_tokens (ECons ?context_tokens (ENil))))
+            ?mask_add_a_strides
+            (ECons (MNum 0) ?mask_rest_strides)
+            ?mask_add_out_strides)
+            (ICons ?scaled_qk (ICons ?mask (INil)))))
+        (= ?scaled_qk (Op (Mul ?sq_shape ?sq_a ?sq_b ?sq_o)
+            (ICons ?scores_f (ICons ?sq_scale (INil)))))
+        (const_like ?sq_scale ?sq_scale_val)
+
+        ; The mask itself proves nothing about layout — the indptrs carry it.
+        (= ?mask (Input ?mask_idx ?mask_name (F32)))
+        (= ?qoi (Input ?qo_idx "qo_indptr" (Int)))
+        (= ?kvi (Input ?kv_idx "kv_indptr" (Int)))
+
+        (const_like ?k_gqa_const 1.000000)
+        (= ?k_gqa (Op (Mul
+            (ECons ?nheads6 (ECons ?hdim6 (ECons ?context_tokens (ENil))))
+            ?k_gqa_a_strides
+            (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
+            ?k_gqa_out_strides)
+            (ICons ?k_gathered (ICons ?k_gqa_const (INil)))))
+
+        (= ?k_gathered (Op (Gather
+            (ECons ?context_tokens (ECons ?kvdim3 (ENil)))
+            ?k_gather_strides
+            (ECons ?num_slots_k (ECons ?kvdim4 (ENil)))
+            ?k_src_strides)
+            (ICons ?k_idx (ICons ?k_cache (INil)))))
+
+        ; The P.V Sum is F32 in this spelling; the op writes ?dt (bf16).
+        ; Union at the downstream Cast so buffer bits and node dtype agree.
+        (= ?out_cast (Op (Cast ?oc_sz (Bf16)) (ICons ?output (INil))))
+
+        (= ?dt (dtype ?q))
+        (= ?dt (dtype ?k_cache))
+        (= ?dt (dtype ?v_cache))
+        (flashinfer_cache_pair ?k_cache ?v_cache)
+        (flashinfer_head_dim_ok ?hdim)
+    )
+    (
+        (let ?fi (Op (FlashInferAttention
+            ?nheads (MDiv ?kvdim ?hdim) ?hdim (MNum 1) ?input_tokens ?context_tokens ?dt ?sq_scale_val -1.0)
+            (ICons ?q (ICons ?k_cache (ICons ?v_cache (ICons ?k_idx
+                (ICons ?qoi (ICons ?kvi (INil)))))))))
+        (union ?out_cast ?fi)
+        (set (dtype ?fi) ?dt)
+    )
+    :ruleset kernel_fuse_late2
+    :name "FlashInfer host-mask explicit-indptr attention 16-bit"
+)

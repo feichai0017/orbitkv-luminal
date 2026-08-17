@@ -104,23 +104,37 @@ pub(crate) struct FlashInferDecodeCaptureSignature {
     pub(crate) ptrs: FlashInferDecodePointers,
 }
 
-/// Pointer-free proof that two derived-decode islands may reuse one prepared
-/// allocation. Equal shapes are not enough: the mutable metadata buffers are
-/// populated from `gather_idx`, so the producer node is part of the key.
-/// Explicit-indptr plans deliberately have no key because their device
-/// contents can change without their node identities changing.
+/// Pointer-free proof that two islands may reuse one prepared allocation.
+/// Equal shapes are not enough: the mutable metadata buffers are populated
+/// from `gather_idx`, so the producer node is part of the key. Explicit-indptr
+/// islands key on the indptr nodes too; their CONTENTS are either part of the
+/// spec (prefill: the plan is content-dependent, so a content change is a new
+/// key) or capacity-planned out of it (decode: the plan is refreshed in place
+/// every tick, see `PreparedFlashInferDecode::refresh_explicit_decode`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FlashInferPrepareKey {
     spec: FlashInferDecodeSpec,
     gather_idx: NodeIndex,
+    indptrs: Option<(NodeIndex, NodeIndex)>,
 }
 
 impl FlashInferPrepareKey {
     pub(crate) fn for_inputs(spec: FlashInferDecodeSpec, inputs: &[NodeIndex]) -> Option<Self> {
-        (inputs.len() == 4).then(|| Self {
-            spec,
-            gather_idx: inputs[3],
-        })
+        match inputs.len() {
+            4 => Some(Self {
+                spec,
+                gather_idx: inputs[3],
+                indptrs: None,
+            }),
+            // Explicit prefill stays unkeyed: its plan depends on the indptr
+            // contents, which resource planning cannot read.
+            6 if !spec.is_prefill() => Some(Self {
+                spec,
+                gather_idx: inputs[3],
+                indptrs: Some((inputs[4], inputs[5])),
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -224,12 +238,81 @@ impl FlashInferResolvedDecode {
         self.ptrs.explicit_kv_indptr.is_some()
     }
 
+    pub(crate) fn is_prefill(&self) -> bool {
+        self.spec.is_prefill()
+    }
+
     pub(crate) fn current_c(&self) -> usize {
         self.spec.c
     }
 
+    pub(crate) fn kv_indptr_host(&self) -> &[i32] {
+        &self.spec.kv_indptr_host
+    }
+
+    pub(crate) fn gather_idx_ptr(&self) -> u64 {
+        self.ptrs.gather_idx
+    }
+
+    /// Explicit-indptr decode is planned at a CAPACITY context length and
+    /// refreshed in place each tick, exactly like derived single-sequence
+    /// decode. Everything else is planned at the actual `c`.
+    fn is_capacity_planned(&self) -> bool {
+        if self.has_explicit_indptr() {
+            !self.spec.is_prefill()
+        } else {
+            self.spec.total_q_tokens == 1
+        }
+    }
+
+    /// Read the explicit indptr contents into the spec, once per distinct
+    /// device buffer per tick (`memo` is keyed by device pointer and lives for
+    /// one runtime step). Every attention layer of a model shares the same two
+    /// indptr Inputs, so this is one readback + one stream sync per tick
+    /// instead of one per layer. No-op for derived-indptr islands.
+    pub(crate) fn fill_explicit_indptrs(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        memo: &mut FxHashMap<u64, Vec<i32>>,
+    ) -> anyhow::Result<()> {
+        let Some(kv_ptr) = self.ptrs.explicit_kv_indptr else {
+            return Ok(());
+        };
+        let rows = self.spec.batch_size + 1;
+        let mut pending: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut want = vec![kv_ptr];
+        if self.spec.is_prefill()
+            && let Some(qo_ptr) = self.ptrs.explicit_qo_indptr
+        {
+            want.push(qo_ptr);
+        }
+        for ptr in want {
+            if memo.contains_key(&ptr) {
+                continue;
+            }
+            let mut host_bytes = vec![0u8; rows * std::mem::size_of::<i32>()];
+            unsafe {
+                result::memcpy_dtoh_async(&mut host_bytes, ptr, stream.cu_stream())?;
+            }
+            pending.push((ptr, host_bytes));
+        }
+        if !pending.is_empty() {
+            stream.synchronize()?;
+            for (ptr, bytes) in pending {
+                memo.insert(ptr, bytes_to_i32_vec(bytes));
+            }
+        }
+        self.spec.kv_indptr_host = memo[&kv_ptr].clone();
+        if self.spec.is_prefill()
+            && let Some(qo_ptr) = self.ptrs.explicit_qo_indptr
+        {
+            self.spec.qo_indptr_host = memo[&qo_ptr].clone();
+        }
+        Ok(())
+    }
+
     pub(crate) fn graph_plan_capacity(&self, existing_capacity: Option<usize>) -> usize {
-        if self.has_explicit_indptr() || self.spec.total_q_tokens != 1 {
+        if !self.is_capacity_planned() {
             return self.spec.c;
         }
         if let Some(capacity) = existing_capacity
@@ -240,15 +323,25 @@ impl FlashInferResolvedDecode {
         flashinfer_graph_plan_capacity(self.spec.c, self.spec.max_kv_pages)
     }
 
+    /// The capture signature: what has to be equal for a captured island to be
+    /// replayed as-is. Capacity-planned islands carry the capacity, not the
+    /// live `c`, and no indptr contents — those change every tick and are
+    /// handled without recapture. Explicit-indptr prefill keeps the contents
+    /// (filled by `fill_explicit_indptrs`): its plan is content-dependent.
     pub(crate) fn signature_for_graph_plan(
         &self,
         plan_c: usize,
     ) -> FlashInferDecodeCaptureSignature {
         let mut spec = self.spec.clone();
         let ptrs = self.ptrs;
-        if !self.has_explicit_indptr() && spec.total_q_tokens == 1 {
+        if self.is_capacity_planned() {
             spec.c = plan_c;
-            spec.kv_indptr_host = vec![0, plan_c as i32];
+            if self.has_explicit_indptr() {
+                spec.kv_indptr_host = Vec::new();
+                spec.qo_indptr_host = Vec::new();
+            } else {
+                spec.kv_indptr_host = vec![0, plan_c as i32];
+            }
         }
         FlashInferDecodeCaptureSignature { spec, ptrs }
     }
@@ -275,6 +368,11 @@ pub(crate) struct PreparedFlashInferDecode {
     last_page_len_ptr: u64,
     _temp_output: CudaSlice<u8>,
     temp_output_ptr: u64,
+    /// Explicit-indptr decode prepared for a CUDA graph: planned at capacity
+    /// `spec.c`, indptr contents and slot indices refreshed OUTSIDE the graph
+    /// each tick by `refresh_explicit_decode`, so `enqueue` records only the
+    /// attention kernels.
+    explicit_graph_decode: bool,
 }
 
 // SAFETY: PreparedFlashInferDecode owns CUDA device allocations and a process-lifetime
@@ -462,12 +560,21 @@ impl EgglogOp for FlashInferAttention {
         let flat_idx_node = input_enodes[3];
         let gather_idx = find_indptrs::try_find_compact_gather_idx(egraph, flat_idx_node)
             .expect("FlashInferAttention matched a gather without recoverable compact gather_idx");
-        let final_inputs = vec![
+        let mut final_inputs = vec![
             input_enodes[0],
             input_enodes[1],
             input_enodes[2],
             gather_idx,
         ];
+        // The host-mask island wires qo_indptr/kv_indptr as inputs 4/5 in
+        // place of the proof-only mask (see "FlashInfer host-mask
+        // explicit-indptr attention"). Forward them so the runtime takes the
+        // explicit-indptr path; the derived-causal islands carry the mask
+        // there instead and keep the 4-input form.
+        if input_enodes.len() == 6 {
+            final_inputs.push(input_enodes[4]);
+            final_inputs.push(input_enodes[5]);
+        }
 
         let op = LLIROp::new::<dyn HostOp>(Box::new(extracted) as Box<dyn HostOp>);
         (op, final_inputs)
@@ -733,11 +840,23 @@ impl FlashInferAttention {
             Ok(bytes_to_i32_vec(host_bytes))
         };
 
+        let explicit_graph_decode =
+            enable_cuda_graph && resolved.ptrs.explicit_kv_indptr.is_some() && !is_prefill;
         let (owned_kv_indptr, owned_kv_indptr_ptr) = if let Some(kv_indptr_ptr) =
             resolved.ptrs.explicit_kv_indptr
         {
             let r = spec.batch_size + 1;
-            spec.kv_indptr_host = read_device_i32s(kv_indptr_ptr, r)?;
+            if spec.kv_indptr_host.len() != r {
+                spec.kv_indptr_host = read_device_i32s(kv_indptr_ptr, r)?;
+            }
+            if explicit_graph_decode {
+                // Plan at capacity so a growing context replays the captured
+                // island; the live kv_indptr buffer is read by the kernel, and
+                // the slot indices are refreshed per tick (below and in
+                // `refresh_explicit_decode`).
+                let actual_c = spec.c;
+                spec.c = flashinfer_graph_plan_capacity(actual_c, spec.max_kv_pages);
+            }
             (None, None)
         } else if is_prefill {
             // Single-sequence prefill: s q tokens attending causally to a
@@ -780,7 +899,9 @@ impl FlashInferAttention {
         let (owned_qo_indptr, owned_qo_indptr_ptr) = if is_prefill {
             if let Some(qo_indptr_ptr) = resolved.ptrs.explicit_qo_indptr {
                 let r = spec.batch_size + 1;
-                spec.qo_indptr_host = read_device_i32s(qo_indptr_ptr, r)?;
+                if spec.qo_indptr_host.len() != r {
+                    spec.qo_indptr_host = read_device_i32s(qo_indptr_ptr, r)?;
+                }
                 (None, None)
             } else {
                 spec.qo_indptr_host = vec![0, spec.total_q_tokens as i32];
@@ -872,6 +993,24 @@ impl FlashInferAttention {
             ));
         }
 
+        if explicit_graph_decode {
+            // The captured island will not copy slot indices; seed them now for
+            // the first replay. `spec.c` is the capacity; the live count is the
+            // last kv_indptr entry.
+            let live_c = spec.kv_indptr_host.last().copied().unwrap_or(0).max(0) as usize;
+            if live_c > 0 {
+                unsafe {
+                    (lib.extract_slot_indices)(
+                        resolved.ptrs.gather_idx as *const i32,
+                        indices_ptr as *mut i32,
+                        live_c as i32,
+                        spec.kv_dim as i32,
+                        cu_stream,
+                    );
+                }
+            }
+        }
+
         Ok(PreparedFlashInferDecode {
             lib,
             spec: spec.clone(),
@@ -893,6 +1032,7 @@ impl FlashInferAttention {
             last_page_len_ptr,
             _temp_output: temp_output,
             temp_output_ptr,
+            explicit_graph_decode,
         })
     }
 }
@@ -900,6 +1040,87 @@ impl FlashInferAttention {
 impl PreparedFlashInferDecode {
     pub(crate) fn plan_c(&self) -> usize {
         self.spec.c
+    }
+
+    /// Per-tick refresh of an explicit-indptr decode island captured in a CUDA
+    /// graph — FlashInfer's own contract: `plan()` on the host every step into
+    /// the fixed workspaces, replay the captured kernels. Under
+    /// `enable_cuda_graph` the plan's `padded_batch_size` is a device constant
+    /// (`max_grid_size / gdy`, see flashinfer `DecodePlan`), so the workspace
+    /// LAYOUT (`plan_info`, baked into the captured launch) is stable while
+    /// batch size and heads are; only the CONTENTS (request/tile indices,
+    /// chunk size) change, and those travel by H2D copy inside the plan.
+    ///
+    /// Also copies the live slot indices, bounded by the live context length,
+    /// so the captured island never reads past this tick's `gather_idx`.
+    ///
+    /// Returns `false` when the island must be recaptured instead: the plan
+    /// layout moved (should not happen for a fixed spec — defensive), or the
+    /// live context outgrew the planned capacity.
+    pub(crate) fn refresh_explicit_decode(
+        &self,
+        stream: &Arc<CudaStream>,
+        kv_indptr_host: &[i32],
+        gather_idx_ptr: u64,
+        live_c: usize,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            self.explicit_graph_decode,
+            "refresh_explicit_decode on a non-explicit-decode plan"
+        );
+        if live_c > self.spec.c {
+            return Ok(false);
+        }
+        anyhow::ensure!(
+            kv_indptr_host.len() == self.spec.batch_size + 1,
+            "FlashInfer explicit refresh: kv_indptr has {} rows, plan has batch {}",
+            kv_indptr_host.len(),
+            self.spec.batch_size
+        );
+        let cu_stream = stream.cu_stream() as *mut std::ffi::c_void;
+        let mut kv_host = kv_indptr_host.to_vec();
+        let mut plan_info_buf = [0i64; 16];
+        let mut plan_info_len: i32 = 0;
+        let page_locked_workspace = page_locked_workspace();
+        let plan_ret = unsafe {
+            (self.lib.plan)(
+                self.float_workspace_ptr as *mut std::ffi::c_void,
+                FLOAT_WORKSPACE_SIZE,
+                self.int_workspace_ptr as *mut std::ffi::c_void,
+                INT_WORKSPACE_SIZE,
+                page_locked_workspace.0 as *mut std::ffi::c_void,
+                kv_host.as_mut_ptr(),
+                self.spec.batch_size as i32,
+                self.spec.num_qo_heads as i32,
+                self.spec.num_kv_heads as i32,
+                self.spec.page_size as i32,
+                self.spec.head_dim as i32,
+                self.spec.dtype as i32,
+                true,
+                cu_stream,
+                plan_info_buf.as_mut_ptr(),
+                &mut plan_info_len,
+            )
+        };
+        anyhow::ensure!(
+            plan_ret == 0,
+            "FlashInfer decode replan failed with error code {plan_ret}"
+        );
+        if plan_info_buf[..plan_info_len as usize] != self.plan_info[..] {
+            return Ok(false);
+        }
+        if live_c > 0 {
+            unsafe {
+                (self.lib.extract_slot_indices)(
+                    gather_idx_ptr as *const i32,
+                    self.indices_ptr as *mut i32,
+                    live_c as i32,
+                    self.spec.kv_dim as i32,
+                    cu_stream,
+                );
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn update_current_c(
@@ -953,6 +1174,8 @@ impl PreparedFlashInferDecode {
                     cu_stream,
                 );
             }
+        } else if self.explicit_graph_decode {
+            // Slot indices are refreshed outside the graph each tick.
         } else if self.spec.c > 0 {
             unsafe {
                 (self.lib.extract_slot_indices)(
@@ -1294,7 +1517,7 @@ mod resource_tests {
     }
 
     #[test]
-    fn explicit_indptr_resource_specs_do_not_assume_cache_sharing() {
+    fn explicit_indptr_decode_resource_specs_share_by_key() {
         let attention = FlashInferAttention {
             num_qo_heads: 4,
             num_kv_heads: 2,
@@ -1322,7 +1545,9 @@ mod resource_tests {
             .device_resource_spec(&inputs, &lengths, &dyn_map, true)
             .unwrap();
 
-        assert!(spec.cache_key.is_none());
+        // Explicit DECODE is capacity-planned and refreshed in place, so
+        // islands with equal specs share one prepared plan.
+        assert!(spec.cache_key.is_some());
         // No owned indptrs: indices (400), two last-page lengths (8),
         // and temporary output (1024).
         assert_eq!(spec.prepared_device_bytes().unwrap(), 1_432);
