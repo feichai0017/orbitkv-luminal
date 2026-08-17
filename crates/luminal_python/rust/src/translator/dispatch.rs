@@ -174,7 +174,7 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.expand.default" => self.translate_expand(node)?,
             "torch.ops.aten.clone.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                if !a.shape.is_contiguous() { a + 0.0 } else { a }
+                self.materialize_copy(node, a)?
             }
             "torch.ops.aten.argsort.default" => self.translate_argsort(node)?,
 

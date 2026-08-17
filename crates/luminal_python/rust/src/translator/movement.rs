@@ -217,7 +217,120 @@ fn normalize_concat_dims(
     }
 }
 
+/// Does the view carry a broadcast axis (stride 0 over a non-unit dim)?
+fn has_broadcast_axis(shape: &ShapeTracker) -> bool {
+    shape
+        .dims
+        .iter()
+        .zip(shape.strides.iter())
+        .any(|(d, s)| s.to_usize() == Some(0) && d.to_usize() != Some(1))
+}
+
+/// Express `target` as a pure merge of adjacent axes of `a`, as a VIEW.
+///
+/// A torch tensor cannot view an expanded axis merged with its neighbour —
+/// that reshape is a copy — but luminal's `ShapeTracker` can (`merge_dims`
+/// gives the merged axis an expression stride, `i/4*128` for a 4-way GQA
+/// group), which is how the hand-written models spell it. Returns `None`
+/// when `target` is not reachable by merging alone (splits, unit-dim
+/// insertion, or dims that do not group), so the caller keeps its general
+/// path.
+fn merge_view(mut a: GraphTensor, target: &[Expression]) -> Option<GraphTensor> {
+    let dims = a.shape.dims.clone();
+    let mut groups: Vec<(usize, usize)> = Vec::with_capacity(target.len());
+    let mut i = 0usize;
+    for t in target {
+        let start = i;
+        let mut prod = Expression::from(1);
+        loop {
+            if i >= dims.len() {
+                return None;
+            }
+            prod = (prod * dims[i]).simplify();
+            i += 1;
+            if prod == t.simplify() {
+                break;
+            }
+            if let (Some(p), Some(tv)) = (prod.to_usize(), t.to_usize())
+                && p > tv
+            {
+                return None;
+            }
+        }
+        groups.push((start, i - start));
+    }
+    if i != dims.len() {
+        return None;
+    }
+    // Merge from the back so earlier group offsets stay valid.
+    for (start, len) in groups.iter().rev() {
+        for _ in 1..*len {
+            a = a.merge_dims(*start, *start + 1);
+        }
+    }
+    Some(a)
+}
+
+fn arg_mentions(arg: &Argument, name: &str) -> bool {
+    arg.as_tensor_name() == Some(name)
+        || arg
+            .as_tensors()
+            .is_some_and(|ts| ts.iter().any(|t| t.name == name))
+        || arg.as_optional_tensors().is_some_and(|ts| {
+            ts.iter()
+                .any(|e| matches!(e, OptionalTensorEntry::Tensor(t) if t.as_tensor.name == name))
+        })
+}
+
 impl<'a> Translator<'a> {
+    /// The target shape of `node`'s output's ONE consumer, if that consumer is
+    /// an `aten.view`. Lets a copy materialise at the shape it is about to be
+    /// viewed as (see `materialize_copy`).
+    fn sole_view_user_shape(&self, node: &Node, dims: &[Expression]) -> Option<Vec<Expression>> {
+        let out = &node.outputs.first()?.as_tensor.as_ref()?.name;
+        let mut users = self
+            .parsed
+            .program
+            .graph_module
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| n.inputs.iter().any(|i| arg_mentions(&i.arg, out)));
+        let user = users.next()?;
+        if users.next().is_some() || user.target != "torch.ops.aten.view.default" {
+            return None;
+        }
+        if user.inputs.first()?.arg.as_tensor_name()? != out.as_str() {
+            return None;
+        }
+        Some(if let Ok(t) = self.get_ints_arg(user, 1) {
+            resolve_neg1_dim(&t, dims)
+        } else {
+            resolve_neg1_dim_exprs(&self.get_exprs_arg(user, 1).ok()?, dims)
+        })
+    }
+
+    /// `aten.clone` (and the copy a reshape of a strided tensor implies):
+    /// materialise a strided/broadcast view. The barrier is `* 1.0` — the
+    /// contiguity barrier the hand-written models use, so the same e-graph
+    /// rules see the same node. When the copy feeds exactly one `view` whose
+    /// shape is a merge of adjacent axes, the merge is done FIRST as a
+    /// ShapeTracker view and the barrier lands at the merged shape: an
+    /// `expand(kvh, g, d, c).reshape(kvh*g, d, c)` GQA broadcast then lowers
+    /// to `Mul((kvh*g, d, c) with group stride i/g*.., 1.0)` — the native
+    /// spelling — instead of a rank-4 copy followed by a free view.
+    pub(crate) fn materialize_copy(&mut self, node: &Node, a: GraphTensor) -> Result<GraphTensor> {
+        if !has_broadcast_axis(&a.shape) && a.shape.is_contiguous() {
+            return Ok(a);
+        }
+        if let Some(target) = self.sole_view_user_shape(node, &a.shape.dims)
+            && let Some(view) = merge_view(a, &target)
+        {
+            return Ok(view * 1.0);
+        }
+        Ok(a * 1.0)
+    }
+
     pub(crate) fn translate_reshape(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
 
@@ -228,15 +341,21 @@ impl<'a> Translator<'a> {
             resolve_neg1_dim_exprs(&exprs, &a.shape.dims)
         };
 
-        let has_broadcast = a
-            .shape
-            .dims
-            .iter()
-            .zip(a.shape.strides.iter())
-            .any(|(d, s)| s.to_usize() == Some(0) && d.to_usize() != Some(1));
+        // Already at the target (a preceding `materialize_copy` landed there).
+        if a.shape.dims.as_slice() == shape.as_slice()
+            && a.shape.is_contiguous()
+            && !has_broadcast_axis(&a.shape)
+        {
+            return Ok(a);
+        }
 
-        let a = if has_broadcast || !a.shape.is_contiguous() {
-            a + 0.0
+        let a = if has_broadcast_axis(&a.shape) || !a.shape.is_contiguous() {
+            // A strided view: torch copies. Merge as a view where possible so
+            // the barrier lands at the target shape (see `materialize_copy`).
+            if let Some(view) = merge_view(a, &shape) {
+                return Ok(view * 1.0);
+            }
+            a * 1.0
         } else {
             a
         };
