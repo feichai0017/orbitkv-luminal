@@ -52,6 +52,7 @@ proptest = "1.9.0"
 # examples) are PARKED — out of the workspace until their M4/4d re-seat
 # on the native ladder. They are not deleted; their sources stay put.
 members = [
+    "crates/luminal_cuda_lite",
     "crates/luminal_nn",
     "crates/luminal_tracing",
     # First re-seated example (conversion directive 2026-08-10): pure

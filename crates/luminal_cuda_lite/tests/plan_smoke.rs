@@ -1,0 +1,92 @@
+//! CL-1 plan-layer smoke: everything up to the device boundary runs on
+//! any host — load, bind, search under the CUDA allow list, plan
+//! inspection, codegen for every elected compute node — and `execute`
+//! without the `device` feature refuses loudly.
+
+use luminal::bufferize::BufferNode;
+use luminal::prelude::FxHashMap;
+use luminal_cuda_lite::{kernels, CudaRuntime};
+
+#[test]
+fn allow_list_is_a_strict_subset_of_the_reference_inventory() {
+    let cuda = CudaRuntime::allow_list();
+    let reference = luminal::reference::reference_allow_list();
+    assert!(!cuda.is_empty(), "CUDA claims nothing");
+    for op in &cuda {
+        assert!(reference.contains(op), "{op} not in the reference inventory");
+    }
+    // Expression-carrying ops are CL-1b: the table must not claim them.
+    for absent in ["Iota", "Gather", "Scatter", "IndexMapApplyMaterialize"] {
+        assert!(
+            !cuda.iter().any(|op| op.contains(absent)),
+            "{absent} claimed before its codegen exists"
+        );
+    }
+}
+
+#[test]
+fn search_produces_a_codegen_complete_plan() {
+    let mut cx = luminal::graph::Graph::new();
+    let a = cx.tensor((2usize, 3usize));
+    let b = cx.tensor((2usize, 3usize));
+    let _out = ((a + b) * a).output();
+
+    let mut rt = CudaRuntime::load(&cx).expect("load");
+    let data: FxHashMap<_, _> = [
+        (a.id, vec![1.0f32, 2., 3., 4., 5., 6.].into()),
+        (b.id, vec![10.0f32, 20., 30., 40., 50., 60.].into()),
+    ]
+    .into_iter()
+    .collect();
+    let outcome = rt
+        .search(&data, &luminal::test_support::harness_search_options())
+        .expect("search under the CUDA allow list");
+    assert!(outcome.plans_profiled > 0, "no plans profiled");
+
+    // Every elected compute node must have a codegen row — the allow
+    // list promised only what the table generates.
+    let plan = rt.plan().expect("plan loaded");
+    let mut computes = 0usize;
+    for node in plan.dag.node_weights() {
+        if let BufferNode::Compute { op, .. } = node {
+            computes += 1;
+            let label = op.label();
+            if label == "BufferAlloc" || label == "BufferFree" {
+                continue;
+            }
+            assert!(
+                kernels::codegen_for(op.as_ref()).is_some(),
+                "elected op {label} has no codegen row"
+            );
+        }
+    }
+    assert!(computes > 0, "plan has no compute nodes");
+
+    // Without the device feature, execute refuses loudly.
+    rt.set_data(a.id, vec![1.0f32, 2., 3., 4., 5., 6.]);
+    rt.set_data(b.id, vec![10.0f32, 20., 30., 40., 50., 60.]);
+    let err = rt.execute().expect_err("execute must refuse without a device");
+    assert!(
+        err.to_string().contains("device"),
+        "refusal must name the missing feature: {err}"
+    );
+}
+
+#[test]
+fn codegen_emits_wellformed_sources() {
+    // String-level check on a representative binary kernel: generate
+    // Add over (2,3) f32 and eyeball the load-bearing pieces.
+    use luminal::dtype::PlanDtype;
+    let ctx = kernels::CodegenCtx {
+        operand_dims: vec![vec![2, 3], vec![2, 3], vec![2, 3]],
+        operand_dtypes: vec![PlanDtype::F32, PlanDtype::F32, PlanDtype::F32],
+        dest_dims: vec![vec![2, 3]],
+        dest_dtypes: vec![PlanDtype::F32],
+    };
+    let add = luminal::reference::ops::AddFunctionalDps;
+    let kernel = kernels::codegen_for(&add).expect("add has a row");
+    let generated = (kernel.codegen)(&add, &ctx).expect("codegen");
+    assert_eq!(generated.n, 6);
+    assert!(generated.source.contains("__global__ void k("));
+    assert!(generated.source.contains("a[i] + b[i]"));
+}
