@@ -20,7 +20,7 @@ pub struct BoundExecutable {
     // These references are the storage-lifetime contract. The runtime borrows
     // their pointers until this executable is dropped.
     _input_refs: Vec<Py<PyAny>>,
-    outputs: Vec<Py<PyAny>>,
+    outputs: Py<PyTuple>,
     destinations: Vec<BoundDestination>,
     // The selected runtime graph is stable after its first execution, so its
     // non-zero-copy outputs only need to be discovered once.
@@ -152,26 +152,32 @@ pub(crate) fn bind(
         let output_node = output_plan.node;
         let output = api.empty(py, shape, dtype_code, &device)?;
         let metadata = api.observe(py, &output)?;
-        // Generic invocation may have left a prior caller-owned destination
-        // registered. Returned bound outputs currently execute into runtime
-        // storage and are copied into their retained tensors after replay;
-        // writebacks above remain directly registered.
-        if !plan
+        // A returned tensor gets permanent storage just like an input. If the
+        // same graph node is also a durable writeback, preserve that input
+        // registration and copy only the duplicate returned view.
+        let aliases_writeback = plan
             .writebacks
             .iter()
-            .any(|writeback| writeback.output.node == output_node)
-        {
-            graph.runtime.clear_output_device_ptr(output_node);
+            .any(|writeback| writeback.output.node == output_node);
+        if !aliases_writeback {
+            unsafe {
+                graph.runtime.set_output_device_ptr(
+                    output_node,
+                    metadata.data_ptr,
+                    metadata.n_bytes(),
+                )
+            };
         }
         destinations.push(BoundDestination {
             node: output_node,
             data_ptr: metadata.data_ptr,
             n_bytes: metadata.n_bytes(),
-            always_copy: true,
+            always_copy: aliases_writeback,
         });
         outputs.push(output.unbind());
     }
 
+    let outputs = PyTuple::new(py, outputs.iter().map(|output| output.clone_ref(py)))?.unbind();
     graph.is_bound = true;
     drop(graph);
     Ok(BoundExecutable {
@@ -214,10 +220,6 @@ impl BoundExecutable {
             }
         }
         drop(graph);
-        Ok(
-            PyTuple::new(py, self.outputs.iter().map(|output| output.clone_ref(py)))?
-                .into_any()
-                .unbind(),
-        )
+        Ok(self.outputs.clone_ref(py).into_any())
     }
 }

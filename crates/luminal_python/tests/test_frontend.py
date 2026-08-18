@@ -3,7 +3,7 @@
 import importlib
 
 import luminal
-from luminal.pt2 import compile as compile_pt2
+from luminal.inference import compile as compile_inference
 
 
 def test_backend_entry_points_route_factory_and_options(monkeypatch):
@@ -32,4 +32,4 @@ def test_backend_entry_points_route_factory_and_options(monkeypatch):
     ]
     assert luminal.luminal_backend is luminal.backend
     assert luminal.register_backend is luminal.make_backend
-    assert luminal.compile is compile_pt2
+    assert luminal.compile is compile_inference

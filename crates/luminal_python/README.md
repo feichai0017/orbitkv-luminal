@@ -19,23 +19,22 @@ Use Luminal's direct, inference-oriented frontend when preparing a model for
 Luminal-managed execution:
 
 ```python
-compiled = luminal.compile(model, example_input)
+input_buffer = example_input.clone()
+compiled = luminal.compile(model, input_buffer)
 ```
 
-The returned artifact still supports generic calls. CUDA inference servers can
-instead bind fixed storage explicitly and replay it without rescanning tensor
+The returned executable is already bound to the tensor leaves in the example
+arguments. Update their contents in place and replay without rescanning tensor
 bindings or allocating outputs:
 
 ```python
-bound = compiled.bind(input_buffer)
-
 input_buffer.copy_(next_input)
-outputs = bound.replay()
+outputs = compiled()
 ```
 
-Bound execution currently requires contiguous CUDA inputs and float32,
-float16, or bfloat16 ordinary outputs. Binding is exclusive: once an artifact
-has produced a bound executable, it no longer accepts generic calls.
+Direct inference currently requires contiguous CUDA inputs. Use
+`torch.compile(..., backend=luminal.backend)` when inputs, outputs, or shapes
+must be replaceable between calls.
 
 Custom native backend factories can be configured with
 `luminal.make_backend(factory)`. The older names `luminal_backend` and

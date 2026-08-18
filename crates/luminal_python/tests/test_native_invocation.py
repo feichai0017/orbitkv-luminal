@@ -157,11 +157,14 @@ def test_bound_execution_is_explicit_and_exclusive(device):
         return
 
     bound = artifact.bind(input_buffer)
-    first_output = bound.replay()[0]
+    first_outputs = bound.replay()
+    first_output = first_outputs[0]
     torch.testing.assert_close(first_output, model(input_buffer))
 
     input_buffer.copy_(torch.full_like(input_buffer, 3.0))
-    second_output = bound.replay()[0]
+    second_outputs = bound.replay()
+    second_output = second_outputs[0]
+    assert second_outputs is first_outputs
     assert second_output is first_output
     torch.testing.assert_close(second_output, model(input_buffer))
 

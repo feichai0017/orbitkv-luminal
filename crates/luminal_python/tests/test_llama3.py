@@ -346,7 +346,7 @@ def test_dynamic_dim_reuse_no_recompile(device: torch.device):
     compiled graph handles multiple sequence lengths via in-place parameter
     updates rather than rebuilding the entire CUDA graph each step.
     """
-    from luminal import compile as luminal_compile
+    from luminal.pt2 import compile_artifact as luminal_compile
 
     class DynamicSeqModel(torch.nn.Module):
         """Embedding + linear projection with variable-length integer input."""

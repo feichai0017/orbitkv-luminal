@@ -424,11 +424,11 @@ def _build_dynamic_shapes_from_gm(gm):
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Direct artifact compilation
 # ---------------------------------------------------------------------------
 
 
-def compile(
+def compile_artifact(
     model,
     example_input,
     search_iterations=25,
@@ -437,7 +437,11 @@ def compile(
     dynamic_dim=None,
     dynamic_shapes=None,
 ):
-    """Compile a PyTorch model to run on Luminal via PT2 pipeline.
+    """Compile a PyTorch model into an unbound Luminal execution artifact.
+
+    This is the low-level direct PT2 entry point. Public inference code should
+    use :func:`luminal.compile`, which binds the example storage once and
+    exposes zero-argument replay.
 
     Args:
         model: A PyTorch nn.Module.

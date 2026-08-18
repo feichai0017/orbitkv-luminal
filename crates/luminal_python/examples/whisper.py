@@ -32,7 +32,7 @@ from transformers import (
     WhisperTokenizer,
 )
 
-from luminal import compile as luminal_compile
+from luminal import backend as luminal_backend
 
 REPO_ID = "openai/whisper-tiny.en"
 
@@ -444,18 +444,16 @@ def main() -> None:
         #    once with a dynamic length dim. Subsequent calls reuse the same
         #    compiled graph — no recompile per token.
         decoder_only = DecoderWithFixedXa(model.decoder, xa).eval().to(device)
-        example_tokens = torch.tensor(
-            [TOKEN_SOT, TOKEN_NO_TIMESTAMPS], dtype=torch.long, device=device
-        )
         print(
             f"Compiling decoder with dynamic seq dim (search_iters={search_iters})..."
         )
         compile_start = time.time()
-        compiled_decoder = luminal_compile(
+        compiled_decoder = torch.compile(
             decoder_only,
-            example_tokens,
-            search_iterations=search_iters,
-            dynamic_dim=0,
+            backend=luminal_backend,
+            options={"search_iterations": search_iters},
+            dynamic=True,
+            fullgraph=True,
         )
         print(f"Compiled in {time.time() - compile_start:.1f}s")
 

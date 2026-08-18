@@ -101,3 +101,35 @@ def test_writeback_metadata_exposed(device):
     # counters = 6 write-back outputs, each bound to a distinct input.
     assert len(writebacks) == 2 * config.num_hidden_layers + config.num_hidden_layers
     assert len(set(writebacks.values())) == len(writebacks)
+
+
+def test_direct_compile_flattens_static_cache_and_preserves_writebacks(device):
+    """The direct export path sees cache storage without Dynamo flattening it."""
+    from luminal.pt2 import compile_artifact
+
+    config, model = tiny_llama()
+    model = model.to(device)
+    input_ids = torch.tensor([[1, 2]], device=device)
+    cache = make_static_cache(config, 16, device)
+
+    class CacheStep(torch.nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, tokens, past_key_values):
+            return self.inner(
+                input_ids=tokens,
+                past_key_values=past_key_values,
+                use_cache=True,
+            ).logits
+
+    artifact = compile_artifact(
+        CacheStep(model),
+        (input_ids, cache),
+        search_iterations=1,
+    )
+
+    writebacks = artifact.writeback_inputs
+    assert len(writebacks) == 3 * config.num_hidden_layers
+    assert len(set(writebacks.values())) == len(writebacks)

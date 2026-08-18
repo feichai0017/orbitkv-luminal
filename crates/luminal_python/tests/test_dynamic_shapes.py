@@ -473,7 +473,7 @@ def test_explicit_compile_float_input_dynamic(device: torch.device):
     new spec accepts an explicit `int` or `Iterable[int]` regardless of dtype,
     and `"auto"` now picks every non-trivial axis.
     """
-    from luminal import compile as luminal_compile
+    from luminal.pt2 import compile_artifact as luminal_compile
 
     class Mdl(torch.nn.Module):
         def forward(self, x):
@@ -508,7 +508,7 @@ def test_explicit_compile_dynamic_shapes_passthrough(device: torch.device):
     API hardcoded `Dim("seq", min=2)` for any single dynamic dim.
     """
     from torch.export import Dim
-    from luminal import compile as luminal_compile
+    from luminal.pt2 import compile_artifact as luminal_compile
 
     class Mdl(torch.nn.Module):
         def forward(self, x):

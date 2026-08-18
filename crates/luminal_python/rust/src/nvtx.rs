@@ -25,9 +25,7 @@ mod cuda {
 
     pub(super) fn api() -> Option<&'static Api> {
         API.get_or_init(|| {
-            if std::env::var_os("LUMINAL_NVTX").is_none() {
-                return None;
-            }
+            std::env::var_os("LUMINAL_NVTX")?;
             let library = ["libnvToolsExt.so.1", "libnvToolsExt.so"]
                 .into_iter()
                 .find_map(|name| unsafe { libloading::Library::new(name).ok() });
