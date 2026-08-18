@@ -831,6 +831,10 @@ class _LazyDynamicCompiledModel:
     def __call__(self, *inputs, **kwargs):
         return self._ensure_compiled()(*inputs, **kwargs)
 
+    def bind(self, *inputs):
+        """Compile, then bind stable CUDA resources for replay."""
+        return self._ensure_compiled().bind(*inputs)
+
     @property
     def has_dynamic_dims(self):
         return self._ensure_compiled().has_dynamic_dims

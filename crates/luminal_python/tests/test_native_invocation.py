@@ -232,3 +232,25 @@ def test_bound_replay_keeps_integer_token_on_device(device):
     assert token.dtype == torch.int64
     assert token.ndim == 0
     torch.testing.assert_close(token, model(logits))
+
+
+def test_lazy_dynamic_artifact_can_bind(device):
+    if device.type != "cuda":
+        pytest.skip("bound execution requires CUDA")
+
+    artifacts = []
+
+    def capturing_backend(graph_module, example_inputs, options=None):
+        artifact = backend(graph_module, example_inputs, options)
+        artifacts.append(artifact)
+        return artifact
+
+    model = Affine().to(device)
+    compiled = torch.compile(
+        model, backend=capturing_backend, fullgraph=True, dynamic=True
+    )
+    input_buffer = torch.randn(3, 4, device=device)
+    compiled(input_buffer)
+
+    bound = artifacts[0].bind(input_buffer)
+    torch.testing.assert_close(bound.replay()[0], model(input_buffer))

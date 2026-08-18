@@ -1,6 +1,7 @@
 mod bound_execution;
 pub mod compiled_graph;
 mod dim_arith;
+mod nvtx;
 mod tensor_bridge;
 pub mod torch_dtype;
 mod torch_invocation;

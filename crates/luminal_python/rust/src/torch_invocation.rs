@@ -207,6 +207,8 @@ fn invoke_with_state(
     py: Python<'_>,
     inputs: &Bound<'_, PyTuple>,
 ) -> PyResult<Py<PyAny>> {
+    let _invocation = crate::nvtx::range(c"luminal.torch_invocation");
+    let pre_execute = crate::nvtx::range(c"luminal.torch_invocation.pre_execute");
     if state.torch_api.is_none() {
         state.torch_api = Some(TorchApi::new(py)?);
     }
@@ -330,7 +332,11 @@ fn invoke_with_state(
         }
     }
 
+    drop(pre_execute);
+    let execute_runtime = crate::nvtx::range(c"luminal.torch_invocation.execute_runtime");
     graph.execute_runtime();
+    drop(execute_runtime);
+    let _post_execute = crate::nvtx::range(c"luminal.torch_invocation.post_execute");
 
     let mut outputs = Vec::with_capacity(plan.returned_outputs.len());
     state.gpu_output_copies.clear();

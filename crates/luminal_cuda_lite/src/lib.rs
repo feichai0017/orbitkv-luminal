@@ -3,6 +3,7 @@
 // `use luminal_cuda_lite::...` imports.
 extern crate self as luminal_cuda_lite;
 
+mod batch_copy;
 pub mod dyn_backend;
 pub mod host;
 pub mod kernel;

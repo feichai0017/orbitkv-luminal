@@ -190,8 +190,14 @@ impl BoundExecutable {
     /// Outputs always remain tensors, including rank-zero tensors that the
     /// generic torch.compile path converts to Python scalars with `.item()`.
     fn replay(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let _invocation = crate::nvtx::range(c"luminal.bound_replay");
+        let pre_execute = crate::nvtx::range(c"luminal.bound_replay.pre_execute");
         let mut graph = self.graph.borrow_mut(py);
+        drop(pre_execute);
+        let execute_runtime = crate::nvtx::range(c"luminal.bound_replay.execute_runtime");
         graph.execute_runtime();
+        drop(execute_runtime);
+        let _post_execute = crate::nvtx::range(c"luminal.bound_replay.post_execute");
 
         let output_copies = self.output_copies.get_or_insert_with(|| {
             self.destinations

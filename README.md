@@ -166,6 +166,7 @@ off by default; set to `1` to enable unless noted.
 | `LLIR_DUMP_PRE_UNROLL` | Also dump each selected finalist before loop unrolling (requires `LLIR_DUMP_DIR`). |
 | `LUMINAL_SEARCH_DUMP_LAST_LLIR` / `LUMINAL_FUZZ_DUMP_LAST_LLIR` | Write the most recent candidate LLIR summary to a fixed path during search / equivalence fuzzing. |
 | `LUMINAL_CUDA_PROFILE_RECAPTURE` | Per-execute phase timing (`CUDA_PREPARE_PROFILE`, `CUDA_EXEC_PROFILE`, `CUDA_ALLOC_PROFILE`, `CUDA_RECAP_PROFILE` lines): prepare/allocate/materialize/launch/sync breakdown — the tool for decomposing TTFT/TPOT into kernel time vs. runtime overhead. |
+| `LUMINAL_NVTX` | Adds path-specific `pre_execute`, `execute_runtime`, and `post_execute` NVTX ranges around generic `torch.compile` invocation and bound `luminal.compile` replay. Requires a CUDA build and `libnvToolsExt`. |
 | `LUMINAL_CUDA_MEMORY_DEBUG` | CUDA arena/buffer accounting diagnostics. |
 | `LUMINAL_CUDA_DEBUG_GRAPH` / `LUMINAL_CUDA_DEBUG_CUBLASLT_RECAPTURE` / `LUMINAL_CUDA_DEBUG_CUBLASLT_PREPARE_CACHE` | CUDA graph capture and cuBLASLt recapture/prepare-cache debugging. |
 | `LUMINAL_CUDA_CHECK_NONFINITE_INTERNAL` | Checks intermediate buffers (not just outputs) for non-finite values after execution. |
