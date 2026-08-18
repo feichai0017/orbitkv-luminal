@@ -1047,9 +1047,23 @@ impl CudaRuntime {
     }
 
     pub fn output_is_zero_copy(&self, id: impl ToId) -> bool {
-        let producer = self.find_producer_node(id);
-        let data_node = self.follow_aliases(producer);
-        self.external_output_buffers.contains_key(&data_node)
+        let id = id.to_id();
+        match self.resolved_output_registrations.get(&id) {
+            Some(ResolvedOutputRegistration::External { .. }) => true,
+            Some(ResolvedOutputRegistration::Alias {
+                input_ptr,
+                destination_ptr,
+                ..
+            }) => input_ptr == destination_ptr,
+            Some(ResolvedOutputRegistration::Copy { .. } | ResolvedOutputRegistration::Missing) => {
+                false
+            }
+            None => {
+                let producer = self.find_producer_node(id);
+                let data_node = self.follow_aliases(producer);
+                self.external_output_buffers.contains_key(&data_node)
+            }
+        }
     }
 
     /// Find the LLIR producing node for an output tensor.
