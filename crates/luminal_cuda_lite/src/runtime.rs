@@ -1,5 +1,4 @@
 use crate::{
-    batch_copy,
     host::{DeviceBuffer, HostOp},
     kernel::{CudaGraphOp, CudaGraphTiming, KernelOp, record_cuda_graph_timings},
     resource::{
@@ -355,8 +354,6 @@ pub struct CudaRuntime {
     // `changed_hlir` and resource-input validation stay in sync with the map.
     hlir_buffers: FxHashMap<NodeIndex, CudaInput>,
     cuda_stream: Arc<CudaStream>,
-    /// Non-legacy stream required by CUDA's optional batched memcpy API.
-    batch_copy_stream: Option<Arc<CudaStream>>,
     changed_hlir: FxHashSet<NodeIndex>,
     pub(crate) cuda_graph_timings: Vec<(CudaGraphTiming, Uuid)>,
     pub last_kernel_stats: Vec<KernelStats>,
@@ -1242,61 +1239,23 @@ impl CudaRuntime {
             })
             .collect_vec();
 
-        let submitted = resolved
-            .into_iter()
-            .filter_map(|(src, destination, requested_bytes)| {
-                let bytes = requested_bytes.min(src.len());
-                (bytes != 0 && src.ptr() != destination).then_some((destination, src.ptr(), bytes))
-            })
-            .collect_vec();
-
-        let mut used_batch_stream = false;
-        if submitted.len() > 1 {
-            let batch_stream = self.batch_copy_stream.as_deref();
-            let copied_as_batch = if let Some(stream) = batch_stream {
-                used_batch_stream = true;
-                // cuMemcpyBatchAsync rejects the legacy NULL stream. Explicitly
-                // order its per-thread stream after graph execution instead.
-                stream
-                    .join(&self.cuda_stream)
-                    .expect("failed to order batched output copies");
+        for (src, destination, requested_bytes) in resolved {
+            let bytes = requested_bytes.min(src.len());
+            if bytes != 0 && src.ptr() != destination {
                 unsafe {
-                    batch_copy::copy(
-                        &submitted,
-                        stream.cu_stream(),
-                        stream.context().ordinal() as i32,
+                    result::memcpy_dtod_async(
+                        destination,
+                        src.ptr(),
+                        bytes,
+                        self.cuda_stream.cu_stream(),
                     )
-                }
-                .is_some_and(|result| result.result().is_ok())
-            } else {
-                false
-            };
-            if !copied_as_batch {
-                let stream = batch_stream.unwrap_or(&self.cuda_stream);
-                for &(destination, source, bytes) in &submitted {
-                    unsafe {
-                        result::memcpy_dtod_async(destination, source, bytes, stream.cu_stream())
-                            .expect("cuMemcpyDtoDAsync failed");
-                    }
-                }
-            }
-        } else if let Some(&(destination, source, bytes)) = submitted.first() {
-            unsafe {
-                result::memcpy_dtod_async(destination, source, bytes, self.cuda_stream.cu_stream())
                     .expect("cuMemcpyDtoDAsync failed");
+                }
             }
         }
         // Record the arena read after every copy has been submitted.
         drop(arena_access);
-        if used_batch_stream {
-            self.batch_copy_stream
-                .as_ref()
-                .unwrap()
-                .synchronize()
-                .unwrap();
-        } else {
-            self.cuda_stream.synchronize().unwrap();
-        }
+        self.cuda_stream.synchronize().unwrap();
     }
 
     fn restore_external_output_node(&mut self, data_node: NodeIndex) {
@@ -4041,15 +4000,9 @@ impl Runtime for CudaRuntime {
             CudaDeviceResourceLimits::query(&stream)
                 .expect("failed to query CUDA hard resource limits during runtime initialization"),
         );
-        // cuMemcpyBatchAsync cannot use CUDA's legacy NULL stream. The
-        // per-thread stream is non-legacy and needs no owned stream allocation;
-        // copy submission explicitly orders it after `cuda_stream`.
-        let batch_copy_stream =
-            batch_copy::is_available().then(|| stream.context().per_thread_stream());
         Self {
             hlir_buffers: FxHashMap::default(),
             cuda_stream: stream,
-            batch_copy_stream,
             changed_hlir: FxHashSet::default(),
             cuda_graph_timings: vec![],
             last_kernel_stats: vec![],
