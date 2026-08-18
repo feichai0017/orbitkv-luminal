@@ -49,11 +49,10 @@ pub(crate) fn bind(
             "CompiledGraph invocation was not configured by CompiledModel",
         )
     })?;
-    if let Some(expected) = plan.exact_argument_count
-        && inputs.len() != expected
-    {
+    if inputs.len() != plan.inputs.len() {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Expected {expected} inputs, got {}",
+            "Expected {} bound tensor inputs, got {}",
+            plan.inputs.len(),
             inputs.len()
         )));
     }
@@ -62,7 +61,7 @@ pub(crate) fn bind(
     let mut input_refs = Vec::with_capacity(plan.inputs.len());
     let mut device = None;
     for (position, input_plan) in plan.inputs.iter().enumerate() {
-        let input = inputs.get_item(input_plan.argument_index)?;
+        let input = inputs.get_item(position)?;
         let metadata = api.observe(py, &input)?;
         if !metadata.is_cuda() || !metadata.is_contiguous {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -152,27 +151,21 @@ pub(crate) fn bind(
         let output_node = output_plan.node;
         let output = api.empty(py, shape, dtype_code, &device)?;
         let metadata = api.observe(py, &output)?;
-        // A returned tensor gets permanent storage just like an input. If the
-        // same graph node is also a durable writeback, preserve that input
-        // registration and copy only the duplicate returned view.
+        // A returned tensor gets permanent storage just like an input. Keep
+        // writebacks registered to their input buffers; ordinary outputs are
+        // copied into their retained tensors after execution.
         let aliases_writeback = plan
             .writebacks
             .iter()
             .any(|writeback| writeback.output.node == output_node);
         if !aliases_writeback {
-            unsafe {
-                graph.runtime.set_output_device_ptr(
-                    output_node,
-                    metadata.data_ptr,
-                    metadata.n_bytes(),
-                )
-            };
+            graph.runtime.clear_output_device_ptr(output_node);
         }
         destinations.push(BoundDestination {
             node: output_node,
             data_ptr: metadata.data_ptr,
             n_bytes: metadata.n_bytes(),
-            always_copy: aliases_writeback,
+            always_copy: true,
         });
         outputs.push(output.unbind());
     }
