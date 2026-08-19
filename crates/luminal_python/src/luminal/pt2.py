@@ -460,7 +460,7 @@ def _strip_symint_placeholders(gm, example_inputs):
     return new_inputs, kept_indices, True
 
 
-def _build_dynamic_shapes_from_gm(gm):
+def _build_dynamic_shapes_from_gm(gm, dynamic_range=None):
     """Construct a torch.export.export `dynamic_shapes` spec from FX metadata.
 
     Walks each tensor placeholder's `meta['example_value']` FakeTensor and
@@ -478,6 +478,13 @@ def _build_dynamic_shapes_from_gm(gm):
     from torch.export import Dim
 
     placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+
+    if dynamic_range is not None:
+        minimum, maximum = dynamic_range
+        if minimum < 0 or maximum < minimum:
+            raise ValueError(f"invalid dynamic range [{minimum}, {maximum}]")
+        if minimum == maximum:
+            return None
 
     per_input_spec = []
     saw_dynamic = False
