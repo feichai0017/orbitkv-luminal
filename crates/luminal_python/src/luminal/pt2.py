@@ -309,6 +309,11 @@ def _save_and_compile(
     try:
         if owns_tmpdir:
             pt2_path = os.path.join(tmpdir, "model.pt2")
+            # `_example_inputs` is an optional copy of the arguments used to create an
+            # ExportedProgram and is not part of the executable graph's semantics. vLLM
+            # invokes compiler backends during torch.compile tracing, so these inputs may
+            # be FakeTensors, which Luminal does not currently serialize or consume.
+            ep_or_path._example_inputs = None
             _lower_sym_sum(ep_or_path)  # serde gap workaround; see docstring
             torch.export.save(ep_or_path, pt2_path)
             weight_source = ep_or_path.state_dict
@@ -817,10 +822,6 @@ def _eager_pt2_compile(
     # alive during compile would double weight memory on GPU.
     tmpdir = tempfile.mkdtemp(prefix="luminal_")
     pt2_path = os.path.join(tmpdir, "model.pt2")
-    # torch.export.save pickles ep.example_inputs (real tensor data) into the
-    # archive; with weights flowing as inputs that is the entire parameter
-    # set per compile. Nothing reads them back — drop before saving.
-    ep._example_inputs = None
     _lower_sym_sum(ep)  # serde gap workaround; see docstring
     torch.export.save(ep, pt2_path)
 

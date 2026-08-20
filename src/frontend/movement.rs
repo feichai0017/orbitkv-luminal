@@ -545,6 +545,13 @@ impl GraphTensor {
                 new_dims.push(dim.min(end) - start);
             }
             new_dims.reverse();
+            // A zero-sized output has no elements to gather. Building gather indices for
+            // it would create an Iota expression containing modulo by zero, so represent
+            // the empty slice by updating its shape only.
+            if new_dims.iter().any(|dim| dim.to_usize() == Some(0)) {
+                self.shape.dims = new_dims.into_iter().collect();
+                return self;
+            }
             index_expressions.reverse();
             let index_expression = flatten_strides(&new_dims, &index_expressions);
             let iota = self.graph().iota(index_expression, new_dims);
@@ -986,6 +993,16 @@ mod tests {
             |a| a.concat_along(a, 0),
             |a| Tensor::cat(&[a.clone(), a], 0).unwrap(),
         );
+    }
+
+    #[test]
+    fn empty_offset_slice_is_a_metadata_only_view() {
+        let mut cx = Graph::new();
+        let input = cx.tensor((1, 4, 64));
+        let empty = input.slice_along(64.., 2);
+
+        assert_eq!(empty.dims(), &[1, 4, 0]);
+        assert_eq!(empty.id, input.id, "an empty slice must not create an Iota");
     }
 
     #[test]
