@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -19,11 +20,17 @@ from .pt2 import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class RegionExport:
+    program: torch.export.ExportedProgram
+    input_indices: tuple[int, ...]
+
+
 def export_region(
     graph: fx.GraphModule,
     example_inputs: list[Any],
     dynamic_range: tuple[int, int] | None = None,
-) -> torch.export.ExportedProgram:
+) -> RegionExport:
     """Normalize an FX region without storage access or static fallback.
 
     Dynamo may expose a symbolic tensor dimension as a separate ``SymInt``
@@ -34,7 +41,9 @@ def export_region(
 
     graph = copy.deepcopy(graph).eval()
     _strip_data_attr(graph)
-    inputs, _, strip_ok = _strip_symint_placeholders(graph, list(example_inputs))
+    inputs, input_indices, strip_ok = _strip_symint_placeholders(
+        graph, list(example_inputs)
+    )
     if not strip_ok:
         raise RuntimeError(
             "cannot export region: a SymInt input could not be derived from "
@@ -58,8 +67,9 @@ def export_region(
         _drop_input_guards(exported)
         _drop_dead_data_dependent_ops(exported.graph_module)
         exported = exported.run_decompositions(_decomp_table())
+        _drop_input_guards(exported)
         _set_range_constraints(exported, dynamic_range)
-        return exported
+        return RegionExport(exported, tuple(input_indices))
     except Exception as error:
         raise RuntimeError(
             "torch.export failed for compiler-owned FX region: "

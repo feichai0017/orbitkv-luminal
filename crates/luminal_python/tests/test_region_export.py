@@ -38,12 +38,15 @@ def _symbolic_inputs():
     return symbol, tensor
 
 
-def test_export_region_normalizes_to_aten_and_matches_eager() -> None:
+def test_export_region_normalizes_to_aten_and_matches_eager(tmp_path) -> None:
     graph = _linear_graph()
     inputs = [torch.randn(3, 8), torch.randn(4, 8), torch.randn(4)]
 
-    exported = export_region(graph, inputs)
+    result = export_region(graph, inputs)
+    exported = result.program
 
+    assert result.input_indices == (0, 1, 2)
+    assert not getattr(exported, "_guards_code", [])
     targets = [
         node.target
         for node in exported.graph_module.graph.nodes
@@ -52,6 +55,11 @@ def test_export_region_normalizes_to_aten_and_matches_eager() -> None:
     assert targets
     assert all(isinstance(target, torch._ops.OpOverload) for target in targets)
     torch.testing.assert_close(exported.module()(*inputs), graph(*inputs))
+
+    path = tmp_path / "region.pt2"
+    torch.export.save(exported, path)
+    loaded = torch.export.load(path)
+    torch.testing.assert_close(loaded.module()(*inputs), graph(*inputs))
 
 
 def test_export_region_does_not_modify_original_graph() -> None:
@@ -75,8 +83,10 @@ def test_export_region_treats_data_attr_as_input_alias() -> None:
     graph_module = fx.GraphModule(torch.nn.Module(), graph)
     inputs = [torch.randn(3, 8), torch.randn(3, 8)]
 
-    exported = export_region(graph_module, inputs)
+    result = export_region(graph_module, inputs)
+    exported = result.program
 
+    assert result.input_indices == (0, 1)
     assert not exported.constants
     assert all(
         node.target is not torch._C._autograd._get_data_attr
@@ -97,8 +107,10 @@ def test_export_region_preserves_symbolic_fake_tensor_dimension() -> None:
     graph.output(output)
     graph_module = fx.GraphModule(torch.nn.Module(), graph)
 
-    exported = export_region(graph_module, [symbol, tensor])
+    result = export_region(graph_module, [symbol, tensor])
+    exported = result.program
 
+    assert result.input_indices == (1,)
     placeholders = list(exported.graph_module.graph.find_nodes(op="placeholder"))
     assert len(placeholders) == 1
     assert exported.range_constraints
@@ -122,7 +134,7 @@ def test_export_region_applies_bounded_dynamic_range() -> None:
         fx.GraphModule(torch.nn.Module(), graph),
         [symbol, tensor],
         dynamic_range=(1, 8),
-    )
+    ).program
 
     assert exported.range_constraints
     assert all(int(value.upper) == 8 for value in exported.range_constraints.values())
@@ -145,7 +157,7 @@ def test_export_region_preserves_shared_dynamic_dimension() -> None:
         fx.GraphModule(torch.nn.Module(), graph),
         [left_value, right_value],
         dynamic_range=(1, 8),
-    )
+    ).program
 
     assert len(exported.range_constraints) == 1
     assert int(next(iter(exported.range_constraints.values())).upper) == 8
@@ -168,7 +180,7 @@ def test_export_region_specializes_exact_range() -> None:
         fx.GraphModule(torch.nn.Module(), graph),
         [8, concrete_tensor],
         dynamic_range=(8, 8),
-    )
+    ).program
 
     assert not exported.range_constraints
     assert "Sym(" not in exported.graph_module.print_readable(print_output=False)
