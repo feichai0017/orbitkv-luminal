@@ -44,4 +44,5 @@ def compile_region(
         user_indices=region.input_indices,
         input_device_ptrs=None,
         device_index=region.device_index,
+        use_current_stream=True,
     )

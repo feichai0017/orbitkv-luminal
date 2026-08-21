@@ -54,6 +54,7 @@ def test_compile_region_preserves_runtime_input_indices(monkeypatch) -> None:
         "user_indices": region.input_indices,
         "input_device_ptrs": None,
         "device_index": 0,
+        "use_current_stream": True,
     }
 
 
@@ -100,6 +101,33 @@ def test_compiled_model_rejects_wrong_cuda_device() -> None:
         model(CudaOneTensor())
 
 
+def test_compiled_model_passes_current_stream(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    calls = []
+    graph = SimpleNamespace(
+        input_names=[],
+        input_dtypes=[],
+        output_names=[],
+        output_dtypes=[],
+        output_shapes=[],
+        writeback_outputs=[],
+        has_dynamic_dims=False,
+        device_type="cuda",
+        device_index=0,
+        supports_device_ptrs=True,
+        run=lambda *args: calls.append(args),
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "current_stream",
+        lambda device: SimpleNamespace(cuda_stream=1234),
+    )
+
+    assert CompiledModel(graph, use_current_stream=True)() == ()
+    assert calls == [(1234,)]
+
+
 def _cuda_skip_reason() -> str | None:
     if not torch.cuda.is_available():
         return "CUDA is not available"
@@ -136,6 +164,33 @@ def test_compile_region_from_fake_cuda_metadata() -> None:
     ]
     (actual,) = compiled(*real_inputs)
     torch.testing.assert_close(actual, real_inputs[0] + real_inputs[1])
+
+
+@pytest.mark.skipif(
+    _CUDA_SKIP_REASON is not None, reason=_CUDA_SKIP_REASON or "CUDA is unavailable"
+)
+def test_compile_region_uses_current_cuda_stream() -> None:
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    with FakeTensorMode():
+        fake_inputs = [
+            torch.empty((2, 4), device="cuda", dtype=torch.float16),
+            torch.empty((2, 4), device="cuda", dtype=torch.float16),
+        ]
+        region = export_region(_add_graph(), fake_inputs)
+
+    compiled = compile_region(region, search_iterations=1)
+    left = torch.empty((2, 4), device="cuda", dtype=torch.float16)
+    right = torch.empty((2, 4), device="cuda", dtype=torch.float16)
+    stream = torch.cuda.Stream()
+
+    with torch.cuda.stream(stream):
+        torch.cuda._sleep(10_000_000)
+        left.fill_(1)
+        right.fill_(2)
+        (actual,) = compiled(left, right)
+
+    torch.testing.assert_close(actual, torch.full_like(actual, 3))
 
 
 @pytest.mark.skipif(

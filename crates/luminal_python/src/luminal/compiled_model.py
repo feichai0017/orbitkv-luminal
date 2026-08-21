@@ -43,6 +43,7 @@ class CompiledModel:
         input_names=None,
         user_indices=None,
         scalar_output_positions=(),
+        use_current_stream=False,
     ):
         """Initialize with a compiled CompiledGraph from Rust.
 
@@ -53,6 +54,8 @@ class CompiledModel:
             user_indices: When torch.compile lifts model parameters into extra args,
                 this tells __call__ which arg positions are actual user inputs.
                 None means all args are user inputs (PT2 path).
+            use_current_stream: Run CUDA work on PyTorch's current stream instead
+                of the backend's owned stream.
         """
         self._graph = graph_result
         self._input_names = input_names or graph_result.input_names
@@ -72,6 +75,7 @@ class CompiledModel:
         self._weight_refs = weight_refs or []
         self._user_indices = user_indices
         self._scalar_output_positions = frozenset(scalar_output_positions)
+        self._use_current_stream = use_current_stream
         self.skip_input_names = frozenset()
         self._is_gpu = getattr(graph_result, "device_type", "cpu") != "cpu"
         self._device_index = getattr(graph_result, "device_index", None)
@@ -343,7 +347,11 @@ class CompiledModel:
                     )
                 output_tensors.append(out)
 
-        self._graph.run()
+        if self._use_current_stream:
+            stream = torch.cuda.current_stream(self._device_index)
+            self._graph.run(stream.cuda_stream)
+        else:
+            self._graph.run()
 
         outputs = []
         gpu_writebacks = []

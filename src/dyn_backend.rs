@@ -69,7 +69,9 @@ pub trait DynBackend {
     fn get_output_bool(&self, _node: NodeIndex) -> Vec<bool> {
         panic!("get_output_bool not supported by '{}'", self.name());
     }
-    fn execute(&mut self, dyn_map: &DynMap);
+    /// Execute on the backend's owned stream, or on a borrowed raw CUDA
+    /// stream supplied by the caller.
+    fn execute(&mut self, dyn_map: &DynMap, stream: Option<u64>);
 
     // --- Optional device pointer support (GPU backends) --------------------
 
@@ -131,7 +133,7 @@ pub struct BackendCompileArgs {
 /// The version is part of the ABI: `BackendCompileArgs` crosses this boundary
 /// by value, so an older plugin must be rejected rather than reading a changed
 /// struct layout.
-pub const BACKEND_FACTORY_CAPSULE_NAME: &std::ffi::CStr = c"luminal.backend_factory.v2";
+pub const BACKEND_FACTORY_CAPSULE_NAME: &std::ffi::CStr = c"luminal.backend_factory.v3";
 
 /// A factory function that compiles a [`Graph`] into a ready-to-execute [`DynBackend`].
 pub type BackendFactory = fn(&mut Graph, BackendCompileArgs) -> Result<Box<dyn DynBackend>, String>;
@@ -448,7 +450,11 @@ impl DynBackend for ReferenceDynBackend {
         }
     }
 
-    fn execute(&mut self, dyn_map: &DynMap) {
+    fn execute(&mut self, dyn_map: &DynMap, stream: Option<u64>) {
+        assert!(
+            stream.is_none(),
+            "reference backend does not support CUDA streams"
+        );
         self.runtime.execute(dyn_map);
     }
 }

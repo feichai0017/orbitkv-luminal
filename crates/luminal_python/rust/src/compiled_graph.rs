@@ -608,8 +608,9 @@ impl CompiledGraph {
     }
 
     /// Execute the graph.
-    fn run(&mut self) {
-        self.runtime.execute(&self.graph.dyn_map);
+    #[pyo3(signature = (stream=None))]
+    fn run(&mut self, stream: Option<u64>) {
+        self.runtime.execute(&self.graph.dyn_map, stream);
     }
 
     /// Return the HLIR graph as a DOT string for visualization.

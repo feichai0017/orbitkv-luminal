@@ -380,6 +380,7 @@ pub struct CudaRuntime {
     // Keep this private: every mutation must go through the buffer APIs so
     // `changed_hlir` and resource-input validation stay in sync with the map.
     hlir_buffers: FxHashMap<NodeIndex, CudaInput>,
+    owned_stream: Arc<CudaStream>,
     cuda_stream: Arc<CudaStream>,
     changed_hlir: FxHashSet<NodeIndex>,
     pub(crate) cuda_graph_timings: Vec<(CudaGraphTiming, Uuid)>,
@@ -457,7 +458,31 @@ impl CudaRuntime {
     }
 
     pub fn device_index(&self) -> usize {
-        self.cuda_stream.context().ordinal()
+        self.owned_stream.context().ordinal()
+    }
+
+    /// # Safety
+    ///
+    /// `raw_stream` must be a live CUDA stream on this runtime's context. Its
+    /// owner must keep it alive while this runtime may retain or use it.
+    pub unsafe fn use_borrowed_stream(&mut self, raw_stream: u64) {
+        let context = self.owned_stream.context();
+        let raw_stream = raw_stream as usize as sys::CUstream;
+        let stream = unsafe { context.wrap_borrowed_stream(raw_stream) };
+        self.select_execution_stream(stream);
+    }
+
+    pub fn use_owned_stream(&mut self) {
+        self.select_execution_stream(Arc::clone(&self.owned_stream));
+    }
+
+    fn select_execution_stream(&mut self, stream: Arc<CudaStream>) {
+        self.cuda_stream = Arc::clone(&stream);
+        for bucket in &mut self.compiled_buckets {
+            for op in bucket.exec_graph.node_weights_mut() {
+                op.stream = Arc::clone(&stream);
+            }
+        }
     }
 
     /// Read-only view of installed HLIR inputs.
@@ -4380,6 +4405,7 @@ impl Runtime for CudaRuntime {
             .expect("failed to create CUDA profiling end event");
         Self {
             hlir_buffers: FxHashMap::default(),
+            owned_stream: Arc::clone(&stream),
             cuda_stream: stream,
             changed_hlir: FxHashSet::default(),
             cuda_graph_timings: vec![],
