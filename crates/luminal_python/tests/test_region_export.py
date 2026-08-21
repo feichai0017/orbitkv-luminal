@@ -219,12 +219,14 @@ def test_export_region_inside_outer_tracing_context() -> None:
         graph.call_function(torch.ops.aten.cat.default, ([left_node, right_node], 0))
     )
 
-    with tracing(TracingContext(left.fake_mode)):
+    outer_context = TracingContext(left.fake_mode)
+    with tracing(outer_context):
         result = export_region(
             fx.GraphModule(torch.nn.Module(), graph),
             [left, right],
             dynamic_range=(1, 8),
         )
+        assert TracingContext.get() is outer_context
 
     assert len(result.program.range_constraints) == 1
 
