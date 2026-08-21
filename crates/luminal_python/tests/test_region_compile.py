@@ -184,12 +184,19 @@ def test_compile_region_uses_current_cuda_stream() -> None:
     right = torch.empty((2, 4), device="cuda", dtype=torch.float16)
     stream = torch.cuda.Stream()
 
+    # Warm up any one-time runtime work before checking asynchronous behavior.
+    compiled(left, right)
+
     with torch.cuda.stream(stream):
-        torch.cuda._sleep(10_000_000)
+        torch.cuda._sleep(1_000_000_000)
+        delayed = torch.cuda.Event()
+        delayed.record()
         left.fill_(1)
         right.fill_(2)
         (actual,) = compiled(left, right)
 
+    assert not delayed.query(), "Luminal synchronized the borrowed CUDA stream"
+    stream.synchronize()
     torch.testing.assert_close(actual, torch.full_like(actual, 3))
 
 

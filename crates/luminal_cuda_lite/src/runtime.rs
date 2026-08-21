@@ -404,6 +404,9 @@ pub struct CudaRuntime {
     /// Resource-relevant input state covered by the most recent aggregate
     /// retained-bucket validation.
     last_resource_input_signature: FxHashMap<NodeIndex, ResourceInputFootprint>,
+    /// Owned-stream execution is blocking; borrowed-stream execution leaves
+    /// completion ordered on the caller's stream.
+    synchronize_stream: bool,
     /// High-water intermediate allocation reused across candidate loads and
     /// bucket switches. At most one compiled bucket may borrow it at a time.
     persistent_arena: Option<PersistentArena>,
@@ -470,10 +473,12 @@ impl CudaRuntime {
         let raw_stream = raw_stream as usize as sys::CUstream;
         let stream = unsafe { context.wrap_borrowed_stream(raw_stream) };
         self.select_execution_stream(stream);
+        self.synchronize_stream = false;
     }
 
     pub fn use_owned_stream(&mut self) {
         self.select_execution_stream(Arc::clone(&self.owned_stream));
+        self.synchronize_stream = true;
     }
 
     fn select_execution_stream(&mut self, stream: Arc<CudaStream>) {
@@ -1255,13 +1260,14 @@ impl CudaRuntime {
         unsafe { self.copy_outputs_to_device_ptrs(&[(id.to_id(), dest_ptr, n_bytes)]) };
     }
 
-    /// Copy several output tensors to external CUDA device pointers and wait once.
+    /// Copy several output tensors to external CUDA device pointers.
     ///
     /// Resolving every source before submitting any work makes the operation
     /// all-or-nothing with respect to runtime lookup failures. More importantly,
     /// callers which need to commit many functionalized mutations (for example
-    /// every K/V tensor in a StaticCache) do not pay one stream synchronization
-    /// per tensor.
+    /// every K/V tensor in a StaticCache) enqueue one batch. Owned-stream mode
+    /// waits once for the batch; borrowed-stream mode leaves it on the caller's
+    /// stream.
     ///
     /// # Safety
     /// Every destination pointer must name a live CUDA allocation with at least
@@ -1294,7 +1300,9 @@ impl CudaRuntime {
                 .expect("cuMemcpyDtoDAsync failed");
             }
         }
-        self.cuda_stream.synchronize().unwrap();
+        if self.synchronize_stream {
+            self.cuda_stream.synchronize().unwrap();
+        }
     }
 
     fn restore_external_output_node(&mut self, data_node: NodeIndex) {
@@ -4422,6 +4430,7 @@ impl Runtime for CudaRuntime {
             max_kernel_source_bytes: Some(DEFAULT_MAX_KERNEL_SOURCE_BYTES),
             device_resource_limits,
             last_resource_input_signature: FxHashMap::default(),
+            synchronize_stream: true,
             persistent_arena: None,
             resource_length_sensitive_hlir: FxHashSet::default(),
             validated_resource_signatures: FxHashSet::default(),
@@ -4700,9 +4709,12 @@ impl Runtime for CudaRuntime {
                 .expect("failed to record CUDA profiling end event");
         }
 
-        // Single sync at end - CUDA stream ordering guarantees sequential execution
+        // Standalone execution is blocking. Embedded callers already use
+        // stream ordering and must not be synchronized here.
         let timer = std::time::Instant::now();
-        self.cuda_stream.synchronize().unwrap();
+        if self.synchronize_stream {
+            self.cuda_stream.synchronize().unwrap();
+        }
         sync_time += timer.elapsed();
         self.last_total_time_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
         if self.profiling {
