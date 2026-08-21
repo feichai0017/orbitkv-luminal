@@ -5,6 +5,7 @@ import torch
 from torch import fx
 
 import luminal.region_compile as region_compile_module
+from luminal.compiled_model import CompiledModel
 from luminal.region_compile import compile_region
 from luminal.region_export import export_region
 
@@ -19,10 +20,11 @@ def _add_graph() -> fx.GraphModule:
 
 
 def test_compile_region_preserves_runtime_input_indices(monkeypatch) -> None:
-    region = export_region(
-        _add_graph(),
-        [torch.randn(2, 4), torch.randn(2, 4)],
-    )
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    with FakeTensorMode():
+        inputs = [torch.randn(2, 4, device="cuda") for _ in range(2)]
+        region = export_region(_add_graph(), inputs)
     sentinel = object()
     factory = object()
     received = {}
@@ -51,7 +53,51 @@ def test_compile_region_preserves_runtime_input_indices(monkeypatch) -> None:
         "iterations": 3,
         "user_indices": region.input_indices,
         "input_device_ptrs": None,
+        "device_index": 0,
     }
+
+
+def test_compile_region_rejects_nonzero_device() -> None:
+    from dataclasses import replace
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    with FakeTensorMode():
+        inputs = [torch.randn(2, 4, device="cuda") for _ in range(2)]
+        region = export_region(_add_graph(), inputs)
+
+    with pytest.raises(ValueError, match="only logical CUDA device 0"):
+        compile_region(replace(region, device_index=1))
+
+
+def test_compiled_model_rejects_wrong_cuda_device() -> None:
+    from types import SimpleNamespace
+
+    class CudaOneTensor(torch.Tensor):
+        @staticmethod
+        def __new__(cls):
+            return torch.Tensor._make_subclass(
+                cls, torch.empty(2), require_grad=False
+            )
+
+        @property
+        def device(self):
+            return torch.device("cuda:1")
+
+    graph = SimpleNamespace(
+        input_names=["x"],
+        input_dtypes=[7],
+        output_names=[],
+        output_shapes=[],
+        writeback_outputs=[],
+        has_dynamic_dims=False,
+        device_type="cuda",
+        device_index=0,
+        supports_device_ptrs=True,
+    )
+    model = CompiledModel(graph)
+
+    with pytest.raises(ValueError, match="compiled runtime uses logical device 0"):
+        model(CudaOneTensor())
 
 
 def _cuda_skip_reason() -> str | None:

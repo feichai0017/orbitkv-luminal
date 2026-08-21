@@ -191,6 +191,7 @@ impl CompiledGraph {
         weight_data: WeightData,
         factory: BackendFactory,
         search_iters: usize,
+        device_index: Option<usize>,
     ) -> Result<CompiledGraph, String> {
         let GraphTranslation {
             mut graph,
@@ -215,6 +216,7 @@ impl CompiledGraph {
         // Build compile args from WeightData.
         let compile_args = BackendCompileArgs {
             search_iters,
+            device_index,
             weights: weights
                 .iter()
                 .map(|(label, td)| (label.clone(), td.bytes.clone(), td.dtype))
@@ -338,6 +340,12 @@ impl CompiledGraph {
     #[getter]
     fn device_type(&self) -> &str {
         self.runtime.device_type()
+    }
+
+    /// The logical CUDA device used by this backend, or None for CPU.
+    #[getter]
+    fn device_index(&self) -> Option<usize> {
+        self.runtime.device_index()
     }
 
     /// Whether the active backend supports device pointer operations (zero-copy GPU I/O).

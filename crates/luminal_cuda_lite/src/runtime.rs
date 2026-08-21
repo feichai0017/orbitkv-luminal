@@ -456,6 +456,10 @@ impl CudaRuntime {
         Ok(Self::initialize(stream))
     }
 
+    pub fn device_index(&self) -> usize {
+        self.cuda_stream.context().ordinal()
+    }
+
     /// Read-only view of installed HLIR inputs.
     ///
     /// Mutations must use `set_data`, `set_buffer`, `set_device_ptr`, or

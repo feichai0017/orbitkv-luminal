@@ -35,6 +35,10 @@ pub trait DynBackend {
         "cpu"
     }
 
+    fn device_index(&self) -> Option<usize> {
+        None
+    }
+
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, dtype: DType);
     fn set_data_f32(&mut self, node: NodeIndex, data: Vec<f32>);
     fn get_output_f32(&self, node: NodeIndex) -> Vec<f32>;
@@ -116,6 +120,7 @@ pub trait DynBackend {
 /// Arguments passed to a backend factory during compilation.
 pub struct BackendCompileArgs {
     pub search_iters: usize,
+    pub device_index: Option<usize>,
     pub weights: Vec<(String, Vec<u8>, DType)>,
     pub tensor_sizes: HashMap<String, usize>,
     pub device_ptrs: HashMap<String, (u64, usize)>,
@@ -123,9 +128,10 @@ pub struct BackendCompileArgs {
 
 /// Canonical PyCapsule name for [`BackendFactory`] function-pointer capsules.
 ///
-/// Value MUST remain `"luminal.backend_factory"` for compatibility with
-/// external plugin producers built against older versions of this crate.
-pub const BACKEND_FACTORY_CAPSULE_NAME: &std::ffi::CStr = c"luminal.backend_factory";
+/// The version is part of the ABI: `BackendCompileArgs` crosses this boundary
+/// by value, so an older plugin must be rejected rather than reading a changed
+/// struct layout.
+pub const BACKEND_FACTORY_CAPSULE_NAME: &std::ffi::CStr = c"luminal.backend_factory.v2";
 
 /// A factory function that compiles a [`Graph`] into a ready-to-execute [`DynBackend`].
 pub type BackendFactory = fn(&mut Graph, BackendCompileArgs) -> Result<Box<dyn DynBackend>, String>;

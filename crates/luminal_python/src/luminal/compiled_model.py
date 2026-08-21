@@ -6,6 +6,7 @@ import torch
 
 from .dtype_util import code_to_torch_dtype
 from .dtype_util import torch_dtype_code as _torch_dtype_code
+from .main import _cuda_device_index
 
 
 def _cuda_input_binding_signature(tensor, n_bytes: int) -> tuple:
@@ -73,6 +74,9 @@ class CompiledModel:
         self._scalar_output_positions = frozenset(scalar_output_positions)
         self.skip_input_names = frozenset()
         self._is_gpu = getattr(graph_result, "device_type", "cpu") != "cpu"
+        self._device_index = getattr(graph_result, "device_index", None)
+        if self._is_gpu and self._device_index is None:
+            raise RuntimeError("CUDA CompiledGraph did not report a device index")
         self._supports_device_ptrs = getattr(
             graph_result, "supports_device_ptrs", False
         )
@@ -141,13 +145,11 @@ class CompiledModel:
                 f"Expected {len(self._input_names)} inputs, got {len(user_inputs)}"
             )
 
-        # Device for outputs: prefer any CUDA input — inputs include lifted
-        # weights, and user_inputs[0] may be a CPU-resident weight (offloaded
-        # models) while activations live on the GPU.
-        input_device = next(
-            (t.device for t in user_inputs if t.is_cuda),
-            user_inputs[0].device if user_inputs else torch.device("cpu"),
-        )
+        if self._is_gpu:
+            _cuda_device_index(user_inputs, expected=self._device_index)
+            input_device = torch.device("cuda", self._device_index)
+        else:
+            input_device = user_inputs[0].device if user_inputs else torch.device("cpu")
 
         # Auto-detect dynamic dims from input shapes
         if self._has_dynamic_dims:

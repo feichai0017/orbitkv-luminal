@@ -18,6 +18,7 @@ from .pt2 import (
     _export_kwargs,
     _strip_symint_placeholders,
 )
+from .main import _cuda_device_index
 from .region_abi import DynamicRange
 
 
@@ -26,6 +27,7 @@ class RegionExport:
     program: torch.export.ExportedProgram
     input_indices: tuple[int, ...]
     dynamic_ranges: tuple[DynamicRange, ...]
+    device_index: int | None
 
 
 def export_region(
@@ -51,6 +53,7 @@ def export_region(
             "cannot export region: a SymInt input could not be derived from "
             "a tensor dimension"
         )
+    device_index = _cuda_device_index(inputs)
 
     dynamic_shapes = _build_dynamic_shapes_from_gm(graph, dynamic_range)
     export_inputs = _fresh_export_inputs(inputs)
@@ -76,7 +79,12 @@ def export_region(
         exported = exported.run_decompositions(_decomp_table())
         _drop_input_guards(exported)
         ranges = _set_range_constraints(exported, dynamic_range)
-        return RegionExport(exported, tuple(input_indices), ranges)
+        return RegionExport(
+            program=exported,
+            input_indices=tuple(input_indices),
+            dynamic_ranges=ranges,
+            device_index=device_index,
+        )
     except Exception as error:
         raise RuntimeError(
             "torch.export failed for compiler-owned FX region: "

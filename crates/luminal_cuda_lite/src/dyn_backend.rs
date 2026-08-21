@@ -19,6 +19,9 @@ impl DynBackend for CudaLiteDynBackend {
     fn device_type(&self) -> &str {
         "cuda"
     }
+    fn device_index(&self) -> Option<usize> {
+        Some(self.runtime.device_index())
+    }
 
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, _dtype: DType) {
         self.runtime.set_data(node, bytes);
@@ -87,7 +90,15 @@ pub fn cuda_lite_factory(
     graph: &mut Graph,
     args: BackendCompileArgs,
 ) -> Result<Box<dyn DynBackend>, String> {
-    let cuda_ctx = CudaContext::new(0).map_err(|e| format!("CUDA init failed: {e}"))?;
+    let device_index = args
+        .device_index
+        .ok_or_else(|| "CUDA backend requires a device index".to_string())?;
+    if device_index != 0 {
+        return Err(format!(
+            "CUDA backend currently supports only logical device 0, got {device_index}"
+        ));
+    }
+    let cuda_ctx = CudaContext::new(device_index).map_err(|e| format!("CUDA init failed: {e}"))?;
     let stream = cuda_ctx.default_stream();
     compile_backend::<CudaRuntime>(
         graph,

@@ -22,6 +22,13 @@ def compile_region(
 
     if device_type != "cuda":
         raise ValueError(f"unsupported region device type: {device_type!r}")
+    if region.device_index is None:
+        raise ValueError("CUDA region compilation requires CUDA tensor inputs")
+    if region.device_index != 0:
+        raise ValueError(
+            "Luminal currently supports only logical CUDA device 0, "
+            f"got {region.device_index}"
+        )
 
     try:
         from .luminal import _cuda_lite_factory_capsule
@@ -36,4 +43,5 @@ def compile_region(
         search_iterations,
         user_indices=region.input_indices,
         input_device_ptrs=None,
+        device_index=region.device_index,
     )
