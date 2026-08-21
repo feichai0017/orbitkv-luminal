@@ -469,10 +469,8 @@ def _build_dynamic_shapes_from_gm(gm, dynamic_range=None):
     """Construct a torch.export.export `dynamic_shapes` spec from FX metadata.
 
     Walks each tensor placeholder's `meta['example_value']` FakeTensor and
-    marks every SymInt dim as `Dim.AUTO`. Sharing/equality relationships
-    between symbolic dims are already encoded in the FakeTensor shapes —
-    torch.export's symbolic-shape engine recovers them during the trace, so
-    we don't need to allocate named `Dim` objects ourselves.
+    marks every SymInt dimension as dynamic. Bounded exports reuse the same
+    `Dim` object wherever the same original FakeTensor symbol appears.
 
     The returned spec is wrapped under `{"args": (...)}` because Dynamo's
     `GraphModule.forward(*args, **kwargs)` signature treats positional inputs
@@ -491,8 +489,19 @@ def _build_dynamic_shapes_from_gm(gm, dynamic_range=None):
         if minimum == maximum:
             return None
 
+        # torch.export specializes dimensions of size 0 and 1 instead of
+        # representing them with a backed symbolic Dim. Ranged artifacts must
+        # therefore start at 2 or higher; exact 0/1 artifacts take the static
+        # path above.
+        effective_minimum = max(2, minimum)
+        if maximum < effective_minimum:
+            raise ValueError(
+                f"dynamic range [{minimum}, {maximum}] has no symbolic values"
+            )
+
     per_input_spec = []
     saw_dynamic = False
+    bounded_dims = {}
     for node in placeholders:
         ev = node.meta.get("example_value")
         if not torch.is_tensor(ev):
@@ -501,7 +510,20 @@ def _build_dynamic_shapes_from_gm(gm, dynamic_range=None):
         spec = {}
         for d, s in enumerate(ev.shape):
             if isinstance(s, torch.SymInt):
-                spec[d] = Dim.AUTO
+                if dynamic_range is None:
+                    spec[d] = Dim.AUTO
+                else:
+                    # The fresh export inputs deliberately carry independent
+                    # symbols. Reusing this Dim is the one place that restores
+                    # equality between occurrences of the original symbol.
+                    key = str(s.node.expr)
+                    if key not in bounded_dims:
+                        bounded_dims[key] = Dim(
+                            f"luminal_dim_{len(bounded_dims)}",
+                            min=effective_minimum,
+                            max=dynamic_range[1],
+                        )
+                    spec[d] = bounded_dims[key]
                 saw_dynamic = True
         per_input_spec.append(spec if spec else None)
 

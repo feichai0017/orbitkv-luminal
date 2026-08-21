@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import fx
 
-from luminal.region_export import export_region
+from luminal.region_export import _fresh_export_inputs, export_region
 
 
 def _linear_graph() -> fx.GraphModule:
@@ -26,7 +26,7 @@ def _symbolic_inputs():
     from torch._subclasses.fake_tensor import FakeTensorMode
     from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-    shape_env = ShapeEnv()
+    shape_env = ShapeEnv(tracked_fakes=[])
     symbol = shape_env.create_symintnode(
         shape_env.create_symbol(4, LocalSource("num_tokens")), hint=4
     )
@@ -130,13 +130,17 @@ def test_export_region_applies_bounded_dynamic_range() -> None:
     x.meta["example_value"] = tensor
     graph.output(graph.call_method("view", (x, size, 2, 4)))
 
-    exported = export_region(
+    result = export_region(
         fx.GraphModule(torch.nn.Module(), graph),
         [symbol, tensor],
         dynamic_range=(1, 8),
-    ).program
+    )
+    exported = result.program
 
     assert exported.range_constraints
+    assert result.dynamic_ranges[0].minimum == 2
+    assert result.dynamic_ranges[0].maximum == 8
+    assert all(int(value.lower) == 2 for value in exported.range_constraints.values())
     assert all(int(value.upper) == 8 for value in exported.range_constraints.values())
 
 
@@ -151,16 +155,78 @@ def test_export_region_preserves_shared_dynamic_dimension() -> None:
     left.meta["example_value"] = left_value
     right = graph.placeholder("right")
     right.meta["example_value"] = right_value
-    graph.output(graph.call_function(torch.ops.aten.add.Tensor, (left, right)))
+    graph.output(
+        graph.call_function(torch.ops.aten.cat.default, ([left, right], 0))
+    )
 
-    exported = export_region(
+    result = export_region(
         fx.GraphModule(torch.nn.Module(), graph),
         [left_value, right_value],
         dynamic_range=(1, 8),
-    ).program
+    )
+    exported = result.program
 
     assert len(exported.range_constraints) == 1
+    assert len(result.dynamic_ranges) == 1
     assert int(next(iter(exported.range_constraints.values())).upper) == 8
+
+
+def test_export_region_uses_a_fresh_fake_mode() -> None:
+    symbol, tensor = _symbolic_inputs()
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    x.meta["example_value"] = tensor
+    graph.output(x)
+
+    result = export_region(
+        fx.GraphModule(torch.nn.Module(), graph),
+        [tensor],
+        dynamic_range=(1, 8),
+    )
+
+    example_inputs, _ = result.program.example_inputs
+    assert example_inputs[0].fake_mode is not tensor.fake_mode
+    assert example_inputs[0].fake_mode.shape_env is not None
+    assert isinstance(example_inputs[0].shape[0], torch.SymInt)
+
+
+def test_fresh_export_inputs_do_not_duck_shape_equal_dimensions() -> None:
+    symbol, left = _symbolic_inputs()
+    with left.fake_mode:
+        right = torch.empty_strided(
+            (symbol, 8), (8, 1), device="cuda:0", dtype=torch.float16
+        )
+
+    fresh_left, fresh_right = _fresh_export_inputs([left, right])
+
+    assert fresh_left.shape[0].node.expr != fresh_right.shape[0].node.expr
+
+
+def test_export_region_inside_outer_tracing_context() -> None:
+    from torch._guards import TracingContext, tracing
+
+    symbol, left = _symbolic_inputs()
+    with left.fake_mode:
+        right = torch.empty_strided(
+            (symbol, 8), (8, 1), device="cuda:0", dtype=torch.float16
+        )
+    graph = fx.Graph()
+    left_node = graph.placeholder("left")
+    left_node.meta["example_value"] = left
+    right_node = graph.placeholder("right")
+    right_node.meta["example_value"] = right
+    graph.output(
+        graph.call_function(torch.ops.aten.cat.default, ([left_node, right_node], 0))
+    )
+
+    with tracing(TracingContext(left.fake_mode)):
+        result = export_region(
+            fx.GraphModule(torch.nn.Module(), graph),
+            [left, right],
+            dynamic_range=(1, 8),
+        )
+
+    assert len(result.program.range_constraints) == 1
 
 
 def test_export_region_specializes_exact_range() -> None:
@@ -176,14 +242,29 @@ def test_export_region_specializes_exact_range() -> None:
         concrete_tensor = torch.empty_strided(
             (8, 8), (8, 1), device="cuda:0", dtype=torch.float16
         )
-    exported = export_region(
+    result = export_region(
         fx.GraphModule(torch.nn.Module(), graph),
         [8, concrete_tensor],
         dynamic_range=(8, 8),
-    ).program
+    )
+    exported = result.program
 
+    assert not result.dynamic_ranges
     assert not exported.range_constraints
     assert "Sym(" not in exported.graph_module.print_readable(print_output=False)
+
+
+def test_export_region_rejects_static_graph_for_ranged_artifact() -> None:
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    graph.output(graph.call_function(torch.ops.aten.relu.default, (x,)))
+
+    with pytest.raises(RuntimeError, match="exactly one dynamic dimension"):
+        export_region(
+            fx.GraphModule(torch.nn.Module(), graph),
+            [torch.randn(4, 8)],
+            dynamic_range=(1, 8),
+        )
 
 
 def test_export_region_rejects_unrepresentable_symbol() -> None:
