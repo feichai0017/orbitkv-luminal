@@ -1784,6 +1784,7 @@ impl CudaRuntime {
         bucket: &mut CompiledBucket,
         stream: &Arc<CudaStream>,
         dyn_dims: &DynMap,
+        external_output_nodes: &FxHashSet<NodeIndex>,
     ) {
         let profile_alloc = std::env::var_os("LUMINAL_CUDA_PROFILE_RECAPTURE").is_some();
         let alloc_profile_start = std::time::Instant::now();
@@ -1913,6 +1914,7 @@ impl CudaRuntime {
         let buffer_updates = bucket
             .logical_buffer_offsets
             .iter()
+            .filter(|(logical_node, _)| !external_output_nodes.contains(logical_node))
             .filter_map(|(logical_node, offset)| {
                 let len = bucket.logical_buffer_bytes.get(logical_node).copied()?;
                 let ptr = arena_ptr.checked_add(*offset as u64)?;
@@ -2806,6 +2808,20 @@ impl CudaRuntime {
             new_arena_bytes,
             cached_ptrs_after_alloc,
         ) = {
+            // A durable external output remains authoritative across calls.
+            // Arena preparation must not replace its cached pointer before the
+            // CUDA graph is launched again.
+            let external_output_nodes = if self.resolved_output_bucket == Some(bucket_idx) {
+                self.resolved_output_registrations
+                    .values()
+                    .filter_map(|resolved| match resolved {
+                        ResolvedOutputRegistration::External { data_node } => Some(*data_node),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                FxHashSet::default()
+            };
             let bucket = &mut self.compiled_buckets[bucket_idx];
             let stabilize_intermediate_pointers = bucket.stabilize_intermediate_pointers;
             let was_hlir_synced = bucket.hlir_synced;
@@ -2821,6 +2837,7 @@ impl CudaRuntime {
                         bucket,
                         &self.cuda_stream,
                         &allocation_dyn_map,
+                        &external_output_nodes,
                     );
                     bucket.last_allocation_dyn_map = allocation_dyn_map.clone();
                 }
@@ -2842,7 +2859,12 @@ impl CudaRuntime {
                     bucket.cached_buffer_ptrs.len(),
                 )
             } else {
-                Self::allocate_intermediate_buffers(bucket, &self.cuda_stream, dyn_map);
+                Self::allocate_intermediate_buffers(
+                    bucket,
+                    &self.cuda_stream,
+                    dyn_map,
+                    &external_output_nodes,
+                );
                 (
                     stabilize_intermediate_pointers,
                     was_hlir_synced,

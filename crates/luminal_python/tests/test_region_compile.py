@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 import torch
 from torch import fx
@@ -52,9 +54,11 @@ def test_compile_region_preserves_runtime_input_indices(monkeypatch) -> None:
         "capsule": factory,
         "iterations": 3,
         "user_indices": region.input_indices,
+        "output_spec": region.output_spec,
         "input_device_ptrs": None,
         "device_index": 0,
         "use_current_stream": True,
+        "static_outputs": False,
     }
 
 
@@ -128,6 +132,30 @@ def test_compiled_model_passes_current_stream(monkeypatch) -> None:
     assert calls == [(1234,)]
 
 
+def test_compiled_model_restores_region_output_structure() -> None:
+    from types import SimpleNamespace
+
+    graph = SimpleNamespace(
+        input_names=[],
+        input_dtypes=[],
+        output_names=["result"],
+        output_dtypes=[7],
+        output_shapes=[[1]],
+        writeback_outputs=[],
+        has_dynamic_dims=False,
+        device_type="cpu",
+        device_index=None,
+        supports_device_ptrs=False,
+        run=lambda: None,
+        get_output_at=lambda position: [3.0],
+    )
+    _, output_spec = torch.utils._pytree.tree_flatten(torch.tensor(0))
+
+    output = CompiledModel(graph, output_spec=output_spec)()
+
+    assert torch.equal(output, torch.tensor([3.0]))
+
+
 def _cuda_skip_reason() -> str | None:
     if not torch.cuda.is_available():
         return "CUDA is not available"
@@ -179,23 +207,40 @@ def test_compile_region_uses_current_cuda_stream() -> None:
         ]
         region = export_region(_add_graph(), fake_inputs)
 
-    compiled = compile_region(region, search_iterations=1)
+    compiled = compile_region(region, search_iterations=1, static_outputs=True)
     left = torch.empty((2, 4), device="cuda", dtype=torch.float16)
     right = torch.empty((2, 4), device="cuda", dtype=torch.float16)
     stream = torch.cuda.Stream()
 
-    # Warm up any one-time runtime work before checking asynchronous behavior.
-    compiled(left, right)
+    # Warm up one-time compilation and allocation work on this stream.
+    with torch.cuda.stream(stream):
+        (actual,) = compiled(left, right)
+    stream.synchronize()
+
+    # `_sleep` cycles do not have a portable wall-clock duration, so measure the
+    # delay on this GPU before using it to test whether the host call blocks.
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    with torch.cuda.stream(stream):
+        start.record()
+        torch.cuda._sleep(1_000_000_000)
+        end.record()
+    end.synchronize()
+    sleep_ms = start.elapsed_time(end)
+    assert sleep_ms > 10, f"CUDA delay is too short to test blocking: {sleep_ms} ms"
 
     with torch.cuda.stream(stream):
         torch.cuda._sleep(1_000_000_000)
-        delayed = torch.cuda.Event()
-        delayed.record()
         left.fill_(1)
         right.fill_(2)
+        call_start = time.perf_counter()
         (actual,) = compiled(left, right)
+        call_ms = (time.perf_counter() - call_start) * 1_000
 
-    assert not delayed.query(), "Luminal synchronized the borrowed CUDA stream"
+    assert call_ms < sleep_ms / 2, (
+        "Luminal blocked on the borrowed CUDA stream "
+        f"(call={call_ms:.3f} ms, queued_delay={sleep_ms:.3f} ms)"
+    )
     stream.synchronize()
     torch.testing.assert_close(actual, torch.full_like(actual, 3))
 
@@ -230,15 +275,18 @@ def test_compile_region_enforces_dynamic_range() -> None:
         [fake_left, fake_right],
         dynamic_range=(1, 8),
     )
-    compiled = compile_region(region, search_iterations=1)
+    compiled = compile_region(region, search_iterations=1, static_outputs=True)
     assert compiled._graph.output_shapes == [[16, 8]]
 
+    output_ptrs = set()
     for size in (2, 3, 5, 8):
         left_value = torch.randn((size, 8), device="cuda", dtype=torch.float16)
         right_value = torch.randn((size, 8), device="cuda", dtype=torch.float16)
         (actual,) = compiled(left_value, right_value)
+        output_ptrs.add(actual.data_ptr())
         assert actual.shape == (size * 2, 8)
         torch.testing.assert_close(actual, torch.cat((left_value, right_value)))
+    assert len(output_ptrs) == 1
 
     for size in (1, 9):
         value = torch.randn((size, 8), device="cuda", dtype=torch.float16)

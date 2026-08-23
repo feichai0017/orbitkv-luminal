@@ -42,8 +42,10 @@ class CompiledModel:
         weight_refs=None,
         input_names=None,
         user_indices=None,
+        output_spec=None,
         scalar_output_positions=(),
         use_current_stream=False,
+        static_outputs=False,
     ):
         """Initialize with a compiled CompiledGraph from Rust.
 
@@ -54,8 +56,11 @@ class CompiledModel:
             user_indices: When torch.compile lifts model parameters into extra args,
                 this tells __call__ which arg positions are actual user inputs.
                 None means all args are user inputs (PT2 path).
+            output_spec: Optional pytree structure expected by the caller.
             use_current_stream: Run CUDA work on PyTorch's current stream instead
                 of the backend's owned stream.
+            static_outputs: Reuse maximum-capacity CUDA output buffers across
+                calls and return views with the current runtime shapes.
         """
         self._graph = graph_result
         self._input_names = input_names or graph_result.input_names
@@ -74,8 +79,11 @@ class CompiledModel:
         self._has_dynamic_dims = getattr(graph_result, "has_dynamic_dims", False)
         self._weight_refs = weight_refs or []
         self._user_indices = user_indices
+        self._output_spec = output_spec
         self._scalar_output_positions = frozenset(scalar_output_positions)
         self._use_current_stream = use_current_stream
+        self._static_outputs = static_outputs
+        self._static_output_tensors = None
         self.skip_input_names = frozenset()
         self._is_gpu = getattr(graph_result, "device_type", "cpu") != "cpu"
         self._device_index = getattr(graph_result, "device_index", None)
@@ -84,6 +92,8 @@ class CompiledModel:
         self._supports_device_ptrs = getattr(
             graph_result, "supports_device_ptrs", False
         )
+        if static_outputs and not (self._is_gpu and self._supports_device_ptrs):
+            raise ValueError("static outputs require CUDA device-pointer support")
         # name -> (device, pointer, required bytes, dtype, strong tensor ref).
         # CUDA bindings are persistent in the runtime; only changed metadata
         # needs to cross PyO3 on subsequent calls.
@@ -326,6 +336,22 @@ class CompiledModel:
         _use_zero_copy = self._supports_device_ptrs
         output_tensors = []
         if _use_zero_copy:
+            if self._static_outputs and self._static_output_tensors is None:
+                self._static_output_tensors = []
+                for i, (shape, out_dtype) in enumerate(
+                    zip(self._output_shapes, output_torch_dtypes)
+                ):
+                    if i in self._writeback_by_pos:
+                        self._static_output_tensors.append(None)
+                        continue
+                    if out_dtype not in _zero_copy_native_floats:
+                        raise TypeError(
+                            f"static output '{self._output_names[i]}' has "
+                            f"unsupported dtype {out_dtype}"
+                        )
+                    out = torch.empty(shape, dtype=out_dtype, device=input_device)
+                    self._static_output_tensors.append(out)
+
             for i, (name, shape) in enumerate(zip(self._output_names, output_shapes)):
                 out_dtype = output_torch_dtypes[i]
                 if i in self._writeback_by_pos:
@@ -340,8 +366,24 @@ class CompiledModel:
                         del self._cuda_writeback_bindings[i]
                     output_tensors.append(None)
                     continue
-                out = torch.empty(shape, dtype=out_dtype, device=input_device)
+                if self._static_outputs:
+                    out = self._static_output_tensors[i]
+                    capacity_shape = tuple(out.shape)
+                    shape = tuple(shape)
+                    if len(shape) != len(capacity_shape) or any(
+                        current > capacity
+                        for current, capacity in zip(shape, capacity_shape)
+                    ):
+                        raise ValueError(
+                            f"output '{name}' shape {shape} exceeds static "
+                            f"capacity {capacity_shape}"
+                        )
+                    out = out.view(-1)[: math.prod(shape)].view(shape)
+                else:
+                    out = torch.empty(shape, dtype=out_dtype, device=input_device)
                 if out_dtype in _zero_copy_native_floats:
+                    # The allocation has maximum capacity, but the runtime
+                    # needs the current logical byte length for dynamic shapes.
                     self._graph.set_output_device_ptr_at(
                         i, out.data_ptr(), out.numel() * out.element_size()
                     )
@@ -395,7 +437,10 @@ class CompiledModel:
         if gpu_writebacks:
             self._graph.copy_outputs_to_device_ptrs_at(gpu_writebacks)
 
-        return tuple(
+        flat_outputs = tuple(
             output.item() if i in self._scalar_output_positions else output
             for i, output in enumerate(outputs)
         )
+        if self._output_spec is not None:
+            return torch.utils._pytree.tree_unflatten(flat_outputs, self._output_spec)
+        return flat_outputs

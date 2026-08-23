@@ -298,10 +298,12 @@ def _save_and_compile(
     factory,
     search_iterations,
     user_indices=None,
+    output_spec=None,
     input_device_ptrs=None,
     scalar_output_positions=(),
     device_index=None,
     use_current_stream=False,
+    static_outputs=False,
 ):
     """Compile a PT2 model via Rust, return CompiledModel.
 
@@ -354,8 +356,10 @@ def _save_and_compile(
             compiled,
             weight_refs=keep_alive,
             user_indices=user_indices,
+            output_spec=output_spec,
             scalar_output_positions=scalar_output_positions,
             use_current_stream=use_current_stream,
+            static_outputs=static_outputs,
         )
     finally:
         if owns_tmpdir and tmpdir:

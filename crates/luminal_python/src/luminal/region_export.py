@@ -26,6 +26,7 @@ from .region_abi import DynamicRange
 class RegionExport:
     program: torch.export.ExportedProgram
     input_indices: tuple[int, ...]
+    output_spec: Any
     dynamic_ranges: tuple[DynamicRange, ...]
     device_index: int | None
 
@@ -44,6 +45,8 @@ def export_region(
     """
 
     graph = copy.deepcopy(graph).eval()
+    output = next(node for node in graph.graph.nodes if node.op == "output")
+    _, output_spec = torch.utils._pytree.tree_flatten(output.args[0])
     _strip_data_attr(graph)
     inputs, input_indices, strip_ok = _strip_symint_placeholders(
         graph, list(example_inputs)
@@ -82,6 +85,7 @@ def export_region(
         return RegionExport(
             program=exported,
             input_indices=tuple(input_indices),
+            output_spec=output_spec,
             dynamic_ranges=ranges,
             device_index=device_index,
         )
