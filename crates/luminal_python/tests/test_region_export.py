@@ -155,9 +155,7 @@ def test_export_region_preserves_shared_dynamic_dimension() -> None:
     left.meta["example_value"] = left_value
     right = graph.placeholder("right")
     right.meta["example_value"] = right_value
-    graph.output(
-        graph.call_function(torch.ops.aten.cat.default, ([left, right], 0))
-    )
+    graph.output(graph.call_function(torch.ops.aten.cat.default, ([left, right], 0)))
 
     result = export_region(
         fx.GraphModule(torch.nn.Module(), graph),

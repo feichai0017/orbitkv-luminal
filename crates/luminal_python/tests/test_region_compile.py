@@ -106,12 +106,8 @@ def test_compile_region_enforces_dynamic_range() -> None:
     )
     fake_mode = FakeTensorMode(shape_env=shape_env)
     with fake_mode:
-        fake_left = torch.empty(
-            (tokens, 8), device="cuda", dtype=torch.float16
-        )
-        fake_right = torch.empty(
-            (tokens, 8), device="cuda", dtype=torch.float16
-        )
+        fake_left = torch.empty((tokens, 8), device="cuda", dtype=torch.float16)
+        fake_right = torch.empty((tokens, 8), device="cuda", dtype=torch.float16)
 
     graph = fx.Graph()
     left = graph.placeholder("left")
