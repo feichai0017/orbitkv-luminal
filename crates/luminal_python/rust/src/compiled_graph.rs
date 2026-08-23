@@ -393,14 +393,13 @@ impl CompiledGraph {
         let mut inferred = HashMap::new();
         for (shape_exprs, shape) in self.input_shape_exprs.iter().zip(input_shapes.iter()) {
             for (dim_expr, &dim_val) in shape_exprs.iter().zip(shape.iter()) {
-                if let Some((var, value)) = solve_single_var_dim(dim_expr, dim_val) {
-                    if let Some(previous) = inferred.insert(var, value)
-                        && previous != value
-                    {
-                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                            "a dynamic dimension was inferred as both {previous} and {value}"
-                        )));
-                    }
+                if let Some((var, value)) = solve_single_var_dim(dim_expr, dim_val)
+                    && let Some(previous) = inferred.insert(var, value)
+                    && previous != value
+                {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "a dynamic dimension was inferred as both {previous} and {value}"
+                    )));
                 }
             }
         }
