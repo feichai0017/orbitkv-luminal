@@ -276,6 +276,32 @@ class CompiledModel:
             torch.bool: ("get_output_bool", torch.bool),
         }
 
+        if self._static_outputs:
+            for i in self._writeback_by_pos:
+                name = self._output_names[i]
+                target = user_inputs[self._writeback_input_pos[i]]
+                out_dtype = output_torch_dtypes[i]
+                expected_numel = math.prod(output_shapes[i])
+                if not (
+                    hasattr(self._graph, "copy_outputs_to_device_ptrs_at")
+                    and target.is_cuda
+                    and target.is_contiguous()
+                    and target.dtype == out_dtype
+                    and target.numel() == expected_numel
+                ):
+                    raise ValueError(
+                        f"static writeback '{name}' requires a contiguous CUDA "
+                        f"tensor with dtype {out_dtype} and {expected_numel} elements"
+                    )
+                n_bytes = target.numel() * target.element_size()
+                signature = _cuda_input_binding_signature(target, n_bytes)
+                previous = self._cuda_writeback_bindings.get(i)
+                if previous is not None and previous[:4] != signature:
+                    raise ValueError(
+                        f"static writeback '{name}' target allocation changed"
+                    )
+                self._cuda_writeback_bindings[i] = (*signature, target)
+
         def _read_typed_output(
             position: int, name: str, shape, out_dtype
         ) -> torch.Tensor:
@@ -361,9 +387,6 @@ class CompiledModel:
                     # front can redirect one cache writeback into another.
                     # Preserve positional semantics with the batched post-run
                     # device copies below.
-                    if i in self._cuda_writeback_bindings:
-                        self._graph.clear_output_device_ptr_at(i)
-                        del self._cuda_writeback_bindings[i]
                     output_tensors.append(None)
                     continue
                 if self._static_outputs:

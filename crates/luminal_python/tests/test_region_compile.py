@@ -171,6 +171,49 @@ def _cuda_skip_reason() -> str | None:
 _CUDA_SKIP_REASON = _cuda_skip_reason()
 
 
+def _cuda_sleep_ms(stream: torch.cuda.Stream) -> float:
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    with torch.cuda.stream(stream):
+        start.record()
+        torch.cuda._sleep(1_000_000_000)
+        end.record()
+    end.synchronize()
+    return start.elapsed_time(end)
+
+
+@pytest.mark.skipif(
+    _CUDA_SKIP_REASON is not None, reason=_CUDA_SKIP_REASON or "CUDA is unavailable"
+)
+def test_non_static_writeback_accepts_changed_target() -> None:
+    from types import SimpleNamespace
+
+    copies = []
+    graph = SimpleNamespace(
+        input_names=["target"],
+        input_dtypes=[7],
+        output_names=["mutation"],
+        output_dtypes=[7],
+        output_shapes=[[2]],
+        writeback_outputs=[(0, "target")],
+        has_dynamic_dims=False,
+        device_type="cuda",
+        device_index=0,
+        supports_device_ptrs=True,
+        set_input_device_ptr=lambda *args: None,
+        run=lambda *args: None,
+        copy_outputs_to_device_ptrs_at=lambda value: copies.append(value),
+    )
+    model = CompiledModel(graph)
+    first = torch.zeros(2, device="cuda")
+    second = torch.zeros(2, device="cuda")
+
+    model(first)
+    model(second)
+
+    assert [copy[0][1] for copy in copies] == [first.data_ptr(), second.data_ptr()]
+
+
 @pytest.mark.skipif(
     _CUDA_SKIP_REASON is not None, reason=_CUDA_SKIP_REASON or "CUDA is unavailable"
 )
@@ -219,14 +262,7 @@ def test_compile_region_uses_current_cuda_stream() -> None:
 
     # `_sleep` cycles do not have a portable wall-clock duration, so measure the
     # delay on this GPU before using it to test whether the host call blocks.
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    with torch.cuda.stream(stream):
-        start.record()
-        torch.cuda._sleep(1_000_000_000)
-        end.record()
-    end.synchronize()
-    sleep_ms = start.elapsed_time(end)
+    sleep_ms = _cuda_sleep_ms(stream)
     assert sleep_ms > 10, f"CUDA delay is too short to test blocking: {sleep_ms} ms"
 
     with torch.cuda.stream(stream):
@@ -243,6 +279,57 @@ def test_compile_region_uses_current_cuda_stream() -> None:
     )
     stream.synchronize()
     torch.testing.assert_close(actual, torch.full_like(actual, 3))
+
+
+@pytest.mark.skipif(
+    _CUDA_SKIP_REASON is not None, reason=_CUDA_SKIP_REASON or "CUDA is unavailable"
+)
+def test_static_writeback_uses_stable_target_on_current_stream() -> None:
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    graph = fx.Graph()
+    target = graph.placeholder("target")
+    update = graph.placeholder("update")
+    result = graph.call_function(torch.ops.aten.add_.Tensor, (target, update))
+    graph.output(result)
+    graph_module = fx.GraphModule(torch.nn.Module(), graph)
+
+    with FakeTensorMode():
+        fake_inputs = [
+            torch.empty((2, 4), device="cuda", dtype=torch.float16),
+            torch.empty((2, 4), device="cuda", dtype=torch.float16),
+        ]
+        region = export_region(graph_module, fake_inputs)
+
+    compiled = compile_region(region, search_iterations=1, static_outputs=True)
+    target_value = torch.zeros((2, 4), device="cuda", dtype=torch.float16)
+    stream = torch.cuda.Stream()
+
+    with torch.cuda.stream(stream):
+        compiled(target_value, torch.ones_like(target_value))
+    stream.synchronize()
+    torch.testing.assert_close(target_value, torch.ones_like(target_value))
+
+    sleep_ms = _cuda_sleep_ms(stream)
+    assert sleep_ms > 10, f"CUDA delay is too short to test blocking: {sleep_ms} ms"
+    with torch.cuda.stream(stream):
+        torch.cuda._sleep(1_000_000_000)
+        call_start = time.perf_counter()
+        compiled(target_value, torch.full_like(target_value, 2))
+        call_ms = (time.perf_counter() - call_start) * 1_000
+
+    assert call_ms < sleep_ms / 2, (
+        "Luminal writeback blocked on the borrowed CUDA stream "
+        f"(call={call_ms:.3f} ms, queued_delay={sleep_ms:.3f} ms)"
+    )
+    stream.synchronize()
+    torch.testing.assert_close(target_value, torch.full_like(target_value, 3))
+
+    with pytest.raises(ValueError, match="requires a contiguous CUDA tensor"):
+        compiled(target_value.t(), torch.ones_like(target_value.t()))
+
+    with pytest.raises(ValueError, match="target allocation changed"):
+        compiled(torch.zeros_like(target_value), torch.ones_like(target_value))
 
 
 @pytest.mark.skipif(
