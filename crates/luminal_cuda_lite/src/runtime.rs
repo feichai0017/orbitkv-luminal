@@ -1913,6 +1913,7 @@ impl CudaRuntime {
             bucket.materialization_fully_dirty = true;
         }
         let arena_ptr = bucket.arena.as_ref().unwrap().device_ptr(stream).0;
+        // Don't allow arena allocation to overwrite a user-provided output pointer.
         let buffer_updates = bucket
             .logical_buffer_offsets
             .iter()
@@ -2810,9 +2811,8 @@ impl CudaRuntime {
             new_arena_bytes,
             cached_ptrs_after_alloc,
         ) = {
-            // A durable external output remains authoritative across calls.
-            // Arena preparation must not replace its cached pointer before the
-            // CUDA graph is launched again.
+            // Preserve caller-provided output pointers for this bucket.
+            // Arena allocation must not replace them with internal buffer pointers.
             let external_output_nodes = if self.resolved_output_bucket == Some(bucket_idx) {
                 self.resolved_output_registrations
                     .values()
@@ -4668,6 +4668,7 @@ impl Runtime for CudaRuntime {
             if let Some(cuda_graph) = exec_op.internal.as_any().downcast_ref::<CudaGraphOp>() {
                 let timer = std::time::Instant::now();
                 let result = if self.external_cuda_graph && !self.profiling {
+                    // allow vLLM to capture kernels
                     let buffers = self
                         .buffer_map_for_exec_op(bucket, exec_op, false)
                         .unwrap_or_else(|e| panic!("CUDA execute buffer resolution failed: {e}"))

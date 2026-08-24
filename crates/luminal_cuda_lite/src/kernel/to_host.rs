@@ -170,6 +170,29 @@ impl CompiledFlashInferDecode {
             .downcast_ref::<FlashInferAttention>()
             .expect("CompiledFlashInferDecode only stores FlashInfer host ops")
     }
+
+    fn enqueue_prepared(
+        &self,
+        stream: &Arc<CudaStream>,
+        buffers: &FxHashMap<NodeIndex, DeviceBuffer>,
+        dyn_map: &DynMap,
+    ) -> anyhow::Result<()> {
+        let prepared = self
+            .prepared
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("FlashInfer step is not prepared"))?;
+        let resolved =
+            self.flashinfer()
+                .resolve_for_graph(self.node, &self.inputs, buffers, dyn_map)?;
+        let signature = resolved.signature_for_graph_plan(prepared.plan_c());
+        anyhow::ensure!(
+            self.signature
+                .as_ref()
+                .is_some_and(|old| old.spec == signature.spec),
+            "FlashInfer shape changed after warmup"
+        );
+        prepared.enqueue(stream, signature.ptrs, true)
+    }
 }
 
 struct PendingFlashInferDecodeRecapture {
@@ -347,6 +370,29 @@ impl CompiledCuBlasLt {
             .downcast_ref::<CuBlasLt>()
             .expect("CompiledCuBlasLt only stores CuBlasLt host ops")
     }
+
+    fn enqueue_prepared(
+        &self,
+        stream: &Arc<CudaStream>,
+        buffers: &FxHashMap<NodeIndex, DeviceBuffer>,
+        dyn_map: &DynMap,
+    ) -> anyhow::Result<()> {
+        let signature = self
+            .cublaslt()
+            .resolve_for_graph(self.node, &self.inputs, buffers, dyn_map)?
+            .signature();
+        let prepared = self
+            .prepared
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("cuBLASLt step is not prepared"))?;
+        anyhow::ensure!(
+            self.signature
+                .as_ref()
+                .is_some_and(|old| old.spec == signature.spec),
+            "cuBLASLt shape changed after warmup"
+        );
+        prepared.enqueue(stream, signature.ptrs)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -457,6 +503,123 @@ impl CompiledKernel {
             static_shared_memory_bytes: function_facts.static_shared_memory_bytes,
             function_max_threads_per_block: Some(function_facts.max_threads_per_block),
         })
+    }
+
+    fn requires_output_buffer(&self, dyn_map: &DynMap) -> bool {
+        self.kernel_op.output_size().exec(dyn_map).unwrap_or(1) != 0
+            && self.kernel_op.output_aliases_input().is_none()
+    }
+
+    fn launch_config(&self, dyn_map: &DynMap) -> anyhow::Result<KernelLaunchConfig> {
+        let config = KernelLaunchConfig {
+            grid: (
+                self.grid.0.exec(dyn_map).unwrap() as u32,
+                self.grid.1.exec(dyn_map).unwrap() as u32,
+                self.grid.2.exec(dyn_map).unwrap() as u32,
+            ),
+            block: (
+                self.block.0.exec(dyn_map).unwrap() as u32,
+                self.block.1.exec(dyn_map).unwrap() as u32,
+                self.block.2.exec(dyn_map).unwrap() as u32,
+            ),
+            shared_mem: self.shared_mem.exec(dyn_map).unwrap() as u32,
+        };
+        if config.grid.0 == 0
+            || config.grid.1 == 0
+            || config.grid.2 == 0
+            || config.block.0 == 0
+            || config.block.1 == 0
+            || config.block.2 == 0
+        {
+            anyhow::bail!(
+                "invalid CUDA launch dimensions for kernel {} at LLIR node {:?}: grid={:?} block={:?}",
+                self.kernel_name,
+                self.node,
+                config.grid,
+                config.block,
+            );
+        }
+        Ok(config)
+    }
+
+    fn validate_pointers(
+        &self,
+        output_ptr: u64,
+        input_ptrs: &[u64],
+        dyn_map: &DynMap,
+    ) -> anyhow::Result<()> {
+        if self.requires_output_buffer(dyn_map) && output_ptr == 0 {
+            anyhow::bail!(
+                "missing output buffer for CUDA kernel {} at LLIR node {:?}",
+                self.kernel_name,
+                self.node,
+            );
+        }
+
+        for (idx, (input_node, input_ptr)) in self.inputs.iter().zip(input_ptrs).enumerate() {
+            if *input_ptr == 0 {
+                anyhow::bail!(
+                    "missing input buffer {idx} for CUDA kernel {} at LLIR node {:?}; input LLIR node {:?}",
+                    self.kernel_name,
+                    self.node,
+                    input_node,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn enqueue_prepared(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        buffer_ptrs: &FxHashMap<NodeIndex, u64>,
+        dyn_map: &DynMap,
+        dyn_dims_ptr: u64,
+    ) -> anyhow::Result<()> {
+        self.kernel_op.pre_execute(
+            stream,
+            &mut self.internal_bufs,
+            &mut self.constants,
+            buffer_ptrs,
+            dyn_map,
+        );
+        let output_ptr = buffer_ptrs.get(&self.node).copied().unwrap_or(0);
+        let input_ptrs = self
+            .inputs
+            .iter()
+            .map(|node| buffer_ptrs.get(node).copied().unwrap_or(0))
+            .collect_vec();
+        self.validate_pointers(output_ptr, &input_ptrs, dyn_map)?;
+        let kernel_dyn_dims_ptr = if self.has_dyn_dims_param {
+            dyn_dims_ptr
+        } else {
+            0
+        };
+        anyhow::ensure!(
+            !self.has_dyn_dims_param || kernel_dyn_dims_ptr != 0,
+            "dynamic-dimension buffer was not prepared before capture"
+        );
+        let mut params = UnifiedKernelParams::new(self.kernel_op.build_params(
+            stream,
+            output_ptr,
+            &input_ptrs,
+            &self.internal_bufs,
+            kernel_dyn_dims_ptr,
+        ));
+        let function = unsafe { self.function.raw_function() };
+        let launch = self.launch_config(dyn_map)?;
+        unsafe {
+            cudarc::driver::result::launch_kernel(
+                function,
+                launch.grid,
+                launch.block,
+                launch.shared_mem,
+                stream.cu_stream(),
+                &mut params.ptrs,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -1519,74 +1682,6 @@ impl CudaGraphOp {
         }
     }
 
-    fn kernel_requires_output_buffer(kernel: &CompiledKernel, dyn_map: &DynMap) -> bool {
-        kernel.kernel_op.output_size().exec(dyn_map).unwrap_or(1) != 0
-            && kernel.kernel_op.output_aliases_input().is_none()
-    }
-
-    fn kernel_launch_config(
-        kernel: &CompiledKernel,
-        dyn_map: &DynMap,
-    ) -> anyhow::Result<KernelLaunchConfig> {
-        let config = KernelLaunchConfig {
-            grid: (
-                kernel.grid.0.exec(dyn_map).unwrap() as u32,
-                kernel.grid.1.exec(dyn_map).unwrap() as u32,
-                kernel.grid.2.exec(dyn_map).unwrap() as u32,
-            ),
-            block: (
-                kernel.block.0.exec(dyn_map).unwrap() as u32,
-                kernel.block.1.exec(dyn_map).unwrap() as u32,
-                kernel.block.2.exec(dyn_map).unwrap() as u32,
-            ),
-            shared_mem: kernel.shared_mem.exec(dyn_map).unwrap() as u32,
-        };
-        if config.grid.0 == 0
-            || config.grid.1 == 0
-            || config.grid.2 == 0
-            || config.block.0 == 0
-            || config.block.1 == 0
-            || config.block.2 == 0
-        {
-            anyhow::bail!(
-                "invalid CUDA launch dimensions for kernel {} at LLIR node {:?}: grid={:?} block={:?}",
-                kernel.kernel_name,
-                kernel.node,
-                config.grid,
-                config.block,
-            );
-        }
-        Ok(config)
-    }
-
-    fn validate_kernel_pointers(
-        kernel: &CompiledKernel,
-        output_ptr: u64,
-        input_ptrs: &[u64],
-        dyn_map: &DynMap,
-    ) -> anyhow::Result<()> {
-        if Self::kernel_requires_output_buffer(kernel, dyn_map) && output_ptr == 0 {
-            anyhow::bail!(
-                "missing output buffer for CUDA kernel {} at LLIR node {:?}",
-                kernel.kernel_name,
-                kernel.node,
-            );
-        }
-
-        for (idx, (input_node, input_ptr)) in kernel.inputs.iter().zip(input_ptrs).enumerate() {
-            if *input_ptr == 0 {
-                anyhow::bail!(
-                    "missing input buffer {idx} for CUDA kernel {} at LLIR node {:?}; input LLIR node {:?}",
-                    kernel.kernel_name,
-                    kernel.node,
-                    input_node,
-                );
-            }
-        }
-
-        Ok(())
-    }
-
     /// Forget every memory derived from a dynamic-dimension value, so the next
     /// materialize walks the same staleness paths a real dim change triggers:
     /// dyn-var kernels rebuild params, dyn-shaped cuBLASLt islands re-prepare
@@ -1754,7 +1849,7 @@ impl CudaGraphOp {
                         .unwrap_or(0)
                 })
                 .collect_vec();
-            Self::validate_kernel_pointers(kernel, output_ptr, &input_ptrs, dyn_map)?;
+            kernel.validate_pointers(output_ptr, &input_ptrs, dyn_map)?;
             let kernel_dyn_dims_ptr = if kernel.has_dyn_dims_param {
                 dyn_dims_ptr
             } else {
@@ -2006,7 +2101,7 @@ impl CudaGraphOp {
             // before touching either the mutable or executable CUDA graph.
             let mut launch_overrides = FxHashMap::default();
             for idx in launch_candidate_set {
-                let launch = Self::kernel_launch_config(&state.kernels[idx], dyn_map)?;
+                let launch = state.kernels[idx].launch_config(dyn_map)?;
                 if state.kernel_launches.get(idx) != Some(&launch) {
                     dirty_kernel_set.insert(idx);
                     launch_overrides.insert(idx, launch);
@@ -2034,7 +2129,7 @@ impl CudaGraphOp {
                     .iter()
                     .map(|inp| current_buffer_ptrs.get(inp).copied().unwrap_or(0))
                     .collect();
-                Self::validate_kernel_pointers(kernel, output_ptr, &input_ptrs, dyn_map)?;
+                kernel.validate_pointers(output_ptr, &input_ptrs, dyn_map)?;
                 let kernel_dyn_dims_ptr = if kernel.has_dyn_dims_param {
                     dyn_dims_ptr
                 } else {
@@ -2520,103 +2615,26 @@ impl CudaGraphOp {
         let dyn_dims_ptr = state.dyn_dims_ptr;
 
         for step_index in 0..state.steps.len() {
-            let step_name = match state.steps[step_index] {
+            let (step_name, result) = match state.steps[step_index] {
                 CompiledStep::Kernel(index) => {
                     let kernel = &mut state.kernels[index];
-                    kernel.kernel_op.pre_execute(
-                        stream,
-                        &mut kernel.internal_bufs,
-                        &mut kernel.constants,
-                        &buffer_ptrs,
-                        dyn_map,
-                    );
-                    let output_ptr = buffer_ptrs.get(&kernel.node).copied().unwrap_or(0);
-                    let input_ptrs = kernel
-                        .inputs
-                        .iter()
-                        .map(|node| buffer_ptrs.get(node).copied().unwrap_or(0))
-                        .collect_vec();
-                    Self::validate_kernel_pointers(kernel, output_ptr, &input_ptrs, dyn_map)?;
-                    let kernel_dyn_dims_ptr = kernel
-                        .has_dyn_dims_param
-                        .then_some(dyn_dims_ptr)
-                        .unwrap_or(0);
-                    anyhow::ensure!(
-                        !kernel.has_dyn_dims_param || kernel_dyn_dims_ptr != 0,
-                        "dynamic-dimension buffer was not prepared before capture"
-                    );
-                    let mut params = UnifiedKernelParams::new(kernel.kernel_op.build_params(
-                        stream,
-                        output_ptr,
-                        &input_ptrs,
-                        &kernel.internal_bufs,
-                        kernel_dyn_dims_ptr,
-                    ));
-                    let function = unsafe { kernel.function.raw_function() };
-                    let launch = Self::kernel_launch_config(kernel, dyn_map)?;
-                    unsafe {
-                        cudarc::driver::result::launch_kernel(
-                            function,
-                            launch.grid,
-                            launch.block,
-                            launch.shared_mem,
-                            stream.cu_stream(),
-                            &mut params.ptrs,
-                        )
-                        .map_err(|error| {
-                            anyhow::anyhow!(
-                                "external kernel step {step_index} ({}) failed: {error}",
-                                kernel.kernel_name
-                            )
-                        })?;
-                    }
-                    kernel.kernel_name
+                    (
+                        kernel.kernel_name,
+                        kernel.enqueue_prepared(stream, &buffer_ptrs, dyn_map, dyn_dims_ptr),
+                    )
                 }
-                CompiledStep::CuBlasLt(index) => {
-                    let op = &state.cublaslt_ops[index];
-                    let signature = op
-                        .cublaslt()
-                        .resolve_for_graph(op.node, &op.inputs, buffers, dyn_map)?
-                        .signature();
-                    let prepared = op
-                        .prepared
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("cuBLASLt step is not prepared"))?;
-                    anyhow::ensure!(
-                        op.signature
-                            .as_ref()
-                            .is_some_and(|old| old.spec == signature.spec),
-                        "cuBLASLt shape changed after warmup"
-                    );
-                    prepared.enqueue(stream, signature.ptrs).map_err(|error| {
-                        anyhow::anyhow!("external cuBLASLt step {step_index} failed: {error}")
-                    })?;
-                    "cuBLASLt"
-                }
-                CompiledStep::FlashInferDecode(index) => {
-                    let op = &state.flashinfer_ops[index];
-                    let prepared = op
-                        .prepared
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("FlashInfer step is not prepared"))?;
-                    let resolved = op
-                        .flashinfer()
-                        .resolve_for_graph(op.node, &op.inputs, buffers, dyn_map)?;
-                    let signature = resolved.signature_for_graph_plan(prepared.plan_c());
-                    anyhow::ensure!(
-                        op.signature
-                            .as_ref()
-                            .is_some_and(|old| old.spec == signature.spec),
-                        "FlashInfer shape changed after warmup"
-                    );
-                    prepared
-                        .enqueue(stream, signature.ptrs, true)
-                        .map_err(|error| {
-                            anyhow::anyhow!("external FlashInfer step {step_index} failed: {error}")
-                        })?;
-                    "FlashInfer"
-                }
+                CompiledStep::CuBlasLt(index) => (
+                    "cuBLASLt",
+                    state.cublaslt_ops[index].enqueue_prepared(stream, buffers, dyn_map),
+                ),
+                CompiledStep::FlashInferDecode(index) => (
+                    "FlashInfer",
+                    state.flashinfer_ops[index].enqueue_prepared(stream, buffers, dyn_map),
+                ),
             };
+            result.map_err(|error| {
+                anyhow::anyhow!("external {step_name} step {step_index} failed: {error}")
+            })?;
             anyhow::ensure!(
                 stream.capture_status()?
                     != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_INVALIDATED,
@@ -3110,7 +3128,7 @@ impl CudaGraphOp {
                     }
 
                     let kernel = &state.kernels[idx];
-                    let launch = Self::kernel_launch_config(kernel, dyn_map)?;
+                    let launch = kernel.launch_config(dyn_map)?;
 
                     let output_ptr = buffer_ptrs.get(&kernel.node).copied().unwrap_or(0);
                     let input_ptrs: Vec<u64> = kernel
@@ -3118,7 +3136,7 @@ impl CudaGraphOp {
                         .iter()
                         .map(|inp| buffer_ptrs.get(inp).copied().unwrap_or(0))
                         .collect();
-                    Self::validate_kernel_pointers(kernel, output_ptr, &input_ptrs, dyn_map)?;
+                    kernel.validate_pointers(output_ptr, &input_ptrs, dyn_map)?;
                     let kernel_dyn_dims_ptr = if kernel.has_dyn_dims_param {
                         dyn_dims_ptr
                     } else {
