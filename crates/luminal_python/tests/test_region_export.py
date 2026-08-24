@@ -14,9 +14,7 @@ def _tensor_reporting_device(device: str) -> torch.Tensor:
     class DeviceTensor(torch.Tensor):
         @staticmethod
         def __new__(cls):
-            return torch.Tensor._make_subclass(
-                cls, torch.empty(1), require_grad=False
-            )
+            return torch.Tensor._make_subclass(cls, torch.empty(1), require_grad=False)
 
         @property
         def device(self):

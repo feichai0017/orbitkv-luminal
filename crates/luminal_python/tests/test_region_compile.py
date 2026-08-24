@@ -81,9 +81,7 @@ def test_compiled_model_rejects_wrong_cuda_device() -> None:
     class CudaOneTensor(torch.Tensor):
         @staticmethod
         def __new__(cls):
-            return torch.Tensor._make_subclass(
-                cls, torch.empty(2), require_grad=False
-            )
+            return torch.Tensor._make_subclass(cls, torch.empty(2), require_grad=False)
 
         @property
         def device(self):

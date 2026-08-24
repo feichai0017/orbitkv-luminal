@@ -649,9 +649,7 @@ def compile(
         )
         ep = ep.run_decompositions(_decomp_table())
 
-    return _save_and_compile(
-        ep, factory, search_iterations, device_index=device_index
-    )
+    return _save_and_compile(ep, factory, search_iterations, device_index=device_index)
 
 
 def _drop_input_guards(ep):
@@ -879,9 +877,7 @@ def _eager_pt2_compile(
     # whole-model compiles) and profiling with synthetic data. Nothing is
     # baked: the runtime still takes pointers per call.
     device_index = _cuda_device_index(user_inputs, expected=device_index)
-    input_device_ptrs = _collect_input_device_ptrs(
-        ep, user_inputs, device_index
-    )
+    input_device_ptrs = _collect_input_device_ptrs(ep, user_inputs, device_index)
 
     del ep, gm
     gc.collect()
