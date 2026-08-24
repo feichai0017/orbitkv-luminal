@@ -123,6 +123,7 @@ pub trait DynBackend {
 pub struct BackendCompileArgs {
     pub search_iters: usize,
     pub device_index: Option<usize>,
+    pub external_cuda_graph: bool,
     pub weights: Vec<(String, Vec<u8>, DType)>,
     pub tensor_sizes: HashMap<String, usize>,
     pub device_ptrs: HashMap<String, (u64, usize)>,
@@ -133,7 +134,7 @@ pub struct BackendCompileArgs {
 /// The version is part of the ABI: `BackendCompileArgs` crosses this boundary
 /// by value, so an older plugin must be rejected rather than reading a changed
 /// struct layout.
-pub const BACKEND_FACTORY_CAPSULE_NAME: &std::ffi::CStr = c"luminal.backend_factory.v3";
+pub const BACKEND_FACTORY_CAPSULE_NAME: &std::ffi::CStr = c"luminal.backend_factory.v4";
 
 /// A factory function that compiles a [`Graph`] into a ready-to-execute [`DynBackend`].
 pub type BackendFactory = fn(&mut Graph, BackendCompileArgs) -> Result<Box<dyn DynBackend>, String>;

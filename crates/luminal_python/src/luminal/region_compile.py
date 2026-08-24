@@ -13,6 +13,7 @@ def compile_region(
     device_type: str = "cuda",
     search_iterations: int = 1,
     static_outputs: bool = False,
+    external_cuda_graph: bool = False,
 ) -> CompiledModel:
     """Compile a region without borrowing storage from its example inputs.
 
@@ -48,4 +49,5 @@ def compile_region(
         device_index=region.device_index,
         use_current_stream=True,
         static_outputs=static_outputs,
+        external_cuda_graph=external_cuda_graph,
     )

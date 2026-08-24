@@ -407,6 +407,8 @@ pub struct CudaRuntime {
     /// Owned-stream execution is blocking; borrowed-stream execution leaves
     /// completion ordered on the caller's stream.
     synchronize_stream: bool,
+    /// Launch kernels directly so an enclosing runtime can capture them.
+    pub(crate) external_cuda_graph: bool,
     /// High-water intermediate allocation reused across candidate loads and
     /// bucket switches. At most one compiled bucket may borrow it at a time.
     persistent_arena: Option<PersistentArena>,
@@ -4453,6 +4455,7 @@ impl Runtime for CudaRuntime {
             device_resource_limits,
             last_resource_input_signature: FxHashMap::default(),
             synchronize_stream: true,
+            external_cuda_graph: false,
             persistent_arena: None,
             resource_length_sensitive_hlir: FxHashSet::default(),
             validated_resource_signatures: FxHashSet::default(),
@@ -4628,11 +4631,20 @@ impl Runtime for CudaRuntime {
         self.apply_output_ptr_registrations();
         output_registration_time += timer.elapsed();
 
-        // Materialize CUDA graphs before timed execution. The first real launch
-        // should only patch an already-instantiated graph, not build it from scratch.
+        let external_capture = self.external_cuda_graph
+            && !self.profiling
+            && self.cuda_stream.capture_status().is_ok_and(|status| {
+                status
+                    == cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE
+            });
+
+        // vLLM warms up each shape before capture. Reuse those prepared
+        // resources while capturing instead of touching Luminal's private graph.
         let timer = std::time::Instant::now();
-        self.materialize_bucket_cuda_graphs(self.active_bucket, dyn_map, false)
-            .unwrap_or_else(|e| panic!("CUDA graph materialization failed: {e}"));
+        if !external_capture {
+            self.materialize_bucket_cuda_graphs(self.active_bucket, dyn_map, false)
+                .unwrap_or_else(|e| panic!("CUDA graph materialization failed: {e}"));
+        }
         materialize_time += timer.elapsed();
         if self.profiling {
             self.last_profile_device_duration = None;
@@ -4655,14 +4667,21 @@ impl Runtime for CudaRuntime {
             .entered();
             if let Some(cuda_graph) = exec_op.internal.as_any().downcast_ref::<CudaGraphOp>() {
                 let timer = std::time::Instant::now();
-                cuda_graph
-                    .launch_materialized(&exec_op.stream)
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "CUDA graph launch error in {:?}: {e}",
-                            exec_op.internal.stats_name().unwrap_or("unknown")
-                        );
-                    });
+                let result = if self.external_cuda_graph && !self.profiling {
+                    let buffers = self
+                        .buffer_map_for_exec_op(bucket, exec_op, false)
+                        .unwrap_or_else(|e| panic!("CUDA execute buffer resolution failed: {e}"))
+                        .expect("CUDA execute requires all CudaGraphOp buffers");
+                    cuda_graph.launch_steps(&exec_op.stream, &buffers, dyn_map)
+                } else {
+                    cuda_graph.launch_materialized(&exec_op.stream)
+                };
+                result.unwrap_or_else(|e| {
+                    panic!(
+                        "CUDA launch error in {:?}: {e}",
+                        exec_op.internal.stats_name().unwrap_or("unknown")
+                    );
+                });
                 graph_launch_time += timer.elapsed();
                 graph_launches += 1;
             } else {

@@ -192,6 +192,7 @@ impl CompiledGraph {
         factory: BackendFactory,
         search_iters: usize,
         device_index: Option<usize>,
+        external_cuda_graph: bool,
     ) -> Result<CompiledGraph, String> {
         let GraphTranslation {
             mut graph,
@@ -217,6 +218,7 @@ impl CompiledGraph {
         let compile_args = BackendCompileArgs {
             search_iters,
             device_index,
+            external_cuda_graph,
             weights: weights
                 .iter()
                 .map(|(label, td)| (label.clone(), td.bytes.clone(), td.dtype))

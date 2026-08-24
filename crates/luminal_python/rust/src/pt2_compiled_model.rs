@@ -134,6 +134,7 @@ pub fn translate_module(
     factory_capsule,
     weight_device_ptrs=None,
     device_index=None,
+    external_cuda_graph=false,
 ))]
 pub fn process_pt2(
     pt2_path: &str,
@@ -142,6 +143,7 @@ pub fn process_pt2(
     factory_capsule: &Bound<'_, PyCapsule>,
     weight_device_ptrs: Option<HashMap<String, (u64, usize)>>,
     device_index: Option<usize>,
+    external_cuda_graph: bool,
 ) -> PyResult<CompiledGraph> {
     let factory: BackendFactory = {
         let expected = ::luminal::dyn_backend::BACKEND_FACTORY_CAPSULE_NAME;
@@ -185,6 +187,7 @@ pub fn process_pt2(
         weight_device_ptrs.unwrap_or_default(),
         factory,
         device_index,
+        external_cuda_graph,
     )
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))
 }
@@ -196,12 +199,20 @@ fn compile_pt2(
     weight_device_ptrs: HashMap<String, (u64, usize)>,
     factory: BackendFactory,
     device_index: Option<usize>,
+    external_cuda_graph: bool,
 ) -> anyhow::Result<CompiledGraph> {
     let (translation, mut weights) = translate_pt2(pt2_path, weights_path)?;
     weights.device_ptrs = weight_device_ptrs;
 
-    CompiledGraph::parse_graph(translation, weights, factory, search_iters, device_index)
-        .map_err(|e| anyhow::anyhow!(e))
+    CompiledGraph::parse_graph(
+        translation,
+        weights,
+        factory,
+        search_iters,
+        device_index,
+        external_cuda_graph,
+    )
+    .map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Translate a PT2 exported model into a format-neutral GraphTranslation + WeightData.

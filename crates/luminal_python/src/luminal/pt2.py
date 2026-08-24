@@ -304,6 +304,7 @@ def _save_and_compile(
     device_index=None,
     use_current_stream=False,
     static_outputs=False,
+    external_cuda_graph=False,
 ):
     """Compile a PT2 model via Rust, return CompiledModel.
 
@@ -347,6 +348,7 @@ def _save_and_compile(
             factory,
             weight_device_ptrs,
             device_index,
+            external_cuda_graph,
         )
 
         # Load CPU weights after compilation

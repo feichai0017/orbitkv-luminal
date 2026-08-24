@@ -528,6 +528,8 @@ struct CudaGraphOpState {
     flashinfer_prepare_cache: Vec<CachedFlashInferPrepare>,
     /// Shared device buffer for dynamic dimensions
     dyn_dims_buffer: Option<CudaSlice<i32>>,
+    /// Cached before external capture to avoid CudaSlice's cross-stream event wait.
+    dyn_dims_ptr: u64,
     /// CUDA graph handle
     cuda_graph: Option<CudaGraphHandle>,
     /// CUDA graph exec handle
@@ -576,6 +578,7 @@ impl CudaGraphOpState {
             cublaslt_workspace_pool: Vec::new(),
             flashinfer_prepare_cache: Vec::new(),
             dyn_dims_buffer: None,
+            dyn_dims_ptr: 0,
             cuda_graph: None,
             cuda_graph_exec: None,
             kernel_params: Vec::new(),
@@ -1658,6 +1661,7 @@ impl CudaGraphOp {
             kernel.internal_bufs.clear();
         }
         state.dyn_dims_buffer = None;
+        state.dyn_dims_ptr = 0;
     }
 
     /// Patch a CUDA graph from an exact set of changed bindings without
@@ -1901,11 +1905,11 @@ impl CudaGraphOp {
 
         // Allocate dyn_dims_buffer if needed
         if !self.dyn_dims_order.is_empty() && state.dyn_dims_buffer.is_none() {
-            state.dyn_dims_buffer = Some(
-                stream
-                    .alloc_zeros::<i32>(self.dyn_dims_order.len())
-                    .expect("Failed to allocate dyn_dims buffer"),
-            );
+            let buffer = stream
+                .alloc_zeros::<i32>(self.dyn_dims_order.len())
+                .expect("Failed to allocate dyn_dims buffer");
+            state.dyn_dims_ptr = buffer.device_ptr(stream).0;
+            state.dyn_dims_buffer = Some(buffer);
         }
 
         // Update shared dyn_dims buffer if dyn_map changed
@@ -2485,6 +2489,140 @@ impl CudaGraphOp {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("CUDA graph launch requested before materialization"))?
             .launch(stream)?;
+        Ok(())
+    }
+
+    /// Enqueue prepared work directly so a caller-owned CUDA graph can capture it.
+    pub(crate) fn launch_steps(
+        &self,
+        stream: &Arc<CudaStream>,
+        buffers: &FxHashMap<NodeIndex, DeviceBuffer>,
+        dyn_map: &DynMap,
+    ) -> anyhow::Result<()> {
+        stream.context().bind_to_thread()?;
+        let mut state = self.state.borrow_mut();
+        anyhow::ensure!(
+            state.last_dyn_values == *dyn_map,
+            "external CUDA graph capture requires a same-shape warmup"
+        );
+
+        let mut buffer_ptrs = FxHashMap::default();
+        for &node in &self.buffer_nodes {
+            if let Some(buffer) = buffers.get(&node) {
+                buffer_ptrs.insert(node, buffer.ptr());
+            }
+        }
+        for &(input, output) in &self.output_aliases {
+            if let Some(&ptr) = buffer_ptrs.get(&input) {
+                buffer_ptrs.insert(output, ptr);
+            }
+        }
+        let dyn_dims_ptr = state.dyn_dims_ptr;
+
+        for step_index in 0..state.steps.len() {
+            let step_name = match state.steps[step_index] {
+                CompiledStep::Kernel(index) => {
+                    let kernel = &mut state.kernels[index];
+                    kernel.kernel_op.pre_execute(
+                        stream,
+                        &mut kernel.internal_bufs,
+                        &mut kernel.constants,
+                        &buffer_ptrs,
+                        dyn_map,
+                    );
+                    let output_ptr = buffer_ptrs.get(&kernel.node).copied().unwrap_or(0);
+                    let input_ptrs = kernel
+                        .inputs
+                        .iter()
+                        .map(|node| buffer_ptrs.get(node).copied().unwrap_or(0))
+                        .collect_vec();
+                    Self::validate_kernel_pointers(kernel, output_ptr, &input_ptrs, dyn_map)?;
+                    let kernel_dyn_dims_ptr = kernel
+                        .has_dyn_dims_param
+                        .then_some(dyn_dims_ptr)
+                        .unwrap_or(0);
+                    anyhow::ensure!(
+                        !kernel.has_dyn_dims_param || kernel_dyn_dims_ptr != 0,
+                        "dynamic-dimension buffer was not prepared before capture"
+                    );
+                    let mut params = UnifiedKernelParams::new(kernel.kernel_op.build_params(
+                        stream,
+                        output_ptr,
+                        &input_ptrs,
+                        &kernel.internal_bufs,
+                        kernel_dyn_dims_ptr,
+                    ));
+                    let function = unsafe { kernel.function.raw_function() };
+                    let launch = Self::kernel_launch_config(kernel, dyn_map)?;
+                    unsafe {
+                        cudarc::driver::result::launch_kernel(
+                            function,
+                            launch.grid,
+                            launch.block,
+                            launch.shared_mem,
+                            stream.cu_stream(),
+                            &mut params.ptrs,
+                        )
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "external kernel step {step_index} ({}) failed: {error}",
+                                kernel.kernel_name
+                            )
+                        })?;
+                    }
+                    kernel.kernel_name
+                }
+                CompiledStep::CuBlasLt(index) => {
+                    let op = &state.cublaslt_ops[index];
+                    let signature = op
+                        .cublaslt()
+                        .resolve_for_graph(op.node, &op.inputs, buffers, dyn_map)?
+                        .signature();
+                    let prepared = op
+                        .prepared
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("cuBLASLt step is not prepared"))?;
+                    anyhow::ensure!(
+                        op.signature
+                            .as_ref()
+                            .is_some_and(|old| old.spec == signature.spec),
+                        "cuBLASLt shape changed after warmup"
+                    );
+                    prepared.enqueue(stream, signature.ptrs).map_err(|error| {
+                        anyhow::anyhow!("external cuBLASLt step {step_index} failed: {error}")
+                    })?;
+                    "cuBLASLt"
+                }
+                CompiledStep::FlashInferDecode(index) => {
+                    let op = &state.flashinfer_ops[index];
+                    let prepared = op
+                        .prepared
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("FlashInfer step is not prepared"))?;
+                    let resolved = op
+                        .flashinfer()
+                        .resolve_for_graph(op.node, &op.inputs, buffers, dyn_map)?;
+                    let signature = resolved.signature_for_graph_plan(prepared.plan_c());
+                    anyhow::ensure!(
+                        op.signature
+                            .as_ref()
+                            .is_some_and(|old| old.spec == signature.spec),
+                        "FlashInfer shape changed after warmup"
+                    );
+                    prepared
+                        .enqueue(stream, signature.ptrs, true)
+                        .map_err(|error| {
+                            anyhow::anyhow!("external FlashInfer step {step_index} failed: {error}")
+                        })?;
+                    "FlashInfer"
+                }
+            };
+            anyhow::ensure!(
+                stream.capture_status()?
+                    != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_INVALIDATED,
+                "external CUDA capture was invalidated by {step_name} step {step_index}"
+            );
+        }
         Ok(())
     }
 

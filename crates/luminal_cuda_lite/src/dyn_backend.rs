@@ -105,10 +105,15 @@ pub fn cuda_lite_factory(
     }
     let cuda_ctx = CudaContext::new(device_index).map_err(|e| format!("CUDA init failed: {e}"))?;
     let stream = cuda_ctx.default_stream();
+    let external_cuda_graph = args.external_cuda_graph;
     compile_backend::<CudaRuntime>(
         graph,
         args,
-        || Ok(CudaRuntime::initialize(stream)),
+        || {
+            let mut runtime = CudaRuntime::initialize(stream);
+            runtime.external_cuda_graph = external_cuda_graph;
+            Ok(runtime)
+        },
         |rt, node, bytes, _dtype| {
             rt.set_data(node, bytes);
         },

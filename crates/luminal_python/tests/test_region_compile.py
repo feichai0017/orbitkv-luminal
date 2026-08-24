@@ -59,6 +59,7 @@ def test_compile_region_preserves_runtime_input_indices(monkeypatch) -> None:
         "device_index": 0,
         "use_current_stream": True,
         "static_outputs": False,
+        "external_cuda_graph": False,
     }
 
 
@@ -279,6 +280,46 @@ def test_compile_region_uses_current_cuda_stream() -> None:
     )
     stream.synchronize()
     torch.testing.assert_close(actual, torch.full_like(actual, 3))
+
+
+@pytest.mark.skipif(
+    _CUDA_SKIP_REASON is not None, reason=_CUDA_SKIP_REASON or "CUDA is unavailable"
+)
+def test_compile_region_can_be_captured_by_pytorch() -> None:
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    with FakeTensorMode():
+        fake_inputs = [
+            torch.empty((2, 4), device="cuda", dtype=torch.float16),
+            torch.empty((2, 4), device="cuda", dtype=torch.float16),
+        ]
+        region = export_region(_add_graph(), fake_inputs)
+
+    compiled = compile_region(
+        region,
+        search_iterations=1,
+        static_outputs=True,
+        external_cuda_graph=True,
+    )
+    left = torch.ones((2, 4), device="cuda", dtype=torch.float16)
+    right = torch.full((2, 4), 2, device="cuda", dtype=torch.float16)
+
+    # Prepare every Luminal resource before capture.
+    compiled(left, right)
+    torch.cuda.synchronize()
+
+    # vLLM's capture buffers need not have the same addresses as warmup.
+    capture_left = torch.full_like(left, 3)
+    capture_right = torch.full_like(right, 4)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        (actual,) = compiled(capture_left, capture_right)
+
+    capture_left.fill_(5)
+    capture_right.fill_(6)
+    graph.replay()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, torch.full_like(actual, 11))
 
 
 @pytest.mark.skipif(
