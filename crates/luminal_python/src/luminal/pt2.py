@@ -5,16 +5,15 @@ Provides:
   - pt2_backend(gm, example_inputs)    — torch.compile compatible backend
 """
 
-from functools import partial
 import inspect
 import os
 import shutil
 import tempfile
+from functools import partial
 
 import torch
 
 from .artifact_cache import CompiledArtifact, get_or_compile
-from .compiled_model import CompiledModel
 from .luminal import process_pt2
 from .main import (
     _collect_weight_pointers,
