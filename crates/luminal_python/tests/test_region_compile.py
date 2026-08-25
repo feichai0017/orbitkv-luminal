@@ -7,6 +7,14 @@ import torch
 from torch import fx
 
 import luminal.region_compile as region_compile_module
+from luminal.artifact_cache import (
+    ArtifactCacheStats,
+    CompiledArtifact,
+    artifact_cache_stats,
+    clear_artifact_cache,
+    get_or_compile,
+    region_artifact_key,
+)
 from luminal.compiled_model import CompiledModel
 from luminal.region_compile import compile_region
 from luminal.region_export import export_region
@@ -60,7 +68,113 @@ def test_compile_region_preserves_runtime_input_indices(monkeypatch) -> None:
         "use_current_stream": True,
         "static_outputs": False,
         "external_cuda_graph": False,
+        "artifact_key": region_artifact_key(
+            region.program,
+            device_type="cuda",
+            device_index=0,
+            search_iterations=3,
+            external_cuda_graph=False,
+        ),
     }
+
+
+def _key_program(input_name: str, op=torch.ops.aten.relu.default):
+    from types import SimpleNamespace
+
+    graph = fx.Graph()
+    value = graph.placeholder(input_name)
+    value.meta["val"] = torch.empty(2, 4)
+    result = graph.call_function(op, (value,))
+    result.meta["val"] = torch.empty(2, 4)
+    graph.output((result,))
+    return SimpleNamespace(
+        constants={},
+        state_dict={},
+        range_constraints={},
+        graph_module=fx.GraphModule(torch.nn.Module(), graph),
+    )
+
+
+def test_artifact_key_ignores_input_names() -> None:
+    options = {"device_type": "cuda", "search_iterations": 1}
+
+    assert region_artifact_key(_key_program("layer_0"), **options) == (
+        region_artifact_key(_key_program("layer_1"), **options)
+    )
+    assert region_artifact_key(_key_program("layer_0"), **options) != (
+        region_artifact_key(
+            _key_program("layer_0", torch.ops.aten.sigmoid.default), **options
+        )
+    )
+
+
+def test_artifact_cache_compiles_once() -> None:
+    clear_artifact_cache()
+    artifact = object()
+    calls = 0
+
+    def compile_artifact():
+        nonlocal calls
+        calls += 1
+        return artifact
+
+    assert get_or_compile("region", compile_artifact) is artifact
+    assert get_or_compile("region", compile_artifact) is artifact
+    assert calls == 1
+    assert artifact_cache_stats() == ArtifactCacheStats(
+        unique_artifacts=1,
+        reuse_hits=1,
+        searches=1,
+    )
+    clear_artifact_cache()
+
+
+def test_shared_artifact_rebinds_inputs_between_models() -> None:
+    from types import SimpleNamespace
+
+    class CudaTensor(torch.Tensor):
+        @staticmethod
+        def __new__(cls):
+            return torch.Tensor._make_subclass(cls, torch.empty(2), False)
+
+        @property
+        def device(self):
+            return torch.device("cuda:0")
+
+        @property
+        def is_cuda(self):
+            return True
+
+    registrations = []
+    graph = SimpleNamespace(
+        input_names=["x"],
+        input_dtypes=[7],
+        output_names=[],
+        output_dtypes=[],
+        output_shapes=[],
+        writeback_outputs=[],
+        has_dynamic_dims=False,
+        device_type="cuda",
+        device_index=0,
+        supports_device_ptrs=True,
+        set_input_device_ptr=lambda _, ptr, __: registrations.append(ptr),
+        run=lambda: None,
+    )
+    artifact = CompiledArtifact(graph)
+    first = artifact.bind()
+    second = artifact.bind()
+    first_input = CudaTensor()
+    second_input = CudaTensor()
+
+    first(first_input)
+    second(second_input)
+    first(first_input)
+
+    assert registrations == [
+        first_input.data_ptr(),
+        second_input.data_ptr(),
+        first_input.data_ptr(),
+    ]
 
 
 def test_compile_region_rejects_nonzero_device() -> None:

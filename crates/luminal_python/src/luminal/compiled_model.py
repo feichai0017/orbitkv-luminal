@@ -46,6 +46,7 @@ class CompiledModel:
         scalar_output_positions=(),
         use_current_stream=False,
         static_outputs=False,
+        artifact=None,
     ):
         """Initialize with a compiled CompiledGraph from Rust.
 
@@ -84,6 +85,8 @@ class CompiledModel:
         self._use_current_stream = use_current_stream
         self._static_outputs = static_outputs
         self._static_output_tensors = None
+        self._artifact = artifact
+        self._binding = object()
         self.skip_input_names = frozenset()
         self._is_gpu = getattr(graph_result, "device_type", "cpu") != "cpu"
         self._device_index = getattr(graph_result, "device_index", None)
@@ -148,6 +151,10 @@ class CompiledModel:
         Returns:
             Tuple of PyTorch tensors containing the model outputs
         """
+        binding_changed = self._artifact is not None and self._artifact.activate(
+            self._binding
+        )
+
         # Drop stripped SymInt args, if any.
         if self._user_indices is not None:
             user_inputs = [inputs[i] for i in self._user_indices]
@@ -202,7 +209,7 @@ class CompiledModel:
                 n_bytes = t.numel() * t.element_size()
                 signature = _cuda_input_binding_signature(t, n_bytes)
                 previous = self._cuda_input_bindings.get(name)
-                if previous is None or previous[:4] != signature:
+                if binding_changed or previous is None or previous[:4] != signature:
                     self._graph.set_input_device_ptr(name, t.data_ptr(), n_bytes)
                 # Commit only after a changed registration succeeds. Retaining
                 # the tensor prevents allocator reuse while Rust holds its

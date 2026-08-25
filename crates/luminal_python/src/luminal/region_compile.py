@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .artifact_cache import region_artifact_key
 from .compiled_model import CompiledModel
 from .pt2 import _save_and_compile
 from .region_export import RegionExport
@@ -39,6 +40,14 @@ def compile_region(
             "region compilation requires luminal_python built with CUDA support"
         ) from error
 
+    artifact_key = region_artifact_key(
+        region.program,
+        device_type=device_type,
+        device_index=region.device_index,
+        search_iterations=search_iterations,
+        external_cuda_graph=external_cuda_graph,
+    )
+
     return _save_and_compile(
         region.program,
         _cuda_lite_factory_capsule(),
@@ -50,4 +59,5 @@ def compile_region(
         use_current_stream=True,
         static_outputs=static_outputs,
         external_cuda_graph=external_cuda_graph,
+        artifact_key=artifact_key,
     )

@@ -5,6 +5,7 @@ Provides:
   - pt2_backend(gm, example_inputs)    — torch.compile compatible backend
 """
 
+from functools import partial
 import inspect
 import os
 import shutil
@@ -12,6 +13,7 @@ import tempfile
 
 import torch
 
+from .artifact_cache import CompiledArtifact, get_or_compile
 from .compiled_model import CompiledModel
 from .luminal import process_pt2
 from .main import (
@@ -293,6 +295,53 @@ def _lower_sym_sum(ep) -> None:
         gm.recompile()
 
 
+def _compile_artifact(
+    ep_or_path,
+    factory,
+    search_iterations,
+    input_device_ptrs,
+    device_index,
+    external_cuda_graph,
+):
+    owns_tmpdir = not isinstance(ep_or_path, str)
+    tmpdir = tempfile.mkdtemp(prefix="luminal_") if owns_tmpdir else None
+    try:
+        if owns_tmpdir:
+            pt2_path = os.path.join(tmpdir, "model.pt2")
+            # Fake example inputs are not part of the executable program.
+            ep_or_path._example_inputs = None
+            _lower_sym_sum(ep_or_path)  # serde gap workaround; see docstring
+            torch.export.save(ep_or_path, pt2_path)
+            weight_source = ep_or_path.state_dict
+        else:
+            pt2_path = ep_or_path
+            weight_source = {}
+
+        resolved_device = _cuda_device_index(
+            weight_source.values(), expected=device_index
+        )
+        keep_alive, weight_device_ptrs, cpu_weights = _collect_weight_pointers(
+            weight_source, device_index=resolved_device
+        )
+        if input_device_ptrs:
+            weight_device_ptrs.update(input_device_ptrs)
+
+        compiled = process_pt2(
+            pt2_path,
+            "",
+            search_iterations,
+            factory,
+            weight_device_ptrs,
+            resolved_device,
+            external_cuda_graph,
+        )
+        _load_cpu_weights(compiled, cpu_weights)
+        return CompiledArtifact(compiled, keep_alive)
+    finally:
+        if owns_tmpdir and tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def _save_and_compile(
     ep_or_path,
     factory,
@@ -305,67 +354,32 @@ def _save_and_compile(
     use_current_stream=False,
     static_outputs=False,
     external_cuda_graph=False,
+    artifact_key=None,
 ):
-    """Compile a PT2 model via Rust, return CompiledModel.
+    """Compile a PT2 model via Rust, return CompiledModel."""
 
-    Args:
-        ep_or_path: Either an ExportedProgram (will be saved to a temp file) or
-            a path to an already-saved .pt2 file. Baked weights come from
-            ep.state_dict (the AOT compile() path); torch.compile graphs carry
-            weights as ordinary inputs and have an empty state_dict.
-        factory: PyCapsule wrapping the BackendFactory to use.
-    """
-    owns_tmpdir = not isinstance(ep_or_path, str)
-    tmpdir = tempfile.mkdtemp(prefix="luminal_") if owns_tmpdir else None
-    try:
-        if owns_tmpdir:
-            pt2_path = os.path.join(tmpdir, "model.pt2")
-            # `_example_inputs` is an optional copy of the arguments used to create an
-            # ExportedProgram and is not part of the executable graph's semantics. vLLM
-            # invokes compiler backends during torch.compile tracing, so these inputs may
-            # be FakeTensors, which Luminal does not currently serialize or consume.
-            ep_or_path._example_inputs = None
-            _lower_sym_sum(ep_or_path)  # serde gap workaround; see docstring
-            torch.export.save(ep_or_path, pt2_path)
-            weight_source = ep_or_path.state_dict
-        else:
-            pt2_path = ep_or_path
-            weight_source = {}
+    compile_artifact = partial(
+        _compile_artifact,
+        ep_or_path,
+        factory,
+        search_iterations,
+        input_device_ptrs,
+        device_index,
+        external_cuda_graph,
+    )
 
-        # Collect weight pointers for Rust (avoids duplicate GPU buffer allocation)
-        device_index = _cuda_device_index(weight_source.values(), expected=device_index)
-        keep_alive, weight_device_ptrs, cpu_weights = _collect_weight_pointers(
-            weight_source, device_index=device_index
-        )
-        if input_device_ptrs:
-            weight_device_ptrs.update(input_device_ptrs)
-
-        # Compile with device pointers — search uses actual weight memory (zero-copy)
-        compiled = process_pt2(
-            pt2_path,
-            "",
-            search_iterations,
-            factory,
-            weight_device_ptrs,
-            device_index,
-            external_cuda_graph,
-        )
-
-        # Load CPU weights after compilation
-        _load_cpu_weights(compiled, cpu_weights)
-
-        return CompiledModel(
-            compiled,
-            weight_refs=keep_alive,
-            user_indices=user_indices,
-            output_spec=output_spec,
-            scalar_output_positions=scalar_output_positions,
-            use_current_stream=use_current_stream,
-            static_outputs=static_outputs,
-        )
-    finally:
-        if owns_tmpdir and tmpdir:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+    artifact = (
+        get_or_compile(artifact_key, compile_artifact)
+        if artifact_key is not None
+        else compile_artifact()
+    )
+    return artifact.bind(
+        user_indices=user_indices,
+        output_spec=output_spec,
+        scalar_output_positions=scalar_output_positions,
+        use_current_stream=use_current_stream,
+        static_outputs=static_outputs,
+    )
 
 
 def _safe_int_bound(value):
