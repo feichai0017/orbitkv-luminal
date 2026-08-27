@@ -149,6 +149,350 @@ fn sources_via_descriptors(plan: &BufferIrGraph) -> Vec<(String, String)> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// M4 Phase 4: strided READS through synthetic ComposedAccess descriptors —
+// string-level gates, host-side (no device). Each test builds a CodegenCtx
+// through `from_descriptors` (the only codegen path) and asserts the
+// generated source contains the exact index expressions and per-axis
+// bounds traps; the flat `a[i]` fast path must stay byte-identical.
+// ---------------------------------------------------------------------------
+
+mod strided {
+    use luminal::buffer_tensor_ir::BufferTensorIrOp;
+    use luminal::bufferize::{AccessHop, BufferId, ComposedAccess, SlotDescriptor};
+    use luminal::dtype::PlanDtype;
+    use luminal::index_expr::IotaExpr;
+    use luminal_cuda_lite::{kernels, ops};
+
+    fn slot(dims: Vec<i64>, access: Option<ComposedAccess>) -> SlotDescriptor {
+        SlotDescriptor {
+            value: luminal::prelude::egraph_serialize::ClassId::from("val$synthetic"),
+            buffer: BufferId::Allocated(0),
+            dims: Some(dims),
+            element_bits: Some(32),
+            dtype: Some(PlanDtype::F32),
+            composed_access: access,
+        }
+    }
+
+    fn one_hop(entries: Option<Vec<IotaExpr>>, parent_dims: Vec<i64>) -> ComposedAccess {
+        ComposedAccess { hops: vec![AccessHop { entries, parent_dims: Some(parent_dims) }] }
+    }
+
+    /// Generate the single kernel source for `op` with the given
+    /// descriptors, through the table row (the real dispatch path).
+    fn generate(
+        op: &dyn BufferTensorIrOp,
+        operand_info: &[SlotDescriptor],
+        result_info: &[SlotDescriptor],
+    ) -> String {
+        let ctx = kernels::CodegenCtx::from_descriptors(op.label(), operand_info, result_info)
+            .expect("descriptor ctx builds");
+        let row = kernels::codegen_for(op).expect("codegen row");
+        let launches = (row.codegen)(op, &ctx).expect("codegen succeeds");
+        assert_eq!(launches.len(), 1, "single-launch op");
+        launches.into_iter().next().unwrap().source
+    }
+
+    fn assert_contains(source: &str, needles: &[&str]) {
+        for needle in needles {
+            assert!(
+                source.contains(needle),
+                "generated source missing `{needle}`:\n{source}"
+            );
+        }
+    }
+
+    /// Transpose: out [3,2] reading parent [2,3] at (c1, c0), through
+    /// the Copy row's unary template.
+    #[test]
+    fn transpose_read_indexes_the_parent_at_swapped_coords() {
+        let access = one_hop(
+            Some(vec![IotaExpr::Coord(0), IotaExpr::Coord(1)]), // parent axis 0 ← c1, axis 1 ← c0
+            vec![2, 3],
+        );
+        let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
+        let source = generate(
+            &op,
+            &[slot(vec![3, 2], Some(access)), slot(vec![3, 2], None)],
+            &[slot(vec![3, 2], None)],
+        );
+        assert_contains(
+            &source,
+            &[
+                // out-coordinate prelude over [3,2]
+                "long long c1 = (long long)(rem % 2ULL); rem /= 2ULL;",
+                "long long c0 = (long long)(rem % 3ULL); rem /= 3ULL;",
+                // hop 0 entries + per-axis bounds traps
+                "long long a_h0_0 = c1;",
+                "if (a_h0_0 < 0 || a_h0_0 >= 2LL) __trap();",
+                "long long a_h0_1 = c0;",
+                "if (a_h0_1 < 0 || a_h0_1 >= 3LL) __trap();",
+                // flat index over the parent's row-major strides [3,1]
+                "long long a_idx = a_h0_0 * 3LL + a_h0_1 * 1LL;",
+                "out[i] = a[a_idx];",
+            ],
+        );
+        assert!(!source.contains("a[i]"), "flat read must be rewritten:\n{source}");
+    }
+
+    /// Zero-base slice with pitch > cols: out [4,5] over parent [4,8]
+    /// (identity coords, larger row pitch), on one operand of a binary
+    /// add — the other operand stays flat `b[i]`.
+    #[test]
+    fn pitched_slice_read_on_one_binary_operand_keeps_the_other_flat() {
+        let access = one_hop(
+            Some(vec![IotaExpr::Coord(1), IotaExpr::Coord(0)]), // parent axis 0 ← c0, axis 1 ← c1
+            vec![4, 8],
+        );
+        let op = ops::add::AddFunctionalDps;
+        let source = generate(
+            &op,
+            &[
+                slot(vec![4, 5], Some(access)),
+                slot(vec![4, 5], None),
+                slot(vec![4, 5], None),
+            ],
+            &[slot(vec![4, 5], None)],
+        );
+        assert_contains(
+            &source,
+            &[
+                "long long a_h0_0 = c0;",
+                "if (a_h0_0 < 0 || a_h0_0 >= 4LL) __trap();",
+                "long long a_h0_1 = c1;",
+                "if (a_h0_1 < 0 || a_h0_1 >= 8LL) __trap();",
+                // pitch 8, not the value's 5
+                "long long a_idx = a_h0_0 * 8LL + a_h0_1 * 1LL;",
+                "out[i] = a[a_idx] + b[i];",
+            ],
+        );
+    }
+
+    /// Broadcast-shaped map: out [2,3] reading parent [1,3] with a Lit 0
+    /// entry on the broadcast axis.
+    #[test]
+    fn broadcast_read_pins_the_broadcast_axis_to_zero() {
+        let access = one_hop(
+            Some(vec![IotaExpr::Lit(0), IotaExpr::Coord(0)]), // parent axis 0 ← 0, axis 1 ← c1
+            vec![1, 3],
+        );
+        let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
+        let source = generate(
+            &op,
+            &[slot(vec![2, 3], Some(access)), slot(vec![2, 3], None)],
+            &[slot(vec![2, 3], None)],
+        );
+        assert_contains(
+            &source,
+            &[
+                "long long a_h0_0 = 0LL;",
+                "if (a_h0_0 < 0 || a_h0_0 >= 1LL) __trap();",
+                "long long a_h0_1 = c1;",
+                "if (a_h0_1 < 0 || a_h0_1 >= 3LL) __trap();",
+                "long long a_idx = a_h0_0 * 3LL + a_h0_1 * 1LL;",
+                "out[i] = a[a_idx];",
+            ],
+        );
+    }
+
+    /// Two-hop chain, composed at codegen time: hop 0 transposes out
+    /// [3,2] into [2,3] coordinates; hop 1 maps those into parent [4,3]
+    /// with a +1 row offset. Hop 1's entries must be evaluated at hop
+    /// 0's OUTPUTS (`a_h0_*`), never at the out coords.
+    #[test]
+    fn two_hop_chain_feeds_hop0_outputs_into_hop1() {
+        let access = ComposedAccess {
+            hops: vec![
+                AccessHop {
+                    entries: Some(vec![IotaExpr::Coord(0), IotaExpr::Coord(1)]),
+                    parent_dims: Some(vec![2, 3]),
+                },
+                AccessHop {
+                    // parent axis 0 ← hop0 coord c0 (= a_h0_0) + 1; axis 1 ← hop0 c1 (= a_h0_1)
+                    entries: Some(vec![
+                        IotaExpr::Add(Box::new(IotaExpr::Coord(1)), Box::new(IotaExpr::Lit(1))),
+                        IotaExpr::Coord(0),
+                    ]),
+                    parent_dims: Some(vec![4, 3]),
+                },
+            ],
+        };
+        let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
+        let source = generate(
+            &op,
+            &[slot(vec![3, 2], Some(access)), slot(vec![3, 2], None)],
+            &[slot(vec![3, 2], None)],
+        );
+        assert_contains(
+            &source,
+            &[
+                "long long a_h0_0 = c1;",
+                "long long a_h0_1 = c0;",
+                "long long a_h1_0 = (a_h0_0 + 1LL);",
+                "if (a_h1_0 < 0 || a_h1_0 >= 4LL) __trap();",
+                "long long a_h1_1 = a_h0_1;",
+                "if (a_h1_1 < 0 || a_h1_1 >= 3LL) __trap();",
+                // the LAST hop's parent is the residence: strides of [4,3]
+                "long long a_idx = a_h1_0 * 3LL + a_h1_1 * 1LL;",
+                "out[i] = a[a_idx];",
+            ],
+        );
+    }
+
+    /// Reduce over a transposed input: ReduceSum(axis_from_end=0) on a
+    /// [2,3] value reading parent [3,2] — the reduced coordinate is the
+    /// loop variable, and the read goes through the chain.
+    #[test]
+    fn reduce_reads_through_the_composed_chain() {
+        let access = one_hop(
+            Some(vec![IotaExpr::Coord(0), IotaExpr::Coord(1)]), // parent axis 0 ← c1, axis 1 ← c0
+            vec![3, 2],
+        );
+        let op = ops::reduce_sum::ReduceSumDps { axis: 0 };
+        let source = generate(
+            &op,
+            &[slot(vec![2, 3], Some(access)), slot(vec![2], None)],
+            &[slot(vec![2], None)],
+        );
+        assert_contains(
+            &source,
+            &[
+                // c0 (outside the reduced axis) rebuilt before the loop
+                "long long c0 = (long long)(rem % 2ULL); rem /= 2ULL;",
+                // the reduced coordinate is the loop variable
+                "long long c1 = (long long)r;",
+                "long long a_h0_0 = c1;",
+                "if (a_h0_0 < 0 || a_h0_0 >= 3LL) __trap();",
+                "long long a_h0_1 = c0;",
+                "if (a_h0_1 < 0 || a_h0_1 >= 2LL) __trap();",
+                "long long a_idx = a_h0_0 * 2LL + a_h0_1 * 1LL;",
+                "float v = a[a_idx];",
+                "acc = acc + v;",
+            ],
+        );
+    }
+
+    /// Cast keeps its conversion around the strided read.
+    #[test]
+    fn cast_wraps_the_strided_read() {
+        let access = one_hop(Some(vec![IotaExpr::Coord(0)]), vec![4]);
+        let op = ops::cast::CastDps;
+        let mut operand = slot(vec![4], Some(access));
+        operand.dtype = Some(PlanDtype::F32);
+        let mut dest = slot(vec![4], None);
+        dest.dtype = Some(PlanDtype::Int);
+        let source =
+            generate(&op, &[operand, dest.clone()], &[dest]);
+        assert_contains(&source, &["out[i] = (int)a[a_idx];"]);
+    }
+
+    /// `entries: None` on ANY hop is a loud codegen bail, never identity.
+    #[test]
+    fn unparsed_entries_on_any_hop_refuse_loudly() {
+        let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
+        // Hop 0 unparsed.
+        let access = one_hop(None, vec![2, 3]);
+        let ctx = kernels::CodegenCtx::from_descriptors(
+            "Copy",
+            &[slot(vec![3, 2], Some(access)), slot(vec![3, 2], None)],
+            &[slot(vec![3, 2], None)],
+        )
+        .expect("ctx builds");
+        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
+            .expect_err("unparsed hop must refuse");
+        assert!(err.to_string().contains("beyond the parsed expression subset"), "got: {err}");
+        // Hop 1 unparsed behind a good hop 0.
+        let access = ComposedAccess {
+            hops: vec![
+                AccessHop {
+                    entries: Some(vec![IotaExpr::Coord(0), IotaExpr::Coord(1)]),
+                    parent_dims: Some(vec![2, 3]),
+                },
+                AccessHop { entries: None, parent_dims: Some(vec![4, 3]) },
+            ],
+        };
+        let ctx = kernels::CodegenCtx::from_descriptors(
+            "Copy",
+            &[slot(vec![3, 2], Some(access)), slot(vec![3, 2], None)],
+            &[slot(vec![3, 2], None)],
+        )
+        .expect("ctx builds");
+        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
+            .expect_err("unparsed hop 1 must refuse");
+        assert!(err.to_string().contains("hop 1"), "got: {err}");
+    }
+
+    /// A composed access on a RESULT descriptor refuses at the single
+    /// codegen entry point (strided writes are CL-4b).
+    #[test]
+    fn result_composed_access_refuses_at_from_descriptors() {
+        let access = one_hop(Some(vec![IotaExpr::Coord(0)]), vec![4]);
+        let err = kernels::CodegenCtx::from_descriptors(
+            "ProbeOp",
+            &[slot(vec![4], None)],
+            &[slot(vec![4], Some(access))],
+        )
+        .expect_err("result access must refuse");
+        assert!(err.to_string().contains("strided writes"), "got: {err}");
+    }
+
+    /// A composed access on the DPS dest OPERAND slot refuses in the
+    /// template (same CL-4b line).
+    #[test]
+    fn dest_operand_composed_access_refuses_in_the_template() {
+        let access = one_hop(Some(vec![IotaExpr::Coord(0), IotaExpr::Coord(1)]), vec![3, 2]);
+        let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
+        let ctx = kernels::CodegenCtx::from_descriptors(
+            "Copy",
+            &[slot(vec![3, 2], None), slot(vec![3, 2], Some(access))],
+            &[slot(vec![3, 2], None)],
+        )
+        .expect("ctx builds");
+        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
+            .expect_err("dest operand access must refuse");
+        assert!(err.to_string().contains("strided writes"), "got: {err}");
+    }
+
+    /// Ops outside the elementwise/reduce templates fail closed on a
+    /// composed operand instead of indexing it flat.
+    #[test]
+    fn non_template_ops_fail_closed_on_composed_operands() {
+        let access = one_hop(Some(vec![IotaExpr::Coord(0)]), vec![4]);
+        let op = ops::gather::GatherDps { rank: 1 };
+        let mut coord = slot(vec![4], None);
+        coord.dtype = Some(PlanDtype::Int);
+        let ctx = kernels::CodegenCtx::from_descriptors(
+            "Gather",
+            &[slot(vec![4], Some(access)), coord, slot(vec![4], None)],
+            &[slot(vec![4], None)],
+        )
+        .expect("ctx builds");
+        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
+            .expect_err("gather must fail closed");
+        assert!(err.to_string().contains("does not lower"), "got: {err}");
+    }
+
+    /// Descriptor-less operands still emit the flat `a[i]` kernel
+    /// byte-identically to the pre-Phase-4 template (hard pin).
+    #[test]
+    fn flat_path_is_byte_identical() {
+        let op = ops::add::AddFunctionalDps;
+        let source = generate(
+            &op,
+            &[slot(vec![2, 3], None), slot(vec![2, 3], None), slot(vec![2, 3], None)],
+            &[slot(vec![2, 3], None)],
+        );
+        assert_eq!(
+            source,
+            r#"extern "C" __global__ void k(const float* a, const float* b, float* out, unsigned long long n) {
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = a[i] + b[i];
+}"#
+        );
+    }
+}
+
 /// The None-dims contract, descriptor-side: symbolic geometry refuses
 /// loudly (mirror of the executor's buffer-table bail), never a silent
 /// zero-extent kernel.

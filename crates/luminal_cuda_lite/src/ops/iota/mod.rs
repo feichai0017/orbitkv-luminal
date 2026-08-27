@@ -90,6 +90,7 @@ pub(crate) fn codegen(
     let Some(iota) = op.as_any().downcast_ref::<IotaDps>() else {
         bail!("iota codegen reached with a non-Iota op");
     };
+    crate::kernels::require_flat_operands("Iota", ctx)?;
     let Some(expr) = &iota.expr else {
         bail!("iota beyond the parsed expression subset (fail-closed, as the reference)");
     };

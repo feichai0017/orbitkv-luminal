@@ -19,7 +19,7 @@ fn run_both(
     // Reference side.
     let staged: Vec<(NodeIndex, TypedBuffer)> =
         inputs.iter().map(|(id, v)| (*id, v.clone().into())).collect();
-    let reference = luminal::test_support::run_reference(cx, &staged);
+    let reference = luminal_reference::harness::run_reference(cx, &staged);
     let want = reference.get_f32(out).expect("reference output").clone();
 
     // Device side.

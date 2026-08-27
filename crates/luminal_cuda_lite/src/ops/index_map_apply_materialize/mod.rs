@@ -105,6 +105,10 @@ pub(crate) fn codegen(
     let Some(mat) = op.as_any().downcast_ref::<IndexMapApplyMaterializeDps>() else {
         bail!("materialize codegen reached with a non-Materialize op");
     };
+    // Phase 4 lowers composed access in the elementwise/reduce templates
+    // only; a view folded onto THIS op's parent operand would compose
+    // with the op's own map — not lowered here, so refuse loudly.
+    crate::kernels::require_flat_operands("IndexMapApplyMaterialize", ctx)?;
     let Some(entries) = &mat.entries else {
         bail!("index map beyond the parsed expression subset (fail-closed, as the reference)");
     };

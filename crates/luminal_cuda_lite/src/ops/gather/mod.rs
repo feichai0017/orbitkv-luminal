@@ -111,6 +111,7 @@ pub(crate) fn codegen(
     let Some(gather) = op.as_any().downcast_ref::<GatherDps>() else {
         bail!("gather codegen reached with a non-Gather op");
     };
+    crate::kernels::require_flat_operands("Gather", ctx)?;
     let rank = gather.rank;
     let data_dims = &ctx.operand_dims[0];
     if data_dims.len() != rank {

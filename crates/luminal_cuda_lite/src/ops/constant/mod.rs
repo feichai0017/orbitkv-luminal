@@ -87,6 +87,7 @@ pub(crate) fn codegen(
     let Some(constant) = op.as_any().downcast_ref::<ConstantDps>() else {
         bail!("constant codegen reached with a non-Constant op");
     };
+    crate::kernels::require_flat_operands("Constant", ctx)?;
     let to = cuda_type(ctx.dest_dtypes[0])?;
     let n = numel(&ctx.dest_dims[0]);
     let value = constant.value;

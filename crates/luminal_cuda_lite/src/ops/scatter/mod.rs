@@ -155,6 +155,7 @@ pub(crate) fn codegen(
     let Some(scatter) = op.as_any().downcast_ref::<ScatterFunctionalDps>() else {
         bail!("scatter codegen reached with a non-Scatter op");
     };
+    crate::kernels::require_flat_operands("ScatterFunctional", ctx)?;
     let rank = scatter.rank;
     let init_dims = &ctx.operand_dims[0];
     if init_dims.len() != rank {

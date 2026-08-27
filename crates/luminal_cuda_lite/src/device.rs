@@ -89,6 +89,46 @@ impl KernelCache {
     }
 }
 
+/// Bring-up/test helper: NVRTC-compile `source` (entry `k`), launch it
+/// once over `n` threads on device 0 with the given input byte buffers
+/// followed by one zeroed `out_bytes` output and the `n` argument (the
+/// standard generated-kernel signature, no scratch), and return the
+/// output bytes. Used by the Phase-4 synthetic-descriptor device gates
+/// to launch strided-read kernels outside a plan; a `__trap()` in the
+/// kernel surfaces as an `Err` from the synchronize.
+pub fn launch_single(source: &str, inputs: &[&[u8]], out_bytes: usize, n: usize) -> Result<Vec<u8>> {
+    let ctx = CudaContext::new(0).context("no CUDA device 0")?;
+    let stream = ctx.default_stream();
+    let mut cache = KernelCache { ctx: ctx.clone(), modules: HashMap::new() };
+    let func = cache.function(source)?;
+    let mut device_inputs = Vec::with_capacity(inputs.len());
+    for host in inputs {
+        let mut slice = stream.alloc_zeros::<u8>(host.len().max(1)).context("input alloc")?;
+        if !host.is_empty() {
+            stream.memcpy_htod(*host, &mut slice).context("H2D")?;
+        }
+        device_inputs.push(slice);
+    }
+    let mut dest = stream.alloc_zeros::<u8>(out_bytes.max(1)).context("dest alloc")?;
+    let n_arg = n as u64;
+    let cfg = LaunchConfig {
+        grid_dim: (((n as u32).max(1) + 255) / 256, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut builder = stream.launch_builder(&func);
+    for input in &device_inputs {
+        builder.arg(input);
+    }
+    builder.arg(&mut dest);
+    builder.arg(&n_arg);
+    unsafe { builder.launch(cfg) }.context("launch")?;
+    stream.synchronize().context("stream sync")?;
+    let mut host = vec![0u8; dest.len()];
+    stream.memcpy_dtoh(&dest, &mut host).context("D2H")?;
+    Ok(host)
+}
+
 /// Execute a bufferized plan on device 0. Returns host copies of every
 /// output-role buffer, keyed by BufferLit.
 pub fn execute_plan(
