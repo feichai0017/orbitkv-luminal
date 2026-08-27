@@ -1,0 +1,183 @@
+; ============================================================================
+; ROUND 11 — THE ONE TRANSPOSE-SANDWICH REWRITE, on the canonical form only.
+;
+; Round-10 lineage (Austin, 2026-08-25): "having the rewrite rule is still a
+; good way to make sure that those useful layout tensors can exist in the
+; first place... I would like to have this rule in place instead of having
+; the versions which switches the position of A and B as inputs."
+; Round-11 ruling (Austin, 2026-08-26): logical rules are named by SHAPES,
+; never by layout letters; the three canonicalization rewrites
+; (cublaslt_marker_canonicalize.egg) fold every recorded spelling into the
+; ONE canonical form, so the sandwich needs exactly ONE rule, firing on
+; that form.
+;
+; THE REWRITE, stated on matrices:  A x B  =  ((B^T) x (A^T))^T.
+;
+; Spelled on the canonical chain: given
+;   out[m,n] = ReduceSum_k( apply(A,(c2 c0),P) * apply(B,(c0 c1),P) ),
+;   P = [m, n, k],
+; mint the SIBLING canonical chain over P' = [n, m, k] whose operands are
+; the rank-2 transpose VIEWS of the originals:
+;   A-role operand: B^T = apply(B, transpose, [n,k])   (storage [m'=n, k'=k])
+;   B-role operand: A^T = apply(A, transpose, [k,m])   (storage [k'=k, n'=m])
+; each read through the STANDARD canonical map — the sibling is itself in
+; canonical form, which is the whole point: one site rule, one descriptor
+; stratum, one assembly serve both generations. The views mint no bytes
+; (the views machinery composes their layouts over the original buffers),
+; and the two outs are tied as rank-2 transpose views of each other in
+; BOTH directions, exactly as round 10 had them:
+;   inner_out  ∪  (apply out  t  [n,m])  — layout flows out -> sibling;
+;   out        ∪  (apply inner_out  t  [m,n])  — plan flows sibling -> out.
+;
+; WHY THIS EXISTS (unchanged): cuBLASLt has no transD; the recorder mints
+; right-major outs, which present out^T to a COL call. The descriptor arms
+; are UNSWAPPED and match the sibling site, whose out is the transpose
+; view of a right-major out — COL m' x n' over the same bytes. The e-graph
+; joins the general rewrite and the literal backend matcher.
+;
+; TERMINATION (round 11): the sibling is canonical, so this rule fires on
+; it too, minting transpose views OF transpose views. The DOUBLE-TRANSPOSE
+; COLLAPSE (cublaslt_marker_canonicalize.egg) unions every such view-of-a-
+; view with the original tensor; generation-3 operands thereby collapse
+; into generation 1, the generation-3 maps/shapes hash-cons into the
+; original chain's, and the rebuilt chain IS the original chain — nothing
+; new is minted, saturation closes. The round-11 revert probe
+; (tests/r11_collapse_revert_probe.rs) pins both directions: without the
+; collapse rule bounded runs grow without bound; with it they saturate.
+;
+; COST: one sibling chain + two transpose views + composed layouts per
+; canonical matmul. The scaling test prints the number.
+; ============================================================================
+; --- the transpose-sandwich rewrite, canonical form ------------------------
+; A[m,k] (map c2 c0), B[k,n] (map c0 c1) -> the sibling canonical chain
+; over [n, m, k] with both operands transpose-viewed.
+(rule
+  (
+    (= ?out (LogicalReduceSum ?prod 0))
+    (= ?prod (LogicalMul ?a_bcast ?b_bcast))
+    (= ?a_bcast (LogicalIndexMapApply ?a ?a_map ?prod_shape))
+    (= ?b_bcast (LogicalIndexMapApply ?b ?b_map ?prod_shape))
+    (= ?a_map (IndexMapLit
+        (IntExprCons (CoordVar ?prod_shape 2)
+          (IntExprCons (CoordVar ?prod_shape 0) (IntExprNil)))
+        ?a_shape))
+    (= ?b_map (IndexMapLit
+        (IntExprCons (CoordVar ?prod_shape 0)
+          (IntExprCons (CoordVar ?prod_shape 1) (IntExprNil)))
+        ?b_shape))
+    (= ?prod_shape (ShapeLit
+        (IntExprCons ?m (IntExprCons ?n (IntExprCons ?k (IntExprNil))))))
+    (= (shape-of ?a) ?a_shape)
+    (= ?a_shape (ShapeLit (IntExprCons ?m (IntExprCons ?k (IntExprNil)))))
+    (= (shape-of ?b) ?b_shape)
+    (= ?b_shape (ShapeLit (IntExprCons ?k (IntExprCons ?n (IntExprNil)))))
+    (= (shape-of ?out) ?out_shape)
+    (= ?out_shape (ShapeLit (IntExprCons ?m (IntExprCons ?n (IntExprNil)))))
+    (= (dtype-of ?a) (F32))
+    (= (dtype-of ?b) (F32))
+    (= (dtype-of ?out) (F32))
+  )
+  (
+    (let ?prod2_shape (ShapeLit
+        (IntExprCons ?n (IntExprCons ?m (IntExprCons ?k (IntExprNil))))))
+    (let ?inner_shape (ShapeLit (IntExprCons ?n (IntExprCons ?m (IntExprNil)))))
+    ; B^T as the sibling's A-role operand: storage [m'=n, k'=k].
+    (let ?bt_shape (ShapeLit (IntExprCons ?n (IntExprCons ?k (IntExprNil)))))
+    (let ?b_t (LogicalIndexMapApply ?b
+      (IndexMapLit
+        (IntExprCons (CoordVar ?bt_shape 0)
+          (IntExprCons (CoordVar ?bt_shape 1) (IntExprNil)))
+        ?b_shape)
+      ?bt_shape))
+    ; A^T as the sibling's B-role operand: storage [k'=k, n'=m].
+    (let ?at_shape (ShapeLit (IntExprCons ?k (IntExprCons ?m (IntExprNil)))))
+    (let ?a_t (LogicalIndexMapApply ?a
+      (IndexMapLit
+        (IntExprCons (CoordVar ?at_shape 0)
+          (IntExprCons (CoordVar ?at_shape 1) (IntExprNil)))
+        ?a_shape)
+      ?at_shape))
+    ; the sibling chain, in CANONICAL form over [m', n', k'] = [n, m, k]:
+    ; A'-position map (c2 c0), B'-position map (c0 c1) — the standard maps.
+    (let ?inner_out
+      (LogicalReduceSum
+        (LogicalMul
+          (LogicalIndexMapApply ?b_t
+            (IndexMapLit
+              (IntExprCons (CoordVar ?prod2_shape 2)
+                (IntExprCons (CoordVar ?prod2_shape 0) (IntExprNil)))
+              ?bt_shape)
+            ?prod2_shape)
+          (LogicalIndexMapApply ?a_t
+            (IndexMapLit
+              (IntExprCons (CoordVar ?prod2_shape 0)
+                (IntExprCons (CoordVar ?prod2_shape 1) (IntExprNil)))
+              ?at_shape)
+            ?prod2_shape))
+        0))
+    ; inner_out IS the transpose view of out (layout flows out -> sibling)...
+    (union ?inner_out (LogicalIndexMapApply ?out
+      (IndexMapLit
+        (IntExprCons (CoordVar ?inner_shape 0)
+          (IntExprCons (CoordVar ?inner_shape 1) (IntExprNil)))
+        ?out_shape)
+      ?inner_shape))
+    ; ...and out IS the transpose view of inner_out (plan flows sibling -> out).
+    (union ?out (LogicalIndexMapApply ?inner_out
+      (IndexMapLit
+        (IntExprCons (CoordVar ?out_shape 0)
+          (IntExprCons (CoordVar ?out_shape 1) (IntExprNil)))
+        ?inner_shape)
+      ?out_shape))
+  )
+)
+; ============================================================================
+; TRANSPOSE-VIEW INJECTIVITY TRANSPORT.
+;
+; A rank-2 transpose is a bijection on index space, so the composed view
+; layout of an INJECTIVE parent layout is injective: distinct view
+; coordinates map to distinct parent coordinates (bijection) map to
+; distinct bytes (parent injectivity). The premise ties the view layout to
+; being EXACTLY the parent layout's bit expression substituted through THIS
+; transpose map (the round-9 tie discipline) — the fact is transported onto
+; that composed layout tensor and no other.
+;
+; ROUND 11: this transport now serves THREE view families — the sandwich's
+; out-tie views (as in round 10), the sandwich's OPERAND views (B^T / A^T
+; above), and the canonicalization views (cublaslt_marker_canonicalize.egg).
+; All three are the same rank-2 transpose spelling, so the one rule covers
+; them; the descriptor arms' injectivity gate admits a viewed operand
+; exactly through this rule.
+;
+; VOCABULARY GAP (reported): this transport is general views machinery and
+; belongs in the preamble next to the contiguous injectivity arms
+; (egglog_preamble.egg:4217-4238); it lives here because the prototype is
+; prototype-local. Without it, no composed transpose-view layout tensor
+; has an injectivity fact (the strided no-overlap fold was deleted
+; 2026-08-05), and assembly's gates would refuse every viewed reading.
+;
+; WELD-SOUNDNESS NOTE: at extent 1 the map-entry spelling below can match
+; maps welded into the transpose pattern's classes; every such match has
+; the welded axis at extent 1, where the coordinate contributes a single
+; value, so the matched map is still injective on its domain and the
+; transported fact still true.
+; ============================================================================
+(rule
+  (
+    (= ?v (LogicalIndexMapApply ?p ?map ?vshape))
+    (= ?map (IndexMapLit
+        (IntExprCons (CoordVar ?vshape 0)
+          (IntExprCons (CoordVar ?vshape 1) (IntExprNil)))
+        ?pshape))
+    (= ?plt (LayoutTensorLit ?p ?playout))
+    (= ?playout (BitOffsetExpressionLayoutLit ?p_expr ?pshape ?bits))
+    (= (injectivity-of ?plt) (Injective))
+    (= ?composed (int-subst-of ?p_expr ?map))
+    (= ?vlayout (BitOffsetExpressionLayoutLit ?composed ?vshape ?bits))
+    (= ?vlt (LayoutTensorLit ?v ?vlayout))
+  )
+  (
+    (set (injectivity-of ?vlt) (Injective))
+  )
+)
+; ============================================================================
