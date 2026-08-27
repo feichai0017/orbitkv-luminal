@@ -20,7 +20,7 @@ use luminal::shape;
 
 /// The accumulated pre-search program parts (the reference runtime's
 /// NativeSpec is private; this is the same accumulation rebuilt from
-/// the public `native_parts` seam).
+/// the public `bound_parts` seam).
 struct NativeParts {
     pre_schedule: String,
     input_slots: Vec<graph::InputSlot>,
@@ -47,7 +47,7 @@ impl CudaRuntime {
     /// [`CudaRuntime::search`].
     pub fn load(graph: &graph::Graph) -> Result<Self> {
         let (pre_schedule, input_slots, output_slots, post_checks, labeled_checks) =
-            graph.logical.native_parts().map_err(|e| anyhow!(e))?;
+            graph.logical.bound_parts(&crate::bindings::CudaBindings).map_err(|e| anyhow!(e))?;
         Ok(Self {
             native: Some(NativeParts {
                 pre_schedule,
@@ -111,7 +111,7 @@ impl CudaRuntime {
                 "{}{}{}{}",
                 native.pre_schedule,
                 native.binding_seeds,
-                luminal::reference_binding::SCHEDULE,
+                crate::bindings::CudaBindings::SCHEDULE,
                 native.post_checks
             ),
             input_slots: native.input_slots.clone(),
@@ -132,7 +132,7 @@ impl CudaRuntime {
                 luminal::egglog_snippet::assembled_program_for(&crate::ops::cuda_matchers()),
                 native.pre_schedule,
                 native.binding_seeds,
-                luminal::reference_binding::SCHEDULE
+                crate::bindings::CudaBindings::SCHEDULE
             );
             let mut probe = luminal::egglog_snippet::new_egraph();
             if probe.parse_and_run_program(None, &unchecked).is_ok() {
@@ -158,7 +158,7 @@ impl CudaRuntime {
             input_data,
             options,
             Some(Self::allow_list()),
-            Some(crate::ops::cuda_matchers()),
+            crate::ops::cuda_matchers(),
             &mut luminal::implementation_search::StaticProfiler,
         )?;
 

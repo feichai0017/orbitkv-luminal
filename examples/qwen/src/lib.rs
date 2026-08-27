@@ -17,7 +17,7 @@ use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, TypedBuffer};
-use luminal::reference::ReferenceRuntime;
+use luminal_reference::ReferenceRuntime;
 use model::{Qwen, QwenDims};
 use std::error::Error;
 use std::io::Write as _;

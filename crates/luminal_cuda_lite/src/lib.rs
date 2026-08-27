@@ -26,6 +26,7 @@
 //! alias-safety convention; `ties` and `Anti` edges are honored in the
 //! toposort order but no in-place claim is made.
 
+pub mod bindings;
 pub mod kernels;
 pub mod ops;
 pub mod runtime;
@@ -33,6 +34,7 @@ pub mod runtime;
 #[cfg(feature = "device")]
 pub mod device;
 
+pub use bindings::CudaBindings;
 pub use runtime::CudaRuntime;
 
 /// The op labels this runtime claims, derived from its codegen table —

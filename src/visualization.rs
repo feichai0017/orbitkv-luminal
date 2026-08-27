@@ -158,7 +158,7 @@ impl ToDot for crate::graph::LogicalGraph {
 }
 
 /// The extraction artifact — the most useful single type to render:
-/// `extractor::extract_layout_ir_with_ops` returns
+/// `extractor::extract_layout_ir_with_ops_and_matchers` returns
 /// `Result<Option<ExtractedGraph>>` and `dps::dps_rewrite` both consumes
 /// AND produces this same type, so one impl covers the whole
 /// extract → DPS ladder (render before and after the rewrite).

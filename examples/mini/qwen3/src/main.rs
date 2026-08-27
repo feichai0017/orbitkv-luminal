@@ -5,7 +5,7 @@
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use luminal::reference::ReferenceRuntime;
+use luminal_reference::ReferenceRuntime;
 use mini_qwen3::MiniQwen3;
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {

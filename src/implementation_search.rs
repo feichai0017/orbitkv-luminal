@@ -25,7 +25,6 @@ use rustc_hash::FxHashMap;
 use crate::bufferize::BufferIrGraph;
 use crate::extractor::{self, Genome};
 use crate::graph::LogicalProgram;
-use crate::reference::ReferenceRuntime;
 
 #[derive(Debug, Clone)]
 pub struct ImplementationSearchOptions {
@@ -139,15 +138,6 @@ impl SearchTimings {
 
 /// Search the saturated e-graph for the fastest executable plan, profiling
 /// with the given caller data. Deterministic for a fixed seed.
-pub fn search_implementations(
-    egraph: &egraph_serialize::EGraph,
-    program: &LogicalProgram,
-    input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
-    options: &ImplementationSearchOptions,
-) -> Result<SearchOutcome> {
-    search_implementations_with_ops(egraph, program, input_data, options, None)
-}
-
 /// As [`search_implementations`], with the runtime's ALLOWABLE-OPS
 /// inventory made explicit (M3 Step 2: per-runtime, unstandardized).
 /// How search prices a candidate plan. Runtimes supply their own
@@ -168,34 +158,6 @@ pub trait PlanProfiler {
     ) -> Result<u128>;
 }
 
-/// The historical profiler: execute on the reference host runtime.
-#[derive(Default)]
-pub struct ReferenceProfiler;
-
-impl PlanProfiler for ReferenceProfiler {
-    fn profile(
-        &mut self,
-        plan: &crate::bufferize::BufferIrGraph,
-        input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
-        trials: usize,
-        _heuristic_cost: u64,
-    ) -> Result<u128> {
-        let mut runtime = ReferenceRuntime::default();
-        runtime.load_plan(plan.clone());
-        for (id, data) in input_data {
-            runtime.set_data_buffer(*id, data.clone());
-        }
-        runtime.execute()?; // warmup + validity
-        let mut best_nanos = u128::MAX;
-        for _ in 0..trials.max(1) {
-            let start = Instant::now();
-            runtime.execute()?;
-            best_nanos = best_nanos.min(start.elapsed().as_nanos());
-        }
-        Ok(best_nanos)
-    }
-}
-
 /// Rank by the heuristic byte-move estimate without executing —
 /// deterministic, device-free search for runtimes that cannot (or
 /// need not) run candidates on the searching host.
@@ -214,24 +176,6 @@ impl PlanProfiler for StaticProfiler {
     }
 }
 
-pub fn search_implementations_with_ops(
-    egraph: &egraph_serialize::EGraph,
-    program: &LogicalProgram,
-    input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
-    options: &ImplementationSearchOptions,
-    allow_override: Option<Vec<&'static str>>,
-) -> Result<SearchOutcome> {
-    search_implementations_with_runtime(
-        egraph,
-        program,
-        input_data,
-        options,
-        allow_override,
-        None,
-        &mut ReferenceProfiler,
-    )
-}
-
 /// The runtime-owned search entry (ruling 2026-08-17): the caller
 /// supplies its OWN matcher set (None = the in-core reference
 /// registry, which Step B moves out) and its OWN profiler.
@@ -241,7 +185,7 @@ pub fn search_implementations_with_runtime(
     input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
     allow_override: Option<Vec<&'static str>>,
-    matchers: Option<Vec<Box<dyn crate::layout_ir::OpMatcher>>>,
+    matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
     profiler: &mut dyn PlanProfiler,
 ) -> Result<SearchOutcome> {
     // Tensor-keyed at the boundary (the retired-HLIR-keyspace design);
@@ -258,21 +202,17 @@ pub fn search_implementations_with_runtime(
         })
         .collect();
     let input_data = &buffer_data;
-    let allow = allow_override.unwrap_or_else(crate::reference::reference_allow_list);
+
     let mut timings = SearchTimings::default();
     let analysis_start = Instant::now();
-    let (mut session, index) = match matchers {
-        Some(matchers) => {
-            let session =
-                extractor::ExtractionSession::new_with_matcher_set(egraph, Some(&allow), matchers);
-            let index = session.producer_index();
-            (session, index)
-        }
-        None => (
-            extractor::ExtractionSession::new(egraph, Some(&allow)),
-            extractor::producer_index_with_ops(egraph, Some(&allow)),
-        ),
-    };
+    // The allow list narrows the caller's matcher set; None = the whole set.
+    let allow = allow_override;
+    let mut session = extractor::ExtractionSession::new_with_matcher_set(
+        egraph,
+        allow.as_deref(),
+        matchers,
+    );
+    let index = session.producer_index();
     timings.analysis_nanos = analysis_start.elapsed().as_nanos();
     // An empty index is NOT an error: a graph with no searchable producer
     // classes (pure identity — every output is an input value) has a
@@ -582,6 +522,10 @@ pub fn bucketed_search_implementations(
         &crate::shape::DynMap,
     ) -> FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
+    assembled_program: &str,
+    matchers: impl Fn() -> Vec<Box<dyn crate::layout_ir::OpMatcher>>,
+    profiler: &mut dyn PlanProfiler,
+    bindings: &dyn crate::runtime_binding::RuntimeBindingsGenerator,
 ) -> Result<Vec<BucketPlan>> {
     ensure!(!dim_buckets.is_empty(), "no dim buckets supplied");
 
@@ -591,7 +535,7 @@ pub fn bucketed_search_implementations(
     // never changes across buckets; only the binding does.
     let (pre, input_slots, output_slots, post, _labeled) = graph
         .logical
-        .native_parts()
+        .bound_parts(bindings)
         .map_err(|reason| anyhow!("native load refused: {reason}"))?;
     let seeds_text = |seeds: &BTreeMap<crate::shape::Symbol, (u64, u64)>| {
         let mut text = String::new();
@@ -607,7 +551,7 @@ pub fn bucketed_search_implementations(
         text: format!(
             "{pre}{}{}{post}",
             seeds_text(seeds),
-            crate::reference_binding::SCHEDULE
+            bindings.schedule()
         ),
         input_slots: input_slots.clone(),
         output_slots: output_slots.clone(),
@@ -652,7 +596,7 @@ pub fn bucketed_search_implementations(
         let validation = assemble(&validation_seeds);
         let text = format!(
             "{}\n\n{}",
-            crate::egglog_snippet::assembled_program(),
+            assembled_program,
             validation.text
         );
         crate::egglog_snippet::new_egraph()
@@ -667,7 +611,7 @@ pub fn bucketed_search_implementations(
         let program = assemble(&pin_seeds);
         let text = format!(
             "{}\n\n{}",
-            crate::egglog_snippet::assembled_program(),
+            assembled_program,
             program.text
         );
         let mut egraph = crate::egglog_snippet::new_egraph();
@@ -676,7 +620,15 @@ pub fn bucketed_search_implementations(
             .map_err(|err| anyhow!("bucket {ranges:?} representative render fails: {err}"))?;
         let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
         let data = input_data(&representative);
-        let outcome = search_implementations(&serialized, &program, &data, options)?;
+        let outcome = search_implementations_with_runtime(
+            &serialized,
+            &program,
+            &data,
+            options,
+            None,
+            matchers(),
+            profiler,
+        )?;
         plans.push(BucketPlan { ranges, representative, program, outcome });
     }
     Ok(plans)
@@ -696,9 +648,21 @@ pub fn select_bucket<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::graph::Graph;
+    // DEP-WORLD tests (Step B): these suites drive the reference runtime
+    // through the luminal_reference dev-dependency, so every luminal type
+    // they touch must come from the `luminal::` build that crate links,
+    // never `crate` (the cyclic dev-dependency compiles the library
+    // twice, and the two builds' types do not unify).
+    use std::collections::BTreeMap;
+
     use egglog::SerializeConfig;
+    use rustc_hash::FxHashMap;
+
+    use luminal::graph::Graph;
+    use luminal::implementation_search::{
+        bucketed_search_implementations, select_bucket, ImplementationSearchOptions,
+    };
+    use luminal_reference::{search_implementations, ReferenceRuntime};
 
     /// A REAL selection space (x+y and x*y from shared inputs offers the
     /// fused kernel vs the pair, plus commuted and mutating variants): the
@@ -723,13 +687,13 @@ mod tests {
 
         // Our search.
         let (cx2, x2, y2, a2, m2) = build();
-        let program = cx2.logical.native_program().expect("native program");
+        let program = cx2.logical.bound_program(&luminal_reference::ReferenceBindings).expect("native program");
         let text = format!(
             "{}\n\n{}",
-            crate::egglog_snippet::assembled_program(),
+            luminal_reference::assembled_program(),
             program.text
         );
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         egraph.parse_and_run_program(None, &text).expect("program runs");
         let serialized = egraph.serialize(SerializeConfig::default()).egraph;
 
@@ -777,7 +741,7 @@ mod tests {
     /// representative.
     #[test]
     fn bucketed_search_validates_searches_and_selects() {
-        use crate::graph::DimBucket;
+        use luminal::graph::DimBucket;
 
         let build = |dim: usize| {
             let mut cx = Graph::new();
@@ -788,7 +752,7 @@ mod tests {
             (cx, x, y, out)
         };
 
-        let buckets: BTreeMap<crate::shape::Symbol, Vec<DimBucket>> = [(crate::shape::Symbol::from('a'),
+        let buckets: BTreeMap<luminal::shape::Symbol, Vec<DimBucket>> = [(luminal::shape::Symbol::from('a'),
             vec![DimBucket::new(2, 4), DimBucket::new(5, 9)],
         )]
         .into();
@@ -796,8 +760,8 @@ mod tests {
         // The graph used for SEARCH: built at any pin (per-bucket renders
         // re-pin), sharing the same HLIR shape.
         let (cx, x, y, _out) = build(3);
-        let data_for = |rep: &crate::shape::DynMap| {
-            let n = rep[&crate::shape::Symbol::from('a')] * 2;
+        let data_for = |rep: &luminal::shape::DynMap| {
+            let n = rep[&luminal::shape::Symbol::from('a')] * 2;
             let mut data = FxHashMap::default();
             data.insert(x.id, (0..n).map(|v| v as f32 + 1.0).collect::<Vec<f32>>().into());
             data.insert(y.id, (0..n).map(|v| v as f32 * 0.5).collect::<Vec<f32>>().into());
@@ -808,22 +772,26 @@ mod tests {
             &buckets,
             data_for,
             &ImplementationSearchOptions::default(),
+            luminal_reference::assembled_program(),
+            luminal_reference::ops::built_in_matchers,
+            &mut luminal_reference::ReferenceProfiler,
+            &luminal_reference::ReferenceBindings,
         )
         .expect("bucketed search completes");
         assert_eq!(plans.len(), 2, "one plan per bucket");
 
         // Selection covers each bucket; out-of-range dims select nothing.
         let mut dims = FxHashMap::default();
-        dims.insert(crate::shape::Symbol::from('a'), 3usize);
-        assert!(select_bucket(&plans, &dims).unwrap().ranges[&crate::shape::Symbol::from('a')] == (2, 4));
-        dims.insert(crate::shape::Symbol::from('a'), 7usize);
-        assert!(select_bucket(&plans, &dims).unwrap().ranges[&crate::shape::Symbol::from('a')] == (5, 9));
-        dims.insert(crate::shape::Symbol::from('a'), 20usize);
+        dims.insert(luminal::shape::Symbol::from('a'), 3usize);
+        assert!(select_bucket(&plans, &dims).unwrap().ranges[&luminal::shape::Symbol::from('a')] == (2, 4));
+        dims.insert(luminal::shape::Symbol::from('a'), 7usize);
+        assert!(select_bucket(&plans, &dims).unwrap().ranges[&luminal::shape::Symbol::from('a')] == (5, 9));
+        dims.insert(luminal::shape::Symbol::from('a'), 20usize);
         assert!(select_bucket(&plans, &dims).is_none());
 
         // Numeric agreement at each bucket's representative.
         for plan in &plans {
-            let rep = plan.representative[&crate::shape::Symbol::from('a')];
+            let rep = plan.representative[&luminal::shape::Symbol::from('a')];
             // GOLDEN (computed: out = x * y with x[i] = i+1, y[i] = i*0.5
             // — the data_for closure's values at this representative).
             let n = rep * 2;

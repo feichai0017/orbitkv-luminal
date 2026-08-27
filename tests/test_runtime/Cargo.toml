@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 luminal = { path = "../.." }
+luminal_reference = { path = "../../crates/luminal_reference" }
 # Versions track luminal's Cargo.toml exactly — the egglog/egraph-serialize/
 # petgraph types must UNIFY with luminal's so the fixture runners can hand
 # this crate's egraphs to luminal's extractor and bufferizer.

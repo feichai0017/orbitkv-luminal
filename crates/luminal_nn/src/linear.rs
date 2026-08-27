@@ -53,7 +53,7 @@ mod tests {
     use super::Linear;
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
-    use luminal::reference::ReferenceRuntime;
+    use luminal_reference::ReferenceRuntime;
     use rustc_hash::FxHashMap;
 
     fn assert_close(ours: &[f32], expected: &[f32]) {
@@ -231,7 +231,7 @@ mod fp8_tests {
             *row = acc * (input_scale * weight_scale);
         }
 
-        let rt = luminal::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (x.id, x_vals.into()),

@@ -420,7 +420,7 @@ impl<T: 'static> AsAnyOp for T {
 }
 
 pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + AsAnyOp + Debug {
-    /// The op's IR name (see the label policy in [`crate::reference::ops`]).
+    /// The op's IR name (see the label policy in `luminal_reference::ops`).
     fn label(&self) -> &str;
 
     /// Is this operand's buffer read? (Inputs are read.)
@@ -1158,7 +1158,7 @@ pub(crate) fn build_buffer_tensor_ir(
 /// The rebuild preserves node order (allocs and frees slot in at their
 /// placement points), so the lowering's emission order — and with it the
 /// plan's printed schedule — reads allocate → use → free.
-pub(crate) fn optimize(bt: BufferTensorIrGraph) -> BufferTensorIrGraph {
+pub(crate) fn optimize(bt: BufferTensorIrGraph) -> Result<BufferTensorIrGraph> {
     use petgraph::visit::EdgeRef;
     let BufferTensorIrGraph {
         dag,
@@ -1348,10 +1348,19 @@ pub(crate) fn optimize(bt: BufferTensorIrGraph) -> BufferTensorIrGraph {
         }
         // Frees for buffers last touched here.
         for buffer in frees_after.get(&index).cloned().unwrap_or_default() {
-            let (resident, producer_index) = final_resident
-                .get(&buffer)
-                .expect("a freed buffer has a final resident")
-                .clone();
+            let Some((resident, producer_index)) = final_resident.get(&buffer).cloned()
+            else {
+                // Never a panic: a freed buffer with no final written resident
+                // means a value chain reached the free stage with no producer
+                // (e.g. undefined contents routed through views past an
+                // incomplete validation). Reject the plan loudly instead of
+                // aborting the process. (Ruling 2026-08-26.)
+                anyhow::bail!(
+                    "buffer-tensor plan inconsistent: buffer {:?} is scheduled \
+                     to be freed but has no final written resident",
+                    buffer,
+                );
+            };
             let free = out.add_node(BtNode::Op {
                 op: Box::new(BufferFree),
                 operands: vec![resident.clone()],
@@ -1414,11 +1423,11 @@ pub(crate) fn optimize(bt: BufferTensorIrGraph) -> BufferTensorIrGraph {
         }
     }
 
-    BufferTensorIrGraph {
+    Ok(BufferTensorIrGraph {
         dag: out,
         buffers,
         value_buffer,
-    }
+    })
 }
 
 // =============================================================================

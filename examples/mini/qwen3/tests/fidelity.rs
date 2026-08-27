@@ -110,7 +110,7 @@ fn mini_gqa_family(family: &str, gate_act: &dyn Fn(&[f32]) -> Vec<f32>) {
         .collect();
 
     let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
-    let mut rt = luminal::reference::ReferenceRuntime::load(&cx).expect("native load");
+    let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("native load");
     rt.search(
         &data,
         &luminal::implementation_search::ImplementationSearchOptions::default(),

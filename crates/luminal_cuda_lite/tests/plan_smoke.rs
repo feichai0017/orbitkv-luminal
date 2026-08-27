@@ -10,7 +10,7 @@ use luminal_cuda_lite::{kernels, CudaRuntime};
 #[test]
 fn allow_list_is_a_strict_subset_of_the_reference_inventory() {
     let cuda = CudaRuntime::allow_list();
-    let reference = luminal::reference::reference_allow_list();
+    let reference = luminal_reference::reference_allow_list();
     assert!(!cuda.is_empty(), "CUDA claims nothing");
     for op in &cuda {
         assert!(reference.contains(op), "{op} not in the reference inventory");

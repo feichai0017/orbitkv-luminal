@@ -13,6 +13,7 @@ path = "src/main.rs"
 # asymmetry, uncached cross-attention; slot-pool decoder self-cache.
 [dependencies]
 luminal = { path = "../.." }
+luminal_reference = { path = "../../crates/luminal_reference" }
 luminal_nn = { path = "../../crates/luminal_nn" }
 rustc-hash = "2.1"
 tokenizers = "0.22.2"

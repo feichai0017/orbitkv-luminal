@@ -31,7 +31,7 @@ pub mod logical_op {
 }
 pub mod reference {
     pub mod ops {
-        pub use luminal::reference::ops::*;
+        pub use luminal_reference::ops::*;
     }
 }
 
@@ -43,8 +43,8 @@ use luminal::layout_ir::OpMatcher;
 /// view op and the fused add+mul pair. Tests in this crate extract and
 /// assemble against exactly this list.
 pub fn matchers() -> Vec<Box<dyn OpMatcher>> {
-    let mut matchers = luminal::reference::ops::built_in_matchers();
-    matchers.push(Box::new(luminal::reference::ops::IndexMapApplyViewMatcher));
+    let mut matchers = luminal_reference::ops::built_in_matchers();
+    matchers.push(Box::new(luminal_reference::ops::IndexMapApplyViewMatcher));
     matchers.push(Box::new(AddMulFusedMatcher));
     matchers
 }
@@ -77,7 +77,7 @@ pub fn extract_fixture(script_text: &str) -> ExtractedGraph {
 /// the first preference (an implementation constructor name) it can satisfy,
 /// falling back to its first candidate — the producer index is
 /// deterministically sorted, so the same preferences always build the same
-/// genome. (Adapted from `luminal::test_support::genome_preferring`, which
+/// genome. (Adapted from `luminal_reference::harness::genome_preferring`, which
 /// is public but hard-wired to the built-in producer index; this one runs
 /// over THIS runtime's matcher set via the genome seam.)
 pub fn genome_preferring(

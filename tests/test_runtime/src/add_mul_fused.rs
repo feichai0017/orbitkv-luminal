@@ -2,7 +2,7 @@
 //!
 //! REHOMED (ruling 2026-08-13): the reference runtime implements only plain
 //! spellings, so the AddMulFused family was deleted from
-//! `luminal::reference::ops` at commit aff22598 and restored here verbatim
+//! the reference registry (now `luminal_reference::ops`) at commit aff22598 and restored here verbatim
 //! (paths adjusted `crate::` → `luminal::`; the `.egg` texts live under this
 //! crate's `src/egg/`). It exists to exercise runtime MACHINERY — fused
 //! multi-output claiming, genome dedup, waste destinations — not to compute.

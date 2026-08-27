@@ -4,7 +4,6 @@ use anyhow::{Context, Result, bail};
 use egraph_serialize::{ClassId, EGraph, Node, NodeId};
 use petgraph::graph::{DiGraph, NodeIndex};
 
-use crate::reference::ops::built_in_matchers;
 use crate::layout_ir::{
     Access, BufferInfo, ExtractedDag, ExtractedEdge, ExtractedGraph, ExtractedNode,
     ExtractionSite, FreedBy, InputNode, LayoutInfo, LayoutIrOp, LayoutTensorInfo, LogicalInfo,
@@ -147,19 +146,7 @@ pub fn extract_layout_ir_with_matchers(
     Extractor::new_with_matchers(egraph, None, None, matchers).extract()
 }
 
-pub fn extract_layout_ir(egraph: &EGraph) -> Result<Option<ExtractedGraph>> {
-    extract_layout_ir_with_ops(egraph, None)
-}
 
-/// [`extract_layout_ir`] restricted to an allow-list of LayoutTensorOp
-/// constructor names — the test/debug lever for exercising a specific
-/// implementation. `None` allows every op; a program not implementable
-/// within the list fails extraction loudly.
-///
-/// Both this and [`extract_layout_ir`] are the DETERMINISTIC FIXTURE
-/// extractor (min-cost, tie-broken) — tooling for fixtures and goldens,
-/// not the selection mechanism. The search path is
-/// [`extract_layout_ir_with_genome`].
 /// A reusable extraction session: the immutable analysis (class maps, op
 /// specs, the runtime-viability fixpoint) is computed ONCE, and genomes
 /// are swapped in per extraction. The implementation search runs dozens
@@ -170,13 +157,6 @@ pub struct ExtractionSession<'a> {
 }
 
 impl<'a> ExtractionSession<'a> {
-    pub fn new(egraph: &'a EGraph, allowed_ops: Option<&[&str]>) -> Self {
-        let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
-        let mut extractor = Extractor::new(egraph, allowed, None);
-        extractor.apply_viability_filter();
-        Self { extractor }
-    }
-
     /// The runtime-owned constructor (ruling 2026-08-17): extraction
     /// over the CALLER's matcher set, intersected with its allow list.
     pub fn new_with_matcher_set(
@@ -429,12 +409,21 @@ impl<'a> ExtractionSession<'a> {
     }
 }
 
-pub fn extract_layout_ir_with_ops(
+/// [`extract_layout_ir_with_matchers`] restricted to an allow-list of
+/// LayoutTensorOp constructor names — the test/debug lever for exercising
+/// a specific implementation. `None` allows every op; a program not
+/// implementable within the list fails extraction loudly.
+///
+/// This is the DETERMINISTIC FIXTURE extractor (min-cost, tie-broken) —
+/// tooling for fixtures and goldens, not the selection mechanism. The
+/// search path is [`extract_layout_ir_with_genome_and_matchers`].
+pub fn extract_layout_ir_with_ops_and_matchers(
     egraph: &EGraph,
     allowed_ops: Option<&[&str]>,
+    matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
 ) -> Result<Option<ExtractedGraph>> {
     let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
-    let mut extractor = Extractor::new(egraph, allowed, None);
+    let mut extractor = Extractor::new_with_matchers(egraph, allowed, None, matchers);
     extractor.extract()
 }
 
@@ -459,37 +448,14 @@ pub struct Genome {
     pub choices: HashMap<ClassId, ProducerChoice>,
 }
 
-/// Genome-driven extraction — the selection adapter's walk. Starts from the
-/// binding outputs and instantiates exactly the genome's chosen producer
-/// per demanded class; multi-output instances dedup by enode; output slots
-/// the genome does NOT assign to their instance write anonymous waste
-/// destinations (fresh synthetic values, allocated and freed unread —
-/// waste-allowed, priced by profiling).
-#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
-pub fn extract_layout_ir_with_genome(
-    egraph: &EGraph,
-    genome: &Genome,
-) -> Result<Option<ExtractedGraph>> {
-    extract_layout_ir_with_genome_and_ops(egraph, genome, None)
-}
-
-/// Genome-driven extraction under a backend implementation allow-list (the
-/// genome and the inventory compose: choices must come from allowed ops).
-#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
-pub fn extract_layout_ir_with_genome_and_ops(
-    egraph: &EGraph,
-    genome: &Genome,
-    allowed_ops: Option<&[&str]>,
-) -> Result<Option<ExtractedGraph>> {
-    let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
-    let mut extractor = Extractor::new(egraph, allowed, Some(genome));
-    extractor.apply_viability_filter();
-    extractor.extract()
-}
-
 /// Genome-driven extraction with an EXPLICIT runtime matcher set — the
-/// TestRuntime seam's genome form (ruling 2026-08-13; deletes the
-/// tests-side vendored-source workaround).
+/// selection adapter's walk (ruling 2026-08-13; deletes the tests-side
+/// vendored-source workaround). Starts from the binding outputs and
+/// instantiates exactly the genome's chosen producer per demanded class;
+/// multi-output instances dedup by enode; output slots the genome does
+/// NOT assign to their instance write anonymous waste destinations
+/// (fresh synthetic values, allocated and freed unread — waste-allowed,
+/// priced by profiling).
 pub fn extract_layout_ir_with_genome_and_matchers(
     egraph: &EGraph,
     genome: &Genome,
@@ -500,37 +466,16 @@ pub fn extract_layout_ir_with_genome_and_matchers(
     extractor.extract()
 }
 
-/// [`producer_index`] over an EXPLICIT runtime matcher set (the
-/// TestRuntime seam).
+/// Every LayoutTensor class's candidate producers over an EXPLICIT
+/// runtime matcher set (the TestRuntime seam), as
+/// `(implementation constructor name, choice)` pairs sorted for
+/// determinism — the raw material genome construction and mutation draw
+/// from. Classes with no producers (boundary inputs) are absent.
 pub fn producer_index_with_matchers(
     egraph: &EGraph,
     matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
 ) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
     let mut extractor = Extractor::new_with_matchers(egraph, None, None, matchers);
-    extractor.apply_viability_filter();
-    producer_index_from(&extractor)
-}
-
-/// Every LayoutTensor class's candidate producers, as
-/// `(implementation constructor name, choice)` pairs sorted for
-/// determinism — the raw material genome construction and mutation draw
-/// from. Classes with no producers (boundary inputs) are absent.
-#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
-pub fn producer_index(
-    egraph: &EGraph,
-) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
-    producer_index_with_ops(egraph, None)
-}
-
-/// [`producer_index`] restricted to a backend's implementation allow-list —
-/// the genome space only offers what the executing backend implements.
-#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
-pub fn producer_index_with_ops(
-    egraph: &EGraph,
-    allowed_ops: Option<&[&str]>,
-) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
-    let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
-    let mut extractor = Extractor::new(egraph, allowed, None);
     extractor.apply_viability_filter();
     producer_index_from(&extractor)
 }
@@ -708,14 +653,6 @@ pub fn plan_fingerprint(graph: &ExtractedGraph) -> u64 {
 }
 
 impl<'a> Extractor<'a> {
-    fn new(
-        egraph: &'a EGraph,
-        allowed_ops: Option<HashSet<String>>,
-        genome: Option<&Genome>,
-    ) -> Self {
-        Self::new_with_matchers(egraph, allowed_ops, genome, built_in_matchers())
-    }
-
     /// The runtime-injectable constructor (the TestRuntime seam, ruling
     /// 2026-08-13): extraction consumes THE GIVEN runtime's matcher set —
     /// the reference registry is just the default caller.

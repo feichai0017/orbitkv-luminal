@@ -893,11 +893,10 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        frontend::{binary::tests::test_binary, unary::tests::test_unary},
-        prelude::*,
-        tests::assert_exact,
-    };
+    use crate::frontend::binary::tests::test_binary;
+    use crate::frontend::unary::tests::test_unary;
+    use luminal::prelude::*;
+    use crate::tests::assert_exact;
     use candle_core::{IndexOp, Tensor};
     use proptest::prelude::*;
 
@@ -1231,7 +1230,7 @@ mod tests {
         let a = cx.tensor((2, 3));
         let repeated = (a.repeat((2, 2)) * 1.0).output();
 
-        let rt = crate::test_support::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].into())]);
+        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].into())]);
 
         assert_exact(
             rt.get_f32(repeated.id).unwrap(),

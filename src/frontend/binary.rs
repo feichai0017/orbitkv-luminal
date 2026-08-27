@@ -464,10 +464,8 @@ impl F32Pow for f32 {
 // #[cfg(test)]
 #[cfg(test)]
 pub(super) mod tests {
-    use crate::{
-        prelude::*,
-        tests::{assert_close, random_vec},
-    };
+    use luminal::prelude::*;
+    use crate::tests::{assert_close, random_vec};
     use candle_core::{DType, Device, Tensor};
     use itertools::Itertools;
     use proptest::prelude::*;
@@ -516,7 +514,7 @@ pub(super) mod tests {
 
         let lhs_values = lhs_transform(random_vec(a_shape.iter().copied().product()));
         let rhs_values = rhs_transform(random_vec(b_shape.iter().copied().product()));
-        let rt = crate::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[(a.id, lhs_values.clone().into()), (b.id, rhs_values.clone().into())],
         );
@@ -677,7 +675,7 @@ pub(super) mod tests {
             test_binary(
                 size,
                 size,
-                |a, b| a.lt(b).cast(crate::dtype::DType::F32),
+                |a, b| a.lt(b).cast(luminal::dtype::DType::F32),
                 |a, b| a.lt(&b).unwrap().to_dtype(DType::F32).unwrap(),
             );
         }
@@ -691,7 +689,7 @@ pub(super) mod tests {
             test_binary(
                 size,
                 (),
-                |a, b| a.lt(b.expand_rhs(a.dims())).cast(crate::dtype::DType::F32),
+                |a, b| a.lt(b.expand_rhs(a.dims())).cast(luminal::dtype::DType::F32),
                 |a, b| {
                     let scalar = b.to_scalar::<f32>().unwrap();
                     let lhs = a.to_vec1::<f32>().unwrap();
@@ -712,7 +710,7 @@ pub(super) mod tests {
             test_binary(
                 size,
                 size,
-                |a, b| a.gt(b).cast(crate::dtype::DType::F32),
+                |a, b| a.gt(b).cast(luminal::dtype::DType::F32),
                 |a, b| a.gt(&b).unwrap().to_dtype(DType::F32).unwrap(),
             );
         }
@@ -725,7 +723,7 @@ pub(super) mod tests {
             test_binary(
                 size,
                 size,
-                |a, b| a.le(b).cast(crate::dtype::DType::F32),
+                |a, b| a.le(b).cast(luminal::dtype::DType::F32),
                 |a, b| a.le(&b).unwrap().to_dtype(DType::F32).unwrap(),
             );
         }
@@ -738,7 +736,7 @@ pub(super) mod tests {
             test_binary(
                 size,
                 size,
-                |a, b| a.ge(b).cast(crate::dtype::DType::F32),
+                |a, b| a.ge(b).cast(luminal::dtype::DType::F32),
                 |a, b| a.ge(&b).unwrap().to_dtype(DType::F32).unwrap(),
             );
         }
@@ -749,7 +747,7 @@ pub(super) mod tests {
         test_binary(
             27,
             27,
-            |a, b| a.ne(b).cast(crate::dtype::DType::F32),
+            |a, b| a.ne(b).cast(luminal::dtype::DType::F32),
             |a, b| a.ne(&b).unwrap().to_dtype(DType::F32).unwrap(),
         );
     }
@@ -759,7 +757,7 @@ pub(super) mod tests {
         test_binary(
             27,
             27,
-            |a, b| a.eq(b).cast(crate::dtype::DType::F32),
+            |a, b| a.eq(b).cast(luminal::dtype::DType::F32),
             |a, b| a.eq(&b).unwrap().to_dtype(DType::F32).unwrap(),
         );
     }
@@ -827,7 +825,7 @@ pub(super) mod tests {
                 // gt() returns Bool, cast to F32 for cond which expects F32
                 let cond = a
                     .gt(b.graph().constant_float(0.0).expand_rhs(a.dims()))
-                    .cast(crate::dtype::DType::F32);
+                    .cast(luminal::dtype::DType::F32);
                 a.cond(cond, b)
             },
             |a, b| {

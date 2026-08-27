@@ -1158,6 +1158,41 @@ fn validate_input_program(graph: &ExtractedGraph) -> Result<()> {
         }
     }
 
+    // Undefinedness PROPAGATES across non-writing Must ties (views): a view's
+    // contents ARE its operand's contents, so a view of an undefined value is
+    // itself undefined. Without this, a poison behind a view slips both doors
+    // below and only surfaces as a deep plan-construction failure — and once
+    // destination seeding can cross views, it would surface as uninitialized
+    // bytes delivered to a caller. Fixpoint so chains propagate hop-by-hop.
+    // DPS destination ties are untouched: their ops WRITE the tied result, so
+    // the !result_writes_memory guard excludes them. (Ruling 2026-08-26.)
+    loop {
+        let mut grew = false;
+        for node in graph.dag.node_weights() {
+            let ExtractedNode::LayoutOp(op) = node else {
+                continue;
+            };
+            for (operand, result) in must_ties(op.op.as_ref()) {
+                if !op.op.result_writes_memory(result)
+                    && op
+                        .inputs
+                        .get(operand)
+                        .is_some_and(|input| undefined.contains(&input.value))
+                    && op
+                        .outputs
+                        .get(result)
+                        .is_some_and(|output| !undefined.contains(&output.eclass))
+                {
+                    undefined.insert(op.outputs[result].eclass.clone());
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
     // Undefined values are write-targets only: no op may READ one. (The DPS
     // rewrite's poison destinations are declared write-only, so they pass.)
     for node in graph.dag.node_weights() {
@@ -1533,7 +1568,7 @@ pub(crate) fn buffer_tensor_plan(
     // certify what `optimize` constructs (allocs, frees, their ordering
     // edges), and the residency arms only gain edges by the reorder — the
     // pass adds ordering and removes nothing a consumer reads.
-    let bt = crate::buffer_tensor_ir::optimize(bt);
+    let bt = crate::buffer_tensor_ir::optimize(bt)?;
     crate::buffer_tensor_ir::validate(&bt)?;
     Ok(bt)
 }
@@ -2313,25 +2348,9 @@ mod tests {
         assert_eq!(analysis.in_place.get(&(0, 0)), Some(&false));
     }
 
-    /// The built-in functional ops take the conservative out-of-place
-    /// defaults: no ties, results written into planner-allocated storage
-    /// (never op-internal allocations), and never undefined contents.
-    #[test]
-    fn builtin_ops_declare_out_of_place_defaults() {
-        use crate::reference::ops::{AddFunctional, IndexMapApplyMaterialize, ReduceSum, SqrtFunctional};
-        let ops: Vec<Box<dyn LayoutIrOp>> = vec![
-            Box::new(AddFunctional),
-            Box::new(SqrtFunctional),
-            Box::new(ReduceSum { axis: 0 }),
-            Box::new(IndexMapApplyMaterialize { entries: None }),
-        ];
-        for op in &ops {
-            assert!(op.alias_info().is_empty());
-            assert!(!op.result_is_allocated_internally(0));
-            assert!(op.result_writes_memory(0));
-            assert!(!op.result_is_undefined(0));
-        }
-    }
+    // (The registry-contract pins — built-in ops declare out-of-place
+    // defaults and no unconditional sharing permits — moved to
+    // `luminal_reference::ops` with the registry in Step B.)
 
     /// SOUNDNESS REGRESSION for the pinned-buffer pre-union: an op reads x and
     /// declares a write-only in-place destination d, where x and d cohabit
@@ -2765,45 +2784,6 @@ mod tests {
         assert_eq!(analysis.in_place.get(&(0, 0)), Some(&false), "loser vetoed by commit");
     }
 
-    /// RANK 9: NO built-in declares the unconditional sharing permit — ops
-    /// whose in-place safety depends on preconditions get matched with those
-    /// preconditions in egglog (the Mutating tier) instead of asserting a
-    /// blanket permit the engine would have to trust.
-    #[test]
-    fn builtin_ops_declare_no_unconditional_permits() {
-        use crate::test_support::test_ops::AddMulFused;
-        use crate::reference::ops::{AddFunctional, AddMutating, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax, ReduceSum, SqrtFunctional, SqrtMutating};
-        let ops: Vec<Box<dyn LayoutIrOp>> = vec![
-            Box::new(SqrtFunctional),
-            Box::new(ExpFunctional),
-            Box::new(AddFunctional),
-            Box::new(MulFunctional),
-            Box::new(DivFunctional),
-            Box::new(SqrtMutating),
-            Box::new(AddMutating),
-            Box::new(AddMulFused),
-            Box::new(MaterializeLayoutCopy),
-            Box::new(ReduceSum { axis: 0 }),
-            Box::new(ReduceMax { axis: 0 }),
-            Box::new(IndexMapApplyMaterialize { entries: None }),
-        ];
-        for op in &ops {
-            assert!(
-                op.alias_info().iter().all(|info| info.sharing == Sharing::Must),
-                "{}",
-                op.label()
-            );
-        }
-
-        // The ONE deliberate May declarer: its egglog match requires all
-        // layouts equal, discharging the permit's precondition at match time.
-        // rhs may share the mutated storage; the reverse direction (reading
-        // the mutated operand against... nothing ties operand 1) is no permit.
-        let alias_safe = crate::reference::ops::AddMutatingInputAliasSafe;
-        assert!(permits_sharing(&alias_safe, 1, 0));
-        assert!(!permits_sharing(&alias_safe, 0, 1));
-    }
-
     // -------------------------------------------------------------------------
     // Lowering tripwires: the mechanical arms of validate_plan, proven to
     // REJECT. (The SEMANTIC certificate is proven to reject in
@@ -2856,5 +2836,57 @@ mod tests {
         });
         let err = validate_plan(&dag).unwrap_err();
         assert!(err.to_string().contains("unfolded view"), "{err}");
+    }
+
+    /// RULING 2026-08-26 (a): undefinedness propagates across non-writing
+    /// Must ties. A view of an undefined value READ by a computing op is
+    /// rejected at validation — previously the view's fresh value slipped
+    /// the direct poison check.
+    #[test]
+    fn view_of_undefined_read_is_rejected_at_validation() {
+        use crate::test_support::{MockView, TestGraph};
+        let mut g = TestGraph::new();
+        let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
+        let v = g.op(Box::new(MockView), &[&e], &[("v", "view")])[0].clone();
+        let r = g
+            .op(
+                Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }),
+                &[&v],
+                &[("r", "rm")],
+            )[0]
+            .clone();
+        g.output(&r, "out");
+        let err = bufferize(&g.build()).unwrap_err();
+        assert!(
+            err.to_string().contains("reads undefined contents"),
+            "expected the propagated poison door, got: {err:#}"
+        );
+    }
+
+    /// RULING 2026-08-26 (a)+(b): a view of an undefined value bound
+    /// STRAIGHT to an output slot — no reader op at all — is rejected at
+    /// validation with a structured error. Previously this slipped both
+    /// validation doors and aborted the process at the free-stage expect
+    /// in buffer_tensor_ir.rs (now also demoted to a bail as
+    /// defense-in-depth).
+    #[test]
+    fn view_of_undefined_bound_to_output_slot_is_rejected_at_validation() {
+        use crate::test_support::{MockView, TestGraph};
+        let mut g = TestGraph::new();
+        let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
+        let v = g.op(Box::new(MockView), &[&e], &[("v", "view")])[0].clone();
+        g.output(&v, "out");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bufferize(&g.build())));
+        match result {
+            Ok(Ok(plan)) => panic!(
+                "LAUNDERED: undefined bytes delivered to a bound output through a view:\n{}",
+                plan.summary()
+            ),
+            Ok(Err(err)) => assert!(
+                err.to_string().contains("binds the undefined"),
+                "expected the propagated slot-poison door, got: {err:#}"
+            ),
+            Err(_) => panic!("panicked — the ruling demands a structured error, never an abort"),
+        }
     }
 }

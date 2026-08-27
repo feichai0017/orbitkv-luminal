@@ -17,7 +17,7 @@ pub mod test_ops {
     //! home is a small TestRuntime with simple view/mutation/multi-output
     //! implementations — recorded in the queue, not built yet.
 
-    use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, Sharing, ToDps};
+    use crate::layout_ir::{AliasInfo, Bufferizable, LayoutIrOp, Sharing, ToDps};
     use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 
     /// `AddMulFusedGeneric(lhs, rhs) -> (add_out, mul_out)`
@@ -118,13 +118,11 @@ pub mod test_ops {
 }
 
 use std::collections::HashMap;
-use std::fs;
 
 use egraph_serialize::ClassId;
 use petgraph::graph::NodeIndex;
 
 use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
-use crate::extractor;
 use crate::layout_ir::{
     AliasInfo, BufferInfo, Bufferizable, ExtractedDag, ExtractedEdge,
     Access, ExtractedGraph, ExtractedNode, FreedBy, InputNode, LayoutInfo, LayoutIrOp,
@@ -469,158 +467,28 @@ impl TestGraph {
     }
 }
 
-// =============================================================================
-// Fixture path: real egglog scripts through the real extractor
-// =============================================================================
-
-/// Run `test_scripts/<script>` through egglog (with the full preamble) and
-/// hand back the serialized e-graph — the selection tooling's raw material.
-pub fn serialize_fixture(script: &str) -> egraph_serialize::EGraph {
-    use egglog::SerializeConfig;
-
-    let preamble = crate::egglog_snippet::assembled_program();
-    let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
-        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
-    let program = format!("{preamble}\n\n{source}");
-
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    egraph
-        .parse_and_run_program(Some(script.to_string()), &program)
-        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
-    egraph.serialize(SerializeConfig::default()).egraph
-}
-
-/// Build a TOTAL genome over a fixture's produced classes: each class takes
-/// the first preference (an implementation constructor name) it can satisfy,
-/// falling back to its first candidate — the producer index is
-/// deterministically sorted, so the same preferences always build the same
-/// genome.
-pub fn genome_preferring(
-    egraph: &egraph_serialize::EGraph,
-    preferences: &[&str],
-) -> extractor::Genome {
-    let index = extractor::producer_index(egraph);
-    let mut genome = extractor::Genome::default();
-    for (class, candidates) in index {
-        let pick = preferences
-            .iter()
-            .find_map(|preferred| {
-                candidates
-                    .iter()
-                    .find(|(name, _)| name.as_str() == *preferred)
-            })
-            .or_else(|| candidates.first())
-            .expect("produced classes have candidates");
-        genome.choices.insert(class, pick.1.clone());
-    }
-    genome
-}
-
-/// Genome-driven fixture extraction (the selection adapter's walk) plus the
-/// plan fingerprint the search dedups on.
-pub fn extract_fixture_with_genome(
-    script: &str,
-    preferences: &[&str],
-) -> (ExtractedGraph, u64) {
-    let egraph = serialize_fixture(script);
-    let genome = genome_preferring(&egraph, preferences);
-    let graph = extractor::extract_layout_ir_with_genome(&egraph, &genome)
-        .expect("genome extraction runs")
-        .expect("genome extraction reaches the boundary");
-    let fingerprint = extractor::plan_fingerprint(&graph);
-    (graph, fingerprint)
-}
-
-/// TESTRUNTIME v0 (ruling 2026-08-13): a small tests-side runtime
-/// vocabulary — the reference registry PLUS the op variants tests need
-/// that the reference runtime deliberately does not implement (today:
-/// the view op; mutating/multi-output variants join it when the
-/// reference registry sheds them for CUDA-lite). Extraction and
-/// program assembly are runtime-injectable, so this is just a matcher
-/// list — no runtime machinery duplicated.
-pub fn test_runtime_matchers() -> Vec<Box<dyn crate::layout_ir::OpMatcher>> {
-    let mut matchers = crate::reference::ops::built_in_matchers();
-    matchers.push(Box::new(crate::reference::ops::IndexMapApplyViewMatcher));
-    matchers
-}
-
-/// [`extract_fixture`] on the TESTRUNTIME's vocabulary.
-pub fn extract_fixture_on_test_runtime(script: &str) -> ExtractedGraph {
-    use egglog::SerializeConfig;
-
-    let preamble = crate::egglog_snippet::assembled_program_for(&crate::test_support::test_runtime_matchers());
-    let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
-        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
-    let program = format!("{preamble}
-
-{source}");
-
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    egraph
-        .parse_and_run_program(Some(script.to_string()), &program)
-        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
-    let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-    extractor::extract_layout_ir_with_matchers(&serialized, crate::test_support::test_runtime_matchers())
-        .expect("extraction succeeds")
-        .unwrap_or_else(|| panic!("fixture {script} produced no extracted graph"))
-}
-
-/// Run `test_scripts/<script>` through egglog (with the full preamble) and the
-/// real extractor, returning the extracted graph. Panics on any failure — these
-/// are test fixtures.
-pub fn extract_fixture(script: &str) -> ExtractedGraph {
-    use egglog::SerializeConfig;
-
-    let preamble = crate::egglog_snippet::assembled_program();
-    let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
-        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
-    let program = format!("{preamble}\n\n{source}");
-
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    egraph
-        .parse_and_run_program(Some(script.to_string()), &program)
-        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
-    let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-    extractor::extract_layout_ir(&serialized)
-        .expect("extraction succeeds")
-        .unwrap_or_else(|| panic!("fixture {script} produced no extracted graph"))
-}
-
-/// [`extract_fixture`] restricted to an allow-list of LayoutTensorOp
-/// constructor names — forces extraction through specific implementations so
-/// a test can exercise one op end to end. Panics if the program is not
-/// implementable within the list; use [`try_extract_fixture_with_ops`] to
-/// assert that failure itself.
-pub fn extract_fixture_with_ops(script: &str, allowed: &[&str]) -> ExtractedGraph {
-    try_extract_fixture_with_ops(script, allowed)
-        .expect("extraction succeeds")
-        .unwrap_or_else(|| panic!("fixture {script} produced no extracted graph"))
-}
-
-/// The fallible form of [`extract_fixture_with_ops`].
-pub fn try_extract_fixture_with_ops(
-    script: &str,
-    allowed: &[&str],
-) -> anyhow::Result<Option<ExtractedGraph>> {
-    use egglog::SerializeConfig;
-
-    let preamble = crate::egglog_snippet::assembled_program();
-    let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
-        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
-    let program = format!("{preamble}\n\n{source}");
-
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    egraph
-        .parse_and_run_program(Some(script.to_string()), &program)
-        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
-    let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-    extractor::extract_layout_ir_with_ops(&serialized, Some(allowed))
-}
+// The fixture path (real egglog scripts through the real extractor) and
+// the run_reference harness moved to `luminal_reference::harness` with the
+// reference registry (Step B, ruling 2026-08-17): they default the matcher
+// set to the reference ops, which core no longer owns. Core keeps only the
+// runtime-neutral pieces: TestGraph/mocks above and harness_search_options.
 
 #[cfg(test)]
 mod harness_tests {
-    use super::*;
-    use crate::bufferize;
+    // DEP-WORLD suite (Step B): fixtures and the reference registry come
+    // through the luminal_reference dev-dependency, so every luminal type
+    // here must come from the `luminal::` build that crate links, never
+    // `crate` — the cyclic dev-dependency's two library builds do not
+    // unify their types.
+    use std::fs;
+
+    use luminal::bufferize;
+    use luminal::layout_ir::Access;
+    use luminal::test_support::*;
+    use luminal_reference::harness::{
+        extract_fixture, extract_fixture_on_test_runtime, extract_fixture_with_ops,
+        serialize_fixture, try_extract_fixture_with_ops,
+    };
 
     /// The builder produces a graph the real pipeline accepts end to end.
     #[test]
@@ -658,7 +526,7 @@ mod harness_tests {
     /// carry an Anti edge ordering Exp's read before the copy's write.
     #[test]
     fn war_hazard_gets_anti_edge() {
-        use crate::bufferize::{BufferNode, EdgeKind};
+        use luminal::bufferize::{BufferNode, EdgeKind};
         use petgraph::visit::EdgeRef;
 
         let graph = extract_fixture("boundary_war_hazard.egg");
@@ -694,7 +562,7 @@ mod harness_tests {
     /// are unordered by dataflow; the plan must order read-of-B first.
     #[test]
     fn copy_reading_buffer_ordered_before_copy_writing_it() {
-        use crate::bufferize::{BufferNode, EdgeKind};
+        use luminal::bufferize::{BufferNode, EdgeKind};
         use petgraph::visit::EdgeRef;
 
         let mut g = TestGraph::new();
@@ -773,7 +641,7 @@ mod harness_tests {
     /// retarget op2's operand to it, and never write x's pinned buffer.
     #[test]
     fn rejected_accumulator_copies_contents_and_retargets() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
         use petgraph::visit::EdgeRef;
 
         let mut g = TestGraph::new();
@@ -842,7 +710,7 @@ mod harness_tests {
     /// irrelevant), and must not share the operand's storage.
     #[test]
     fn rejected_write_only_dest_retargets_without_copy() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let mut g = TestGraph::new();
         // Interior operand: v is another op's result with a sibling reader.
@@ -917,7 +785,7 @@ mod harness_tests {
     /// zero copies, every op computing directly into the output storage.
     #[test]
     fn chained_destinations_collapse_onto_the_output_buffer() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let mut g = TestGraph::new();
         let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
@@ -973,13 +841,13 @@ mod harness_tests {
     /// passes through. Zero copies, zero allocations, no permits involved.
     #[test]
     fn mutating_sqrt_bufferizes_zero_copy_in_place() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_with_ops(
             "boundary_in_place_mutation.egg",
             &["LayoutTensorOpSqrtMutatingGeneric"],
         );
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -1010,13 +878,13 @@ mod harness_tests {
     /// accumulation is zero-copy in the caller's buffer.
     #[test]
     fn alias_safe_add_accumulates_x_plus_x_in_place() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_with_ops(
             "boundary_alias_safe_add.egg",
             &["LayoutTensorOpAddMutatingInputAliasSafeGeneric"],
         );
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -1048,13 +916,13 @@ mod harness_tests {
     /// missing permit.
     #[test]
     fn plain_mutating_add_on_x_plus_x_degrades_to_copies() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_with_ops(
             "boundary_alias_safe_add.egg",
             &["LayoutTensorOpAddMutatingGeneric"],
         );
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         let allocs = plan
             .buffers
@@ -1093,11 +961,11 @@ mod harness_tests {
     /// recorded extraction-preference decision.)
     #[test]
     fn boundary_mutation_via_functional_degrades_to_copy() {
-        use crate::bufferize::{BufferId, BufferNode, EdgeKind};
+        use luminal::bufferize::{BufferId, BufferNode, EdgeKind};
         use petgraph::visit::EdgeRef;
 
         let graph = extract_fixture("boundary_in_place_mutation.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         let allocs = plan
             .buffers
@@ -1133,7 +1001,7 @@ mod harness_tests {
     /// slot (E) is served by a copy out of D.
     #[test]
     fn seed_ties_break_to_lowest_slot() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let mut g = TestGraph::new();
         let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
@@ -1180,7 +1048,7 @@ mod harness_tests {
     /// after the reader.
     #[test]
     fn rejected_seed_degrades_to_copy_with_war_edge() {
-        use crate::bufferize::{BufferId, BufferNode, EdgeKind};
+        use luminal::bufferize::{BufferId, BufferNode, EdgeKind};
         use petgraph::visit::EdgeRef;
 
         let mut g = TestGraph::new();
@@ -1360,7 +1228,7 @@ mod harness_tests {
     /// ReferenceRuntime sizes its buffers from.
     #[test]
     fn extraction_carries_numeric_dims_and_bits() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
 
         // Retargeted off the retired fused-matmul fixture (non-mutating
         // inventory ruling 2026-08-13): any extracted op output carries
@@ -1413,8 +1281,8 @@ mod harness_tests {
 (let data_layout_tensor (LayoutTensorLit data_logical data_layout))
 (run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
-        let full = format!("{}\n\n{}", crate::egglog_snippet::assembled_program(), body);
-        crate::egglog_snippet::new_egraph()
+        let full = format!("{}\n\n{}", luminal_reference::assembled_program(), body);
+        luminal::egglog_snippet::new_egraph()
             .parse_and_run_program(None, &full)
             .expect("sound div/mod gather program saturates cleanly under the subst range guard");
     }
@@ -1467,7 +1335,7 @@ mod harness_tests {
     fn regenerate_golden_plans() {
         for stem in GOLDEN_SCRIPTS {
             let graph = extract_fixture(&format!("{stem}.egg"));
-            let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect(stem);
+            let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect(stem);
             fs::write(format!("output/{stem}.bufferized.txt"), plan.summary())
                 .expect("golden writes");
         }
@@ -1479,9 +1347,9 @@ mod harness_tests {
     /// values carry the tied result's LAYOUT (the equivalence gate keys on it).
     #[test]
     fn dps_rewrite_appends_tied_poison_destinations() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
         let graph = extract_fixture("boundary_in_place_mutation.egg");
-        let rewritten = crate::dps::dps_rewrite(&graph);
+        let rewritten = luminal::dps::dps_rewrite(&graph);
 
         // The DPS form keeps the base op's label (label policy: IR names are
         // never edited), so DPS-ness is witnessed semantically: among
@@ -1519,7 +1387,7 @@ mod harness_tests {
     /// convention, proven end to end on the boundary_iota fixture.
     #[test]
     fn iota_extracts_as_zero_input_source() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
         let graph = extract_fixture("boundary_iota.egg");
         let extracted = graph
             .dag
@@ -1532,7 +1400,7 @@ mod harness_tests {
         assert!(extracted.inputs.is_empty(), "a source op has no operands");
         assert_eq!(extracted.outputs.len(), 1);
 
-        let rewritten = crate::dps::dps_rewrite(&graph);
+        let rewritten = luminal::dps::dps_rewrite(&graph);
         let dps = rewritten
             .dag
             .node_weights()
@@ -1558,7 +1426,7 @@ mod harness_tests {
     /// that honest outcome; extraction preference is a deferred lever.)
     #[test]
     fn scatter_mutating_updates_the_cache_in_place() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
         let graph = extract_fixture_with_ops(
             "boundary_scatter.egg",
             &["LayoutTensorOpScatterMutatingGeneric", "LayoutTensorOpIotaGeneric"],
@@ -1579,7 +1447,7 @@ mod harness_tests {
         assert_eq!(scatter.inputs[2].port, "coord0");
         assert_eq!(scatter.inputs[3].port, "coord1");
 
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph))
+        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph))
             .expect("in-place scatter bufferizes");
         let summary = plan.summary();
         assert!(summary.contains("ScatterMutatingGeneric"), "{summary}");
@@ -1595,7 +1463,7 @@ mod harness_tests {
     /// egglog's own merge machinery raises the error.
     #[test]
     fn scatter_with_disagreeing_src_and_coordinate_shapes_dies_in_the_terminal_stratum() {
-        let preamble = crate::egglog_snippet::assembled_program();
+        let preamble = luminal_reference::assembled_program();
         let script = r#"
 (let cache_shape (ShapeLit (IntExprCons (IntLit 6) (IntExprCons (IntLit 4) (IntExprNil)))))
 (let cache (LogicalTensorInputLit (LogicalIdLit "cache") cache_shape (F32)))
@@ -1613,7 +1481,7 @@ mod harness_tests {
         let program = format!("{preamble}
 
 {script}");
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         let err = egraph
             .parse_and_run_program(None, &program)
             .expect_err("the shape lock must collide in the terminal stratum");
@@ -1629,7 +1497,7 @@ mod harness_tests {
     /// DPS rewrite the destination is the trailing operand.
     #[test]
     fn gather_extracts_with_rank_counted_operands() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
         let graph = extract_fixture("boundary_gather.egg");
         let extracted = graph
             .dag
@@ -1644,7 +1512,7 @@ mod harness_tests {
         assert_eq!(extracted.inputs[1].port, "coord0");
         assert_eq!(extracted.inputs[2].port, "coord1");
 
-        let rewritten = crate::dps::dps_rewrite(&graph);
+        let rewritten = luminal::dps::dps_rewrite(&graph);
         let dps = rewritten
             .dag
             .node_weights()
@@ -1673,9 +1541,9 @@ mod harness_tests {
     /// has run over all of them by the time bufferize returns Ok.
     #[test]
     fn dtype_index_reads_serialized_rows_onto_buffers() {
-        use crate::dtype::PlanDtype;
+        use luminal::dtype::PlanDtype;
         let graph = extract_fixture("boundary_gather.egg");
-        let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph))
+        let plan = luminal::bufferize::bufferize(&luminal::dps::dps_rewrite(&graph))
             .expect("mixed-dtype plan bufferizes");
 
         let mut by_lit: std::collections::HashMap<i64, PlanDtype> = Default::default();
@@ -1717,7 +1585,7 @@ mod harness_tests {
     /// scripts.
     #[test]
     fn gather_with_disagreeing_coordinate_shapes_dies_in_the_terminal_stratum() {
-        let preamble = crate::egglog_snippet::assembled_program();
+        let preamble = luminal_reference::assembled_program();
         let script = r#"
 (let three_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
 (let four_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
@@ -1745,7 +1613,7 @@ mod harness_tests {
 (run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let program = format!("{preamble}\n\n{script}");
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         let err = egraph
             .parse_and_run_program(None, &program)
             .expect_err("the shape closure must collide in the terminal stratum");
@@ -1763,7 +1631,7 @@ mod harness_tests {
     /// IntVar — dies there.
     #[test]
     fn iota_with_no_derivable_bounds_dies_in_the_terminal_stratum() {
-        let preamble = crate::egglog_snippet::assembled_program();
+        let preamble = luminal_reference::assembled_program();
         let script = r#"
 (let mystery_var (IntVar "mystery_var"))
 (let unsafe_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
@@ -1773,7 +1641,7 @@ mod harness_tests {
 (check (= ?demanded_upper (upper-bound-of mystery_var)))
 "#;
         let program = format!("{preamble}\n\n{script}");
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         let err = egraph
             .parse_and_run_program(None, &program)
             .expect_err("the constructor-site demand must fail on the absent bound");
@@ -1788,8 +1656,8 @@ mod harness_tests {
     #[test]
     fn dps_rewrite_is_idempotent() {
         let graph = extract_fixture("basic_program.egg");
-        let once = crate::dps::dps_rewrite(&graph);
-        let twice = crate::dps::dps_rewrite(&once);
+        let once = luminal::dps::dps_rewrite(&graph);
+        let twice = luminal::dps::dps_rewrite(&once);
         assert_eq!(once.dag.node_count(), twice.dag.node_count());
         assert_eq!(once.dag.edge_count(), twice.dag.edge_count());
     }
@@ -1798,7 +1666,7 @@ mod harness_tests {
     /// the view op leaves no node in the plan (folded like a poison producer).
     #[test]
     fn view_reads_parent_buffer_with_zero_plan_nodes() {
-        use crate::bufferize::BufferNode;
+        use luminal::bufferize::BufferNode;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -1858,7 +1726,7 @@ mod harness_tests {
     /// writer yields out-of-place; the view, decided in phase 1, stands.
     #[test]
     fn writer_into_viewed_buffer_yields_out_of_place() {
-        use crate::bufferize::BufferId;
+        use luminal::bufferize::BufferId;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -1906,7 +1774,7 @@ mod harness_tests {
     /// carries the VIEW's layout (region-aware boundary bookkeeping).
     #[test]
     fn view_passthrough_to_output_slot() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -1932,8 +1800,8 @@ mod harness_tests {
     /// fold.
     #[test]
     fn real_view_op_feeds_compute_with_zero_plan_nodes() {
-        use crate::bufferize::BufferNode;
-        use crate::reference::ops::IndexMapApplyView;
+        use luminal::bufferize::BufferNode;
+        use luminal_reference::ops::IndexMapApplyView;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -1978,8 +1846,8 @@ mod harness_tests {
     /// itself still contributes no compute node.
     #[test]
     fn real_view_op_to_output_slot_pays_a_boundary_copy() {
-        use crate::bufferize::BufferNode;
-        use crate::reference::ops::IndexMapApplyView;
+        use luminal::bufferize::BufferNode;
+        use luminal_reference::ops::IndexMapApplyView;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2024,10 +1892,10 @@ mod harness_tests {
     /// Zero allocations, zero copies.
     #[test]
     fn view_feeds_compute_fixture_runs_one_kernel_on_the_input_buffer() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_on_test_runtime("boundary_view_feeds_compute.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -2083,10 +1951,10 @@ mod harness_tests {
     /// buffer directly through the folded view.
     #[test]
     fn write_into_viewed_buffer_fixture_degrades_to_copy() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_on_test_runtime("boundary_write_into_viewed_buffer.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         let launch: Vec<BufferId> = plan
             .dag
@@ -2141,10 +2009,10 @@ mod harness_tests {
     /// and the donated buffer backs no output slot.
     #[test]
     fn donated_input_fixture_frees_the_donated_buffer() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture("boundary_donated_input.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -2193,7 +2061,7 @@ mod harness_tests {
     /// anywhere.
     #[test]
     fn extraction_prefers_the_view_op_where_the_layout_is_composed() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
 
         let graph = extract_fixture_on_test_runtime("basic_program.egg");
         let mut views = 0;
@@ -2231,10 +2099,10 @@ mod harness_tests {
     fn must_alloc_outputs_are_coerced_to_caller_provided_storage() {
         use std::collections::HashSet;
 
-        use crate::bufferize::{BufferId, BufferNode, Owner};
+        use luminal::bufferize::{BufferId, BufferNode, Owner};
 
         let graph = extract_fixture("basic_program.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         // Storage that exists at launch = the buffers backing BufferInput
         // nodes (the extractor admits those from BufferInputLit membership).
@@ -2291,9 +2159,9 @@ mod harness_tests {
     /// every compute node, and Poison producers are folded (no compute node).
     #[test]
     fn dps_destinations_admitted_and_poisons_folded() {
-        use crate::bufferize::BufferNode;
+        use luminal::bufferize::BufferNode;
         let graph = extract_fixture("basic_program.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
         let mut computes = 0;
         for idx in plan.dag.node_indices() {
             if let BufferNode::Compute { op, reads, writes, .. } = &plan.dag[idx] {
@@ -2326,7 +2194,7 @@ mod harness_tests {
     /// only writer, whichever decision order the toposort produces.
     #[test]
     fn unordered_second_writer_of_shared_destination_is_rejected() {
-        use crate::bufferize::BufferNode;
+        use luminal::bufferize::BufferNode;
 
         let mut g = TestGraph::new();
         let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")])[0].clone();
@@ -2383,8 +2251,8 @@ mod harness_tests {
     /// with reads[dest_j] == writes[j] for both.
     #[test]
     fn multi_destination_pairs_get_distinct_allocations() {
-        use crate::bufferize::BufferNode;
-        use crate::test_support::test_ops::AddMulFused;
+        use luminal::bufferize::BufferNode;
+        use luminal::test_support::test_ops::AddMulFused;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2394,7 +2262,7 @@ mod harness_tests {
         g.output(&sum, "D");
         g.output(&prod, "E");
 
-        let rewritten = crate::dps::dps_rewrite(&g.build());
+        let rewritten = luminal::dps::dps_rewrite(&g.build());
         let plan = bufferize::bufferize(&rewritten).expect("bufferizes");
 
         // Each (poison, result) pair on its own allocation — never shared.
@@ -2426,7 +2294,7 @@ mod harness_tests {
     /// span, and both results must dock at their tie rows' east sides.
     #[test]
     fn slot_tables_render_ties_as_spanning_rows() {
-        use crate::test_support::test_ops::AddMulFused;
+        use luminal::test_support::test_ops::AddMulFused;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2435,7 +2303,7 @@ mod harness_tests {
         g.output(&results[0], "D");
         g.output(&results[1], "E");
 
-        let rewritten = crate::dps::dps_rewrite(&g.build());
+        let rewritten = luminal::dps::dps_rewrite(&g.build());
         let dot = rewritten.to_dot();
         for span in ["dest0 ↔ out0</TD>", "dest1 ↔ out1</TD>"] {
             assert!(dot.contains(span), "missing tie row {span:?} in:\n{dot}");
@@ -2565,7 +2433,7 @@ mod intcoordvar_probe {
     /// distinct; an identically-written view hash-conses (free CSE).
     #[test]
     fn x_probe_slice_views_today() {
-        let mut full = crate::egglog_snippet::assembled_program().to_string();
+        let mut full = luminal_reference::assembled_program().to_string();
         full.push_str(
             r#"
 (let vec_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
@@ -2641,94 +2509,6 @@ pub fn harness_search_options() -> crate::implementation_search::ImplementationS
     }
 }
 
-/// DIAGNOSIS-ONLY (test-extractor exemption): does the plain no-genome
-/// extraction produce an executable plan for this graph? Separates "no
-/// plan exists" (structural gap) from "random genomes cannot find one"
-/// (genome-space density). Never used by the main path — everything real
-/// runs the genetic search.
-pub fn plain_plan_exists(cx: &crate::graph::Graph) -> anyhow::Result<()> {
-    let program = cx
-        .logical
-        .native_program()
-        .map_err(|reason| anyhow::anyhow!("recorder: {reason}"))?;
-    let text = format!(
-        "{}\n\n{}",
-        crate::egglog_snippet::assembled_program(),
-        program.text
-    );
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    let start = std::time::Instant::now();
-    egraph
-        .parse_and_run_program(None, &text)
-        .map_err(|err| anyhow::anyhow!("saturation: {err}"))?;
-    eprintln!("[plain-plan] saturation {:?}", start.elapsed());
-    let start = std::time::Instant::now();
-    let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
-    eprintln!(
-        "[plain-plan] serialize {:?} ({} nodes, {} classes)",
-        start.elapsed(),
-        serialized.nodes.len(),
-        serialized.classes().len()
-    );
-    let allow = crate::reference::reference_allow_list();
-    let start = std::time::Instant::now();
-    let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))?
-        .ok_or_else(|| anyhow::anyhow!("no output boundary reached"))?;
-    eprintln!("[plain-plan] extract {:?}", start.elapsed());
-    let start = std::time::Instant::now();
-    crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))?;
-    eprintln!("[plain-plan] dps+bufferize {:?}", start.elapsed());
-    Ok(())
-}
-
-/// M3 Step 4b: the NATIVE test harness — recorder model + reference
-/// binding + dyn pins as tight [n,n] bounds seeds, saturated, then the
-/// GENETIC IMPLEMENTATION SEARCH picks the winning plan (executing every
-/// candidate with the given data), which executes and stays loaded for
-/// output reads. The frontend candle differentials and the reference
-/// differentials both run through here — the same load → bind → search →
-/// execute ladder as the nn module tests, on the harness budget above.
-pub fn run_reference(
-    cx: &crate::graph::Graph,
-    inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
-) -> crate::reference::ReferenceRuntime {
-    run_reference_with_ranges(cx, inputs, &[])
-}
-
-/// [`run_reference`] with VALUE-RANGE ATTESTATIONS (typed-buffers landing D):
-/// plain Int arithmetic is proof-gated, so a graph doing arithmetic
-/// over caller Int data implements only when the caller attests the
-/// data's range — no attestation, no proof, and the search refuses
-/// loudly. `ranges` entries are (tensor, lower, upper), seeded via
-/// `bind_value_range` between load and search.
-pub fn run_reference_with_ranges(
-    cx: &crate::graph::Graph,
-    inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
-    ranges: &[(petgraph::graph::NodeIndex, i64, i64)],
-) -> crate::reference::ReferenceRuntime {
-    let mut rt = crate::reference::ReferenceRuntime::load(cx)
-        .expect("recorder clean for a covered graph");
-    let mut vars: Vec<_> = cx.dyn_map.iter().collect();
-    vars.sort();
-    for (var, value) in vars {
-        rt.bind_dyn_range(*var, *value as u64, *value as u64)
-            .expect("dyn pin binds");
-    }
-    for (tensor, lower, upper) in ranges {
-        rt.bind_value_range(*tensor, *lower, *upper)
-            .expect("value range binds");
-    }
-    let data: rustc_hash::FxHashMap<_, _> = inputs.iter().cloned().collect();
-    rt.search(&data, &harness_search_options())
-        .expect("search finds a plan");
-    for (node, values) in inputs {
-        rt.set_data(*node, values.clone());
-    }
-    rt.execute().expect("winner executes");
-    rt
-}
-
-
 #[cfg(test)]
 mod stage4b_probes {
 
@@ -2745,10 +2525,10 @@ mod stage4b_probes {
     /// aliasing/donation design).
     #[test]
     fn pinned_pure_identity_output() {
-        let mut cx = crate::graph::Graph::new();
+        let mut cx = luminal::graph::Graph::new();
         let a = cx.tensor(2);
         let b = a.output();
-        let rt = crate::test_support::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
+        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
         let got = rt.get_f32(b.id).unwrap();
         assert_eq!(got, &vec![1.0, 2.0]);
     }
@@ -2760,7 +2540,7 @@ mod stage4b_probes {
     /// consumer resolves for itself.
     #[test]
     fn chain_strides_destructure_contract() {
-        use crate::extractor::{chain_strides, ChainStride};
+        use luminal::extractor::{chain_strides, ChainStride};
         let body = r#"
 (let psh (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
 (let p (RightMajorContiguousElementLayoutLit psh (bits-of (F32))))
@@ -2772,8 +2552,8 @@ mod stage4b_probes {
 (let d (RightMajorContiguousElementLayoutLit dsh (bits-of (F32))))
 (run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
-        let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         egraph.parse_and_run_program(None, &full).expect("program runs");
         let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
 
@@ -2827,84 +2607,9 @@ mod stage4b_probes {
         assert_eq!(v[2], Some(ChainStride::Unit), "{v:?}");
     }
 
-    /// THE SCRIPT CORPUS GATE (restored 2026-08-14 for the subst-
-    /// primitive experiment): every test_scripts/*.egg is self-driving
-    /// (carries its own run-schedule and checks), so each runs verbatim
-    /// against the assembled program on a fresh e-graph. This is the
-    /// merge-tree home of the old prototype's `cargo run corpus` gate;
-    /// subst_example P1-P9 and subst_range_guard_example live here and
-    /// pin the substitution guard semantics.
-    #[test]
-    fn corpus_scripts_all_green() {
-        let dir = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/egglog/checkpoint_5/test_scripts"
-        );
-        let mut scripts: Vec<_> = std::fs::read_dir(dir)
-            .expect("test_scripts dir")
-            .filter_map(|entry| {
-                let name = entry.ok()?.file_name().into_string().ok()?;
-                name.ends_with(".egg").then_some(name)
-            })
-            .collect();
-        scripts.sort();
-        // CORPUS_ONLY=a.egg,b.egg filters to a subset — the targeted-run
-        // knob for diagnosing a single script without the whole sweep.
-        if let Ok(only) = std::env::var("CORPUS_ONLY") {
-            let keep: std::collections::HashSet<&str> = only.split(',').collect();
-            scripts.retain(|s| keep.contains(s.as_str()));
-        }
-        assert!(!scripts.is_empty(), "corpus found no scripts");
-        // Bit-rotted scripts, skipped LOUDLY: foldr_example references
-        // element-to-strided-demand, deleted by the affine migration
-        // (2026-08-05); nothing ran the corpus in the merge tree until
-        // this gate existed, so the rot went unnoticed. Deletion or
-        // rewrite is a ruling.
-        const STALE_SCRIPTS: &[&str] = &["foldr_example.egg"];
-        // The corpus assembles against the TESTRUNTIME matcher set (the
-        // superset: built-ins + view + test-only ops) — the assembly the
-        // view-dependent boundary scripts actually run under in the lib
-        // suite, and the shape of the old prototype's corpus runner.
-        let program_head = crate::egglog_snippet::assembled_program_for(&crate::test_support::test_runtime_matchers());
-        let mut failures = Vec::new();
-        for script in &scripts {
-            if STALE_SCRIPTS.contains(&script.as_str()) {
-                eprintln!("[corpus] SKIPPING stale script {script} (see STALE_SCRIPTS)");
-                continue;
-            }
-            let started = std::time::Instant::now();
-            eprintln!("[corpus] running {script}");
-            let source = std::fs::read_to_string(format!("{dir}/{script}"))
-                .expect("script readable");
-            let program = format!("{program_head}\n\n{source}");
-            let mut egraph = crate::egglog_snippet::new_egraph();
-            if let Err(err) = egraph.parse_and_run_program(Some(script.clone()), &program)
-            {
-                failures.push(format!("{script}: {err}"));
-            }
-            eprintln!("[corpus]   {script} done in {:.1}s", started.elapsed().as_secs_f64());
-        }
-        assert!(
-            failures.is_empty(),
-            "corpus scripts failed ({}/{}):\n  {}",
-            failures.len(),
-            scripts.len(),
-            failures.join("\n  ")
-        );
-        eprintln!("[corpus] {} scripts green", scripts.len());
-    }
-
-    /// Dump THE assembled program (core preamble + spliced op snippets —
-    /// exactly what every run executes) to target/assembled_program.egg.
-    /// Run: cargo test --release dump_assembled_program -- --ignored --nocapture
-    #[test]
-    #[ignore = "utility — run explicitly by name"]
-    fn dump_assembled_program() {
-        let program = crate::egglog_snippet::assembled_program();
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/target/assembled_program.egg");
-        std::fs::write(path, program).expect("dump written");
-        eprintln!("[dump] {} lines -> {path}", program.lines().count());
-    }
+    // (The script-corpus gate and the assembled-program dump moved to
+    // crates/luminal_reference/tests/corpus.rs with the reference registry
+    // in Step B — they run the reference/testruntime assembly.)
 
     /// REJOIN-DIVERGENCE ROUND DRIVER (2026-08-10): the two sick mini
     /// graphs (full-anatomy gemma3: 5.8GB in 12s; MiniDit: 10+ min in
@@ -2921,16 +2626,16 @@ mod stage4b_probes {
     fn rejoin_divergence_probe() {
         for lead in [1usize, 2usize] {
         eprintln!("[rejoin-probe] ===== lead extent {lead} =====");
-        let mut cx = crate::graph::Graph::new();
+        let mut cx = luminal::graph::Graph::new();
         let x = cx.tensor((lead, 8usize));
         let heads = x.split_dims(1, 4);
         let x1 = heads.slice_along(0..2, 2);
         let x2 = heads.slice_along(2..4, 2);
         let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
         let (pre, _inputs, _outputs, _post, _labeled) =
-            cx.logical.native_parts().expect("recorder clean");
-        let full = format!("{}\n\n{pre}", crate::egglog_snippet::assembled_program());
-        let mut egraph = crate::egglog_snippet::new_egraph();
+            cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+        let full = format!("{}\n\n{pre}", luminal_reference::assembled_program());
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         egraph.parse_and_run_program(None, &full).expect("body loads");
         let sizes = |egraph: &mut egglog::EGraph| -> std::collections::HashMap<String, isize> {
             let out = egraph
@@ -3081,19 +2786,19 @@ mod stage4b_probes {
     #[test]
     #[ignore = "diagnostic — run explicitly by name"]
     fn specimen_1235_full_schedule() {
-        let mut cx = crate::graph::Graph::new();
+        let mut cx = luminal::graph::Graph::new();
         let a = cx.tensor((1usize, 2usize, 3usize));
         let b = cx.tensor((3usize, 5usize));
         let _out = a.matmul(b).output();
         let (pre, _is, _os, post, _labeled) =
-            cx.logical.native_parts().expect("recorder clean");
+            cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
         let program = format!(
             "{}\n\n{pre}{}{post}",
-            crate::egglog_snippet::assembled_program(),
-            crate::reference_binding::SCHEDULE
+            luminal_reference::assembled_program(),
+            luminal_reference::ReferenceBindings::SCHEDULE
         );
         let start = std::time::Instant::now();
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         egraph
             .parse_and_run_program(None, &program)
             .expect("specimen saturates");
@@ -3112,53 +2817,53 @@ mod stage4b_probes {
     fn saturation_ab_report() {
         let specimens: Vec<(&str, String)> = vec![
             ("slice_pad(27x10)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((27usize, 10usize));
                 let _out = a
                     .slice((2..6, 7..10))
                     .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
                     .output();
                 let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.native_parts().expect("recorder clean");
+                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
                 pre
             }),
             ("batch_matmul(2,3,4)x(4,5)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((2usize, 3usize, 4usize));
                 let b = cx.tensor((4usize, 5usize));
                 let _out = a.matmul(b).output();
                 let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.native_parts().expect("recorder clean");
+                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
                 pre
             }),
             ("specimen(1,2,3)x(3,5)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((1usize, 2usize, 3usize));
                 let b = cx.tensor((3usize, 5usize));
                 let _out = a.matmul(b).output();
                 let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.native_parts().expect("recorder clean");
+                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
                 pre
             }),
             ("rejoin_lead1(1,8)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let x = cx.tensor((1usize, 8usize));
                 let heads = x.split_dims(1, 4);
                 let x1 = heads.slice_along(0..2, 2);
                 let x2 = heads.slice_along(2..4, 2);
                 let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
                 let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.native_parts().expect("recorder clean");
+                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
                 pre
             }),
         ];
         for (name, pre) in &specimens {
-            let mut egraph = crate::egglog_snippet::new_egraph();
-            let body = format!("{}\n\n{pre}", crate::egglog_snippet::assembled_program());
+            let mut egraph = luminal::egglog_snippet::new_egraph();
+            let body = format!("{}\n\n{pre}", luminal_reference::assembled_program());
             egraph.parse_and_run_program(None, &body).expect("body loads");
             let start = std::time::Instant::now();
             egraph
-                .parse_and_run_program(None, crate::reference_binding::SCHEDULE)
+                .parse_and_run_program(None, luminal_reference::ReferenceBindings::SCHEDULE)
                 .expect("schedule saturates");
             let sat = start.elapsed().as_secs_f64();
             let out = egraph
@@ -3205,29 +2910,29 @@ mod stage4b_probes {
     fn rrx_profile() {
         let specimens: Vec<(&str, String)> = vec![
             ("slice_pad(27x10)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((27usize, 10usize));
                 let _out = a
                     .slice((2..6, 7..10))
                     .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
                     .output();
-                let (pre, _is, _os, post, _labeled) = cx.logical.native_parts().expect("recorder clean");
-                format!("{pre}{}{post}", crate::reference_binding::SCHEDULE)
+                let (pre, _is, _os, post, _labeled) = cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                format!("{pre}{}{post}", luminal_reference::ReferenceBindings::SCHEDULE)
             }),
             ("batch_matmul(2,3,4,5)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((2usize, 3usize, 4usize));
                 let b = cx.tensor((4usize, 5usize));
                 let _out = a.matmul(b).output();
-                let (pre, _is, _os, post, _labeled) = cx.logical.native_parts().expect("recorder clean");
-                format!("{pre}{}{post}", crate::reference_binding::SCHEDULE)
+                let (pre, _is, _os, post, _labeled) = cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                format!("{pre}{}{post}", luminal_reference::ReferenceBindings::SCHEDULE)
             }),
         ];
         // The fixed floor: parse + declare the assembled preamble alone.
         {
-            let preamble = crate::egglog_snippet::assembled_program();
+            let preamble = luminal_reference::assembled_program();
             let start = std::time::Instant::now();
-            let mut egraph = crate::egglog_snippet::new_egraph();
+            let mut egraph = luminal::egglog_snippet::new_egraph();
             egraph.parse_and_run_program(None, &preamble).expect("preamble loads");
             eprintln!(
                 "[prof] ===== preamble only (parse+declare, no body/schedule): {:.2}s, {} lines =====",
@@ -3236,8 +2941,8 @@ mod stage4b_probes {
             );
         }
         for (name, body) in specimens {
-            let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
-            let mut egraph = crate::egglog_snippet::new_egraph();
+            let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
+            let mut egraph = luminal::egglog_snippet::new_egraph();
             let start = std::time::Instant::now();
             let outputs = egraph.parse_and_run_program(None, &full).expect("program runs");
             let wall = start.elapsed().as_secs_f64();
@@ -3307,8 +3012,8 @@ mod stage4b_probes {
 (let v (LogicalIndexMapApply plog (IndexMapLit (IntExprCons (CoordVar osh 1) (IntExprCons (CoordVar osh 0) (IntExprNil))) psh) osh))
 (run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
-        let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
-        let err = crate::egglog_snippet::new_egraph()
+        let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
+        let err = luminal::egglog_snippet::new_egraph()
             .parse_and_run_program(None, &full)
             .expect_err("out-of-range map over a degenerate axis must panic");
         assert!(
@@ -3325,10 +3030,10 @@ mod stage4b_probes {
     /// with every tripwire live.
     #[test]
     fn degenerate_broadcast_runs_clean() {
-        let mut cx = crate::graph::Graph::new();
+        let mut cx = luminal::graph::Graph::new();
         let a = cx.tensor(1);
         let b = (a * 2.0).output();
-        let rt = crate::test_support::run_reference(&cx, &[(a.id, vec![0.5f32].into())]);
+        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, vec![0.5f32].into())]);
         let got = rt.get_f32(b.id).unwrap();
         assert!((got[0] - 1.0).abs() < 1e-6, "{got:?}");
     }
@@ -3432,7 +3137,7 @@ mod subst_guard_study {
     }
 
     fn run_verdict(text: &str) -> &'static str {
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         match egraph.parse_and_run_program(None, text) {
             Ok(_) => "ok",
             Err(err) => {
@@ -3470,7 +3175,7 @@ mod subst_guard_study {
             ("legacy", "sg4_admits", "ok"),
             ("legacy", "sg4_tighten", "panic-crossed-bounds"),
         ];
-        let base = crate::egglog_snippet::assembled_program();
+        let base = luminal_reference::assembled_program();
         for var_name in ["landed", "legacy"] {
             let varied = variant(&base, var_name);
             for (scen_name, tail) in scenarios() {
@@ -3495,7 +3200,7 @@ mod subst_guard_study {
     /// poison the graph loudly.
     #[test]
     fn interface_specs_report_pristine_labels_and_named_outputs() {
-        use crate::prelude::{DType, Graph};
+        use luminal::prelude::{DType, Graph};
         let mut cx = Graph::default();
         let a = cx.named_tensor("blocks.0.wq.weight", (2usize, 3usize));
         let b = cx.tensor((2usize, 3usize));
@@ -3553,8 +3258,8 @@ mod subst_guard_study {
     /// unify through the bounds lattice, no ring axioms involved.
     #[test]
     fn compound_dim_extents_record_saturate_and_run() {
-        use crate::prelude::{DType, Graph};
-        use crate::shape::IntExpr;
+        use luminal::prelude::{DType, Graph};
+        use luminal::shape::IntExpr;
         let mut cx = Graph::default();
         cx.set_dim('a', 2);
         cx.set_dim('b', 3);
@@ -3571,7 +3276,7 @@ mod subst_guard_study {
 
         let x_vals = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let y_vals = vec![2.0f32, 3.0, 4.0, 5.0, 6.0];
-        let rt = crate::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[(x.id, x_vals.clone().into()), (y.id, y_vals.clone().into())],
         );
@@ -3595,28 +3300,28 @@ mod subst_guard_study {
     /// discharges it; a [2,2] pin refuses at saturation.
     #[test]
     fn squeeze_contract_discharges_at_one_and_refuses_otherwise() {
-        use crate::prelude::{DType, Graph};
+        use luminal::prelude::{DType, Graph};
         let mut cx = Graph::default();
         cx.set_dim('s', 1);
         let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
         let out = (x.squeeze(0) * 2.0).output();
-        let rt = crate::test_support::run_reference(&cx, &[(x.id, vec![1.0f32, 2.0, 3.0].into())]);
+        let rt = luminal_reference::harness::run_reference(&cx, &[(x.id, vec![1.0f32, 2.0, 3.0].into())]);
         assert_eq!(rt.get_f32(out.id).unwrap(), &[2.0, 4.0, 6.0]);
 
         let mut cx = Graph::default();
         cx.set_dim('s', 2);
         let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
         let _ = (x.squeeze(0) * 2.0).output();
-        let mut rt = crate::reference::ReferenceRuntime::load(&cx).expect("records + loads");
+        let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("records + loads");
         let data: rustc_hash::FxHashMap<_, _> =
-            [(x.id, crate::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 6]))]
+            [(x.id, luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 6]))]
                 .into_iter()
                 .collect();
         rt.bind_dyn_range('s', 2, 2).expect("bind");
         let err = rt
             .search(
                 &data,
-                &crate::implementation_search::ImplementationSearchOptions::default(),
+                &luminal::implementation_search::ImplementationSearchOptions::default(),
             )
             .expect_err("extent 2 violates the squeeze contract");
         assert!(
@@ -3629,7 +3334,7 @@ mod subst_guard_study {
     /// proving test): both record, saturate under pins, and execute.
     #[test]
     fn symbolic_pad_and_concat_record_and_run() {
-        use crate::prelude::{DType, Graph};
+        use luminal::prelude::{DType, Graph};
         let mut cx = Graph::default();
         cx.set_dim('s', 3);
         cx.set_dim('t', 2);
@@ -3637,7 +3342,7 @@ mod subst_guard_study {
         let y = cx.named_tensor_dtyped("y", ('t',), DType::F32);
         let padded = x.pad_along(1, 1, 0, 0.0).output();
         let joined = x.concat_along(y, 0).output();
-        let rt = crate::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (x.id, vec![1.0f32, 2.0, 3.0].into()),
@@ -3653,12 +3358,12 @@ mod subst_guard_study {
     /// refuses with the NAMED door.
     #[test]
     fn unfold_window_contract_discharges_and_names_its_door() {
-        use crate::prelude::{DType, Graph};
+        use luminal::prelude::{DType, Graph};
         let mut cx = Graph::default();
         cx.set_dim('s', 5);
         let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
         let out = x.unfold((3usize,), (1usize,), (1usize,)).sum(1).output();
-        let rt = crate::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[(x.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0].into())],
         );
@@ -3668,16 +3373,16 @@ mod subst_guard_study {
         cx.set_dim('s', 2);
         let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
         let _ = x.unfold((3usize,), (1usize,), (1usize,)).sum(1).output();
-        let mut rt = crate::reference::ReferenceRuntime::load(&cx).expect("records + loads");
+        let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("records + loads");
         let data: rustc_hash::FxHashMap<_, _> =
-            [(x.id, crate::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 2]))]
+            [(x.id, luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 2]))]
                 .into_iter()
                 .collect();
         rt.bind_dyn_range('s', 2, 2).expect("bind");
         let err = rt
             .search(
                 &data,
-                &crate::implementation_search::ImplementationSearchOptions::default(),
+                &luminal::implementation_search::ImplementationSearchOptions::default(),
             )
             .expect_err("kernel 3 cannot fit in extent 2");
         assert!(

@@ -40,6 +40,16 @@ rayon = "1.10"
 edition = "2024"
 
 [dev-dependencies]
+# Step B (ruling 2026-08-17): core is runtime-neutral; its own test
+# suites drive the reference runtime through this crate (a legal,
+# standard dev-cycle). The self-dependency gives those #[cfg(test)]
+# modules the DEP-WORLD `luminal::` name: a cyclic dev-dependency
+# compiles the library twice (once plain for luminal_reference, once
+# with cfg(test)), and the two builds' types do not unify — so tests
+# that touch luminal_reference must build their inputs via `luminal::`
+# (the same build luminal_reference links), never `crate::`.
+luminal_reference = { path = "crates/luminal_reference" }
+luminal = { path = "." }
 luminal_nn = { path = "crates/luminal_nn" }
 candle-core = "0.9.2"
 candle-nn = "0.9.2"
@@ -53,6 +63,7 @@ proptest = "1.9.0"
 # on the native ladder. They are not deleted; their sources stay put.
 members = [
     "crates/luminal_cuda_lite",
+    "crates/luminal_reference",
     "crates/luminal_nn",
     "crates/luminal_tracing",
     # First re-seated example (conversion directive 2026-08-10): pure

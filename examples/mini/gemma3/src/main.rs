@@ -8,7 +8,7 @@
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use luminal::reference::ReferenceRuntime;
+use luminal_reference::ReferenceRuntime;
 use luminal_nn::{rope_pairing_matrix, rope_tables_split_half};
 use mini_gemma3::MiniGemma3;
 

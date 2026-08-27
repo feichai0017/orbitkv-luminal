@@ -70,7 +70,7 @@ mod tests {
         let out = build(x).output();
         let mut data = rustc_hash::FxHashMap::default();
         data.insert(x.id, input.clone().into());
-        let mut rt = luminal::reference::ReferenceRuntime::load(&cx).expect("native load");
+        let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("native load");
         rt.search(
             &data,
             &luminal::implementation_search::ImplementationSearchOptions::default(),

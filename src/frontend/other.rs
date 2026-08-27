@@ -153,7 +153,8 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    use crate::{prelude::*, tests::assert_close};
+    use luminal::prelude::*;
+    use crate::tests::assert_close;
     use candle_core::{Device, Tensor};
     use proptest::prelude::*;
 
@@ -164,7 +165,7 @@ mod tests {
         let mut cx = Graph::new();
         let b = func(&mut cx).output();
 
-        let rt = crate::test_support::run_reference(&cx, &[]);
+        let rt = luminal_reference::harness::run_reference(&cx, &[]);
 
         // Reference
         let device = Device::Cpu;
@@ -234,7 +235,7 @@ mod tests {
         let a_data = random_vec(6);
         let b_data = random_vec(6);
         let c_data = random_vec(6);
-        let rt = crate::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (a.id, a_data.clone().into()),
