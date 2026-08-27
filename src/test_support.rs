@@ -3433,3 +3433,493 @@ mod subst_guard_study {
     }
 
 }
+
+/// RING IGNITION BATTERY — the G2 fence's permanent regression suite
+/// (Austin ruling 2026-08-27: "put the G2 patch in, and we can add the
+/// battery as a regression suite").
+///
+/// THE RING: the core preamble's Int arithmetic rewrite family —
+/// commutativity, the G2/certificate-guarded associativity and
+/// distributivity, literal folds, and the bounds lattice whose [n,n]
+/// pin-collapse rule folds point-bound classes to literals.
+///
+/// THE IGNITION PREDICATE (P1–P4), from the Ring Ignition analysis
+/// (raw-spelling repro clone + battery logs, 2026-08-27). A spelling
+/// ignites the ring when ALL FOUR hold:
+///   P1  a NESTED sum/product spelling is present RAW in the egraph
+///       (e.g. (s-3)+1 as IntAdd(IntAdd(s, IntMul(-1,3)), 1)) — not
+///       pre-folded by the frontend;
+///   P2  the inner node's leaves are point-bound ([n,n] seeds), so the
+///       pin-collapse rule folds the inner class to a literal;
+///   P3  the pinned literal's value COLLIDES with another resident
+///       atom's class (a leaf var's pin, a literal operand, or the
+///       root's own fold — the value-coincidence D group);
+///   P4  an associativity/distributivity rule can regroup THROUGH the
+///       collided constant class — each regroup feeds the fold, the
+///       fold re-pins, the pin re-collides: the orbit that minted fresh
+///       literal atoms every round (pre-fence: 300k–4.4M tuples by
+///       r11–r15, battery.log).
+/// The G2 fence starves P4: three premises ((= ?x_lower
+/// (lower-bound-of ?x)) (= ?x_upper (upper-bound-of ?x)) (< ?x_lower
+/// ?x_upper)) on Assoc-IntAdd, Assoc-IntMul, and Distributivity-expand
+/// refuse point-bound matched inner classes — a known constant is owned
+/// by the fold/pin machinery, and associativity is equivalence
+/// discovery for UNKNOWNS.
+///
+/// EVERY test is HARD-BOUNDED: a round cap, a tuple ceiling checked
+/// after every single round, and a per-round wall-clock bail. If the
+/// fence is ever weakened, the igniter configs cross their tuple
+/// ceilings within ~12 rounds and the tests FAIL LOUDLY (never hang).
+/// That is this suite's whole purpose.
+///
+/// RAW SPELLINGS BY HAND: this tree's frontend simplify folds
+/// recorder-built extents ((s-3)+1 arrives as s-2), so recorder-built
+/// fixtures would exercise the SHIELD (the fold), not the RING. Every
+/// fixture below injects hand-authored egglog text; `drive` asserts the
+/// injected spelling reaches the program verbatim.
+#[cfg(test)]
+mod ring_ignition_battery {
+    /// All function-table sizes (`(print-size)`), both engine print
+    /// formats parsed.
+    fn table_sizes(egraph: &mut egglog::EGraph) -> std::collections::BTreeMap<String, isize> {
+        let out = egraph
+            .parse_and_run_program(None, "(print-size)")
+            .expect("sizes");
+        let mut map = std::collections::BTreeMap::new();
+        for chunk in &out {
+            let text = chunk.to_string();
+            for fragment in text.split('(') {
+                let fragment = fragment.trim().trim_end_matches(')');
+                if let Some((n, c)) = fragment.rsplit_once(' ') {
+                    if let Ok(c) = c.trim().parse::<isize>() {
+                        map.insert(n.trim().to_string(), c);
+                    }
+                }
+            }
+            for line in text.lines() {
+                if let Some((n, c)) = line.rsplit_once(": ") {
+                    if let Ok(c) = c.trim().parse::<isize>() {
+                        map.insert(n.trim().to_string(), c);
+                    }
+                }
+            }
+        }
+        map
+    }
+
+
+    const RING_ONLY: &str = "(run 1)";
+    const RING_AND_SUBST: &str = "(run 1) (run subst-walk 1)";
+
+    /// Hard per-round wall-clock bail: a healthy round on this suite is
+    /// milliseconds; one slow round means the ring is burning.
+    const ROUND_WALL_SECS: u64 = 30;
+
+    enum Verdict {
+        /// Delta hit zero (after round 3) under the ceiling.
+        Quiesce { rounds: usize, tuples: isize },
+        /// Round cap reached without quiescing — still under the
+        /// ceiling (legal only for pinned residual growers).
+        NoQuiesce { tuples: isize, last_delta: isize },
+    }
+
+    /// Bounded round driver. PANICS (loudly, boundedly) if the tuple
+    /// ceiling is crossed or a round exceeds the wall clock — those are
+    /// the ignition signatures. Never hangs: at most `max_rounds`
+    /// rounds, each individually walled.
+    fn drive(
+        label: &str,
+        body: &str,
+        schedule: &str,
+        max_rounds: usize,
+        tuple_ceiling: isize,
+    ) -> Verdict {
+        let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
+        // Raw-spelling verification: the hand-authored fixture text must
+        // reach the egraph verbatim (nothing folded it en route).
+        for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            assert!(
+                full.contains(line),
+                "[{label}] fixture line did not reach the program raw: {line}"
+            );
+        }
+        let mut egraph = luminal::egglog_snippet::new_egraph();
+        egraph
+            .parse_and_run_program(None, &full)
+            .unwrap_or_else(|e| panic!("[{label}] body loads: {e}"));
+        let trace = std::env::var_os("G2_BATTERY_TRACE").is_some();
+        let mut prev_sizes = table_sizes(&mut egraph);
+        let mut prev: isize = prev_sizes.values().sum();
+        let mut last_delta = 0isize;
+        for round in 1..=max_rounds {
+            let start = std::time::Instant::now();
+            egraph
+                .parse_and_run_program(None, schedule)
+                .unwrap_or_else(|e| panic!("[{label}] round {round}: {e}"));
+            let sizes = table_sizes(&mut egraph);
+            let total: isize = sizes.values().sum();
+            last_delta = total - prev;
+            if trace {
+                let deltas: Vec<String> = sizes
+                    .iter()
+                    .filter_map(|(n, &c)| {
+                        let d = c - prev_sizes.get(n).copied().unwrap_or(0);
+                        (d != 0).then(|| format!("{n} {d:+}"))
+                    })
+                    .collect();
+                eprintln!(
+                    "[g2-trace:{label}] r{round}: total {total} ({last_delta:+}) | {}",
+                    deltas.join(", ")
+                );
+            }
+            prev_sizes = sizes;
+            assert!(
+                total <= tuple_ceiling,
+                "[{label}] RING IGNITION: {total} tuples > ceiling {tuple_ceiling} at round \
+                 {round} (last delta {last_delta:+}) — the G2 fence (egglog_preamble.egg, \
+                 Assoc-IntAdd / Assoc-IntMul / Distributivity-expand) has been weakened, or a \
+                 new rule feeds the pin-collapse orbit"
+            );
+            assert!(
+                start.elapsed().as_secs() <= ROUND_WALL_SECS,
+                "[{label}] RING IGNITION (slow round): round {round} took \
+                 {:.1}s at {total} tuples — bailing before the hang",
+                start.elapsed().as_secs_f64()
+            );
+            if last_delta == 0 && round > 3 {
+                return Verdict::Quiesce {
+                    rounds: round,
+                    tuples: total,
+                };
+            }
+            prev = total;
+        }
+        Verdict::NoQuiesce {
+            tuples: prev,
+            last_delta,
+        }
+    }
+
+    /// Assert a fixture quiesces within the round cap at or under the
+    /// pinned fixed-point ceiling.
+    fn assert_quiesce(
+        label: &str,
+        body: &str,
+        schedule: &str,
+        max_rounds: usize,
+        tuple_ceiling: isize,
+    ) {
+        match drive(label, body, schedule, max_rounds, tuple_ceiling) {
+            Verdict::Quiesce { rounds, tuples } => {
+                eprintln!("[g2-battery:{label}] QUIESCE r{rounds}, {tuples} tuples");
+            }
+            Verdict::NoQuiesce { tuples, last_delta } => panic!(
+                "[{label}] did not quiesce in {max_rounds} rounds ({tuples} tuples, last \
+                 delta {last_delta:+}) — a quiescing config regressed; suspect the G2 fence \
+                 or a new ring rule"
+            ),
+        }
+    }
+
+    const S5: &str = "(set (lower-bound-of (IntVar \"s\")) (bigint 5))\n(set (upper-bound-of (IntVar \"s\")) (bigint 5))\n";
+    const T2: &str = "(set (lower-bound-of (IntVar \"t\")) (bigint 2))\n(set (upper-bound-of (IntVar \"t\")) (bigint 2))\n";
+
+    fn seeds(pairs: &[(&str, i64, i64)]) -> String {
+        pairs
+            .iter()
+            .map(|(v, lo, hi)| {
+                format!(
+                    "(set (lower-bound-of (IntVar \"{v}\")) (bigint {lo}))\n(set (upper-bound-of (IntVar \"{v}\")) (bigint {hi}))\n"
+                )
+            })
+            .collect()
+    }
+
+    fn e(expr: &str, seeds: &str) -> String {
+        format!("(let e_root {expr})\n{seeds}")
+    }
+
+    /// Fixed-point ceiling for the bare-spelling configs: clone
+    /// measurements post-fence were 69–203 tuples; main measures in the
+    /// same band. Slack is deliberately wide — the pre-fence igniters
+    /// cross 300k, so anything under this ceiling is unambiguous.
+    const BARE_QUIESCE_CEILING: isize = 2_000;
+    const BARE_MAX_ROUNDS: usize = 20;
+
+    fn assert_group(entries: &[(&str, String)]) {
+        for (label, body) in entries {
+            assert_quiesce(label, body, RING_ONLY, BARE_MAX_ROUNDS, BARE_QUIESCE_CEILING);
+        }
+    }
+
+    /// Group A: controls + the original raw window-count spellings.
+    /// A3 is THE flagship igniter — (s-3)+1 with s pinned [5,5] ignited
+    /// pre-fence at r14 with 2.6M tuples (battery.log 2026-08-27).
+    #[test]
+    fn group_a_controls_and_flagship_igniter_quiesce() {
+        assert_group(&[
+            ("A1_add_st", e(r#"(IntAdd (IntVar "s") (IntVar "t"))"#, &format!("{S5}{T2}"))),
+            ("A2_sub_s3", e(r#"(IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3)))"#, S5)),
+            ("A3_sub_s3_p1_flagship", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, S5)),
+            ("A4_add_st_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntVar "t")) (IntLit 1))"#, &format!("{S5}{T2}"))),
+            ("A5_sub_st", e(r#"(IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t")))"#, &format!("{S5}{T2}"))),
+            ("A6_sub_st_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#, &format!("{S5}{T2}"))),
+            ("A7_mul_s2_p1", e(r#"(IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntLit 1))"#, S5)),
+            ("A8_mul_s2_pt", e(r#"(IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntVar "t"))"#, &format!("{S5}{T2}"))),
+            ("A9_div_s2_p1", e(r#"(IntAdd (IntTruncDiv (IntVar "s") (IntLit 2)) (IntLit 1))"#, S5)),
+            ("A10_win_full", e(r#"(IntAdd (IntTruncDiv (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 2)) (IntLit 1))"#, S5)),
+        ]);
+    }
+
+    /// Group B: predicate discriminators (which shapes carry P1–P4).
+    /// Pre-fence igniters here: B3, B4, B6, B8. B5 is pinned separately
+    /// below as the known residual grower.
+    #[test]
+    fn group_b_predicate_discriminators_quiesce() {
+        assert_group(&[
+            ("B1_add_s3_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 3)) (IntLit 1))"#, S5)),
+            ("B2_sublit_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit -3)) (IntLit 1))"#, S5)),
+            ("B3_sub_s3_pt", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntVar "t"))"#, &format!("{S5}{T2}"))),
+            ("B4_deep", e(r#"(IntAdd (IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1)) (IntLit 1))"#, S5)),
+            ("B6_lit_first", e(r#"(IntAdd (IntAdd (IntLit 3) (IntMul (IntLit -1) (IntVar "s"))) (IntLit 1))"#, S5)),
+            ("B7_mulvar_p1", e(r#"(IntAdd (IntMul (IntVar "s") (IntVar "t")) (IntLit 1))"#, &format!("{S5}{T2}"))),
+            ("B8_sub_s1_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 1))) (IntLit 1))"#, S5)),
+            ("B9_pad_out", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 1)) (IntLit 1))"#, S5)),
+            ("B10_two_prods", e(r#"(IntAdd (IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, S5)),
+            ("B11_prodpair", e(r#"(IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3)))"#, S5)),
+            ("B12_prodpair_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3))) (IntLit 1))"#, S5)),
+        ]);
+    }
+
+    /// B5 (s-(t-3))+1: in the analysis clone this was the one RESIDUAL
+    /// GROWER post-fence (NOQ30, 37k tuples — a literal div-fold /
+    /// backward-distributivity family). ON MAIN IT QUIESCES (r7, 120
+    /// tuples, measured 2026-08-27) — main's tree closes the family the
+    /// clone left open. Pinned as quiescing; pre-fence this config
+    /// IGNITED at r11 with 474k tuples, so the ceiling discriminates
+    /// the fence hard either way.
+    #[test]
+    fn group_b5_clone_residual_grower_quiesces_on_main() {
+        let body = e(
+            r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntAdd (IntVar "t") (IntMul (IntLit -1) (IntLit 3))))) (IntLit 1))"#,
+            &format!("{S5}{T2}"),
+        );
+        assert_quiesce("B5_sub_nest_t", &body, RING_ONLY, BARE_MAX_ROUNDS, BARE_QUIESCE_CEILING);
+    }
+
+    /// Group C: bounds variants of the flagship igniter — wide ranges
+    /// and zero-crossing ranges must not ignite (P2 fails: no pin).
+    #[test]
+    fn group_c_bounds_variants_quiesce() {
+        assert_group(&[
+            ("C1_ign_wide", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 4, 100)]))),
+            ("C2_ign_zerox", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 1, 100)]))),
+            ("C3_ign_zerox0", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 0, 10)]))),
+            ("C4_ign_nobounds", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, "")),
+        ]);
+    }
+
+    /// Groups D/E: value-coincidence discriminators (same spellings,
+    /// different point bindings — P3 probes) + the symbolic-kernel
+    /// unfold window-count spellings.
+    #[test]
+    fn group_d_e_value_coincidence_and_symbolic_window_quiesce() {
+        let sub_s3_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#;
+        let sub_st_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#;
+        let lit_first = r#"(IntAdd (IntAdd (IntLit 3) (IntMul (IntLit -1) (IntVar "s"))) (IntLit 1))"#;
+        let sub_s1_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 1))) (IntLit 1))"#;
+        let sub_s3_p3 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 3))"#;
+        let sub_s2_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 2))) (IntLit 1))"#;
+        let dividend = r#"(IntAdd (IntVar "d") (IntMul (IntLit -1) (IntAdd (IntMul (IntVar "l") (IntAdd (IntVar "k") (IntMul (IntLit -1) (IntLit 1)))) (IntLit 1))))"#;
+        let win_sym = format!(r#"(IntAdd (IntTruncDiv {dividend} (IntLit 2)) (IntLit 1))"#);
+        assert_group(&[
+            ("D1_s6", e(sub_s3_p1, &seeds(&[("s", 6, 6)]))),
+            ("D2_s4", e(sub_s3_p1, &seeds(&[("s", 4, 4)]))),
+            ("D3_s8", e(sub_s3_p1, &seeds(&[("s", 8, 8)]))),
+            ("D4_s7t3", e(sub_st_p1, &seeds(&[("s", 7, 7), ("t", 3, 3)]))),
+            ("D5_s5t4", e(sub_st_p1, &seeds(&[("s", 5, 5), ("t", 4, 4)]))),
+            ("D6_s3t2", e(sub_st_p1, &seeds(&[("s", 3, 3), ("t", 2, 2)]))),
+            ("D7_B6_s6", e(lit_first, &seeds(&[("s", 6, 6)]))),
+            ("D8_B8_s7", e(sub_s1_p1, &seeds(&[("s", 7, 7)]))),
+            ("D9_s5", e(sub_s3_p3, &seeds(&[("s", 5, 5)]))),
+            ("D10_s9", e(sub_s2_p1, &seeds(&[("s", 9, 9)]))),
+            ("E1_dividend", e(dividend, &seeds(&[("d", 16, 16), ("k", 3, 3), ("l", 2, 2)]))),
+            ("E2_win_sym", e(&win_sym, &seeds(&[("d", 16, 16), ("k", 3, 3), ("l", 2, 2)]))),
+            ("E3_win_sym", e(&win_sym, &seeds(&[("d", 17, 17), ("k", 4, 4), ("l", 1, 1)]))),
+        ]);
+    }
+
+    /// Group F: predicate boundary predictions, constructed before the
+    /// fence landed to falsify the collision predicate (P3 probes with
+    /// tail-sum/leaf/operand collisions).
+    #[test]
+    fn group_f_predicate_boundaries_quiesce() {
+        assert_group(&[
+            ("F1_tail_hits_var", e(r#"(IntAdd (IntAdd (IntVar "s") (IntVar "t")) (IntLit 1))"#, &seeds(&[("s", 5, 5), ("t", 4, 4)]))),
+            ("F2_tail_hits_op", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 2, 2)]))),
+            ("F3_diag_no_prod", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 1, 1)]))),
+            ("F4_no_coll", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 6, 6)]))),
+            ("F5_var_is_leaf", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 2, 2)]))),
+        ]);
+    }
+
+
+    /// Group M: nested-PRODUCT shapes against the Assoc-IntMul fence
+    /// premise. Probed 2026-08-27 with that premise ABLATED: none of
+    /// these ignite — no known product detonator exists (the premise is
+    /// prophylactic symmetry with the add fence; products lack the
+    /// like-term/tail-sum collision fuel). Kept as coverage so any
+    /// future ring rule that makes products detonable is caught here;
+    /// the premise itself is pinned textually by
+    /// `g2_fence_text_is_intact` below.
+    #[test]
+    fn group_m_nested_products_quiesce() {
+        assert_group(&[
+            ("M1_s5_x3_x2", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 3)) (IntLit 2))"#, S5)),
+            ("M2_s3_x2_x3", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 3, 3)]))),
+            ("M3_st_x2", e(r#"(IntMul (IntMul (IntVar "s") (IntVar "t")) (IntLit 2))"#, &seeds(&[("s", 3, 3), ("t", 2, 2)]))),
+            ("M4_s2_x2_x2", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 2))"#, &seeds(&[("s", 2, 2)]))),
+            ("M5_s7_x2_x3_nocoll", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 7, 7)]))),
+            ("M6_deep_mul", e(r#"(IntMul (IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3)) (IntLit 2))"#, &seeds(&[("s", 2, 2)]))),
+            ("M7_mul_of_sub", e(r#"(IntMul (IntMul (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 2)) (IntLit 3))"#, S5)),
+            ("M8_mixed_addroot", e(r#"(IntAdd (IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3)) (IntLit 1))"#, &seeds(&[("s", 3, 3)]))),
+            ("M9_win_times", e(r#"(IntMul (IntMul (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 3)) (IntLit 2))"#, S5)),
+        ]);
+    }
+
+    /// THE FENCE TEXT TRIPWIRE (repo precedent: subst_guard_study's
+    /// guard anchors). The Assoc-IntMul G2 premise has no known
+    /// behavioral detonator, so behavior tests alone cannot catch its
+    /// removal — the fence is ALSO pinned textually: each of the three
+    /// guarded rules must appear verbatim in the assembled program, and
+    /// each rule action exactly once (no unguarded twin beside a
+    /// guarded original).
+    #[test]
+    fn g2_fence_text_is_intact() {
+        const ASSOC_INTADD: &str = "(rule\n  (\n    (= ?expr (IntAdd ?inner ?outer))\n    (= ?inner (IntAdd ?lhs ?rhs))\n    (provably-cannot-union-with-zero ?inner)\n    (= ?inner_lower (lower-bound-of ?inner))\n    (= ?inner_upper (upper-bound-of ?inner))\n    (< ?inner_lower ?inner_upper)\n  )\n  ((union ?expr (IntAdd ?lhs (IntAdd ?rhs ?outer))))\n)";
+        const ASSOC_INTMUL: &str = "(rule\n  (\n    (= ?expr (IntMul ?inner ?outer))\n    (= ?inner (IntMul ?lhs ?rhs))\n    (provably-cannot-union-with-zero ?inner)\n    (= ?inner_lower (lower-bound-of ?inner))\n    (= ?inner_upper (upper-bound-of ?inner))\n    (< ?inner_lower ?inner_upper)\n  )\n  ((union ?expr (IntMul ?lhs (IntMul ?rhs ?outer))))\n)";
+        const DIST_EXPAND: &str = "(rule\n  (\n    (= ?expr (IntMul ?summands ?factor))\n    (= ?summands (IntAdd ?lhs ?rhs))\n    (provably-cannot-union-with-zero ?expr)\n    (provably-cannot-union-with-zero ?lhs)\n    (provably-cannot-union-with-zero ?rhs)\n    (provably-cannot-union-with-zero ?factor)\n    (= ?summands_lower (lower-bound-of ?summands))\n    (= ?summands_upper (upper-bound-of ?summands))\n    (< ?summands_lower ?summands_upper)\n  )\n  ((union ?expr (IntAdd (IntMul ?lhs ?factor) (IntMul ?rhs ?factor))))\n)";
+        let program = luminal_reference::assembled_program();
+        for (name, rule, action) in [
+            ("Assoc-IntAdd", ASSOC_INTADD, "((union ?expr (IntAdd ?lhs (IntAdd ?rhs ?outer))))"),
+            ("Assoc-IntMul", ASSOC_INTMUL, "((union ?expr (IntMul ?lhs (IntMul ?rhs ?outer))))"),
+            ("Distributivity-expand", DIST_EXPAND, "((union ?expr (IntAdd (IntMul ?lhs ?factor) (IntMul ?rhs ?factor))))"),
+        ] {
+            assert!(
+                program.contains(rule),
+                "G2 fence drifted: the guarded {name} rule text is not in the preamble \
+                 (egglog_preamble.egg — if the change is intentional, re-prove with this \
+                 battery and re-pin)"
+            );
+            assert_eq!(
+                program.matches(action).count(),
+                1,
+                "G2 fence bypassed: {name}'s action appears more than once — an unguarded \
+                 twin rule beside the guarded original"
+            );
+        }
+    }
+
+    /// Group G: mixed static/dynamic bounds — wide var with a pinned
+    /// literal tail (the shipping symbolic-dim shape).
+    #[test]
+    fn group_g_mixed_bounds_quiesce() {
+        assert_group(&[
+            ("G1_wide_s_lit2", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 2))) (IntLit 1))"#, &seeds(&[("s", 4, 100)]))),
+            ("G2_wide_s_pt_t", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#, &seeds(&[("s", 4, 100), ("t", 2, 2)]))),
+            ("G3_wide_s_lit3", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 4, 100)]))),
+        ]);
+    }
+
+    /// USER-DIM END-TO-END: the raw (s-t)+1 dim spelling inside real
+    /// shape/layout context (LogicalTensorInputLit + right-major
+    /// layout), hand-authored to mirror the clone recorder's output
+    /// byte-for-byte at the extent (this tree's frontend would fold it —
+    /// the shield the battery must bypass). Pre-fence this IGNITED at
+    /// r15 with 683k tuples (exposure.log).
+    #[test]
+    fn user_dim_raw_spelling_in_layout_context_quiesces() {
+        let body = "\
+(let g2ud_shape (ShapeLit (IntExprCons (IntAdd (IntAdd (IntVar \"s\") (IntMul (IntLit -1) (IntVar \"t\"))) (IntLit 1)) (IntExprNil))))
+(let g2ud_x (LogicalTensorInputLit (LogicalIdLit \"g2ud_x\") g2ud_shape (F32)))
+(let g2ud_layout (RightMajorContiguousElementLayoutLit g2ud_shape (bits-of (F32))))
+(set (lower-bound-of (IntVar \"s\")) (bigint 5))
+(set (upper-bound-of (IntVar \"s\")) (bigint 5))
+(set (lower-bound-of (IntVar \"t\")) (bigint 2))
+(set (upper-bound-of (IntVar \"t\")) (bigint 2))
+";
+        assert_quiesce("user_dim_raw", body, RING_AND_SUBST, 40, 5_000);
+    }
+
+    /// SUBST-COMPOSITION (coord entry): the walk substitutes a
+    /// crop/flip-style negative-offset map entry into a flat outer
+    /// IntAdd, minting the nested spelling AT SATURATION — rewrites can
+    /// build the igniter from flat parts, so the fence must hold on
+    /// rule-minted (not just seeded) spellings.
+    #[test]
+    fn subst_composition_minted_nesting_quiesces() {
+        let body = r#"
+(let ext_e (IntVar "e"))
+(set (lower-bound-of ext_e) (bigint 5))
+(set (upper-bound-of ext_e) (bigint 5))
+(let src_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let out_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let c_src (CoordVar src_shape 0))
+(let c_out (CoordVar out_shape 0))
+(let entry (IntAdd (IntAdd ext_e (IntMul (IntLit -1) (IntLit 3))) c_out))
+(let map (IndexMapLit (IntExprCons entry (IntExprNil)) src_shape))
+(let outer_expr (IntAdd c_src (IntLit 1)))
+(int-subst-demand outer_expr map)
+"#;
+        assert_quiesce("subst_comp", body, RING_AND_SUBST, 25, 5_000);
+    }
+
+    /// SUBST-COMPOSITION (coord-free entry, pure dim offset e-3): the
+    /// walk mints IntAdd(IntAdd(e, -1*3), 1) — the A3 flagship — at
+    /// saturation.
+    #[test]
+    fn subst_composition_coordfree_mints_flagship_quiesces() {
+        let body = r#"
+(let ext_e (IntVar "e"))
+(set (lower-bound-of ext_e) (bigint 5))
+(set (upper-bound-of ext_e) (bigint 5))
+(let src_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let c_src (CoordVar src_shape 0))
+(let entry (IntAdd ext_e (IntMul (IntLit -1) (IntLit 3))))
+(let map (IndexMapLit (IntExprCons entry (IntExprNil)) src_shape))
+(let outer_expr (IntAdd c_src (IntLit 1)))
+(int-subst-demand outer_expr map)
+"#;
+        assert_quiesce("subst_comp_coordfree", body, RING_AND_SUBST, 25, 5_000);
+    }
+
+    /// THE ORIGINAL RAW-UNFOLD DRIVER: a real recorded unfold graph
+    /// (this tree's recorder folds the window count — verified below)
+    /// PLUS the raw window-count spelling injected beside it, so the
+    /// ring sees the raw atom inside full graph/subst-walk context.
+    #[test]
+    fn unfold_graph_with_raw_window_count_quiesces() {
+        use luminal::prelude::{DType, Graph};
+        let mut cx = Graph::new();
+        cx.set_dim('s', 5);
+        let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
+        let _out = x.unfold((3usize,), (1usize,), (1usize,)).sum(1).output();
+        let (pre, _inputs, _outputs, _post, _labeled) = cx
+            .logical
+            .bound_parts(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean");
+        let raw_window = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#;
+        // The shield check: this tree's frontend simplify must have
+        // folded the recorder's window count — if the raw nested
+        // spelling ever starts arriving from the recorder, the fixture
+        // double-covers and should be revisited.
+        eprintln!(
+            "[g2-battery:unfold] recorder emits raw spelling: {}",
+            pre.contains(raw_window)
+        );
+        let body = format!(
+            "{pre}\n(let g2_raw_window {raw_window})\n{S5}"
+        );
+        assert_quiesce("unfold_raw_window", &body, RING_AND_SUBST, 60, 10_000);
+    }
+}
