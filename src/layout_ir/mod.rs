@@ -514,6 +514,27 @@ pub struct LayoutInfo {
 /// plan's duration. `ReadWrite` = exclusive read/write (transient scribbling
 /// included). Preserving a value across the boundary is an *obligation* (an
 /// exit binding), never an access property.
+///
+/// THE TWO BOUNDARY CONTRACTS (M4 Phase 2, ruled by Austin 2026-08-27):
+///
+/// CONTRACT 1 — BUFFERLIT DISJOINTNESS. Distinct `BufferLit` e-classes
+/// warrant DISJOINT storage: each `BufferLit` names a unique,
+/// non-overlapping piece of memory. A caller binding two tensors that
+/// share underlying storage must bind them to the SAME `BufferLit`,
+/// distinguished by their layouts. Binding overlapping pointer ranges to
+/// distinct `BufferLit`s violates the plan's aliasing model — every
+/// certificate, anti-edge, and executor storage decision keys on
+/// `BufferId` equality — and real backends must assert pairwise
+/// non-overlap of bound pointer ranges at bind time and refuse loudly.
+///
+/// CONTRACT 2 — READWRITE EXCLUSIVITY. A buffer bound `ReadWrite` is the
+/// program's EXCLUSIVELY for the plan's duration: the caller must neither
+/// read nor write it mid-execution, and the program may consume it — a
+/// `ReadWrite` input whose value has no surviving later read is a legal
+/// in-place destination, including when reached through view chains, and
+/// its prior contents are then destroyed. Callers who want their bytes
+/// back unchanged bind `ReadOnly`; callers who want results delivered
+/// into their storage declare an output binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     ReadOnly,
