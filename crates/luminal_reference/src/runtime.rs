@@ -364,7 +364,19 @@ impl ReferenceRuntime {
         for index in order {
             match &plan.dag[index] {
                 BufferNode::BufferInput { .. } | BufferNode::BufferOutput { .. } => {}
-                BufferNode::BufferCopy { src, dst, .. } => {
+                BufferNode::BufferCopy { src, dst, access, .. } => {
+                    // Phase 5: a copy carrying composed access MATERIALIZES a
+                    // folded view — this executor is permanently
+                    // materialize-only (ruling aff22598), its own searches
+                    // never elect views, so a folded copy can only arrive via
+                    // an externally-loaded plan. Refuse loudly: byte-copying
+                    // it would silently drop the fold.
+                    ensure!(
+                        access.is_none(),
+                        "reference executor received a folded-view copy \
+                         ({src:?} -> {dst:?}) — this runtime is materialize-only \
+                         and has no strided-copy path"
+                    );
                     let data = storage
                         .get(src)
                         .ok_or_else(|| anyhow!("copy reads unknown buffer"))?

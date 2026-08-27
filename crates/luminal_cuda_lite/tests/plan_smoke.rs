@@ -7,13 +7,74 @@ use luminal::bufferize::BufferNode;
 use luminal::prelude::FxHashMap;
 use luminal_cuda_lite::{kernels, CudaRuntime};
 
+/// The claim-set pin, RESTATED for M4 Phase 5. The old pin ("every CUDA
+/// claim is in the reference inventory") assumed one claim class; the
+/// allow list now derives TWO, and only one of them can be pinned
+/// against the reference:
+///
+///  * KERNEL-BEARING claims (a codegen row exists) must stay a subset
+///    of the reference inventory — every op the device executes has a
+///    host reference to differential against.
+///  * PLAN-TRANSPARENT claims (declared effects prove the planner folds
+///    them; see `luminal_cuda_lite::plan_transparent`) are asserted
+///    separately and are deliberately NOT in the reference runtime's
+///    inventory: per ruling aff22598 the reference runtime is
+///    permanently materialize-only, so its allow list excludes the view
+///    op by design while CUDA-lite claims it. A subset pin over the
+///    whole claim set would therefore fail on exactly the op Phase 5
+///    exists to admit.
 #[test]
-fn allow_list_is_a_strict_subset_of_the_reference_inventory() {
-    let cuda = CudaRuntime::allow_list();
+fn kernel_bearing_claims_subset_reference_and_transparent_class_asserted() {
     let reference = luminal_reference::reference_allow_list();
+    let cuda = CudaRuntime::allow_list();
     assert!(!cuda.is_empty(), "CUDA claims nothing");
+
+    // Partition the claim set by the SAME derivations the allow list
+    // used: a codegen row for the constructor's label = kernel-bearing;
+    // prototype effects = plan-transparent. No name lists.
+    let kernel_labels: Vec<&'static str> =
+        kernels::cuda_kernels().iter().map(|k| k.label).collect();
+    let registry = luminal_cuda_lite::ops::cuda_registry();
+    let mut transparent_claims = 0usize;
     for op in &cuda {
-        assert!(reference.contains(op), "{op} not in the reference inventory");
+        let stripped = op.trim_start_matches("LayoutTensorOp");
+        let kernel_bearing = kernel_labels
+            .iter()
+            .any(|l| stripped == *l || stripped.trim_end_matches("Generic") == *l);
+        if kernel_bearing {
+            assert!(
+                reference.contains(op),
+                "kernel-bearing claim {op} not in the reference inventory"
+            );
+        } else {
+            // Claimable without a kernel ONLY through the transparent
+            // class: re-derive it from the registered prototype.
+            let entry = registry
+                .iter()
+                .find(|e| e.matcher.egglog_constructor() == *op)
+                .unwrap_or_else(|| panic!("claim {op} has no registered matcher"));
+            assert!(
+                luminal_cuda_lite::plan_transparent(entry.prototype.as_ref()),
+                "{op} has neither a codegen row nor plan-transparent effects"
+            );
+            transparent_claims += 1;
+        }
+    }
+    assert!(
+        transparent_claims > 0,
+        "Phase 5: the transparent class must be non-empty (the view op is electable)"
+    );
+    // And the transparent class is exactly what the reference refuses:
+    // none of its members are in the materialize-only reference inventory.
+    for entry in &registry {
+        if luminal_cuda_lite::plan_transparent(entry.prototype.as_ref()) {
+            assert!(
+                !reference.contains(&entry.matcher.egglog_constructor()),
+                "{} is plan-transparent yet the reference (materialize-only, \
+                 ruling aff22598) claims it — the pin's premise changed",
+                entry.matcher.egglog_constructor()
+            );
+        }
     }
     // CL-1b: the expression-carrying ops are claimed now.
     for present in ["Iota", "Gather", "ScatterFunctional", "IndexMapApplyMaterialize"] {

@@ -26,6 +26,7 @@
 //! alias-safety convention; `ties` and `Anti` edges are honored in the
 //! toposort order but no in-place claim is made.
 
+pub mod binding_check;
 pub mod bindings;
 pub mod kernels;
 pub mod ops;
@@ -37,9 +38,37 @@ pub mod device;
 pub use bindings::CudaBindings;
 pub use runtime::CudaRuntime;
 
-/// The op labels this runtime claims, derived from its codegen table —
-/// the CUDA analogue of `reference_allow_list()`: search may only
-/// elect ops the backend can actually execute.
+/// PLAN-TRANSPARENT (M4 Phase 5): claimable WITHOUT a kernel iff the
+/// op's DECLARED EFFECTS prove the planner folds it — no operand ever
+/// reads memory, no result ever writes memory, exactly one Must tie
+/// binding result 0 into operand 0's storage, and no DPS form (nothing
+/// is written, so there is no destination to pass). This is the
+/// allow-list face of the lowering fold in `luminal::bufferize` (the
+/// view-shaped predicate at lowering, plus the unfolded-view plan
+/// validator as the fence): an op these predicates admit never reaches
+/// the device as a kernel — it lowers to a producer redirect and its
+/// consumers read through the recorded composed access. Derived from
+/// trait answers on a prototype instance, NEVER from an op-name list.
+pub fn plan_transparent(op: &dyn luminal::layout_ir::LayoutIrOp) -> bool {
+    use luminal::layout_ir::{AliasInfo, Sharing};
+    let ties = op.alias_info();
+    ties == [AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
+        && !op.operand_reads_memory(0)
+        && !op.result_writes_memory(0)
+        && op.to_dps().is_none()
+}
+
+/// The op labels this runtime claims — the CUDA analogue of
+/// `reference_allow_list()`: search may only elect ops the backend can
+/// actually EXECUTE (a codegen row in the kernel table) or provably
+/// FOLD (the plan-transparent class above). Labels follow house policy:
+/// the egglog constructor minus the `LayoutTensorOp` prefix, nothing
+/// else added or stripped.
 pub fn cuda_allow_list() -> Vec<&'static str> {
-    kernels::cuda_kernels().iter().map(|k| k.label).collect()
+    CudaRuntime::allow_list()
+        .into_iter()
+        .map(|constructor| {
+            constructor.strip_prefix("LayoutTensorOp").unwrap_or(constructor)
+        })
+        .collect()
 }

@@ -1,10 +1,15 @@
-//! M4 Phase 3 zero-behavior pin: CUDA codegen strings are IDENTICAL
-//! whether `CodegenCtx` geometry comes from the shared buffer table
-//! (the pre-Phase-3 device path) or from the plan node's own
-//! `SlotDescriptor`s (the Phase-3 device path). No views are electable
-//! on real backends yet, so descriptors equal buffer-table dims today —
-//! this test pins that equality string-for-string on representative
-//! searched plans, host-side (no device needed).
+//! M4 Phase 3 pin, RESTATED at Phase 5: CUDA codegen strings are
+//! IDENTICAL whether `CodegenCtx` geometry comes from the shared buffer
+//! table (the pre-Phase-3 device path) or from the plan node's own
+//! `SlotDescriptor`s (the Phase-3 device path) — FOR NODES WITHOUT
+//! COMPOSED ACCESS. The Phase-3 wording ("no views are electable on
+//! real backends") was the zero-behavior premise; Phase 5 flips it
+//! deliberately: the view op is now claimed through the plan-transparent
+//! class, so view-consumer nodes carry composed access their descriptors
+//! know and the buffer table never can. On those nodes the descriptor
+//! route MUST diverge (it emits the Phase-4 strided read-through); the
+//! divergence itself is pinned below, and the strided string gates +
+//! `view_admission` own the read-through's content.
 //!
 //! Set `CODEGEN_DUMP_DIR` to also write every generated source to disk
 //! (used to diff before/after captures across the Phase-3 landing).
@@ -113,7 +118,10 @@ fn representative_plans() -> Vec<(&'static str, BufferIrGraph)> {
 }
 
 /// The Phase-3 device path: geometry from the node's own descriptors.
-fn sources_via_descriptors(plan: &BufferIrGraph) -> Vec<(String, String)> {
+/// The third tuple slot records whether the node read through a fold
+/// (any operand carrying composed access) — the Phase-5 restatement
+/// keys on it.
+fn sources_via_descriptors(plan: &BufferIrGraph) -> Vec<(String, String, bool)> {
     let mut out = Vec::new();
     for node in plan.dag.node_weights() {
         let BufferNode::Compute { op, reads, writes, operand_info, result_info, .. } = node
@@ -126,14 +134,12 @@ fn sources_via_descriptors(plan: &BufferIrGraph) -> Vec<(String, String)> {
         }
         assert_eq!(operand_info.len(), reads.len(), "{label}: operand descriptors parallel reads");
         assert_eq!(result_info.len(), writes.len(), "{label}: result descriptors parallel writes");
-        // Zero-behavior pin's premise, checked explicitly: no view is
-        // electable on this backend, so no slot carries composed access.
-        for slot in operand_info {
-            assert!(
-                slot.composed_access.is_none(),
-                "{label}: unexpected composed access on a real-backend plan"
-            );
-        }
+        // Phase 5: composed access is now LEGAL here — the view op is
+        // electable, folded views hand their consumers the access. The
+        // old zero-behavior assert (composed_access always None) died
+        // with the premise; the caller now pins where divergence from
+        // the buffer-table route is required vs forbidden.
+        let folded = operand_info.iter().any(|slot| slot.composed_access.is_some());
         let kernel = kernels::codegen_for(op.as_ref())
             .unwrap_or_else(|| panic!("elected op {label} has no codegen row"));
         let ctx = kernels::CodegenCtx::from_descriptors(&label, operand_info, result_info)
@@ -143,7 +149,7 @@ fn sources_via_descriptors(plan: &BufferIrGraph) -> Vec<(String, String)> {
             .into_iter()
             .enumerate()
         {
-            out.push((format!("{label}#{i}"), launch.source));
+            out.push((format!("{label}#{i}"), launch.source, folded));
         }
     }
     out
@@ -521,24 +527,69 @@ fn descriptor_ctx_bails_loudly_on_missing_numerics() {
     assert_eq!(ok.composed_access, vec![None]);
 }
 
+/// RE-PINNED ONCE at Phase 5 (view electability). Justification per
+/// flip:
+///  * NON-FOLDED nodes: the Phase-3 equality pin stands unchanged —
+///    descriptor-derived codegen is string-identical to the
+///    buffer-table replication.
+///  * FOLDED nodes (an operand carries composed access): equality is
+///    now IMPOSSIBLE BY DESIGN — the buffer table never knew the
+///    folded view's map, which is exactly the Phase-3 bug class the
+///    descriptors were built to fix. The pin flips to REQUIRED
+///    DIVERGENCE: the descriptor route must emit a different (strided
+///    read-through) source than the flat replication. The matmul
+///    fixture flips from all-equal to folded (its broadcast/permute
+///    movement now folds); elementwise and mul_sum stay all-equal.
 #[test]
 fn codegen_strings_via_descriptors_match_the_buffer_table() {
+    let mut folded_seen = 0usize;
     for (name, plan) in representative_plans() {
         let via_table = sources_via_buffer_table(&plan);
         let via_descriptors = sources_via_descriptors(&plan);
         assert!(!via_table.is_empty(), "{name}: no compute kernels generated");
         assert_eq!(
-            via_table, via_descriptors,
-            "{name}: descriptor-derived codegen must be string-identical to the buffer table"
+            via_table.len(),
+            via_descriptors.len(),
+            "{name}: both routes generate the same kernel sequence"
         );
+        for ((t_label, t_source), (d_label, d_source, folded)) in
+            via_table.iter().zip(&via_descriptors)
+        {
+            assert_eq!(t_label, d_label, "{name}: kernel order agrees between routes");
+            if *folded {
+                folded_seen += 1;
+                assert_ne!(
+                    t_source, d_source,
+                    "{name}/{d_label}: a folded operand must change the generated \
+                     read (the buffer table cannot know the composed access)"
+                );
+            } else {
+                assert_eq!(
+                    t_source, d_source,
+                    "{name}/{d_label}: descriptor-derived codegen must be \
+                     string-identical to the buffer table on non-folded nodes"
+                );
+            }
+        }
         if let Ok(dir) = std::env::var("CODEGEN_DUMP_DIR") {
             let dir = std::path::Path::new(&dir);
             std::fs::create_dir_all(dir).expect("dump dir");
-            for (i, (label, source)) in via_descriptors.iter().enumerate() {
+            for (i, (label, source, _)) in via_descriptors.iter().enumerate() {
                 let file = dir.join(format!("{name}_{i:02}_{}.cu", label.replace('#', "_")));
                 std::fs::write(file, source).expect("dump write");
             }
         }
-        println!("[{name}] {} kernels, string-identical via both paths", via_table.len());
+        let folded_here = via_descriptors.iter().filter(|(_, _, f)| *f).count();
+        println!(
+            "[{name}] {} kernels: {} identical via both paths, {} folded (divergence required)",
+            via_table.len(),
+            via_table.len() - folded_here,
+            folded_here
+        );
     }
+    assert!(
+        folded_seen > 0,
+        "Phase 5: at least one representative plan must fold a view \
+         (the matmul fixture's movement is foldable)"
+    );
 }

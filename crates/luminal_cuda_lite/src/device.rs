@@ -14,7 +14,9 @@
 //! output-role buffer back to host `TypedBuffer`s keyed by BufferLit.
 
 use anyhow::{anyhow, bail, Context, Result};
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, LaunchConfig, PushKernelArg};
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaModule, CudaSlice, DevicePtr, LaunchConfig, PushKernelArg,
+};
 use cudarc::nvrtc::compile_ptx;
 use luminal::buffer_tensor_ir::TypedBuffer;
 use luminal::bufferize::{BufferId, BufferIrGraph, BufferNode, EdgeKind};
@@ -173,6 +175,28 @@ pub fn execute_plan(
         geometry.insert(id.clone(), (dims, dtype));
     }
 
+    // CONTRACT-1 (bind-time): distinct BufferIds must be backed by
+    // disjoint device ranges — folded-view reads and WAR ordering are
+    // both keyed on BufferId identity. Fresh `alloc_zeros` per buffer
+    // makes this hold by construction today; the assert is the
+    // contract's enforcement face for when raw caller pointers arrive
+    // at this binding surface. Loud refusal, never mistranslation.
+    {
+        let bound: Vec<crate::binding_check::BoundRange> = storage
+            .iter()
+            .map(|(id, slice)| {
+                let (base, _sync) = slice.device_ptr(&stream);
+                crate::binding_check::BoundRange {
+                    buffer: format!("{id:?}"),
+                    base: base as u64,
+                    bytes: slice.len() as u64,
+                }
+            })
+            .collect();
+        crate::binding_check::assert_disjoint(&bound)
+            .context("CONTRACT-1 bind-time check")?;
+    }
+
     // Phase 2: toposort — Anti edges are ordinary edges here, so WAR
     // ordering is enforced by construction.
     let order = luminal::prelude::petgraph::algo::toposort(&plan.dag, None)
@@ -186,11 +210,47 @@ pub fn execute_plan(
     for node in order {
         match &plan.dag[node] {
             BufferNode::BufferInput { .. } | BufferNode::BufferOutput { .. } => {}
-            BufferNode::BufferCopy { src, dst, .. } => {
+            BufferNode::BufferCopy { src, dst, access, .. } => {
                 let (src_geo, src_dtype) =
                     geometry.get(src).ok_or_else(|| anyhow!("copy src unknown"))?.clone();
                 let (dst_geo, dst_dtype) =
                     geometry.get(dst).ok_or_else(|| anyhow!("copy dst unknown"))?.clone();
+                if let Some(access) = access {
+                    // Phase 5: the value resides in `src` through folded
+                    // views — MATERIALIZE it (strided read through the hop
+                    // chain), never byte-copy. Iteration domain = dst
+                    // geometry (the value's, per the dims join); dtype is
+                    // value-preserving by the copy contract.
+                    if src_dtype != dst_dtype {
+                        bail!(
+                            "folded copy dtype mismatch: {src_dtype:?} -> {dst_dtype:?}"
+                        );
+                    }
+                    let launches =
+                        crate::kernels::copy_through_fold(&dst_geo, dst_dtype, access)
+                            .context("folded-copy codegen")?;
+                    let src_slice = storage.get(src).unwrap().clone();
+                    let dest_bytes =
+                        dst_geo.iter().product::<usize>() * dtype_bytes(dst_dtype)?;
+                    let mut dest =
+                        stream.alloc_zeros::<u8>(dest_bytes.max(1)).context("dest alloc")?;
+                    for generated in &launches {
+                        let func = cache.function(&generated.source)?;
+                        let n = generated.n as u64;
+                        let cfg = LaunchConfig {
+                            grid_dim: (((generated.n as u32).max(1) + 255) / 256, 1, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        };
+                        let mut builder = stream.launch_builder(&func);
+                        builder.arg(&src_slice);
+                        builder.arg(&mut dest);
+                        builder.arg(&n);
+                        unsafe { builder.launch(cfg) }.context("launch folded copy")?;
+                    }
+                    storage.insert(dst.clone(), dest);
+                    continue;
+                }
                 if src_geo.iter().product::<usize>() != dst_geo.iter().product::<usize>()
                     || src_dtype != dst_dtype
                 {

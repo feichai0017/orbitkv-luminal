@@ -196,6 +196,29 @@ pub(crate) fn unary(ctx: &CodegenCtx, expr: &str) -> Result<Vec<KernelSource>> {
     strided_elementwise(ctx, expr, &["a"], &sig, to)
 }
 
+/// M4 Phase 5: the FOLDED-COPY lowering. A `BufferCopy` whose value
+/// resides in `src` through folded views is a materializing read, not a
+/// byte-move: `out[i] = src[chain(coords(i))]` over the VALUE's own
+/// extents (dst geometry, per the writer-identity dims join). Reuses
+/// the unary template — the copy is exactly `a[i]` with a composed
+/// operand — so index lowering and the per-axis bounds traps are the
+/// same code the compute kernels use.
+pub fn copy_through_fold(
+    value_dims: &[usize],
+    dtype: PlanDtype,
+    access: &ComposedAccess,
+) -> Result<Vec<KernelSource>> {
+    let ctx = CodegenCtx {
+        // Mirror the DPS slot shape (operand + dest) the templates expect.
+        operand_dims: vec![value_dims.to_vec(), value_dims.to_vec()],
+        operand_dtypes: vec![dtype, dtype],
+        dest_dims: vec![value_dims.to_vec()],
+        dest_dtypes: vec![dtype],
+        composed_access: vec![Some(access.clone()), None],
+    };
+    unary(&ctx, "a[i]")
+}
+
 /// The strided elementwise form (Phase 4): identical launch geometry to
 /// the flat template — one thread per OUT element — but every operand
 /// carrying a [`ComposedAccess`] is read at `name[f(out_coords)]`,

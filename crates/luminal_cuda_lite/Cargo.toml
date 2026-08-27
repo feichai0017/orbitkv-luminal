@@ -26,3 +26,7 @@ cudarc = { version = "0.19.8", optional = true, features = ["cuda-version-from-b
 # Step B: the reference inventory the subset test pins against now lives
 # in its own crate.
 luminal_reference = { path = "../luminal_reference" }
+# M4 Phase 5: the refusal-accounting ladder (the cycle-anatomy L1-L8
+# discipline) runs the nn llama-block graphs through THIS runtime's
+# search with views admitted.
+luminal_nn = { path = "../luminal_nn" }

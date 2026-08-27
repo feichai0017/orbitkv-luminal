@@ -260,6 +260,15 @@ pub enum BufferNode {
         /// value's geometry (never the src BUFFER's, which may be cohabited
         /// by values of other extents).
         value: ClassId,
+        /// How the transported value ADDRESSES `src` when it resides there
+        /// through folded views (M4 Phase 5): the same hop chain consumer
+        /// operand descriptors carry. `None` = the value is dense in `src`
+        /// and the copy is a byte-move; `Some` = the copy MATERIALIZES the
+        /// view (each dst element reads `src` through the chain evaluated
+        /// at its own coordinates — dst geometry is the value's, per the
+        /// dims join above). Executors without a strided-copy path must
+        /// refuse a `Some` loudly, never byte-copy it.
+        access: Option<ComposedAccess>,
     },
     /// A program output: each slot's value pinned into its destination buffer.
     BufferOutput { slots: Vec<OutputBinding> },
@@ -2170,6 +2179,10 @@ pub(crate) fn lower(
                         src: src.buffer.clone(),
                         dst: dst.buffer.clone(),
                         value: src.value.clone(),
+                        // A folded value's transport is a MATERIALIZING
+                        // copy: carry the fold so the executor reads
+                        // through it (Phase 5; None = plain byte-move).
+                        access: folded_access.get(&src.value).cloned(),
                     });
                     if let Some(&from) = producer.get(&residence(src)) {
                         dag.add_edge(
@@ -2256,6 +2269,10 @@ pub(crate) fn lower(
                             src: src_buffer.clone(),
                             dst: slot.buffer.clone(),
                             value: slot.value.clone(),
+                            // A delivery of a folded value materializes
+                            // the view into the caller's storage (Phase
+                            // 5; None = plain byte-move).
+                            access: folded_access.get(&slot.value).cloned(),
                         });
                         dag.add_edge(
                             from,
@@ -3040,7 +3057,12 @@ mod tests {
     fn validator_rejects_self_copy() {
         let d = vbuf("D");
         let mut dag = DiGraph::new();
-        dag.add_node(BufferNode::BufferCopy { src: d.clone(), dst: d.clone(), value: cid("v") });
+        dag.add_node(BufferNode::BufferCopy {
+            src: d.clone(),
+            dst: d.clone(),
+            value: cid("v"),
+            access: None,
+        });
         let err = validate_plan(&dag).unwrap_err();
         assert!(err.to_string().contains("self-copy"), "{err}");
     }

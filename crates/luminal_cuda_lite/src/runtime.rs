@@ -79,21 +79,30 @@ impl CudaRuntime {
     }
 
     /// The ops this runtime claims: the CUDA analogue of
-    /// `reference_allow_list()` — matcher constructors whose label has
-    /// a codegen row.
+    /// `reference_allow_list()` — two classes, both derived, never
+    /// name-listed (M4 Phase 5):
+    ///
+    ///  * KERNEL-BEARING: matcher constructors whose label has a
+    ///    codegen row — claimable because the device can execute them.
+    ///  * PLAN-TRANSPARENT: constructors whose registered PROTOTYPE's
+    ///    declared effects prove the planner folds them before any
+    ///    kernel is needed (see [`crate::plan_transparent`]) —
+    ///    claimable because nothing ever executes.
     pub fn allow_list() -> Vec<&'static str> {
         let labels: Vec<&'static str> =
             crate::kernels::cuda_kernels().iter().map(|k| k.label).collect();
-        crate::ops::cuda_matchers()
+        crate::ops::cuda_registry()
             .iter()
-            .map(|m| m.egglog_constructor())
-            .filter(|ctor| {
+            .filter(|entry| {
+                let ctor = entry.matcher.egglog_constructor();
                 let stripped = ctor.trim_start_matches("LayoutTensorOp");
-                labels.iter().any(|label| {
+                let kernel_bearing = labels.iter().any(|label| {
                     stripped == *label
                         || stripped.trim_end_matches("Generic") == *label
-                })
+                });
+                kernel_bearing || crate::plan_transparent(entry.prototype.as_ref())
             })
+            .map(|entry| entry.matcher.egglog_constructor())
             .collect()
     }
 

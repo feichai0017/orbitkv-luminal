@@ -17,6 +17,7 @@ pub mod exp;
 pub mod exp2;
 pub mod gather;
 pub mod index_map_apply_materialize;
+pub mod index_map_apply_view;
 pub mod iota;
 pub mod less_than;
 pub mod log2;
@@ -32,32 +33,72 @@ pub mod sqrt;
 pub mod trunc_div;
 pub mod trunc_rem;
 
-use luminal::layout_ir::OpMatcher;
+use luminal::layout_ir::{LayoutIrOp, OpMatcher};
 
-/// The matcher set this runtime assembles and extracts with.
-pub fn cuda_matchers() -> Vec<Box<dyn OpMatcher>> {
+/// One registered op: the matcher plus a PROTOTYPE instance of the op
+/// it extracts. The prototype exists so claim derivation can read the
+/// op's DECLARED EFFECTS (memory-effect predicates, alias contract,
+/// DPS story) without an e-graph in hand — the allow list's
+/// plan-transparent class is derived from these trait answers, never
+/// from a name list. Prototype metadata fields (entries, ranks, axes)
+/// take their cheapest value: the effect predicates of every op here
+/// are metadata-independent.
+pub struct RegisteredOp {
+    pub matcher: Box<dyn OpMatcher>,
+    pub prototype: Box<dyn LayoutIrOp>,
+}
+
+/// The registry this runtime assembles, extracts, and derives claims
+/// with: every matcher paired with a prototype of the (functional-form)
+/// op its `extract` produces.
+pub fn cuda_registry() -> Vec<RegisteredOp> {
+    fn reg(
+        matcher: impl OpMatcher + 'static,
+        prototype: impl LayoutIrOp + 'static,
+    ) -> RegisteredOp {
+        RegisteredOp { matcher: Box::new(matcher), prototype: Box::new(prototype) }
+    }
     vec![
-        Box::new(add::AddFunctionalMatcher),
-        Box::new(materialize_layout_copy::MaterializeLayoutCopyMatcher),
-        Box::new(sqrt::SqrtFunctionalMatcher),
-        Box::new(exp::ExpFunctionalMatcher),
-        Box::new(mul::MulFunctionalMatcher),
-        Box::new(div::DivFunctionalMatcher),
-        Box::new(trunc_div::TruncDivFunctionalMatcher),
-        Box::new(trunc_rem::TruncRemFunctionalMatcher),
-        Box::new(reduce_sum::ReduceSumMatcher),
-        Box::new(reduce_max::ReduceMaxMatcher),
-        Box::new(iota::IotaMatcher),
-        Box::new(gather::GatherMatcher),
-        Box::new(constant::ConstantMatcher),
-        Box::new(scatter::ScatterFunctionalMatcher),
-        Box::new(exp2::Exp2FunctionalMatcher),
-        Box::new(log2::Log2FunctionalMatcher),
-        Box::new(sin::SinFunctionalMatcher),
-        Box::new(recip::RecipFunctionalMatcher),
-        Box::new(modulo::ModFunctionalMatcher),
-        Box::new(less_than::LessThanMatcher),
-        Box::new(cast::CastMatcher),
-        Box::new(index_map_apply_materialize::IndexMapApplyMaterializeMatcher),
+        reg(add::AddFunctionalMatcher, add::AddFunctional),
+        reg(
+            materialize_layout_copy::MaterializeLayoutCopyMatcher,
+            materialize_layout_copy::MaterializeLayoutCopy,
+        ),
+        reg(sqrt::SqrtFunctionalMatcher, sqrt::SqrtFunctional),
+        reg(exp::ExpFunctionalMatcher, exp::ExpFunctional),
+        reg(mul::MulFunctionalMatcher, mul::MulFunctional),
+        reg(div::DivFunctionalMatcher, div::DivFunctional),
+        reg(trunc_div::TruncDivFunctionalMatcher, trunc_div::TruncDivFunctional),
+        reg(trunc_rem::TruncRemFunctionalMatcher, trunc_rem::TruncRemFunctional),
+        reg(reduce_sum::ReduceSumMatcher, reduce_sum::ReduceSum { axis: 0 }),
+        reg(reduce_max::ReduceMaxMatcher, reduce_max::ReduceMax { axis: 0 }),
+        reg(iota::IotaMatcher, iota::Iota { expr: None }),
+        reg(gather::GatherMatcher, gather::Gather { rank: 1 }),
+        reg(constant::ConstantMatcher, constant::Constant { value: 0.0 }),
+        reg(scatter::ScatterFunctionalMatcher, scatter::ScatterFunctional { rank: 1 }),
+        reg(exp2::Exp2FunctionalMatcher, exp2::Exp2Functional),
+        reg(log2::Log2FunctionalMatcher, log2::Log2Functional),
+        reg(sin::SinFunctionalMatcher, sin::SinFunctional),
+        reg(recip::RecipFunctionalMatcher, recip::RecipFunctional),
+        reg(modulo::ModFunctionalMatcher, modulo::ModFunctional),
+        reg(less_than::LessThanMatcher, less_than::LessThan),
+        reg(cast::CastMatcher, cast::Cast),
+        reg(
+            index_map_apply_materialize::IndexMapApplyMaterializeMatcher,
+            index_map_apply_materialize::IndexMapApplyMaterialize { entries: None },
+        ),
+        // M4 Phase 5: the view op is ELECTABLE on this runtime — no
+        // kernel, claimed through the plan-transparent class its
+        // declared effects prove (see `crate::plan_transparent`).
+        reg(
+            index_map_apply_view::IndexMapApplyViewMatcher,
+            index_map_apply_view::IndexMapApplyView { entries: None },
+        ),
     ]
+}
+
+/// The matcher set this runtime assembles and extracts with — the
+/// registry's matcher column.
+pub fn cuda_matchers() -> Vec<Box<dyn OpMatcher>> {
+    cuda_registry().into_iter().map(|entry| entry.matcher).collect()
 }
