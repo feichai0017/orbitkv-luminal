@@ -420,7 +420,7 @@ impl<T: 'static> AsAnyOp for T {
 }
 
 pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + AsAnyOp + Debug {
-    /// The op's IR name (see the label policy in [`crate::reference::ops`]).
+    /// The op's IR name (see the label policy in `luminal_reference::ops`).
     fn label(&self) -> &str;
 
     /// Is this operand's buffer read? (Inputs are read.)

@@ -9,7 +9,7 @@ use std::{
 use image::{ImageBuffer, ImageReader, Rgb, RgbImage};
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
-use luminal::reference::ReferenceRuntime;
+use luminal_reference::ReferenceRuntime;
 use yolo_v11::model::*;
 
 const ARTIFACT_DIR: &str = "examples/yolo_v11/artifacts";

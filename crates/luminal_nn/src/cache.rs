@@ -16,7 +16,7 @@ use luminal::prelude::anyhow;
 use luminal::prelude::Ns;
 use luminal::graph::Graph;
 use luminal::prelude::{GraphTensor, TypedBuffer};
-use luminal::reference::ReferenceRuntime;
+use luminal_reference::ReferenceRuntime;
 
 /// The slot-pool cache: one (slots, kv_dim) K/V input pair per layer.
 /// `kv_dim` is per-layer (gemma-4's sliding and full layers differ),

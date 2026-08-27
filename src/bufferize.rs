@@ -2313,25 +2313,9 @@ mod tests {
         assert_eq!(analysis.in_place.get(&(0, 0)), Some(&false));
     }
 
-    /// The built-in functional ops take the conservative out-of-place
-    /// defaults: no ties, results written into planner-allocated storage
-    /// (never op-internal allocations), and never undefined contents.
-    #[test]
-    fn builtin_ops_declare_out_of_place_defaults() {
-        use crate::reference::ops::{AddFunctional, IndexMapApplyMaterialize, ReduceSum, SqrtFunctional};
-        let ops: Vec<Box<dyn LayoutIrOp>> = vec![
-            Box::new(AddFunctional),
-            Box::new(SqrtFunctional),
-            Box::new(ReduceSum { axis: 0 }),
-            Box::new(IndexMapApplyMaterialize { entries: None }),
-        ];
-        for op in &ops {
-            assert!(op.alias_info().is_empty());
-            assert!(!op.result_is_allocated_internally(0));
-            assert!(op.result_writes_memory(0));
-            assert!(!op.result_is_undefined(0));
-        }
-    }
+    // (The registry-contract pins — built-in ops declare out-of-place
+    // defaults and no unconditional sharing permits — moved to
+    // `luminal_reference::ops` with the registry in Step B.)
 
     /// SOUNDNESS REGRESSION for the pinned-buffer pre-union: an op reads x and
     /// declares a write-only in-place destination d, where x and d cohabit
@@ -2763,45 +2747,6 @@ mod tests {
         let analysis = Analyzer::new(&ops, &facts).run().unwrap();
         assert_eq!(analysis.in_place.get(&(1, 0)), Some(&true), "output-nearer op wins");
         assert_eq!(analysis.in_place.get(&(0, 0)), Some(&false), "loser vetoed by commit");
-    }
-
-    /// RANK 9: NO built-in declares the unconditional sharing permit — ops
-    /// whose in-place safety depends on preconditions get matched with those
-    /// preconditions in egglog (the Mutating tier) instead of asserting a
-    /// blanket permit the engine would have to trust.
-    #[test]
-    fn builtin_ops_declare_no_unconditional_permits() {
-        use crate::test_support::test_ops::AddMulFused;
-        use crate::reference::ops::{AddFunctional, AddMutating, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax, ReduceSum, SqrtFunctional, SqrtMutating};
-        let ops: Vec<Box<dyn LayoutIrOp>> = vec![
-            Box::new(SqrtFunctional),
-            Box::new(ExpFunctional),
-            Box::new(AddFunctional),
-            Box::new(MulFunctional),
-            Box::new(DivFunctional),
-            Box::new(SqrtMutating),
-            Box::new(AddMutating),
-            Box::new(AddMulFused),
-            Box::new(MaterializeLayoutCopy),
-            Box::new(ReduceSum { axis: 0 }),
-            Box::new(ReduceMax { axis: 0 }),
-            Box::new(IndexMapApplyMaterialize { entries: None }),
-        ];
-        for op in &ops {
-            assert!(
-                op.alias_info().iter().all(|info| info.sharing == Sharing::Must),
-                "{}",
-                op.label()
-            );
-        }
-
-        // The ONE deliberate May declarer: its egglog match requires all
-        // layouts equal, discharging the permit's precondition at match time.
-        // rhs may share the mutated storage; the reverse direction (reading
-        // the mutated operand against... nothing ties operand 1) is no permit.
-        let alias_safe = crate::reference::ops::AddMutatingInputAliasSafe;
-        assert!(permits_sharing(&alias_safe, 1, 0));
-        assert!(!permits_sharing(&alias_safe, 0, 1));
     }
 
     // -------------------------------------------------------------------------

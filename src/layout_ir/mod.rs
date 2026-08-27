@@ -141,7 +141,9 @@ pub(crate) fn must_ties<O: Bufferizable + ?Sized>(op: &O) -> Vec<(usize, usize)>
 /// `write_operand` is must-tied to (the permit routes through the written
 /// result — the edge universe is operand→result). The other derived view of
 /// [`Bufferizable::alias_info`] (see [`must_ties`] for why it lives here).
-pub(crate) fn permits_sharing<O: Bufferizable + ?Sized>(
+/// Public so runtime registries can pin their declared contracts against
+/// the same reading (Step B).
+pub fn permits_sharing<O: Bufferizable + ?Sized>(
     op: &O,
     read_operand: usize,
     write_operand: usize,
@@ -422,11 +424,10 @@ pub trait OpMatcher: std::fmt::Debug {
 // The op INVENTORY does not live here (ruling 2026-08-06): layout_ir
 // defines the IR framework — the traits, extraction machinery, and plan
 // types — and stays distant from where ops are implemented. The
-// reference runtime's inventory is `crate::reference::ops`; a future
-// runtime crate brings its own. (Remaining crate-split coupling: the
-// extractor and egglog assembly still call
-// reference::ops::built_in_matchers directly — the plugin registry
-// parameter is the next seam.)
+// reference runtime's inventory is `luminal_reference::ops`; every
+// runtime crate brings its own. (Step B closed the crate-split coupling:
+// the extractor and egglog assembly take the matcher set as a
+// parameter.)
 
 /// The petgraph carrying the dataflow DAG.
 pub type ExtractedDag = DiGraph<ExtractedNode, ExtractedEdge>;

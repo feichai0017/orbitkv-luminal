@@ -55,6 +55,6 @@ fn mini_convnet_matches_scalar_reference() {
     let f2 = conv(&f1, &w2, C1, C2, 3); // (C2, 1, 1), relu applied
     let expected = ref_matmul(&f2, &wh, C2, CLASSES);
 
-    let rt = luminal::test_support::run_reference(&cx, &pairs);
+    let rt = luminal_reference::harness::run_reference(&cx, &pairs);
     assert_close(rt.get_f32(out.id).expect("logits"), &expected);
 }

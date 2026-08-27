@@ -1,0 +1,34 @@
+; Layout Tensor Op Gather Generic — variable arity: data first, then one
+; coordinate layout tensor per axis, one written output. The write gate is
+; the same as every writer's: the destination must be provably injective.
+(rule
+  (
+    (= ?out_logical (LogicalGather ?data_logical ?coordinate_list))
+    (= ?data_layout_tensor (LayoutTensorLit ?data_logical ?data_layout))
+    ; CANONICAL-ONLY: this slot must carry its logical's own right-major
+    ; contiguous layout. The kernels fabricate dense right-major strides
+    ; in Rust and never read a layout, so before this premise a left-major
+    ; operand was accepted and silently mis-indexed.
+    (= ?data_layout (RightMajorContiguousElementLayoutLit ?data_cshape ?data_cbits))
+    (= ?data_cshape (shape-of ?data_logical))
+    (= ?data_cbits (bits-of (dtype-of ?data_logical)))
+    (coordinate-layout-tensors ?coordinate_list ?coordinate_layout_tensors)
+    (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    ; CANONICAL-ONLY: this slot must carry its logical's own right-major
+    ; contiguous layout. The kernels fabricate dense right-major strides
+    ; in Rust and never read a layout, so before this premise a left-major
+    ; operand was accepted and silently mis-indexed.
+    (= ?out_layout (RightMajorContiguousElementLayoutLit ?out_cshape ?out_cbits))
+    (= ?out_cshape (shape-of ?out_logical))
+    (= ?out_cbits (bits-of (dtype-of ?out_logical)))
+    (= (injectivity-of ?out_layout_tensor) (Injective))
+  )
+  (
+    (let ?layout_tensor_op
+      (LayoutTensorOpLit
+        (LayoutTensorCons ?data_layout_tensor ?coordinate_layout_tensors)
+        (LayoutTensorCons ?out_layout_tensor (LayoutTensorNil))))
+    (union ?layout_tensor_op
+      (LayoutTensorOpGatherGeneric ?data_layout_tensor ?coordinate_layout_tensors ?out_layout))
+  )
+)

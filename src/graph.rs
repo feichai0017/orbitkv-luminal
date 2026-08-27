@@ -135,7 +135,7 @@ impl Graph {
 // Model/binding split (M3 Step 1): the recorder emits MODEL text only —
 // input declarations, ops, output naming, signature lists. Boundary
 // vocabulary (layouts, buffers, access, freed-by, Bool8 casts) is the
-// runtime binding generator's business (`reference_binding`), never the
+// runtime binding generator's business (`runtime_binding`), never the
 // model's.
 //
 // Coverage is honest: any construct the recorder does not understand
@@ -1429,12 +1429,16 @@ impl LogicalGraph {
         &self.post_checks
     }
 
-    /// The native assembly SPLIT at the schedule (binding seeds inject
+    /// The bound assembly SPLIT at the schedule (binding seeds inject
     /// before saturation): (pre-schedule text, input slots, output slots,
-    /// post-schedule checks).
+    /// post-schedule checks). The model text is runtime-neutral; every
+    /// boundary statement comes from the caller's
+    /// [`RuntimeBindingsGenerator`](crate::runtime_binding::RuntimeBindingsGenerator)
+    /// — each runtime hands in its own (Step C, 2026-08-17).
     #[allow(clippy::type_complexity)]
-    pub fn native_parts(
+    pub fn bound_parts(
         &self,
+        bindings: &dyn crate::runtime_binding::RuntimeBindingsGenerator,
     ) -> Result<
         (
             String,
@@ -1464,12 +1468,12 @@ impl LogicalGraph {
             } else {
                 format!("v{}", id.index())
             };
-            text.push_str(&crate::reference_binding::input_binding(
+            text.push_str(&bindings.input_binding(
                 &stem,
                 buffer as usize,
                 &value_name,
                 &shape,
-                &crate::reference_binding::width_term(value.dtype),
+                &bindings.width_term(value.dtype),
             ));
             input_buffer_tensors.push(format!("{stem}_buffer_tensor"));
             input_slots.push(InputSlot {
@@ -1489,7 +1493,7 @@ impl LogicalGraph {
             let stem = format!("natout{key}");
             let buffer = next_buffer;
             next_buffer += 1;
-            text.push_str(&crate::reference_binding::output_binding(
+            text.push_str(&bindings.output_binding(
                 &stem,
                 buffer as usize,
                 &format!("v{}", id.index()),
@@ -1503,7 +1507,7 @@ impl LogicalGraph {
                 size: key as u64,
             });
         }
-        text.push_str(&crate::reference_binding::boundary_lists(
+        text.push_str(&bindings.boundary_lists(
             &input_buffer_tensors,
             &output_buffer_tensors,
             "nat_input_boundary",
@@ -1518,11 +1522,14 @@ impl LogicalGraph {
         ))
     }
 
-    /// The assembled native program (model + reference-binding defaults).
-    pub fn native_program(&self) -> Result<LogicalProgram, String> {
-        let (pre, input_slots, output_slots, post_checks, _labeled) = self.native_parts()?;
+    /// The assembled program under the given runtime's bindings.
+    pub fn bound_program(
+        &self,
+        bindings: &dyn crate::runtime_binding::RuntimeBindingsGenerator,
+    ) -> Result<LogicalProgram, String> {
+        let (pre, input_slots, output_slots, post_checks, _labeled) = self.bound_parts(bindings)?;
         Ok(LogicalProgram {
-            text: format!("{pre}{}{post_checks}", crate::reference_binding::SCHEDULE),
+            text: format!("{pre}{}{post_checks}", bindings.schedule()),
             input_slots,
             output_slots,
         })
@@ -1560,7 +1567,8 @@ pub struct OutputSlot {
 #[derive(Debug, Clone)]
 pub struct LogicalProgram {
     /// Model + binding + schedule + authoring-contract checks. Run as
-    /// `format!("{}\n\n{}", egglog_snippet::assembled_program(), text)`.
+    /// `format!("{}\n\n{}", <the runtime's assembled program>, text)` —
+    /// e.g. `luminal_reference::assembled_program()`.
     pub text: String,
     /// Bound inputs in signature order.
     pub input_slots: Vec<InputSlot>,

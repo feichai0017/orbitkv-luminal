@@ -7,13 +7,33 @@ use luminal::bufferize::BufferNode;
 use luminal::prelude::FxHashMap;
 use luminal_cuda_lite::{kernels, CudaRuntime};
 
+/// Ops CUDA-lite claims that the reference deliberately does not.
+///
+/// The reference runtime went CANONICAL-LAYOUT-ONLY: every one of its match
+/// rules now pins each operand and result to its logical's own right-major
+/// contiguous layout. That made `CopyGeneric` structurally unmintable there
+/// — both of its slots bind the SAME logical, so pinning both makes them one
+/// e-class and its `(!= ?in ?out)` premise can never hold — and it was
+/// retired rather than left registered-but-unfireable.
+///
+/// CUDA-lite has not made that move and should not yet: CL-4 admits views,
+/// and a view that must exit to a non-composed slot needs exactly this
+/// layout-conversion copy. So the two inventories legitimately differ, and
+/// the old "cuda is a strict subset" claim is simply no longer the
+/// invariant. What still holds is that every divergence is deliberate.
+const DELIBERATE_DIVERGENCE: &[&str] = &["LayoutTensorOpCopyGeneric"];
+
 #[test]
-fn allow_list_is_a_strict_subset_of_the_reference_inventory() {
+fn allow_list_diverges_from_the_reference_only_deliberately() {
     let cuda = CudaRuntime::allow_list();
-    let reference = luminal::reference::reference_allow_list();
+    let reference = luminal_reference::reference_allow_list();
     assert!(!cuda.is_empty(), "CUDA claims nothing");
     for op in &cuda {
-        assert!(reference.contains(op), "{op} not in the reference inventory");
+        assert!(
+            reference.contains(op) || DELIBERATE_DIVERGENCE.contains(op),
+            "{op} is claimed by CUDA-lite, is not in the reference inventory, and is \
+             not listed as a deliberate divergence"
+        );
     }
     // CL-1b: the expression-carrying ops are claimed now.
     for present in ["Iota", "Gather", "ScatterFunctional", "IndexMapApplyMaterialize"] {

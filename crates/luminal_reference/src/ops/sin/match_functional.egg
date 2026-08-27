@@ -1,0 +1,30 @@
+; Layout Tensor Op Sin Generic
+(rule
+  (
+    (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?in_layout))
+    ; CANONICAL-ONLY: this slot must carry its logical's own right-major
+    ; contiguous layout. The kernels fabricate dense right-major strides
+    ; in Rust and never read a layout, so before this premise a left-major
+    ; operand was accepted and silently mis-indexed.
+    (= ?in_layout (RightMajorContiguousElementLayoutLit ?in_cshape ?in_cbits))
+    (= ?in_cshape (shape-of ?in_logical))
+    (= ?in_cbits (bits-of (dtype-of ?in_logical)))
+    (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    ; CANONICAL-ONLY: this slot must carry its logical's own right-major
+    ; contiguous layout. The kernels fabricate dense right-major strides
+    ; in Rust and never read a layout, so before this premise a left-major
+    ; operand was accepted and silently mis-indexed.
+    (= ?out_layout (RightMajorContiguousElementLayoutLit ?out_cshape ?out_cbits))
+    (= ?out_cshape (shape-of ?out_logical))
+    (= ?out_cbits (bits-of (dtype-of ?out_logical)))
+    (= ?out_logical (LogicalSin ?in_logical))
+    (= (injectivity-of ?out_layout_tensor) (Injective))
+  )
+  (
+    (let ?layout_tensor_op
+      (LayoutTensorOpLit
+        (LayoutTensorCons ?in_layout_tensor (LayoutTensorNil))
+        (LayoutTensorCons ?out_layout_tensor (LayoutTensorNil))))
+    (union ?layout_tensor_op (LayoutTensorOpSinFunctionalGeneric ?in_layout_tensor ?out_layout))
+  )
+)

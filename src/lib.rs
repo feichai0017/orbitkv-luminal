@@ -2,7 +2,7 @@ pub mod dtype;
 pub mod egglog_utils;
 pub mod frontend;
 pub mod graph;
-pub mod reference_binding;
+pub mod runtime_binding;
 pub mod mask_events;
 pub mod shape;
 
@@ -13,6 +13,7 @@ pub mod shape;
 pub mod buffer_tensor_ir;
 pub mod bufferize;
 pub mod dps;
+pub mod poison;
 pub mod egglog_snippet;
 pub mod index_expr;
 pub mod subst_primitive;
@@ -20,7 +21,6 @@ pub mod extractor;
 pub mod layout_ir;
 pub mod logical_op;
 pub mod implementation_search;
-pub mod reference;
 pub mod test_support;
 pub mod visualization;
 

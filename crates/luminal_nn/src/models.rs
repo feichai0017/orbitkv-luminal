@@ -581,7 +581,7 @@ mod tests {
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
     use luminal::shape::IntExpr;
-    use luminal::reference::ReferenceRuntime;
+    use luminal_reference::ReferenceRuntime;
     use rustc_hash::FxHashMap;
     use scalar_refs::*;
 
@@ -922,7 +922,7 @@ mod tests {
         let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
         for seed in 0..16 {
             let mut rt =
-                luminal::reference::ReferenceRuntime::load(&cx).expect("native load");
+                luminal_reference::ReferenceRuntime::load(&cx).expect("native load");
             let outcome = rt.search(
                 &data,
                 &luminal::implementation_search::ImplementationSearchOptions {
@@ -939,22 +939,23 @@ mod tests {
                     // Re-run the same single genome through a session we
                     // control so the blockage record is inspectable.
                     // (search consumed the runtime; rebuild the pipeline)
-                    let program = cx.logical.native_program().expect("clean");
+                    let program = cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("clean");
                     let text = format!(
                         "{}\n\n{}",
-                        luminal::egglog_snippet::assembled_program(),
+                        luminal_reference::assembled_program(),
                         program.text
                     );
                     let mut egraph = luminal::egglog_snippet::new_egraph();
                     egraph.parse_and_run_program(None, &text).expect("runs");
                     let serialized =
                         egraph.serialize(egglog::SerializeConfig::default()).egraph;
-                    let allow = luminal::reference::reference_allow_list();
-                    let mut session = luminal::extractor::ExtractionSession::new(
+                    let allow = luminal_reference::reference_allow_list();
+                    let mut session = luminal::extractor::ExtractionSession::new_with_matcher_set(
                         &serialized,
                         Some(&allow),
+                        luminal_reference::ops::built_in_matchers(),
                     );
-                    let index = luminal::extractor::producer_index_with_ops(
+                    let index = luminal_reference::producer_index_with_ops(
                         &serialized,
                         Some(&allow),
                     );
@@ -1155,7 +1156,7 @@ mod tests {
         let (_, pairs) = block_data(&fx);
         let (ref_logits, ref_kc, ref_vc) = block_reference(&fx);
 
-        let rt = luminal::test_support::run_reference(&fx.cx, &pairs);
+        let rt = luminal_reference::harness::run_reference(&fx.cx, &pairs);
         assert_close(rt.get_f32(logits.id).expect("logits"), &ref_logits);
         assert_close(rt.get_f32(kc.id).expect("k cache"), &ref_kc);
         assert_close(rt.get_f32(vc.id).expect("v cache"), &ref_vc);
@@ -1438,7 +1439,7 @@ mod forward_rope_tests {
             pairs.push((tensor.id, weights(n, 10 + seed).into()));
         }
 
-        let rt = luminal::test_support::run_reference(&cx, &pairs);
+        let rt = luminal_reference::harness::run_reference(&cx, &pairs);
         let rope_out = rt.get_f32(out_rope.id).expect("rope out").clone();
         let expr_out = rt.get_f32(out_expr.id).expect("expr out").clone();
         assert_close(&rope_out, &expr_out);

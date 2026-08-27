@@ -1,52 +1,107 @@
 //! TestRuntime — the tests-side runtime vocabulary (rehoming ruling
 //! 2026-08-13).
 //!
-//! The reference runtime implements only PLAIN spellings of the logical
-//! ops; the fused ops (AddMulFused, MatMulFused) were deleted from it at
-//! commit aff22598 and their test estate died with them. The estate that
-//! needs fused/view variants lives HERE instead: extraction and egglog
-//! assembly are runtime-injectable
+//! THE SPLIT this crate exists to hold: the reference runtime is
+//! functional, out-of-place and view-free. Its kernel table carries only
+//! `*FunctionalDps` types and `reference_allow_list()` is *derived* from
+//! that table, so a mutating or view-shaped op registered there is
+//! extractable but can never be selected — dead weight paid for on every
+//! saturation. The op shapes that exercise `Bufferizable` / `ToDps` /
+//! the bufferizer's aliasing machinery live HERE instead, and this crate
+//! owns them outright: instance, DPS form, matcher and `.egg` rewrites,
+//! one folder per op under [`ops`].
+//!
+//! It depends on NO other runtime crate — not even the reference one.
+//! The 22 plain functional ops are forked here too, kernels omitted.
+//! These are two different runtimes with two different jobs, and their
+//! vocabularies are EXPECTED to diverge: this op list will be whittled
+//! down to the shapes the bufferizer contracts actually need, while the
+//! reference registry moves toward canonical-layout-only. Nothing is
+//! kept in sync on purpose.
+//!
+//! No runtime machinery is duplicated: extraction and egglog assembly
+//! are runtime-injectable
 //! (`luminal::extractor::extract_layout_ir_with_matchers`,
 //! `luminal::egglog_snippet::assembled_program_for`), so this crate is a
-//! MATCHER LIST plus fixture runners — no runtime machinery duplicated.
+//! MATCHER LIST, its own op folders, and fixture runners. It is
+//! plan-level only — no kernels, no executor: everything it asserts is a
+//! property of an `ExtractedGraph` or a `BufferIrGraph`.
 
-pub mod add_mul_fused;
+pub mod ops;
 
-pub use add_mul_fused::{AddMulFused, AddMulFusedDps, AddMulFusedMatcher};
+pub use ops::{
+    AddMulFused, AddMulFusedDps, AddMulFusedMatcher, IndexMapApplyView, IndexMapApplyViewMatcher,
+};
 
-// ---------------------------------------------------------------------------
-// the included `src/extractor.rs` text resolves `crate::dtype`,
-// `crate::layout_ir`, `crate::logical_op`, and `crate::reference` against
-// these, so its types ARE luminal's types. Not part of this crate's
-// vocabulary — reach for `luminal::…` directly in tests.
-// ---------------------------------------------------------------------------
-pub mod dtype {
-    pub use luminal::dtype::*;
-}
-pub mod layout_ir {
-    pub use luminal::layout_ir::*;
-}
-pub mod logical_op {
-    pub use luminal::logical_op::*;
-}
-pub mod reference {
-    pub mod ops {
-        pub use luminal::reference::ops::*;
-    }
-}
+use std::path::PathBuf;
 
 use luminal::layout_ir::ExtractedGraph;
 use luminal::layout_ir::OpMatcher;
 
-/// THE TestRuntime vocabulary: the reference registry, plus the op
-/// variants the reference runtime deliberately does not implement — the
-/// view op and the fused add+mul pair. Tests in this crate extract and
-/// assemble against exactly this list.
+/// THE TestRuntime vocabulary, every entry owned by this crate: 22
+/// forked functional ops, the metadata view op, the fused add+mul pair,
+/// and the 12 mutating forms. Tests here extract and assemble against
+/// exactly this list.
 pub fn matchers() -> Vec<Box<dyn OpMatcher>> {
-    let mut matchers = luminal::reference::ops::built_in_matchers();
-    matchers.push(Box::new(luminal::reference::ops::IndexMapApplyViewMatcher));
+    let mut matchers = ops::functional::functional_matchers();
+    matchers.push(Box::new(IndexMapApplyViewMatcher));
     matchers.push(Box::new(AddMulFusedMatcher));
+    matchers.extend(ops::mutating::mutating_matchers());
     matchers
+}
+
+/// A fixture owned by THIS crate, under `fixtures/`.
+///
+/// Every fixture this runtime uses lives here, including forked copies of
+/// scripts the reference corpus also carries. The fork is deliberate: the
+/// reference copy cannot name a mutating or view constructor (an
+/// undeclared constructor is an egglog PARSE failure), and the two
+/// vocabularies are expected to diverge. Nothing here reaches into the
+/// core script tree.
+pub fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(name)
+}
+
+/// [`extract_fixture`] on one of this crate's own fixtures, by file name.
+pub fn extract_fixture_by_name(name: &str) -> ExtractedGraph {
+    let source = std::fs::read_to_string(fixture_path(name))
+        .unwrap_or_else(|_| panic!("fixture script {name} readable"));
+    extract_fixture(&source)
+}
+
+/// [`extract_fixture_by_name`] restricted to an allow-list of
+/// `LayoutTensorOp` constructor names — forces extraction through
+/// specific implementations so a test can pin one spelling end to end.
+/// Runs over THIS runtime's matcher set.
+pub fn extract_fixture_with_ops(name: &str, allowed: &[&str]) -> ExtractedGraph {
+    try_extract_fixture_with_ops(name, allowed)
+        .expect("extraction succeeds")
+        .unwrap_or_else(|| panic!("fixture {name} produced no extracted graph"))
+}
+
+/// The fallible form of [`extract_fixture_with_ops`] — used to assert
+/// that an unsatisfiable filter refuses, rather than silently widening.
+pub fn try_extract_fixture_with_ops(
+    name: &str,
+    allowed: &[&str],
+) -> anyhow::Result<Option<ExtractedGraph>> {
+    let source = std::fs::read_to_string(fixture_path(name))
+        .unwrap_or_else(|_| panic!("fixture script {name} readable"));
+    try_extract_text_with_ops(&source, allowed)
+}
+
+fn try_extract_text_with_ops(
+    script_text: &str,
+    allowed: &[&str],
+) -> anyhow::Result<Option<ExtractedGraph>> {
+    let serialized = serialize_fixture(script_text);
+    luminal::extractor::extract_layout_ir_with_ops_and_matchers(
+        &serialized,
+        Some(allowed),
+        matchers(),
+    )
 }
 
 /// The assembled egglog program for this runtime's vocabulary, plus the
@@ -77,9 +132,7 @@ pub fn extract_fixture(script_text: &str) -> ExtractedGraph {
 /// the first preference (an implementation constructor name) it can satisfy,
 /// falling back to its first candidate — the producer index is
 /// deterministically sorted, so the same preferences always build the same
-/// genome. (Adapted from `luminal::test_support::genome_preferring`, which
-/// is public but hard-wired to the built-in producer index; this one runs
-/// over THIS runtime's matcher set via the genome seam.)
+/// genome. Runs over THIS runtime's matcher set via the genome seam.
 pub fn genome_preferring(
     egraph: &luminal::prelude::egraph_serialize::EGraph,
     preferences: &[&str],
@@ -109,10 +162,13 @@ pub fn extract_fixture_with_genome(
 ) -> (ExtractedGraph, u64) {
     let serialized = serialize_fixture(script_text);
     let genome = genome_preferring(&serialized, preferences);
-    let graph =
-        luminal::extractor::extract_layout_ir_with_genome_and_matchers(&serialized, &genome, matchers())
-            .expect("genome extraction runs")
-            .expect("genome extraction reaches the boundary");
+    let graph = luminal::extractor::extract_layout_ir_with_genome_and_matchers(
+        &serialized,
+        &genome,
+        matchers(),
+    )
+    .expect("genome extraction runs")
+    .expect("genome extraction reaches the boundary");
     let fingerprint = luminal::extractor::plan_fingerprint(&graph);
     (graph, fingerprint)
 }

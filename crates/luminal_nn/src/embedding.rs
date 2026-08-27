@@ -69,7 +69,7 @@ mod tests {
     use super::Embedding;
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
-    use luminal::reference::ReferenceRuntime;
+    use luminal_reference::ReferenceRuntime;
     use luminal::shape::IntExpr;
     use rustc_hash::FxHashMap;
 

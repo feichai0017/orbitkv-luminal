@@ -1,0 +1,20 @@
+# THE REFERENCE RUNTIME as a standalone crate (Step B of the runtime-
+# ownership ruling, 2026-08-17): the trusted host executor, its op
+# registry, and the reference-flavored defaulting conveniences
+# (assembled_program, run_reference, the with_ops search wrapper).
+# The core `luminal` crate is runtime-neutral — matchers and profilers
+# always explicit — and dev-depends on this crate for its own test
+# suites (a legal, standard dev-cycle).
+[package]
+name = "luminal_reference"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+luminal = { path = "../.." }
+anyhow = "1"
+rustc-hash = "2"
+petgraph = "0.6.4"
+float8 = { version = "0.7", features = ["bytemuck", "num-traits"] }
+egglog = {git="https://github.com/egraphs-good/egglog", rev="c2c0f1510a3633b768fb3d30ad284b211290e4b2"}
+egraph-serialize = { version = "0.3.0", default-features = false, features = ["graphviz", "serde"]}

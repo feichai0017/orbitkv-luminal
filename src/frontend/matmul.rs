@@ -126,7 +126,7 @@ impl GraphTensor {
 #[cfg(test)]
 mod tests {
     use crate::frontend::binary::tests::test_binary;
-    use crate::prelude::{DType, Graph};
+    use luminal::prelude::{DType, Graph};
     use proptest::prelude::*;
 
     #[test]

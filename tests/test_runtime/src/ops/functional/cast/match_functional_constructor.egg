@@ -1,0 +1,2 @@
+; The dtype-changing materializer.
+(constructor LayoutTensorOpCastGeneric (LayoutTensor Dtype Layout) LayoutTensorOp)

@@ -35,7 +35,12 @@ fn genome_fused_choice_dedups_one_instance_claiming_both_slots() {
         .keys()
         .filter(|id| matches!(id, BufferId::Allocated(_)))
         .count();
-    assert_eq!(allocs, 0, "both slots land in caller buffers:\n{}", plan.summary());
+    assert_eq!(
+        allocs,
+        0,
+        "both slots land in caller buffers:\n{}",
+        plan.summary()
+    );
 }
 
 /// GENOME WALK, the MIXED plan (the paper-walk's scenario 3, now
@@ -70,7 +75,10 @@ fn genome_mixed_choice_mints_a_waste_destination() {
         .keys()
         .filter(|id| matches!(id, BufferId::Allocated(_)))
         .count();
-    assert_eq!(allocs, 1, "the unclaimed fused slot writes scratch:\n{summary}");
+    assert_eq!(
+        allocs, 1,
+        "the unclaimed fused slot writes scratch:\n{summary}"
+    );
 }
 
 /// Many genomes, one plan: the fingerprint identifies the PLAN, so the

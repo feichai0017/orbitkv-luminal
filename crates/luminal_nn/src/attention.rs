@@ -538,7 +538,7 @@ mod tests {
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
     use luminal::shape::IntExpr;
-    use luminal::reference::ReferenceRuntime;
+    use luminal_reference::ReferenceRuntime;
     use rustc_hash::FxHashMap;
 
     fn assert_close(ours: &[f32], expected: &[f32]) {
@@ -685,7 +685,7 @@ mod tests {
             }
         }
 
-        let rt = luminal::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (q.id, q_vals.into()),
@@ -798,7 +798,7 @@ mod tests {
             }
         }
 
-        let rt = luminal::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (q.id, q_vals.into()),
@@ -899,7 +899,7 @@ mod masked_tests {
             }
         }
 
-        let rt = luminal::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (q.id, q_vals.into()),

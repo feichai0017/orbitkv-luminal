@@ -450,7 +450,7 @@ mod forward_tests {
             &mut cx,
         );
         let out = conv.forward(x).output();
-        let rt = luminal::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[(x.id, x_data.clone().into()), (conv.weight.id, w_data.clone().into())],
         );
