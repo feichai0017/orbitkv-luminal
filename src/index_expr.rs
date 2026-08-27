@@ -184,3 +184,60 @@ fn parse_int_expr_uncached(
     }
     None
 }
+
+/// Walk a matched term's index-map metadata into numeric entries:
+/// `IndexMapLit` → cons spine BY E-CLASS, one [`IotaExpr`] per parent axis.
+/// The SHARED form of the per-runtime materialize parsers (how the e-graph
+/// is READ is shared, ruling 2026-08-17). EXISTENTIAL AT EVERY LEVEL (the
+/// R8/backtracking doctrine): a saturated map class holds several
+/// `IndexMapLit` spellings and a list class several cons spellings, so the
+/// walk tries every spelling and takes the first that parses all the way
+/// down — all spellings of a class denote the same map, so any parseable
+/// one is correct. `map_child`/`shape_child` are the matched enode's
+/// metadata child indices (the map, and the OUT shape whose coordinates
+/// the entries are functions of — the owner-shape guard). `None` = no
+/// spelling parses; extraction stays infallible and the numeric consumer's
+/// loud refusal carries the burden.
+pub fn parse_index_map_entries(
+    site: &ExtractionSite<'_>,
+    map_child: usize,
+    shape_child: usize,
+) -> Option<Vec<IotaExpr>> {
+    let map_class = site.child_class(map_child);
+    let out_shape = site.child_class(shape_child);
+    let mut memo = std::collections::HashMap::new();
+    for map_node in site.nodes_in_class_value(&map_class, "IndexMapLit") {
+        let Some(head) = site.class_of_child(map_node, 0) else { continue };
+        if let Some(entries) = parse_entry_list(site, &head, 64, &out_shape, &mut memo) {
+            return Some(entries);
+        }
+    }
+    None
+}
+
+fn parse_entry_list(
+    site: &ExtractionSite<'_>,
+    class: &egraph_serialize::ClassId,
+    depth: usize,
+    out_shape: &egraph_serialize::ClassId,
+    memo: &mut std::collections::HashMap<egraph_serialize::ClassId, ParseMemo>,
+) -> Option<Vec<IotaExpr>> {
+    if depth == 0 {
+        return None;
+    }
+    if site.nodes_in_class_value(class, "IntExprNil").next().is_some() {
+        return Some(Vec::new());
+    }
+    for cons in site.nodes_in_class_value(class, "IntExprCons") {
+        let Some(element) = site.class_of_child(cons, 0) else { continue };
+        let Some(tail) = site.class_of_child(cons, 1) else { continue };
+        let Some(expr) = parse_int_expr_memo(site, &element, 64, Some(out_shape), memo) else {
+            continue;
+        };
+        if let Some(mut rest) = parse_entry_list(site, &tail, depth - 1, out_shape, memo) {
+            rest.insert(0, expr);
+            return Some(rest);
+        }
+    }
+    None
+}

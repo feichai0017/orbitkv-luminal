@@ -484,10 +484,12 @@ fn conflicting_writers_bail_loudly_with_both_named() {
 /// GATE (per-node descriptor schema, approved 2026-08-26b): every lowered
 /// Compute node carries per-slot operand/result descriptors — value +
 /// buffer identity from the BufferTensor slots, dims/dtype from the
-/// extraction — parallel to `reads`/`writes`. The composed-access slot
-/// stays `None` this phase (the type is uninhabited, so that is a
-/// compile-time fact, not an assertion). BufferCopy nodes carry the copied
-/// value. In this all-literal fixture, every MockOp slot must be FILLED.
+/// extraction — parallel to `reads`/`writes`. Since M4 Phase 3 the
+/// composed-access slot is FILLED at view-fold time: the view-reading
+/// operand carries the fold's hop (fail-closed `entries: None` here —
+/// `MockView` exposes no numeric map), result slots stay direct.
+/// BufferCopy nodes carry the copied value. In this all-literal fixture,
+/// every MockOp slot must be FILLED.
 #[test]
 fn every_compute_node_carries_filled_slot_descriptors() {
     let mut g = DimsGraph::new();
@@ -521,7 +523,20 @@ fn every_compute_node_carries_filled_slot_descriptors() {
                         assert!(slot.dims.is_some(), "MockOp slot dims filled (value {})", slot.value);
                         assert!(slot.dtype.is_some(), "MockOp slot dtype filled (value {})", slot.value);
                         assert!(slot.element_bits.is_some(), "MockOp slot bits filled (value {})", slot.value);
-                        assert!(slot.composed_access.is_none(), "composed access stays None in Phase 1");
+                    }
+                    // Phase 3: the operand READS THROUGH the folded view, so
+                    // its descriptor records the fold — one hop, fail-closed
+                    // entries (MockView has no numeric map), parent dims =
+                    // x's literal extents. Results are produced here: direct.
+                    let access = operand_info[0]
+                        .composed_access
+                        .as_ref()
+                        .expect("the view-reading operand carries the fold's composed access");
+                    assert_eq!(access.hops.len(), 1, "one folded view, one hop");
+                    assert_eq!(access.hops[0].entries, None, "MockView is mapless: fail-closed");
+                    assert_eq!(access.hops[0].parent_dims, Some(vec![2, 3]), "parent extents ride the hop");
+                    for slot in result_info {
+                        assert!(slot.composed_access.is_none(), "results are never folds");
                     }
                 }
             }

@@ -17,19 +17,71 @@
 
 use anyhow::{bail, Result};
 use luminal::buffer_tensor_ir::BufferTensorIrOp;
+use luminal::bufferize::{ComposedAccess, SlotDescriptor};
 use luminal::dtype::PlanDtype;
 use luminal::index_expr::IotaExpr;
 use std::any::TypeId;
 
 /// Geometry + typing for one compute node, in plan order: operands
 /// (destination-last, the DPS convention), then destinations again as
-/// the write set. Dims come from the plan's buffer annotations — the
-/// same numbers the reference executor sizes with.
+/// the write set. Dims come from the node's own [`SlotDescriptor`]s (M4
+/// Phase 3) — per-slot VALUE geometry, which equals the shared buffer
+/// table's numbers while no view is electable on this backend (the
+/// string-identity pin in `tests/codegen_identity.rs`).
+#[derive(Debug)]
 pub struct CodegenCtx {
     pub operand_dims: Vec<Vec<usize>>,
     pub operand_dtypes: Vec<PlanDtype>,
     pub dest_dims: Vec<Vec<usize>>,
     pub dest_dtypes: Vec<PlanDtype>,
+    /// Per-operand composed view access, parallel to `operand_dims` —
+    /// `Some` iff folded views stand between the slot's value and its
+    /// buffer. Carried for Phase 4 (kernels indexing through views); NO
+    /// kernel template reads it yet, and on this backend it is all-`None`
+    /// today (views are not electable on real backends).
+    pub composed_access: Vec<Option<ComposedAccess>>,
+}
+
+impl CodegenCtx {
+    /// Build codegen geometry from the compute node's own slot
+    /// descriptors — never the shared buffer table (Phase 3 pin). Loud
+    /// on missing numerics, mirroring the executor's None-dims bail.
+    pub fn from_descriptors(
+        label: &str,
+        operand_info: &[SlotDescriptor],
+        result_info: &[SlotDescriptor],
+    ) -> Result<Self> {
+        let dims_of = |slot: &SlotDescriptor, role: &str| -> Result<Vec<usize>> {
+            let dims = slot
+                .dims
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("{label} {role} lacks geometry"))?;
+            Ok(dims.iter().map(|&d| usize::try_from(d).unwrap_or(0)).collect())
+        };
+        let dtype_of = |slot: &SlotDescriptor, role: &str| -> Result<PlanDtype> {
+            slot.dtype
+                .ok_or_else(|| anyhow::anyhow!("{label} {role} lacks dtype"))
+        };
+        Ok(CodegenCtx {
+            operand_dims: operand_info
+                .iter()
+                .map(|s| dims_of(s, "operand"))
+                .collect::<Result<_>>()?,
+            operand_dtypes: operand_info
+                .iter()
+                .map(|s| dtype_of(s, "operand"))
+                .collect::<Result<_>>()?,
+            dest_dims: result_info
+                .iter()
+                .map(|s| dims_of(s, "dest"))
+                .collect::<Result<_>>()?,
+            dest_dtypes: result_info
+                .iter()
+                .map(|s| dtype_of(s, "dest"))
+                .collect::<Result<_>>()?,
+            composed_access: operand_info.iter().map(|s| s.composed_access.clone()).collect(),
+        })
+    }
 }
 
 /// One generated launch: entry name is always `k`; `n` is the launch

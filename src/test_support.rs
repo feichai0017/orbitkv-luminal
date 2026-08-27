@@ -236,6 +236,47 @@ impl crate::layout_ir::ToDps for MockView {
 
 impl LayoutIrOp for MockView {}
 
+/// [`MockView`] carrying a numeric index map — the Phase-3 fold reads it
+/// through `view_index_map` and records it (with the parent's dims) on
+/// every consumer's operand descriptor. Same declared memory effects and
+/// tie as `MockView`; only the map differs.
+#[derive(Debug, Clone)]
+pub struct MockViewWithMap {
+    pub entries: Vec<crate::index_expr::IotaExpr>,
+}
+
+impl OpSlotNames for MockViewWithMap {}
+
+impl BufferTensorIrOp for MockViewWithMap {
+    fn label(&self) -> &str {
+        "MockViewWithMap"
+    }
+
+    fn operand_reads_memory(&self, _operand: usize) -> bool {
+        false // metadata op: no bytes observed
+    }
+    fn result_writes_memory(&self, _result: usize) -> bool {
+        false // metadata op: no bytes produced
+    }
+    fn view_index_map(&self, _result: usize) -> Option<Vec<crate::index_expr::IotaExpr>> {
+        Some(self.entries.clone())
+    }
+}
+
+impl Bufferizable for MockViewWithMap {
+    fn alias_info(&self) -> Vec<AliasInfo> {
+        vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
+    }
+}
+
+impl crate::layout_ir::ToDps for MockViewWithMap {
+    fn to_dps(&self) -> Option<Box<dyn crate::layout_ir::LayoutIrOp>> {
+        None // nothing is written: there is no destination to pass
+    }
+}
+
+impl LayoutIrOp for MockViewWithMap {}
+
 /// An alloc-like op (à la `tensor.empty`): its single result is undefined
 /// storage, so reading it is never a conflict.
 #[derive(Debug, Clone)]
@@ -1805,7 +1846,7 @@ mod harness_tests {
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
-        let v = g.op(Box::new(IndexMapApplyView), &[&x], &[("v", "row0")])[0].clone();
+        let v = g.op(Box::new(IndexMapApplyView { entries: None }), &[&x], &[("v", "row0")])[0].clone();
         let r = g.op(
             Box::new(MockOp { reads: vec![true], ..Default::default() }),
             &[&v],
@@ -1851,7 +1892,7 @@ mod harness_tests {
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
-        let v = g.op(Box::new(IndexMapApplyView), &[&x], &[("v", "row0")])[0].clone();
+        let v = g.op(Box::new(IndexMapApplyView { entries: None }), &[&x], &[("v", "row0")])[0].clone();
         g.output(&v, "D");
         let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
 

@@ -168,13 +168,37 @@ pub struct BufferEdge {
     pub kind: EdgeKind,
 }
 
-/// The composed per-slot access expression: how a slot's value addresses its
-/// buffer through the views folded between them. M4 Phase 3 fills this at
-/// view-fold time; in Phase 1/2 NOTHING constructs it (the enum is
-/// uninhabited, so every `Option<ComposedAccess>` is provably `None`) — the
-/// slot exists now so the descriptor schema is stable before the fill lands.
+/// One folded view between a slot's value and its backing storage: the
+/// view's index map plus the geometry it indexes into. `entries` holds one
+/// expression tree per PARENT axis (outermost inward), evaluated at the
+/// hop's OUT coordinates — exactly the numeric vocabulary the runtimes
+/// already parse and compile for `IndexMapApplyMaterialize` (extraction-side
+/// parsing, enode-anchored, never destructured from class spellings).
+/// `entries: None` is the fail-closed form: the view folded but its map was
+/// beyond the parsed expression subset, so a numeric consumer must refuse
+/// loudly rather than assume identity. `parent_dims` are the extents the
+/// entries index into (`None` = symbolic, the [`Buffer::dims`] contract).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ComposedAccess {}
+pub struct AccessHop {
+    /// Per-parent-axis index expressions over this hop's OUT coordinates.
+    pub entries: Option<Vec<crate::index_expr::IotaExpr>>,
+    /// The hop's parent extents — the bounds `entries` index into.
+    pub parent_dims: Option<Vec<i64>>,
+}
+
+/// The composed per-slot access expression: how a slot's value addresses its
+/// buffer through the views folded between them. Filled at view-fold time
+/// (M4 Phase 3): `hops[0]` is the OUTERMOST fold — the view producing the
+/// slot's value, its `entries` evaluated at the slot's own coordinates —
+/// and each hop's outputs are the next hop's coordinates (hop `k`'s
+/// `parent_dims` are hop `k+1`'s out dims); the LAST hop's parent is the
+/// residence the slot actually reads. Multi-hop chains are stored STACKED
+/// AND UN-NORMALIZED — the planner records composition order, it never
+/// rewrites expressions (that is the e-graph's job, never-depend-on-spelling).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposedAccess {
+    pub hops: Vec<AccessHop>,
+}
 
 /// Per-slot geometry descriptor on a plan node: the VALUE occupying an
 /// operand/result slot, the buffer backing it, and the value's literal
@@ -195,7 +219,11 @@ pub struct SlotDescriptor {
     pub element_bits: Option<i64>,
     /// The value's plan dtype (same contract as `dims`).
     pub dtype: Option<crate::dtype::PlanDtype>,
-    /// Composed view access for this slot — always `None` until Phase 3.
+    /// Composed view access for this slot: `Some` iff one or more folded
+    /// views stand between the slot's value and the buffer it reads —
+    /// filled at view-fold time (operand slots only; a compute RESULT is
+    /// produced by the node itself, never through a fold). `None` = the
+    /// slot addresses its buffer directly.
     pub composed_access: Option<ComposedAccess>,
 }
 
@@ -2011,9 +2039,11 @@ pub(crate) fn lower(
     use petgraph::visit::EdgeRef;
 
     // Per-slot descriptor: identity from the BufferTensor (value, buffer)
-    // pair, geometry from the extraction's per-value facts. The composed
-    // access slot stays `None` — Phase 3 fills it at view-fold time.
-    let describe = |tensor: &BufferTensor| -> SlotDescriptor {
+    // pair, geometry from the extraction's per-value facts, composed access
+    // from the view folds recorded below (operand slots reading a
+    // folded-view value carry the full stacked chain; everything else is a
+    // direct read and stays `None`).
+    let describe = |tensor: &BufferTensor, access: Option<ComposedAccess>| -> SlotDescriptor {
         let geometry = value_geometry.get(&tensor.value);
         SlotDescriptor {
             value: tensor.value.clone(),
@@ -2021,7 +2051,7 @@ pub(crate) fn lower(
             dims: geometry.and_then(|g| g.dims.clone()),
             element_bits: geometry.and_then(|g| g.element_bits),
             dtype: geometry.and_then(|g| g.dtype),
-            composed_access: None,
+            composed_access: access,
         }
     };
 
@@ -2033,6 +2063,13 @@ pub(crate) fn lower(
     // BT node -> lowered node, for transferring Anti edges (folded nodes have
     // no entry).
     let mut lowered: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+    // The access each FOLDED view value's readers must compose to reach the
+    // parent residence's bytes — recorded at fold time, keyed by value (a
+    // view is a value-level distinction; a repair copy moves its PARENT's
+    // value, so a view value never gains a second, differently-shaped
+    // residence). A chain of folds stacks: the new hop goes in front of the
+    // parent's own chain (outermost-first), un-normalized.
+    let mut folded_access: HashMap<ClassId, ComposedAccess> = HashMap::new();
     let mut outputs = Vec::new();
 
     let residence = |tensor: &BufferTensor| (tensor.value.clone(), tensor.buffer.clone());
@@ -2098,6 +2135,23 @@ pub(crate) fn lower(
                 if is_view {
                     for (result, tensor) in results.iter().enumerate() {
                         let parent = &operands[derives(result).expect("checked by is_view")];
+                        // Phase 3: the fold no longer discards the view's
+                        // index map — record it (with the parent's dims,
+                        // the extents it indexes into) so every consumer's
+                        // operand descriptor carries the composed access.
+                        // A parent that is itself a folded view stacks its
+                        // chain BEHIND this hop (outermost-first).
+                        let hop = AccessHop {
+                            entries: op.view_index_map(result),
+                            parent_dims: value_geometry
+                                .get(&parent.value)
+                                .and_then(|g| g.dims.clone()),
+                        };
+                        let mut hops = vec![hop];
+                        if let Some(parent_access) = folded_access.get(&parent.value) {
+                            hops.extend(parent_access.hops.iter().cloned());
+                        }
+                        folded_access.insert(tensor.value.clone(), ComposedAccess { hops });
                         if let Some(&from) = producer.get(&residence(parent)) {
                             producer.insert(residence(tensor), from);
                         }
@@ -2143,8 +2197,13 @@ pub(crate) fn lower(
                     reads: reads.clone(),
                     writes: writes.clone(),
                     ties: ties.clone(),
-                    operand_info: operands.iter().map(&describe).collect(),
-                    result_info: results.iter().map(&describe).collect(),
+                    operand_info: operands
+                        .iter()
+                        .map(|t| describe(t, folded_access.get(&t.value).cloned()))
+                        .collect(),
+                    // A compute result is produced HERE — never through a
+                    // fold — so its access is always direct.
+                    result_info: results.iter().map(|t| describe(t, None)).collect(),
                 });
                 for (idx, tensor) in operands.iter().enumerate() {
                     if let Some(&from) = producer.get(&residence(tensor)) {
@@ -3073,5 +3132,160 @@ mod tests {
             ),
             Err(_) => panic!("panicked — the ruling demands a structured error, never an abort"),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // M4 Phase 3: the fold records the composed access
+    // -------------------------------------------------------------------------
+
+    /// A folded view no longer discards its index map: the consumer's
+    /// operand descriptor carries a one-hop [`ComposedAccess`] with the
+    /// view's entries, while the node's result descriptor (produced HERE,
+    /// not through a fold) stays direct.
+    #[test]
+    fn folded_view_records_composed_access_on_consumer() {
+        use crate::index_expr::IotaExpr;
+        use crate::test_support::{MockViewWithMap, TestGraph};
+        let entries = vec![IotaExpr::Coord(0), IotaExpr::Coord(1)];
+        let mut g = TestGraph::new();
+        let x = g.input("x", "B", Access::ReadWrite, "rm");
+        let v = g.op(
+            Box::new(MockViewWithMap { entries: entries.clone() }),
+            &[&x],
+            &[("v", "row0")],
+        )[0]
+        .clone();
+        let r = g.op(
+            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            &[&v],
+            &[("r", "rm")],
+        )[0]
+        .clone();
+        g.output(&r, "D");
+        let plan = bufferize(&g.build()).expect("bufferizes");
+
+        let consumer = plan
+            .dag
+            .node_weights()
+            .find_map(|node| match node {
+                BufferNode::Compute { op, operand_info, result_info, .. }
+                    if op.label() == "MockOp" =>
+                {
+                    Some((operand_info.clone(), result_info.clone()))
+                }
+                _ => None,
+            })
+            .expect("the consumer survives lowering");
+        let (operand_info, result_info) = consumer;
+        assert_eq!(operand_info.len(), 1);
+        assert_eq!(operand_info[0].value, v, "the slot's VALUE is the view's");
+        assert_eq!(
+            operand_info[0].buffer, plan.value_buffer[&x],
+            "the slot's BUFFER is the parent's (the fold's redirect)"
+        );
+        let access = operand_info[0]
+            .composed_access
+            .as_ref()
+            .expect("the fold records the composed access");
+        assert_eq!(access.hops.len(), 1);
+        assert_eq!(access.hops[0].entries.as_deref(), Some(entries.as_slice()));
+        // TestGraph carries no numeric geometry, so parent dims are the
+        // honest `None` (the symbolic contract) — never a fabricated shape.
+        assert_eq!(access.hops[0].parent_dims, None);
+        assert!(
+            result_info[0].composed_access.is_none(),
+            "a compute result is produced here, never through a fold"
+        );
+    }
+
+    /// A two-hop chain reaches the consumer STACKED, outermost-first and
+    /// un-normalized: hops[0] is the view producing the slot's value (its
+    /// entries evaluate at the slot's own coordinates), hops[1] the view
+    /// under it.
+    #[test]
+    fn two_hop_view_chain_stacks_outermost_first() {
+        use crate::index_expr::IotaExpr;
+        use crate::test_support::{MockViewWithMap, TestGraph};
+        let inner = vec![IotaExpr::Coord(1), IotaExpr::Coord(0)]; // v1 over x
+        let outer = vec![
+            IotaExpr::Add(Box::new(IotaExpr::Coord(0)), Box::new(IotaExpr::Lit(1))),
+        ]; // v2 over v1
+        let mut g = TestGraph::new();
+        let x = g.input("x", "B", Access::ReadWrite, "rm");
+        let v1 = g.op(
+            Box::new(MockViewWithMap { entries: inner.clone() }),
+            &[&x],
+            &[("v1", "row0")],
+        )[0]
+        .clone();
+        let v2 = g.op(
+            Box::new(MockViewWithMap { entries: outer.clone() }),
+            &[&v1],
+            &[("v2", "row1")],
+        )[0]
+        .clone();
+        let r = g.op(
+            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            &[&v2],
+            &[("r", "rm")],
+        )[0]
+        .clone();
+        g.output(&r, "D");
+        let plan = bufferize(&g.build()).expect("bufferizes");
+
+        let operand_info = plan
+            .dag
+            .node_weights()
+            .find_map(|node| match node {
+                BufferNode::Compute { op, operand_info, .. } if op.label() == "MockOp" => {
+                    Some(operand_info.clone())
+                }
+                _ => None,
+            })
+            .expect("the consumer survives lowering");
+        assert_eq!(operand_info[0].value, v2);
+        assert_eq!(operand_info[0].buffer, plan.value_buffer[&x], "both folds redirect to x");
+        let access = operand_info[0].composed_access.as_ref().expect("chain recorded");
+        assert_eq!(access.hops.len(), 2, "stacked, never pre-composed");
+        assert_eq!(access.hops[0].entries.as_deref(), Some(outer.as_slice()), "outermost first");
+        assert_eq!(access.hops[1].entries.as_deref(), Some(inner.as_slice()));
+        let _ = v1;
+    }
+
+    /// A view op WITHOUT a numeric map still folds, and the fold is
+    /// fail-closed: the hop is recorded with `entries: None` — a numeric
+    /// consumer must refuse loudly, never assume identity. (Loud bail,
+    /// never silent mistranslation.)
+    #[test]
+    fn mapless_view_fold_records_a_fail_closed_hop() {
+        use crate::test_support::{MockView, TestGraph};
+        let mut g = TestGraph::new();
+        let x = g.input("x", "B", Access::ReadWrite, "rm");
+        let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
+        let r = g.op(
+            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            &[&v],
+            &[("r", "rm")],
+        )[0]
+        .clone();
+        g.output(&r, "D");
+        let plan = bufferize(&g.build()).expect("bufferizes");
+
+        let operand_info = plan
+            .dag
+            .node_weights()
+            .find_map(|node| match node {
+                BufferNode::Compute { op, operand_info, .. } if op.label() == "MockOp" => {
+                    Some(operand_info.clone())
+                }
+                _ => None,
+            })
+            .expect("the consumer survives lowering");
+        let access = operand_info[0]
+            .composed_access
+            .as_ref()
+            .expect("even a mapless fold is recorded — a dropped hop would be silent identity");
+        assert_eq!(access.hops.len(), 1);
+        assert_eq!(access.hops[0].entries, None, "fail-closed: no numeric map, no guess");
     }
 }

@@ -443,6 +443,20 @@ pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + AsAnyOp + Debu
     fn result_is_undefined(&self, _result: usize) -> bool {
         false
     }
+
+    /// The view's index map, numerically: one expression tree per PARENT
+    /// axis (outermost inward), evaluated at the RESULT's coordinates —
+    /// the same entry vocabulary the materialize ops carry, parsed
+    /// extraction-side (enode-anchored, never from class spellings).
+    /// Implemented by metadata-view ops (no reads, no writes, result tied)
+    /// so the bufferizer can record the access it folds away onto consumer
+    /// slot descriptors ([`crate::bufferize::ComposedAccess`], M4 Phase 3).
+    /// `None` (the default) = no numeric map available: the fold still
+    /// happens, but records a fail-closed hop — numeric consumers must
+    /// refuse loudly, never guess.
+    fn view_index_map(&self, _result: usize) -> Option<Vec<crate::index_expr::IotaExpr>> {
+        None
+    }
 }
 
 impl Clone for Box<dyn BufferTensorIrOp> {

@@ -16,8 +16,18 @@ use luminal::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, Op
 /// tie is repairable — a view over a copy of the parent's buffer is a
 /// faithful lowering — so Must is a requirement on WHERE the shared storage
 /// lives, never a hard error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IndexMapApplyView;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexMapApplyView {
+    /// The index map, numerically — one full expression tree per PARENT
+    /// axis (outermost inward), evaluated at the OUT coordinates; parsed
+    /// at extraction exactly like the materialize ops' entries. The
+    /// bufferizer reads this through `view_index_map` when it folds the
+    /// op, recording the composed access on consumer slot descriptors
+    /// (M4 Phase 3). `None` = entries beyond the parsed expression
+    /// subset: the fold records a fail-closed hop and numeric consumers
+    /// refuse loudly.
+    pub entries: Option<Vec<luminal::index_expr::IotaExpr>>,
+}
 
 impl OpSlotNames for IndexMapApplyView {
     fn operand_name(&self, operand: usize) -> String {
@@ -38,6 +48,10 @@ impl BufferTensorIrOp for IndexMapApplyView {
     }
     fn result_writes_memory(&self, _result: usize) -> bool {
         false // metadata op: no bytes produced
+    }
+
+    fn view_index_map(&self, _result: usize) -> Option<Vec<luminal::index_expr::IotaExpr>> {
+        self.entries.clone()
     }
 }
 
@@ -87,7 +101,11 @@ impl OpMatcher for IndexMapApplyViewMatcher {
         &[("index_map", 1), ("shape", 2), ("out_layout", 3)]
     }
 
-    fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(IndexMapApplyView)
+    fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
+        // Metadata children: index_map at 1, OUT shape at 2 (the
+        // owner-shape guard) — the same walk the materialize matcher does.
+        Box::new(IndexMapApplyView {
+            entries: luminal::index_expr::parse_index_map_entries(site, 1, 2),
+        })
     }
 }

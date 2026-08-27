@@ -160,7 +160,7 @@ pub fn execute_plan(
                 let dst_slice = storage.get_mut(dst).unwrap();
                 stream.memcpy_dtod(&src_slice, dst_slice).context("D2D copy")?;
             }
-            BufferNode::Compute { op, reads, writes, .. } => {
+            BufferNode::Compute { op, reads, writes, operand_info, result_info, .. } => {
                 let label = op.label();
                 if label == "BufferAlloc" || label == "BufferFree" {
                     continue; // storage is pre-materialized in CL-2
@@ -168,28 +168,22 @@ pub fn execute_plan(
                 let Some(kernel) = codegen_for(op.as_ref()) else {
                     bail!("no cuda codegen for {label}");
                 };
-                let ctxinfo = CodegenCtx {
-                    operand_dims: reads
-                        .iter()
-                        .map(|id| geometry.get(id).map(|(d, _)| d.clone()))
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| anyhow!("{label} operand lacks geometry"))?,
-                    operand_dtypes: reads
-                        .iter()
-                        .map(|id| geometry.get(id).map(|(_, t)| *t))
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| anyhow!("{label} operand lacks dtype"))?,
-                    dest_dims: writes
-                        .iter()
-                        .map(|id| geometry.get(id).map(|(d, _)| d.clone()))
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| anyhow!("{label} dest lacks geometry"))?,
-                    dest_dtypes: writes
-                        .iter()
-                        .map(|id| geometry.get(id).map(|(_, t)| *t))
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| anyhow!("{label} dest lacks dtype"))?,
-                };
+                // Phase 3: codegen geometry comes from the node's OWN slot
+                // descriptors, never the shared buffer table — `geometry`
+                // stays for allocation sizing and the copy check only. A
+                // compute node arriving without its descriptors is
+                // malformed: bail loudly (mirror of the None-dims bail).
+                if operand_info.len() != reads.len() || result_info.len() != writes.len() {
+                    bail!(
+                        "{label}: compute node lacks slot descriptors \
+                         (operand_info {}/{}, result_info {}/{})",
+                        operand_info.len(),
+                        reads.len(),
+                        result_info.len(),
+                        writes.len()
+                    );
+                }
+                let ctxinfo = CodegenCtx::from_descriptors(label, operand_info, result_info)?;
                 let launches = (kernel.codegen)(op.as_ref(), &ctxinfo)
                     .with_context(|| format!("codegen for {label}"))?;
 
