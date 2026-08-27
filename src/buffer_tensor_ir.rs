@@ -16,7 +16,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 
 use anyhow::Result;
@@ -593,7 +593,9 @@ pub struct BufferTensorIrGraph {
     /// Every distinct buffer, by id (interned during assignment).
     pub buffers: HashMap<BufferId, Buffer>,
     /// The buffer holding each value (values collapse onto buffers via reuse).
-    pub value_buffer: HashMap<ClassId, BufferId>,
+    /// A `BTreeMap` so every iteration over it is value-ordered and
+    /// deterministic (see [`crate::bufferize::BufferIrGraph::value_buffer`]).
+    pub value_buffer: BTreeMap<ClassId, BufferId>,
 }
 
 impl BufferTensorIrGraph {
@@ -1875,7 +1877,7 @@ mod tests {
         BufferTensorIrGraph {
             dag,
             buffers: HashMap::new(),
-            value_buffer: HashMap::new(),
+            value_buffer: BTreeMap::new(),
         }
     }
 
@@ -2020,7 +2022,7 @@ mod tests {
         BufferTensorIrGraph {
             dag,
             buffers,
-            value_buffer: HashMap::new(),
+            value_buffer: BTreeMap::new(),
         }
     }
 

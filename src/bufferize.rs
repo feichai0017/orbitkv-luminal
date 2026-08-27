@@ -69,7 +69,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 use egraph_serialize::ClassId;
@@ -168,6 +168,37 @@ pub struct BufferEdge {
     pub kind: EdgeKind,
 }
 
+/// The composed per-slot access expression: how a slot's value addresses its
+/// buffer through the views folded between them. M4 Phase 3 fills this at
+/// view-fold time; in Phase 1/2 NOTHING constructs it (the enum is
+/// uninhabited, so every `Option<ComposedAccess>` is provably `None`) — the
+/// slot exists now so the descriptor schema is stable before the fill lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposedAccess {}
+
+/// Per-slot geometry descriptor on a plan node: the VALUE occupying an
+/// operand/result slot, the buffer backing it, and the value's literal
+/// geometry (`None` = symbolic, numeric consumers bail loudly — the same
+/// contract as [`Buffer::dims`]). Identity (`value`, `buffer`) is filled at
+/// lowering from the BufferTensor operands/results; geometry comes from the
+/// extraction's per-value facts. Purely additive this phase: nothing reads
+/// it yet except tests and the writer-identity dims join.
+#[derive(Debug, Clone)]
+pub struct SlotDescriptor {
+    /// The value occupying this slot (operand read / result written).
+    pub value: ClassId,
+    /// The buffer backing the slot (same entry as `reads`/`writes`).
+    pub buffer: BufferId,
+    /// The value's literal extents (`None` = symbolic).
+    pub dims: Option<Vec<i64>>,
+    /// The value's element bit width (same contract as `dims`).
+    pub element_bits: Option<i64>,
+    /// The value's plan dtype (same contract as `dims`).
+    pub dtype: Option<crate::dtype::PlanDtype>,
+    /// Composed view access for this slot — always `None` until Phase 3.
+    pub composed_access: Option<ComposedAccess>,
+}
+
 /// A node in the buffer IR. `Compute` nodes are the original ops, now reading and
 /// writing buffers; `BufferCopy` is the only genuinely new operation (bufferizer-
 /// inserted materialization); the boundaries are pinned buffers.
@@ -186,9 +217,22 @@ pub enum BufferNode {
         /// node for rendering: the plan surface must not query analysis-time
         /// contracts (`alias_info`), and slot names come from `OpSlotNames`.
         ties: Vec<(usize, usize)>,
+        /// Per-operand descriptors, parallel to `reads`.
+        operand_info: Vec<SlotDescriptor>,
+        /// Per-result descriptors, parallel to `writes`.
+        result_info: Vec<SlotDescriptor>,
     },
     /// A bufferizer-inserted copy materializing `src` into `dst`.
-    BufferCopy { src: BufferId, dst: BufferId },
+    BufferCopy {
+        src: BufferId,
+        dst: BufferId,
+        /// The value the copy transports — a copy preserves the value and
+        /// changes the buffer, so ONE value names what lands in `dst`. The
+        /// writer-identity dims join reads this to give `dst` the copied
+        /// value's geometry (never the src BUFFER's, which may be cohabited
+        /// by values of other extents).
+        value: ClassId,
+    },
     /// A program output: each slot's value pinned into its destination buffer.
     BufferOutput { slots: Vec<OutputBinding> },
 }
@@ -202,7 +246,10 @@ pub struct BufferIrGraph {
     /// Every distinct buffer in the plan, by id.
     pub buffers: HashMap<BufferId, Buffer>,
     /// The buffer holding each value (values collapse onto buffers via reuse).
-    pub value_buffer: HashMap<ClassId, BufferId>,
+    /// A `BTreeMap` deliberately: residual iterations (the checked bits/dtype
+    /// joins, diagnostics) walk it in value order, so their messages are
+    /// stable run-to-run — never std-HashMap hash order.
+    pub value_buffer: BTreeMap<ClassId, BufferId>,
     /// The `BufferOutput` node(s).
     pub outputs: Vec<NodeIndex>,
 }
@@ -271,7 +318,7 @@ impl BufferIrGraph {
                     self.names(reads),
                     self.names(writes),
                 )),
-                BufferNode::BufferCopy { src, dst } => op_lines.push(format!(
+                BufferNode::BufferCopy { src, dst, .. } => op_lines.push(format!(
                     "  BufferCopy: [{}] -> [{}]",
                     self.buffer_name(src),
                     self.buffer_name(dst),
@@ -392,7 +439,7 @@ impl BufferIrGraph {
                     ));
                     continue;
                 }
-                BufferNode::BufferCopy { src, dst } => (
+                BufferNode::BufferCopy { src, dst, .. } => (
                     // An op: a square, like every other op.
                     format!(
                         "BufferCopy\n{} → {}",
@@ -1343,41 +1390,70 @@ fn validate_input_program(graph: &ExtractedGraph) -> Result<()> {
 /// [`BufferIrGraph`] whose values are buffers and whose copies are real nodes. The
 /// source `graph` is borrowed and left untouched.
 pub fn bufferize(graph: &ExtractedGraph) -> Result<BufferIrGraph> {
-    let mut plan = lower(buffer_tensor_plan(graph)?)?;
-    annotate_buffer_geometry(&mut plan, graph)?;
+    let geometry = extraction_geometry(graph);
+    let mut plan = lower(buffer_tensor_plan(graph)?, &geometry)?;
+    annotate_buffer_geometry(&mut plan, graph, &geometry)?;
     Ok(plan)
+}
+
+/// A value's literal geometry as the extraction recorded it. `None` fields
+/// mean symbolic/underivable — numeric consumers bail loudly, never guess.
+#[derive(Debug, Clone)]
+pub(crate) struct ValueGeometry {
+    pub(crate) dims: Option<Vec<i64>>,
+    pub(crate) element_bits: Option<i64>,
+    pub(crate) dtype: Option<crate::dtype::PlanDtype>,
+}
+
+/// Collect every extraction value's literal geometry, keyed by e-class.
+pub(crate) fn extraction_geometry(graph: &ExtractedGraph) -> HashMap<ClassId, ValueGeometry> {
+    let mut value_geometry: HashMap<ClassId, ValueGeometry> = HashMap::new();
+    for node in graph.dag.node_weights() {
+        match node {
+            ExtractedNode::BufferInput(input) => {
+                value_geometry
+                    .entry(input.value.eclass.clone())
+                    .or_insert(ValueGeometry {
+                        dims: input.value.dims.clone(),
+                        element_bits: input.value.element_bits,
+                        dtype: input.value.dtype_enum,
+                    });
+            }
+            ExtractedNode::LayoutOp(op) => {
+                for output in &op.outputs {
+                    value_geometry
+                        .entry(output.eclass.clone())
+                        .or_insert(ValueGeometry {
+                            dims: output.dims.clone(),
+                            element_bits: output.element_bits,
+                            dtype: output.dtype_enum,
+                        });
+                }
+            }
+            ExtractedNode::BufferOutput(_) => {}
+        }
+    }
+    value_geometry
 }
 
 /// Thread the extraction's literal geometry (dims, element bits) and the
 /// boundary `BufferLit` keys onto the plan's buffers — the sizing/binding
 /// surface the `ReferenceRuntime` executes from. Purely additive; `None`
 /// stays `None` for symbolic geometry, and numeric consumers bail loudly.
-fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) -> Result<()> {
-    use std::collections::HashMap as Map;
-    type Geometry = (Option<Vec<i64>>, Option<i64>, Option<crate::dtype::PlanDtype>);
-    let mut value_geometry: Map<ClassId, Geometry> = Map::new();
-    let mut boundary_lits: Map<ClassId, i64> = Map::new();
+fn annotate_buffer_geometry(
+    plan: &mut BufferIrGraph,
+    graph: &ExtractedGraph,
+    value_geometry: &HashMap<ClassId, ValueGeometry>,
+) -> Result<()> {
+    let mut boundary_lits: HashMap<ClassId, i64> = HashMap::new();
     for node in graph.dag.node_weights() {
         match node {
             ExtractedNode::BufferInput(input) => {
-                value_geometry.entry(input.value.eclass.clone()).or_insert((
-                    input.value.dims.clone(),
-                    input.value.element_bits,
-                    input.value.dtype_enum,
-                ));
                 if let Some(lit) = input.buffer.lit {
                     boundary_lits.insert(input.buffer.id_eclass.clone(), lit);
                 }
             }
-            ExtractedNode::LayoutOp(op) => {
-                for output in &op.outputs {
-                    value_geometry.entry(output.eclass.clone()).or_insert((
-                        output.dims.clone(),
-                        output.element_bits,
-                        output.dtype_enum,
-                    ));
-                }
-            }
+            ExtractedNode::LayoutOp(_) => {}
             ExtractedNode::BufferOutput(output) => {
                 for slot in &output.slots {
                     if let Some(lit) = slot.buffer.lit {
@@ -1387,31 +1463,110 @@ fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) ->
             }
         }
     }
-    for (value, id) in &plan.value_buffer {
-        if let Some((dims, bits, dtype)) = value_geometry.get(value) {
-            if let Some(buffer) = plan.buffers.get_mut(id) {
-                // Dims/bits joins are CHECKED, order-independent lattice
-                // joins (None ∨ x = x; equal ∨ equal = equal; different
-                // knowns BAIL) — the old first-wins-by-hash-order join
-                // let a buffer shared by values of different numel take
-                // its geometry nondeterministically (found 2026-08-12 by
-                // the forced view-admission probe; fix ruled 2026-08-13).
-                // Dims stay FIRST-WINS for now — and that is a documented
-                // hole, not a design: folded views legitimately cohabit a
-                // buffer with the parent at DIFFERENT numel (matmul expand
-                // reads (2,3) through (2,4,3); slice reads (2,2) through
-                // (2); scalar broadcast reads () through (3,5)), so a
-                // checked numel join refuses valid plans. The sound join
-                // needs WRITER identity — storage geometry = the resident
-                // value that supplies the bytes (staged input or writing
-                // kernel), view readers skipped. That resident-geometry
-                // annotation is the prerequisite for admitting views on
-                // real backends and lands with the M4 re-seat (ruling
-                // 2026-08-13); until then hash-order decides ties exactly
-                // as before, deterministic per build.
-                if buffer.dims.is_none() {
-                    buffer.dims = dims.clone();
+
+    // THE WRITER-IDENTITY DIMS JOIN (ruling 2026-08-13, approved 2026-08-26):
+    // a buffer's storage geometry is the geometry of the residents that
+    // SUPPLY ITS BYTES, and nothing else. Writers are enumerated from the
+    // plan's nodes in deterministic node order (never a value map):
+    //
+    //   * `BufferInput` slots — the caller stages the slot value's bytes;
+    //   * `Compute` results with `result_writes_memory` — the kernel writes
+    //     the result value's bytes (BufferAlloc results declare no write:
+    //     undefined contents have no geometry to contribute);
+    //   * `BufferCopy` destinations — the COPIED value's bytes land in dst.
+    //
+    // Folded views produce no plan node, so a view reader can never vote —
+    // that is what makes the join sound where a checked all-residents join
+    // refuses valid plans (matmul expand reads (2,3) through (2,4,3); a
+    // scalar broadcast reads () through (3,5)). Join law per buffer:
+    // None ∨ x = x; equal ∨ equal = equal; two DIFFERENT known dims are a
+    // planner contradiction and bail loudly, both writers named. There is
+    // no first-wins arm anywhere.
+    let mut dims_votes: HashMap<BufferId, (Vec<i64>, String)> = HashMap::new();
+    {
+        let mut vote = |buffer: &BufferId, value: &ClassId, writer: String| -> Result<()> {
+            let Some(geometry) = value_geometry.get(value) else {
+                return Ok(());
+            };
+            let Some(dims) = &geometry.dims else {
+                return Ok(()); // symbolic: None ∨ x = x
+            };
+            match dims_votes.get(buffer) {
+                None => {
+                    dims_votes.insert(buffer.clone(), (dims.clone(), writer));
                 }
+                Some((held, held_by)) if held != dims => anyhow::bail!(
+                    "buffer geometry contradiction on {buffer:?}: {writer} \
+                     writes {dims:?} into a buffer that {held_by} already \
+                     writes as {held:?} — a buffer's writers must agree on \
+                     its storage geometry",
+                ),
+                Some(_) => {}
+            }
+            Ok(())
+        };
+        for index in plan.dag.node_indices() {
+            match &plan.dag[index] {
+                BufferNode::BufferInput { slots } => {
+                    for slot in slots {
+                        vote(
+                            &slot.buffer,
+                            &slot.value,
+                            format!("input slot (value {})", slot.value),
+                        )?;
+                    }
+                }
+                BufferNode::Compute {
+                    op,
+                    writes,
+                    result_info,
+                    ..
+                } => {
+                    for (result, id) in writes.iter().enumerate() {
+                        if !op.result_writes_memory(result) {
+                            continue;
+                        }
+                        let Some(info) = result_info.get(result) else {
+                            anyhow::bail!(
+                                "plan node {} is missing the descriptor for \
+                                 result {result} — lowering must fill \
+                                 result_info for every result slot",
+                                op.label()
+                            );
+                        };
+                        vote(
+                            id,
+                            &info.value,
+                            format!("{} (result {result}, value {})", op.label(), info.value),
+                        )?;
+                    }
+                }
+                BufferNode::BufferCopy { dst, value, .. } => {
+                    vote(dst, value, format!("BufferCopy (value {value})"))?;
+                }
+                BufferNode::BufferOutput { .. } => {}
+            }
+        }
+    }
+    for buffer in plan.buffers.values_mut() {
+        if let Some((dims, _)) = dims_votes.get(&buffer.id) {
+            buffer.dims = Some(dims.clone());
+        }
+    }
+
+    for (value, id) in &plan.value_buffer {
+        if let Some(ValueGeometry {
+            element_bits: bits,
+            dtype,
+            ..
+        }) = value_geometry.get(value)
+        {
+            if let Some(buffer) = plan.buffers.get_mut(id) {
+                // Bits join is CHECKED, an order-independent lattice join
+                // (None ∨ x = x; equal ∨ equal = equal; different knowns
+                // BAIL) — every resident, view readers included, must agree
+                // on the element width. Iteration order is the BTreeMap's
+                // value order, so bail messages are stable.
                 match (buffer.element_bits, *bits) {
                     (None, known) => buffer.element_bits = known,
                     (Some(held), Some(new)) if held != new => anyhow::bail!(
@@ -1458,23 +1613,24 @@ fn annotate_buffer_geometry(plan: &mut BufferIrGraph, graph: &ExtractedGraph) ->
             buffer.lit = boundary_lits.get(eclass).copied();
         }
     }
-    // A delivery copy's destination inherits its source's geometry (same
-    // value, same shape — the dst had no value of its own to join on).
+    // A delivery copy's destination inherits its source's WIDTH/DTYPE when
+    // the dst had no value of its own to join on (None ∨ x = x — a fill,
+    // never an override; a conflicting known already bailed in the checked
+    // joins above). Dims take no part here: the writer-identity join above
+    // already gave dst the COPIED VALUE's geometry, which is the correct
+    // one even when the src buffer is cohabited by values of other extents.
     let copy_pairs: Vec<(BufferId, BufferId)> = plan
         .dag
         .node_weights()
         .filter_map(|node| match node {
-            BufferNode::BufferCopy { src, dst } => Some((src.clone(), dst.clone())),
+            BufferNode::BufferCopy { src, dst, .. } => Some((src.clone(), dst.clone())),
             _ => None,
         })
         .collect();
     for (src, dst) in copy_pairs {
         let Some(source) = plan.buffers.get(&src) else { continue };
-        let (dims, bits, dtype) = (source.dims.clone(), source.element_bits, source.dtype);
+        let (bits, dtype) = (source.element_bits, source.dtype);
         if let Some(buffer) = plan.buffers.get_mut(&dst) {
-            if buffer.dims.is_none() {
-                buffer.dims = dims;
-            }
             if buffer.element_bits.is_none() {
                 buffer.element_bits = bits;
             }
@@ -1581,7 +1737,7 @@ pub(crate) fn buffer_tensor_plan(
 #[derive(Default)]
 pub(crate) struct Bufferizer {
     pub(crate) buffers: HashMap<BufferId, Buffer>,
-    pub(crate) value_buffer: HashMap<ClassId, BufferId>,
+    pub(crate) value_buffer: BTreeMap<ClassId, BufferId>,
     /// Buffer chosen for each storage-class representative (so all values an
     /// admitted decision placed in one allocation — an in-place producer and
     /// its operand, a view and its parent — share one buffer).
@@ -1771,13 +1927,13 @@ impl Bufferizer {
 fn validate_plan(dag: &DiGraph<BufferNode, BufferEdge>) -> Result<()> {
     for index in dag.node_indices() {
         match &dag[index] {
-            BufferNode::BufferCopy { src, dst } if src == dst => {
+            BufferNode::BufferCopy { src, dst, .. } if src == dst => {
                 anyhow::bail!(
                     "plan validation failed: self-copy of {src:?} — a no-op \
                      writer must be folded before the WAR scan"
                 );
             }
-            BufferNode::Compute { op, reads, writes, ties } => {
+            BufferNode::Compute { op, reads, writes, ties, .. } => {
                 if reads.is_empty()
                     && !writes.is_empty()
                     && (0..writes.len()).all(|result| op.result_is_undefined(result))
@@ -1841,7 +1997,10 @@ fn validate_plan(dag: &DiGraph<BufferNode, BufferEdge>) -> Result<()> {
 /// fold, buffer DCE) ran in [`crate::buffer_tensor_ir::optimize`]. What
 /// follows the walk is the schedulability check and the lowering tripwires
 /// ([`validate_plan`]).
-pub(crate) fn lower(bt: crate::buffer_tensor_ir::BufferTensorIrGraph) -> Result<BufferIrGraph> {
+pub(crate) fn lower(
+    bt: crate::buffer_tensor_ir::BufferTensorIrGraph,
+    value_geometry: &HashMap<ClassId, ValueGeometry>,
+) -> Result<BufferIrGraph> {
     use crate::buffer_tensor_ir::{BtNode, BufferTensor, BufferTensorIrGraph};
     let BufferTensorIrGraph {
         dag: bt_dag,
@@ -1850,6 +2009,21 @@ pub(crate) fn lower(bt: crate::buffer_tensor_ir::BufferTensorIrGraph) -> Result<
     } = bt;
 
     use petgraph::visit::EdgeRef;
+
+    // Per-slot descriptor: identity from the BufferTensor (value, buffer)
+    // pair, geometry from the extraction's per-value facts. The composed
+    // access slot stays `None` — Phase 3 fills it at view-fold time.
+    let describe = |tensor: &BufferTensor| -> SlotDescriptor {
+        let geometry = value_geometry.get(&tensor.value);
+        SlotDescriptor {
+            value: tensor.value.clone(),
+            buffer: tensor.buffer.clone(),
+            dims: geometry.and_then(|g| g.dims.clone()),
+            element_bits: geometry.and_then(|g| g.element_bits),
+            dtype: geometry.and_then(|g| g.dtype),
+            composed_access: None,
+        }
+    };
 
     let mut dag: DiGraph<BufferNode, BufferEdge> = DiGraph::new();
     // The lowered node producing each RESIDENCE (value, buffer) — a copy
@@ -1941,6 +2115,7 @@ pub(crate) fn lower(bt: crate::buffer_tensor_ir::BufferTensorIrGraph) -> Result<
                     let copy = dag.add_node(BufferNode::BufferCopy {
                         src: src.buffer.clone(),
                         dst: dst.buffer.clone(),
+                        value: src.value.clone(),
                     });
                     if let Some(&from) = producer.get(&residence(src)) {
                         dag.add_edge(
@@ -1958,7 +2133,9 @@ pub(crate) fn lower(bt: crate::buffer_tensor_ir::BufferTensorIrGraph) -> Result<
                     continue;
                 }
 
-                // COMPUTE: erase values, keep buffers.
+                // COMPUTE: erase values into buffers — but keep each slot's
+                // value + geometry on the node's descriptors (per-node
+                // descriptor schema, approved 2026-08-26b).
                 let reads: Vec<BufferId> = operands.iter().map(|t| t.buffer.clone()).collect();
                 let writes: Vec<BufferId> = results.iter().map(|t| t.buffer.clone()).collect();
                 let node = dag.add_node(BufferNode::Compute {
@@ -1966,6 +2143,8 @@ pub(crate) fn lower(bt: crate::buffer_tensor_ir::BufferTensorIrGraph) -> Result<
                     reads: reads.clone(),
                     writes: writes.clone(),
                     ties: ties.clone(),
+                    operand_info: operands.iter().map(&describe).collect(),
+                    result_info: results.iter().map(&describe).collect(),
                 });
                 for (idx, tensor) in operands.iter().enumerate() {
                     if let Some(&from) = producer.get(&residence(tensor)) {
@@ -2017,6 +2196,7 @@ pub(crate) fn lower(bt: crate::buffer_tensor_ir::BufferTensorIrGraph) -> Result<
                         let copy = dag.add_node(BufferNode::BufferCopy {
                             src: src_buffer.clone(),
                             dst: slot.buffer.clone(),
+                            value: slot.value.clone(),
                         });
                         dag.add_edge(
                             from,
@@ -2673,7 +2853,8 @@ mod tests {
         let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[]);
         let bt = crate::buffer_tensor_ir::build_buffer_tensor_ir(&graph, &order, assignment, &analysis)
             .expect("construction never errors on a rejected view");
-        let plan = lower(bt).expect("a rejected view repairs, never errors");
+        let plan = lower(bt, &extraction_geometry(&graph))
+            .expect("a rejected view repairs, never errors");
         // The repair copy (x's buffer -> fresh alloc) plus the boundary copy
         // (fresh alloc -> slot E).
         let copies = plan
@@ -2800,7 +2981,7 @@ mod tests {
     fn validator_rejects_self_copy() {
         let d = vbuf("D");
         let mut dag = DiGraph::new();
-        dag.add_node(BufferNode::BufferCopy { src: d.clone(), dst: d.clone() });
+        dag.add_node(BufferNode::BufferCopy { src: d.clone(), dst: d.clone(), value: cid("v") });
         let err = validate_plan(&dag).unwrap_err();
         assert!(err.to_string().contains("self-copy"), "{err}");
     }
@@ -2817,6 +2998,8 @@ mod tests {
             reads: Vec::new(),
             writes: vec![vbuf("D")],
             ties: Vec::new(),
+            operand_info: Vec::new(),
+            result_info: Vec::new(),
         });
         let err = validate_plan(&dag).unwrap_err();
         assert!(err.to_string().contains("caller storage"), "{err}");
@@ -2833,6 +3016,8 @@ mod tests {
             reads: vec![vbuf("D")],
             writes: vec![vbuf("D")],
             ties: vec![(0, 0)],
+            operand_info: Vec::new(),
+            result_info: Vec::new(),
         });
         let err = validate_plan(&dag).unwrap_err();
         assert!(err.to_string().contains("unfolded view"), "{err}");

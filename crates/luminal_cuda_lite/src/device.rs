@@ -146,7 +146,7 @@ pub fn execute_plan(
     for node in order {
         match &plan.dag[node] {
             BufferNode::BufferInput { .. } | BufferNode::BufferOutput { .. } => {}
-            BufferNode::BufferCopy { src, dst } => {
+            BufferNode::BufferCopy { src, dst, .. } => {
                 let (src_geo, src_dtype) =
                     geometry.get(src).ok_or_else(|| anyhow!("copy src unknown"))?.clone();
                 let (dst_geo, dst_dtype) =

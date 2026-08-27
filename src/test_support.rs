@@ -697,7 +697,7 @@ mod harness_tests {
             .find(|e| matches!(&plan.dag[e.source()], BufferNode::BufferCopy { .. }))
             .expect("copy feeds the accumulator");
         match &plan.dag[copy_edge.source()] {
-            BufferNode::BufferCopy { src, dst } => {
+            BufferNode::BufferCopy { src, dst, .. } => {
                 assert_eq!(src, &plan.value_buffer[&x]);
                 assert_eq!(dst, &acc_writes[0]);
             }
@@ -1028,7 +1028,7 @@ mod harness_tests {
             .dag
             .node_indices()
             .filter_map(|idx| match &plan.dag[idx] {
-                BufferNode::BufferCopy { src, dst } => Some((src, dst)),
+                BufferNode::BufferCopy { src, dst, .. } => Some((src, dst)),
                 _ => None,
             })
             .collect();
@@ -1864,7 +1864,7 @@ mod harness_tests {
             .dag
             .node_indices()
             .filter_map(|idx| match &plan.dag[idx] {
-                BufferNode::BufferCopy { src, dst } => Some((src.clone(), dst.clone())),
+                BufferNode::BufferCopy { src, dst, .. } => Some((src.clone(), dst.clone())),
                 _ => None,
             })
             .collect();
@@ -1975,7 +1975,7 @@ mod harness_tests {
         let mut exp_reads = None;
         for idx in plan.dag.node_indices() {
             match &plan.dag[idx] {
-                BufferNode::BufferCopy { src, dst } => copies.push((src.clone(), dst.clone())),
+                BufferNode::BufferCopy { src, dst, .. } => copies.push((src.clone(), dst.clone())),
                 BufferNode::Compute { op, reads, writes, .. } => match op.label() {
                     "SqrtFunctionalGeneric" => sqrt_writes = Some(writes[0].clone()),
                     "ExpFunctionalGeneric" => exp_reads = Some(reads[0].clone()),

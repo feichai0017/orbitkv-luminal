@@ -364,7 +364,7 @@ impl ReferenceRuntime {
         for index in order {
             match &plan.dag[index] {
                 BufferNode::BufferInput { .. } | BufferNode::BufferOutput { .. } => {}
-                BufferNode::BufferCopy { src, dst } => {
+                BufferNode::BufferCopy { src, dst, .. } => {
                     let data = storage
                         .get(src)
                         .ok_or_else(|| anyhow!("copy reads unknown buffer"))?
