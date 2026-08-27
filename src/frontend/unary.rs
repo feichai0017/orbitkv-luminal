@@ -11,18 +11,14 @@ fn scatter_ranks_to_sort_indices(
     axis: usize,
     g: &mut Graph,
 ) -> GraphTensor {
-    let ax_size = dims[axis];
     let ndim = dims.len();
 
-    // Values: [0, 1, ..., ax_size-1] along axis, expanded to full shape
-    let mut values = g.arange(ax_size);
-    let mut zeros = g.iota(ax_size, |_| IntExpr::from(0usize));
-    for (i, &dim) in dims.iter().enumerate() {
-        if i != axis {
-            values = values.expand_dim(i, dim);
-            zeros = zeros.expand_dim(i, dim);
-        }
-    }
+    // Values: [0, 1, ..., ax_size-1] along axis over the full shape,
+    // and the zero init — each a single full-shape coordinate-function
+    // iota (P1 + ruling 2026-08-26): NO applies at all, where the old
+    // scaffolding minted an expand chain per non-axis dim.
+    let values = g.iota(dims.clone(), |c| c[axis]);
+    let zeros = g.iota(dims.clone(), |_| IntExpr::from(0usize));
 
     if ndim == 1 {
         return values.scatter1d(ranks, zeros);
@@ -32,6 +28,7 @@ fn scatter_ranks_to_sort_indices(
     // Compute: adjusted = base_offset + ranks * axis_stride
     let mut strides = vec![IntExpr::from(1usize); ndim];
     for d in (0..ndim.saturating_sub(1)).rev() {
+        // Frontend simplification restored (revert ruling 2026-08-27).
         strides[d] = (strides[d + 1] * dims[d + 1]).simplify();
     }
     let axis_stride = strides[axis];
@@ -376,22 +373,13 @@ impl GraphTensor {
         let a_val = self.expand_dim(axis + 1, ax_size) * 1.0;
         let b_val = self.expand_dim(axis, ax_size) * 1.0;
 
-        // Index tensors for tiebreaking (Int-native comparisons)
-        let mut iota_a = self.graph().arange(ax_size);
-        for (i, dim) in exp_dims.iter().take(axis).enumerate() {
-            iota_a = iota_a.expand_dim(i, *dim);
-        }
-        iota_a = iota_a.expand_dim(axis + 1, ax_size);
-        for (i, dim) in exp_dims.iter().enumerate().skip(axis + 2) {
-            iota_a = iota_a.expand_dim(i, *dim);
-        }
-        let mut iota_b = self.graph().arange(ax_size);
-        for (i, dim) in exp_dims.iter().take(axis + 1).enumerate() {
-            iota_b = iota_b.expand_dim(i, *dim);
-        }
-        for (i, dim) in exp_dims.iter().enumerate().skip(axis + 2) {
-            iota_b = iota_b.expand_dim(i, *dim);
-        }
+        // Index tensors for tiebreaking (Int-native comparisons) —
+        // full-shape coordinate-function iotas (P1 + ruling 2026-08-26):
+        // iota_a reads coordinate `axis`, iota_b coordinate `axis + 1`;
+        // NO applies where the old scaffolding minted an expand chain
+        // per surrounding dim.
+        let iota_a = self.graph().iota(exp_dims.clone(), |c| c[axis]);
+        let iota_b = self.graph().iota(exp_dims.clone(), |c| c[axis + 1]);
 
         // Lexicographic comparison with stable tiebreaking (lower index first):
         // ascending:  rank[j] = count of i where (x[i] < x[j]) || (x[i]==x[j] && i < j)
@@ -457,14 +445,16 @@ impl GraphTensor {
             padding[axis] = (orig_length - 1, 0.into());
             kernel[axis] = orig_length;
             self = self.pad(padding, pad_elem);
-            // Unfold
-            self = self.unfold(kernel, vec![1; n_dims], vec![1; n_dims]);
-            // Remove non-cumulative dimensions
+            // Unfold + removal of the non-cumulative kernel dimensions:
+            // ONE macro construct, ONE apply (ruling 2026-08-26) — the
+            // squeezes compose into the unfold's own map.
+            let mut chain = self.unfold_view(kernel, vec![1; n_dims], vec![1; n_dims]);
             for i in (0..n_dims).rev() {
                 if i != axis {
-                    self = self.squeeze(n_dims + i);
+                    chain = chain.squeeze(n_dims + i);
                 }
             }
+            self = chain.finish();
             // apply operation along cumulative dimensions
             self = op(self, n_dims);
         }

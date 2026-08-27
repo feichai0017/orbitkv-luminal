@@ -41,17 +41,20 @@ impl Embedding {
         let flat = input.flatten();
         let rows = crate::attention::gather_rows(table, flat, self.embedding_dim); // (N, D)
 
-        // Rebuild the batch shape with recorded splits: (N, D) → (in_dims.., D)
-        let mut out = rows;
+        // Rebuild the batch shape: (N, D) → (in_dims.., D) — ONE apply
+        // (ruling 2026-08-26); the split arithmetic composes at map
+        // construction inside this one call.
+        let mut chain = rows.view();
         for axis in 0..in_dims.len().saturating_sub(1) {
+            // Frontend simplification restored (revert ruling 2026-08-27).
             let inner: IntExpr = in_dims[axis + 1..]
                 .iter()
                 .copied()
                 .fold(IntExpr::from(1), |acc, d| acc * d)
                 .simplify();
-            out = out.split_dims(axis, inner);
+            chain = chain.split_dims(axis, inner);
         }
-        out
+        chain.finish()
     }
 
     /// Reverse from embedding space to token distribution (tied head).

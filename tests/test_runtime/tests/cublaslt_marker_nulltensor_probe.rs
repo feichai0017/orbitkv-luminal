@@ -14,11 +14,17 @@ fn base_program() -> String {
 
 /// Probe (i): does the EGGLOG side accept a null LayoutTensor term, and
 /// does any rule derive facts (injectivity, shape) for it?
+///
+/// Row ids below track the RECORDED matmul spelling: the transparent
+/// recorder (fold-2 removed) numbers rows densely — v0/v1 inputs,
+/// v2/v4... broadcast applies, and the output ReduceSum lands on v5
+/// (the old recorder skipped an id for a folded intermediate, putting
+/// it on v6). Setup, not subject: the site refs just have to bind.
 #[test]
 fn nulltensor_probe_egglog_side() {
     let base = base_program();
     let fx = format!(
-        "{base}\n(constructor CublasLtNullTensor (CublasLtLogicalSite) LayoutTensor)\n(let probe_site (CublasLtLogicalMatmulSite v0 v1 v6))\n(let probe_null (CublasLtNullTensor probe_site))\n"
+        "{base}\n(constructor CublasLtNullTensor (CublasLtLogicalSite) LayoutTensor)\n(let probe_site (CublasLtLogicalMatmulSite v0 v1 v5))\n(let probe_null (CublasLtNullTensor probe_site))\n"
     );
     let s = test_runtime::serialize_fixture(&fx);
     let nulls = s.nodes.values().filter(|n| n.op == "CublasLtNullTensor").count();
@@ -57,7 +63,7 @@ fn nulltensor_probe_extraction_side() {
     let fx = format!(
         r#"{base}
 (constructor CublasLtNullTensor (CublasLtLogicalSite) LayoutTensor)
-(let probe_site (CublasLtLogicalMatmulSite v0 v1 v6))
+(let probe_site (CublasLtLogicalMatmulSite v0 v1 v5))
 (let probe_null (CublasLtNullTensor probe_site))
 (let probe_desc_a (CublasLtOperandADescriptor probe_site nat1_layout_tensor
   (CublasLtOperationN)))

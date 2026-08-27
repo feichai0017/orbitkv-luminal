@@ -128,7 +128,10 @@ impl ConvND {
         }
 
         // unfold yields [window..., kernel...] — windows already in front.
-        let unfolded = padded.unfold(kernel_shape, stride_shape, dilation_shape);
+        // The unfold AND the patches reshape below are one logical
+        // construct (im2col), so the whole thing composes into ONE apply
+        // (ruling 2026-08-26) via the chain-returning unfold.
+        let unfolded = padded.unfold_view(kernel_shape, stride_shape, dilation_shape);
         let unfolded_dims = unfolded.dims();
 
         // Capture output spatial dimensions from the unfolded view.
@@ -147,46 +150,52 @@ impl ConvND {
         order2.extend(rank + batch_len + 1..rank + batch_len + 1 + spatial);
         // kernel batch dims and kernel channel dim (to be merged away)
         order2.extend(rank..rank + batch_len + 1);
-        let mut patches = unfolded.permute(order2);
+        // The whole patches reshape — permute + every merge — rides the
+        // SAME one apply as the unfold above (ruling 2026-08-26).
+        let mut patches_chain = unfolded.permute(order2);
 
         // Drop kernel axes for batch + channel by merging them into the previous dimension.
         for _ in 0..=batch_len {
-            let last = patches.dims().len();
-            patches = patches.merge_dims(last - 2, last - 1);
+            let last = patches_chain.rank();
+            patches_chain = patches_chain.merge_dims(last - 2, last - 1);
         }
 
         // Flatten channel and kernel spatial dimensions together.
         for _ in 0..spatial {
             let channel_axis = batch_len + spatial;
-            patches = patches.merge_dims(channel_axis, channel_axis + 1);
+            patches_chain = patches_chain.merge_dims(channel_axis, channel_axis + 1);
         }
 
         // Collapse batch dimensions into one and output dimensions into one for matmul.
         for _ in 1..batch_len {
-            patches = patches.merge_dims(0, 1);
+            patches_chain = patches_chain.merge_dims(0, 1);
         }
         for _ in 1..spatial {
-            patches = patches.merge_dims(1, 2);
+            patches_chain = patches_chain.merge_dims(1, 2);
         }
+        let patches = patches_chain.finish();
 
-        let mut out = patches.matmul(self.weight.permute((1, 0)));
+        let out = patches.matmul(self.weight.permute((1, 0)));
 
-        // Restore batch and spatial dimensions. The collapse loops merged
-        // k dims into 1, so restore splits k-1 times: splitting by every dim
-        // including the outermost would leave a spurious leading 1-dim.
+        // Restore batch and spatial dimensions, then move the channel
+        // dimension ahead of the spatial axes — again ONE construct,
+        // ONE apply. The collapse loops merged k dims into 1, so restore
+        // splits k-1 times: splitting by every dim including the
+        // outermost would leave a spurious leading 1-dim.
         let batch_dims = self.input_batch_dims(&input_dims, batch_len);
+        let mut out_chain = out.view();
         for dim in batch_dims.iter().skip(1).rev() {
-            out = out.split_dims(0, *dim);
+            out_chain = out_chain.split_dims(0, *dim);
         }
         for dim in output_dims.iter().skip(1).rev() {
-            out = out.split_dims(batch_len, *dim);
+            out_chain = out_chain.split_dims(batch_len, *dim);
         }
 
-        // Move channel dimension ahead of the spatial axes: [batch..., ch_out, spatial...]
+        // [batch..., ch_out, spatial...]
         let mut final_order: Vec<usize> = (0..batch_len).collect();
         final_order.push(batch_len + spatial);
         final_order.extend(batch_len..batch_len + spatial);
-        out = out.permute(final_order);
+        let out = out_chain.permute(final_order).finish();
 
         if let Some(_b) = self.bias {
             todo!()

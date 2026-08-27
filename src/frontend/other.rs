@@ -43,6 +43,9 @@ impl Graph {
     ) -> GraphTensor {
         let sh = shape.to_shape();
         let coords: Vec<IntExpr> = (0..sh.len()).map(IntExpr::coord).collect();
+        // Frontend simplification restored (Austin's revert ruling
+        // 2026-08-27): the recorded value expression is
+        // construction-simplified, as pre-R-C.
         let expr = f(&coords).simplify();
         let id = self.mint_id();
         let tensor = GraphTensor::from_id(id, sh.clone(), self, DType::Int);
