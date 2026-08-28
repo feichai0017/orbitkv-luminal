@@ -54,6 +54,32 @@ use luminal::layout_ir::{
     AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
 };
 
+// ---------------------------------------------------------------------------
+// Train-3 wiring (the op-ownership move): the extractor above is the
+// rehomed test_runtime `cublaslt_marker.rs`, semantics-identical; these
+// siblings are the estate's other rehomed/new halves.
+// ---------------------------------------------------------------------------
+/// The round-11 election core, rehomed from the test_runtime lib
+/// (vocabulary now a parameter; `test_runtime` wraps with its own).
+pub mod election;
+/// CPU-side host-call planning + the executor-owned validation the
+/// library does not provide (ld bounds, descriptor construction).
+pub mod exec;
+/// The cudarc result-layer dispatch (device feature only).
+#[cfg(feature = "device")]
+pub mod device_call;
+
+/// HOST-CALL DISPATCHABLE: the allow-list face of the cuBLASLt estate.
+/// Kernel-bearing ops are claimable because a codegen row exists;
+/// plan-transparent ops because the planner folds them; these are
+/// claimable because the executor dispatches them as a HOST LIBRARY
+/// CALL (`cublasLtMatmul`). Derived from the registered prototype's
+/// concrete type, never from a name list.
+pub fn host_dispatchable(op: &dyn LayoutIrOp) -> bool {
+    op.as_any().downcast_ref::<CublasLt>().is_some()
+        || op.as_any().downcast_ref::<CublasLtDps>().is_some()
+}
+
 type ClassId = luminal::prelude::egraph_serialize::ClassId;
 
 // ---------------------------------------------------------------------------

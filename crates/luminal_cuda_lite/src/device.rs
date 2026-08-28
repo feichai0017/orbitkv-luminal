@@ -273,6 +273,108 @@ pub fn execute_plan(
                 if label == "BufferAlloc" || label == "BufferFree" {
                     continue; // storage is pre-materialized in CL-2
                 }
+                // Train 3: the HOST-CALL arm — cuBLASLt contracts
+                // dispatch as one `cublasLtMatmul` library call on the
+                // SAME stream as the surrounding kernels, never an
+                // NVRTC kernel. The destination follows the executor's
+                // out-of-place convention (fresh zeroed slice, swapped
+                // into storage after the call), so the C-fold forms
+                // read their C operand buffer and write fresh D
+                // (C != D pointers, beta = 1.0f — legal, identical
+                // layouts by the marker's rule guard).
+                if let Some(dps) =
+                    op.as_any().downcast_ref::<crate::ops::cublaslt::CublasLtDps>()
+                {
+                    let call = crate::ops::cublaslt::exec::plan_call(&dps.op)
+                        .with_context(|| format!("cuBLASLt call planning for {label}"))?;
+                    if writes.len() != 1 {
+                        bail!("{label}: single-destination contract, got {}", writes.len());
+                    }
+                    let input_count = reads.len().saturating_sub(writes.len());
+                    let inputs: Vec<CudaSlice<u8>> = reads[..input_count]
+                        .iter()
+                        .map(|id| storage.get(id).unwrap().clone())
+                        .collect();
+                    let operand_refs: Vec<&CudaSlice<u8>> = inputs.iter().collect();
+                    // F32-only scope end to end (contract 1): every
+                    // operand slot and the destination must be F32.
+                    let (dest_dims, dest_dtype) = geometry.get(&writes[0]).unwrap().clone();
+                    if dest_dtype != PlanDtype::F32
+                        || operand_info.iter().any(|s| s.dtype != Some(PlanDtype::F32))
+                    {
+                        let bad_operands: Vec<String> = operand_info
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, s)| s.dtype != Some(PlanDtype::F32))
+                            .map(|(i, s)| format!("operand {i}: {:?}", s.dtype))
+                            .collect();
+                        bail!(
+                            "{label}: cuBLASLt scope is F32-only end to end \
+                             (contract 1); dest {dest_dtype:?}, offending \
+                             operands: [{}]",
+                            bad_operands.join(", ")
+                        );
+                    }
+                    // ROW-CONVENTION FRAME CHECK (the orientation-bug
+                    // fence): the fresh dest is written as a dense
+                    // ROW-major m x n matrix, and the plan's disclosure
+                    // walks the result buffer as row-major over the
+                    // RESULT VALUE's dims — the two agree only when the
+                    // planned dims ARE [m, n]. A mismatch means the
+                    // call frame and the plan frame diverged: refuse
+                    // loudly, never land transposed bytes.
+                    if dest_dims != [call.m as usize, call.n as usize] {
+                        bail!(
+                            "{label}: planned destination dims {dest_dims:?} disagree \
+                             with the call frame [m, n] = [{}, {}] — the ROW-major D \
+                             write would not match the disclosed layout",
+                            call.m,
+                            call.n
+                        );
+                    }
+                    // The C-fold forms read a REAL C operand through the
+                    // same ROW m x n descriptor as D (Cdesc == Ddesc by
+                    // rule guard). That read is only correct when the C
+                    // operand buffer holds the call-frame C dense
+                    // row-major: a slot arriving as a FOLDED VIEW
+                    // (composed access over a parent buffer) presents
+                    // different bytes and there is no transC to absorb
+                    // it — refuse loudly.
+                    if let crate::ops::cublaslt::exec::CSource::Operand(ci) = call.c_source {
+                        let slot = operand_info.get(ci).ok_or_else(|| {
+                            anyhow!("{label}: C operand slot {ci} missing from operand_info")
+                        })?;
+                        if slot.composed_access.is_some() {
+                            bail!(
+                                "{label}: C operand arrives as a folded VIEW over its \
+                                 buffer — the ROW-major C descriptor (== D) requires a \
+                                 materialized dense C operand; refusing before dispatch"
+                            );
+                        }
+                        if slot.dims.as_deref() != Some(&[call.m, call.n][..]) {
+                            bail!(
+                                "{label}: C operand dims {:?} disagree with the call \
+                                 frame [m, n] = [{}, {}] — refusing before dispatch",
+                                slot.dims,
+                                call.m,
+                                call.n
+                            );
+                        }
+                    }
+                    let dest_bytes =
+                        dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
+                    let mut dest =
+                        stream.alloc_zeros::<u8>(dest_bytes.max(1)).context("dest alloc")?;
+                    crate::ops::cublaslt::device_call::dispatch(
+                        &call,
+                        &operand_refs,
+                        &mut dest,
+                        &stream,
+                    )
+                    .with_context(|| format!("cuBLASLt dispatch for {label}"))?;
+                    storage.insert(writes[0].clone(), dest);
+                    continue;
+                }
                 let Some(kernel) = codegen_for(op.as_ref()) else {
                     bail!("no cuda codegen for {label}");
                 };

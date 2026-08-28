@@ -12,6 +12,7 @@
 pub mod add;
 pub mod cast;
 pub mod constant;
+pub mod cublaslt;
 pub mod div;
 pub mod exp;
 pub mod exp2;
@@ -97,8 +98,43 @@ pub fn cuda_registry() -> Vec<RegisteredOp> {
     ]
 }
 
+/// The registry WITH the cuBLASLt estate (Train 3): the four
+/// fixed-arity marker contracts, registered as real CL ops whose
+/// execution row is a HOST LIBRARY CALL (`cublasLtMatmul`), never an
+/// NVRTC kernel — the third claim class (see `CudaRuntime::allow_list`).
+///
+/// WHY A SEPARATE SURFACE (measured, Train 3): splicing the marker
+/// vocabulary into EVERY CL assembly detonates the `view-arity-lock`
+/// coherence tripwire ("Illegal merge attempted") at saturation on ALL
+/// seven runnable Train-2 minis and the ladder's llama blocks — the
+/// marker's canonicalization/sandwich rewrites weld transpose-view
+/// apply spellings into logical classes that already carry apply
+/// spellings of a different parent rank (extent-1 weld corners on real
+/// decode-step graphs; the synthetic 2D marker-board fixtures never
+/// exercise this). The .egg rule text is frozen (egglog-level design
+/// wins unmodified; changes need Austin's explicit approval), so until
+/// that ruling lands the marker joins an assembly only through this
+/// EXPLICIT seam ([`crate::CudaRuntime::load_with_cublaslt`]) — the
+/// default vocabulary stays exactly the Train-2 set, and the 2D
+/// canonical-form election pin runs marker-enabled.
+pub fn cuda_registry_with_cublaslt() -> Vec<RegisteredOp> {
+    let mut registry = cuda_registry();
+    for form in cublaslt::CublasLtForm::ALL {
+        registry.push(RegisteredOp {
+            matcher: Box::new(cublaslt::CublasLtMarkerMatcher { form }),
+            prototype: Box::new(cublaslt::CublasLt { form, spec: None }),
+        });
+    }
+    registry
+}
+
 /// The matcher set this runtime assembles and extracts with — the
 /// registry's matcher column.
 pub fn cuda_matchers() -> Vec<Box<dyn OpMatcher>> {
     cuda_registry().into_iter().map(|entry| entry.matcher).collect()
+}
+
+/// The matcher column of [`cuda_registry_with_cublaslt`].
+pub fn cuda_matchers_with_cublaslt() -> Vec<Box<dyn OpMatcher>> {
+    cuda_registry_with_cublaslt().into_iter().map(|entry| entry.matcher).collect()
 }

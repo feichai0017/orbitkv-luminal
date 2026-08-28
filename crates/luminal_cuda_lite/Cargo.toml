@@ -14,7 +14,9 @@ edition = "2021"
 
 [features]
 default = []
-device = ["dep:cudarc"]
+# Train 3: the cuBLASLt host-call dispatch rides the same feature —
+# cudarc's `cublaslt` module (result layer) joins the driver/NVRTC set.
+device = ["dep:cudarc", "cudarc/cublaslt"]
 
 [dependencies]
 luminal = { path = "../.." }

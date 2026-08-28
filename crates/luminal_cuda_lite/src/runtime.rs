@@ -33,6 +33,12 @@ struct NativeParts {
 #[derive(Default)]
 pub struct CudaRuntime {
     native: Option<NativeParts>,
+    /// Train 3: assemble/search with the cuBLASLt marker vocabulary.
+    /// OFF by default — the unconditional splice detonates the
+    /// `view-arity-lock` tripwire on real model graphs (see
+    /// [`crate::ops::cuda_registry_with_cublaslt`]); enabled through
+    /// [`CudaRuntime::load_with_cublaslt`].
+    cublaslt: bool,
     plan: Option<BufferIrGraph>,
     /// Host-staged input payloads by BufferLit id, H2D'd at execute.
     staged: FxHashMap<i64, TypedBuffer>,
@@ -65,6 +71,29 @@ impl CudaRuntime {
         })
     }
 
+    /// [`CudaRuntime::load`] with the cuBLASLt marker vocabulary
+    /// enabled: search assembles the marker's egg snippets and may
+    /// elect the four host-call contracts. EXPLICIT OPT-IN (Train 3):
+    /// on real model graphs the marker's canonicalization rewrites
+    /// currently detonate the `view-arity-lock` coherence tripwire at
+    /// saturation (measured on all seven Train-2 minis); callers get a
+    /// loud saturation error, never a wrong plan. The 2D canonical
+    /// matmul form searches and elects green.
+    pub fn load_with_cublaslt(graph: &graph::Graph) -> Result<Self> {
+        let mut rt = Self::load(graph)?;
+        rt.cublaslt = true;
+        Ok(rt)
+    }
+
+    /// The matcher vocabulary this instance assembles/searches with.
+    fn matchers(&self) -> Vec<Box<dyn luminal::layout_ir::OpMatcher>> {
+        if self.cublaslt {
+            crate::ops::cuda_matchers_with_cublaslt()
+        } else {
+            crate::ops::cuda_matchers()
+        }
+    }
+
     /// Seed interval bounds for a dynamic dimension (facts, never pins:
     /// `[n, n]` is how a caller pins).
     pub fn bind_dyn_range(
@@ -83,8 +112,8 @@ impl CudaRuntime {
     }
 
     /// The ops this runtime claims: the CUDA analogue of
-    /// `reference_allow_list()` — two classes, both derived, never
-    /// name-listed (M4 Phase 5):
+    /// `reference_allow_list()` — three classes, all derived, never
+    /// name-listed (M4 Phase 5 + Train 3):
     ///
     ///  * KERNEL-BEARING: matcher constructors whose label has a
     ///    codegen row — claimable because the device can execute them.
@@ -92,10 +121,25 @@ impl CudaRuntime {
     ///    declared effects prove the planner folds them before any
     ///    kernel is needed (see [`crate::plan_transparent`]) —
     ///    claimable because nothing ever executes.
+    ///  * HOST-CALL DISPATCHABLE (Train 3): constructors whose
+    ///    prototype the executor dispatches as a host library call
+    ///    (`cublasLtMatmul`) — claimable because the device runs them
+    ///    without any NVRTC kernel (see
+    ///    [`crate::ops::cublaslt::host_dispatchable`]).
     pub fn allow_list() -> Vec<&'static str> {
+        Self::allow_list_over(&crate::ops::cuda_registry())
+    }
+
+    /// [`CudaRuntime::allow_list`] over the marker-enabled registry —
+    /// the claim set a [`CudaRuntime::load_with_cublaslt`] search uses.
+    pub fn allow_list_with_cublaslt() -> Vec<&'static str> {
+        Self::allow_list_over(&crate::ops::cuda_registry_with_cublaslt())
+    }
+
+    fn allow_list_over(registry: &[crate::ops::RegisteredOp]) -> Vec<&'static str> {
         let labels: Vec<&'static str> =
             crate::kernels::cuda_kernels().iter().map(|k| k.label).collect();
-        crate::ops::cuda_registry()
+        registry
             .iter()
             .filter(|entry| {
                 let ctor = entry.matcher.egglog_constructor();
@@ -104,7 +148,9 @@ impl CudaRuntime {
                     stripped == *label
                         || stripped.trim_end_matches("Generic") == *label
                 });
-                kernel_bearing || crate::plan_transparent(entry.prototype.as_ref())
+                kernel_bearing
+                    || crate::plan_transparent(entry.prototype.as_ref())
+                    || crate::ops::cublaslt::host_dispatchable(entry.prototype.as_ref())
             })
             .map(|entry| entry.matcher.egglog_constructor())
             .collect()
@@ -132,7 +178,7 @@ impl CudaRuntime {
         };
         let full = format!(
             "{}\n\n{}",
-            luminal::egglog_snippet::assembled_program_for(&crate::ops::cuda_matchers()),
+            luminal::egglog_snippet::assembled_program_for(&self.matchers()),
             program.text
         );
         let mut egraph = luminal::egglog_snippet::new_egraph();
@@ -142,7 +188,7 @@ impl CudaRuntime {
             let mut doors = Vec::new();
             let unchecked = format!(
                 "{}\n\n{}\n{}\n{}",
-                luminal::egglog_snippet::assembled_program_for(&crate::ops::cuda_matchers()),
+                luminal::egglog_snippet::assembled_program_for(&self.matchers()),
                 native.pre_schedule,
                 native.binding_seeds,
                 crate::bindings::CudaBindings::SCHEDULE
@@ -170,8 +216,12 @@ impl CudaRuntime {
             &program,
             input_data,
             options,
-            Some(Self::allow_list()),
-            crate::ops::cuda_matchers(),
+            Some(if self.cublaslt {
+                Self::allow_list_with_cublaslt()
+            } else {
+                Self::allow_list()
+            }),
+            self.matchers(),
             &mut luminal::implementation_search::StaticProfiler,
         )?;
 
