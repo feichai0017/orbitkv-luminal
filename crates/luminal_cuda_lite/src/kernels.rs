@@ -38,11 +38,13 @@ pub struct CodegenCtx {
     /// `Some` iff folded views stand between the slot's value and its
     /// buffer. Phase 4: the elementwise/reduce templates lower a `Some`
     /// operand to `parent[f(out_coords)]` (see [`composed_read_index`]);
-    /// every other codegen body refuses loudly via
-    /// [`require_flat_operands`]. On this backend it is all-`None` on
-    /// real plans today (views are not electable on real backends), so
-    /// real-plan codegen strings are unchanged — the flat `a[i]` fast
-    /// path is byte-identical (pinned in `tests/codegen_identity.rs`).
+    /// Train-2B extends the same lowering to the READ operands of the
+    /// expression-carrying kernels (gather, scatter, materialize —
+    /// `tests/composed_read_families.rs`); iota/constant (dest-only)
+    /// refuse loudly via [`require_flat_operands`], and every WRITE
+    /// side stays fail-closed (CL-4b). The all-`None` flat fast paths
+    /// are byte-identical to pre-Phase-4 codegen (pinned in
+    /// `tests/codegen_identity.rs`).
     pub composed_access: Vec<Option<ComposedAccess>>,
 }
 
@@ -286,12 +288,28 @@ pub(crate) fn composed_read_index(
     access: &ComposedAccess,
     coord_rank: usize,
 ) -> Result<(String, String)> {
+    composed_read_index_pref(operand, access, coord_rank, "c")
+}
+
+/// [`composed_read_index`] with a caller-chosen INPUT coordinate
+/// prefix: hop 0's entries are evaluated at `{in_prefix}0..` instead of
+/// `c0..`. The expression-carrying kernels (gather's data operand, the
+/// materialize's parent) use this to feed their OWN computed
+/// coordinates — the gathered coordinate values, the applied map's
+/// outputs — into a folded chain that stands between the slot's value
+/// and its residence.
+pub(crate) fn composed_read_index_pref(
+    operand: &str,
+    access: &ComposedAccess,
+    coord_rank: usize,
+    in_prefix: &str,
+) -> Result<(String, String)> {
     if access.hops.is_empty() {
         bail!("operand {operand}: composed access with zero hops");
     }
     let mut code = String::new();
     let mut in_rank = coord_rank;
-    let mut in_prefix = "c".to_string();
+    let mut in_prefix = in_prefix.to_string();
     let mut last_parent: Vec<usize> = Vec::new();
     for (h, hop) in access.hops.iter().enumerate() {
         let Some(entries) = &hop.entries else {
@@ -346,9 +364,10 @@ pub(crate) fn composed_read_index(
 }
 
 /// Loud refusal for codegen bodies that do not lower composed access
-/// (gather, scatter, iota, constant, materialize): an operand arriving
-/// with folded-view addressing through a kernel that would index it
-/// flat is silent mistranslation — bail instead.
+/// (iota, constant — dest-only signatures since Train-2B lowered the
+/// gather/scatter/materialize READ sides): an operand arriving with
+/// folded-view addressing through a kernel that would index it flat is
+/// silent mistranslation — bail instead.
 pub(crate) fn require_flat_operands(label: &str, ctx: &CodegenCtx) -> Result<()> {
     for (k, access) in ctx.composed_access.iter().enumerate() {
         if access.is_some() {

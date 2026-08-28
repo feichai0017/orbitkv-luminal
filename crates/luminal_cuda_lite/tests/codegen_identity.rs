@@ -460,22 +460,70 @@ mod strided {
         assert!(err.to_string().contains("strided writes"), "got: {err}");
     }
 
-    /// Ops outside the elementwise/reduce templates fail closed on a
-    /// composed operand instead of indexing it flat.
+    /// Train-2B moved the expression-carrying kernels' READ sides into
+    /// the lowered set (`tests/composed_read_families.rs` owns those
+    /// pins); their WRITE sides stay fail-closed — a composed access on
+    /// the DPS dest operand slot refuses with the CL-4b line, never a
+    /// silently dense write through a view.
     #[test]
-    fn non_template_ops_fail_closed_on_composed_operands() {
-        let access = one_hop(Some(vec![IotaExpr::Coord(0)]), vec![4]);
-        let op = ops::gather::GatherDps { rank: 1 };
+    fn expression_kernel_write_sides_stay_fail_closed() {
+        let dest_access = || one_hop(Some(vec![IotaExpr::Coord(0)]), vec![4]);
         let mut coord = slot(vec![4], None);
         coord.dtype = Some(PlanDtype::Int);
+
+        // Gather: dest0 at slot rank+1.
+        let op = ops::gather::GatherDps { rank: 1 };
         let ctx = kernels::CodegenCtx::from_descriptors(
             "Gather",
-            &[slot(vec![4], Some(access)), coord, slot(vec![4], None)],
+            &[slot(vec![4], None), coord.clone(), slot(vec![4], Some(dest_access()))],
             &[slot(vec![4], None)],
         )
         .expect("ctx builds");
         let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
-            .expect_err("gather must fail closed");
+            .expect_err("gather dest access must fail closed");
+        assert!(err.to_string().contains("strided writes"), "got: {err}");
+
+        // Scatter: dest0 at slot rank+2.
+        let op = ops::scatter::ScatterFunctionalDps { rank: 1 };
+        let ctx = kernels::CodegenCtx::from_descriptors(
+            "ScatterFunctional",
+            &[
+                slot(vec![4], None),
+                slot(vec![2], None),
+                coord.clone(),
+                slot(vec![4], Some(dest_access())),
+            ],
+            &[slot(vec![4], None)],
+        )
+        .expect("ctx builds");
+        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
+            .expect_err("scatter dest access must fail closed");
+        assert!(err.to_string().contains("strided writes"), "got: {err}");
+
+        // Materialize: dest0 at slot 1.
+        let op = ops::index_map_apply_materialize::IndexMapApplyMaterializeDps {
+            entries: Some(vec![IotaExpr::Coord(0)]),
+        };
+        let ctx = kernels::CodegenCtx::from_descriptors(
+            "IndexMapApplyMaterialize",
+            &[slot(vec![4], None), slot(vec![4], Some(dest_access()))],
+            &[slot(vec![4], None)],
+        )
+        .expect("ctx builds");
+        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
+            .expect_err("materialize dest access must fail closed");
+        assert!(err.to_string().contains("strided writes"), "got: {err}");
+
+        // Iota (dest-only signature): still the require-flat refusal.
+        let op = ops::iota::IotaDps { expr: Some(IotaExpr::Coord(0)) };
+        let ctx = kernels::CodegenCtx::from_descriptors(
+            "Iota",
+            &[slot(vec![4], Some(dest_access()))],
+            &[slot(vec![4], None)],
+        )
+        .expect("ctx builds");
+        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
+            .expect_err("iota must fail closed");
         assert!(err.to_string().contains("does not lower"), "got: {err}");
     }
 

@@ -14,7 +14,8 @@ use luminal::layout_ir::{
 use luminal::prelude::egraph_serialize;
 
 use crate::kernels::{
-    coord_prelude, cuda_type, lower_expr, numel, strides_of, CodegenCtx, KernelSource,
+    composed_read_index_pref, coord_prelude, cuda_type, lower_expr, numel, strides_of, CodegenCtx,
+    KernelSource,
 };
 use anyhow::{bail, Result};
 
@@ -97,7 +98,13 @@ impl ToDps for IndexMapApplyMaterializeDps {
 
 impl LayoutIrOp for IndexMapApplyMaterializeDps {}
 
-/// The CUDA lowering, colocated with its op.
+/// The CUDA lowering, colocated with its op. Train-2B: a composed
+/// access on operand 0 is a view chain folded onto the materialize's
+/// input — the op's own map application produces the input VALUE's
+/// coordinates, and the folded chain then composes ON TOP of them
+/// (via [`crate::kernels::composed_read_index_pref`]) down to the
+/// residence actually read. The WRITE side (dest0) stays fail-closed
+/// (CL-4b).
 pub(crate) fn codegen(
     op: &dyn BufferTensorIrOp,
     ctx: &CodegenCtx,
@@ -105,10 +112,12 @@ pub(crate) fn codegen(
     let Some(mat) = op.as_any().downcast_ref::<IndexMapApplyMaterializeDps>() else {
         bail!("materialize codegen reached with a non-Materialize op");
     };
-    // Phase 4 lowers composed access in the elementwise/reduce templates
-    // only; a view folded onto THIS op's parent operand would compose
-    // with the op's own map — not lowered here, so refuse loudly.
-    crate::kernels::require_flat_operands("IndexMapApplyMaterialize", ctx)?;
+    if ctx.composed_access.get(1).is_some_and(Option::is_some) {
+        bail!(
+            "dest operand slot 1 carries a composed access: strided writes \
+             are not lowered (dests stay dense out-of-place; CL-4b)"
+        );
+    }
     let Some(entries) = &mat.entries else {
         bail!("index map beyond the parsed expression subset (fail-closed, as the reference)");
     };
@@ -121,6 +130,32 @@ pub(crate) fn codegen(
     let to = cuda_type(ctx.dest_dtypes[0])?;
     let n = numel(out_dims);
     let prelude = coord_prelude(out_dims);
+    if let Some(access) = ctx.composed_access[0].as_ref() {
+        // The strided branch: the op's map lands on the input VALUE's
+        // coordinates (`parent_c*`, trapped against the value extents —
+        // the map's own checked contract), then the folded chain
+        // carries them to the residence.
+        let mut body = String::from("    long long idx;\n");
+        for (k, entry) in entries.iter().enumerate() {
+            let value = lower_expr(entry, out_dims.len())?;
+            body.push_str(&format!(
+                "    idx = {value};\n    if (idx < 0 || idx >= {ext}LL) __trap();\n    long long parent_c{k} = idx;\n",
+                ext = parent_dims[k]
+            ));
+        }
+        let (chain, pidx) =
+            composed_read_index_pref("parent", access, parent_dims.len(), "parent_c")?;
+        body.push_str(&chain);
+        let source = format!(
+            r#"extern "C" __global__ void k(const {t}* parent, {to}* out, unsigned long long n) {{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+{prelude}{body}    out[i] = parent[{pidx}];
+}}"#
+        );
+        return Ok(vec![KernelSource::plain(source, n)]);
+    }
+    // The flat fast path, byte-identical to pre-Train-2B codegen.
     let parent_strides = strides_of(parent_dims);
     let mut body = String::from("    long long pflat = 0;\n    long long idx;\n");
     for (k, entry) in entries.iter().enumerate() {

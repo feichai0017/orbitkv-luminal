@@ -16,7 +16,9 @@ use luminal::layout_ir::{
     AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
 };
 
-use crate::kernels::{cuda_type, numel, strides_of, CodegenCtx, KernelSource};
+use crate::kernels::{
+    composed_read_index, coord_prelude, cuda_type, numel, strides_of, CodegenCtx, KernelSource,
+};
 use anyhow::{bail, Result};
 
 /// Walk the LayoutTensorCons spine at `child` counting elements — the
@@ -147,7 +149,12 @@ impl ToDps for ScatterFunctionalDps {
 
 impl LayoutIrOp for ScatterFunctionalDps {}
 
-/// The CUDA lowering, colocated with its op.
+/// The CUDA lowering, colocated with its op. Train-2B: the READ-side
+/// operands (init, src, coordinates) may carry a [`ComposedAccess`] —
+/// each folds into that operand's read index via
+/// [`crate::kernels::composed_read_index`]. The WRITE side (dest0)
+/// stays fail-closed (CL-4b), and the checked-scatter injectivity
+/// flags are untouched: the write address arithmetic is identical.
 pub(crate) fn codegen(
     op: &dyn BufferTensorIrOp,
     ctx: &CodegenCtx,
@@ -155,15 +162,23 @@ pub(crate) fn codegen(
     let Some(scatter) = op.as_any().downcast_ref::<ScatterFunctionalDps>() else {
         bail!("scatter codegen reached with a non-Scatter op");
     };
-    crate::kernels::require_flat_operands("ScatterFunctional", ctx)?;
     let rank = scatter.rank;
+    if ctx.composed_access.get(scatter.dest_index()).is_some_and(Option::is_some) {
+        bail!(
+            "dest operand slot {} carries a composed access: strided writes \
+             are not lowered (dests stay dense out-of-place; CL-4b)",
+            scatter.dest_index()
+        );
+    }
     let init_dims = &ctx.operand_dims[0];
     if init_dims.len() != rank {
         bail!("scatter init rank {} vs op rank {rank}", init_dims.len());
     }
     let t = cuda_type(ctx.operand_dtypes[0])?;
-    let dest_n = numel(&ctx.dest_dims[0]);
-    let src_n = numel(&ctx.operand_dims[1]);
+    let dest_dims = &ctx.dest_dims[0];
+    let dest_n = numel(dest_dims);
+    let src_dims = &ctx.operand_dims[1];
+    let src_n = numel(src_dims);
     let strides = strides_of(init_dims);
     // Every launch in the sequence shares the op's full signature so
     // the executor pushes one uniform argument list.
@@ -171,30 +186,87 @@ pub(crate) fn codegen(
     for axis in 0..rank {
         sig.push_str(&format!(", const int* coord{axis}"));
     }
-    // Launch 1: dest = copy(init), over dest numel.
-    let copy_src = format!(
-        r#"extern "C" __global__ void k({sig}, unsigned int* flags, {t}* out, unsigned long long n) {{
+    // Launch 1: dest = copy(init), over dest numel. A folded init is
+    // read through its chain at the DEST coordinates (init's value
+    // spans the dest space by construction).
+    let copy_src = if let Some(access) = ctx.composed_access[0].as_ref() {
+        if init_dims != dest_dims {
+            bail!(
+                "operand init value extents {init_dims:?} differ from dest extents \
+                 {dest_dims:?} under composed access — the scatter copy iterates the dest"
+            );
+        }
+        let prelude = coord_prelude(dest_dims);
+        let (chain, idx) = composed_read_index("init", access, dest_dims.len())?;
+        format!(
+            r#"extern "C" __global__ void k({sig}, unsigned int* flags, {t}* out, unsigned long long n) {{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+{prelude}{chain}    out[i] = init[{idx}];
+}}"#
+        )
+    } else {
+        // Byte-identical to pre-Train-2B codegen.
+        format!(
+            r#"extern "C" __global__ void k({sig}, unsigned int* flags, {t}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = init[i];
 }}"#
-    );
+        )
+    };
     // Launch 2: scattered writes over src numel, with the injectivity
     // check (checked-scatter ruling): an already-set flag is a
-    // conflicting write and traps loudly.
-    let mut body = String::from("    long long flat = 0;\n    long long coord;\n");
+    // conflicting write and traps loudly. Folded src/coordinate
+    // operands read through their chains at the SRC coordinates (the
+    // launch's iteration space); the WRITE address stays the flat
+    // coordinate-built one.
+    let src_access = ctx.composed_access[1].as_ref();
+    let coord_folded =
+        (2..2 + rank).any(|slot| ctx.composed_access.get(slot).is_some_and(Option::is_some));
+    let mut body = String::new();
+    if src_access.is_some() || coord_folded {
+        body.push_str(&coord_prelude(src_dims));
+    }
+    body.push_str("    long long flat = 0;\n    long long coord;\n");
     for axis in 0..rank {
+        if let Some(access) = ctx.composed_access.get(axis + 2).and_then(|a| a.as_ref()) {
+            // The coordinate value's own extents must be src's for the
+            // prelude's `c*` to be its coordinates: refuse a mismatch,
+            // never reinterpret (the elementwise contract).
+            if &ctx.operand_dims[axis + 2] != src_dims {
+                bail!(
+                    "operand coord{axis} value extents {:?} differ from src extents \
+                     {src_dims:?} under composed access — the scatter write launch \
+                     iterates src",
+                    ctx.operand_dims[axis + 2]
+                );
+            }
+            let name = format!("coord{axis}");
+            let (chain, idx) = composed_read_index(&name, access, src_dims.len())?;
+            body.push_str(&chain);
+            body.push_str(&format!("    coord = (long long){name}[{idx}];\n"));
+        } else {
+            body.push_str(&format!("    coord = (long long)coord{axis}[i];\n"));
+        }
         body.push_str(&format!(
-            "    coord = (long long)coord{axis}[i];\n    if (coord < 0 || coord >= {ext}LL) __trap();\n    flat += coord * {stride}LL;\n",
+            "    if (coord < 0 || coord >= {ext}LL) __trap();\n    flat += coord * {stride}LL;\n",
             ext = init_dims[axis],
             stride = strides[axis]
         ));
     }
+    let src_read = if let Some(access) = src_access {
+        let (chain, idx) = composed_read_index("src", access, src_dims.len())?;
+        body.push_str(&chain);
+        format!("src[{idx}]")
+    } else {
+        "src[i]".to_string()
+    };
     let scatter_src = format!(
         r#"extern "C" __global__ void k({sig}, unsigned int* flags, {t}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
 {body}    if (atomicExch(&flags[flat], 1u) != 0u) __trap();
-    out[flat] = src[i];
+    out[flat] = {src_read};
 }}"#
     );
     let flags_bytes = dest_n * std::mem::size_of::<u32>();
