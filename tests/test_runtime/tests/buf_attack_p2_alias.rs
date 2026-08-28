@@ -258,11 +258,14 @@ fn d_unordered_view_reader_blocks_inplace_writer() {
     assert_eq!(writers.len(), 1, "the shared buffer keeps a single writer");
 }
 
-/// (c)+P1 boundary: a view result bound directly to an output slot still
-/// takes the delivery copy — P2 (aliasing) folds the view but cannot remove
-/// the boundary copy; that is P1's seeding stop (bufferize.rs:655-663).
+/// (c)+P1 boundary: a view result bound directly to an output slot.
+/// ESCAPE-AND-DISCLOSE RE-PIN (ruling 2026-08-27, supersedes both the
+/// P1-era delivery-copy pin and the 5b typed refusal): P2 (aliasing)
+/// folds the view AND the boundary costs nothing — the chain's minted
+/// residence ESCAPES (FreedBy::Caller, no free), the slot is backed by
+/// it, and the binding discloses the view layout. Zero copies.
 #[test]
-fn c_view_bound_to_output_still_pays_delivery_copy() {
+fn c_view_bound_to_output_escapes_the_chain_residence() {
     let mut g = TestGraph::new();
     let x = g.input("x", "x", Access::ReadOnly, "rm");
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
@@ -275,12 +278,27 @@ fn c_view_bound_to_output_still_pays_delivery_copy() {
         .remove(0);
     let v = g.op(Box::new(MockView), &[&y], &[("v", "view")]).remove(0);
     g.output(&v, "out");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = bufferize(&g.build()).expect("the view output escapes");
     println!("{}", plan.summary());
     let cps = copies(&plan);
-    assert_eq!(cps.len(), 1, "the boundary delivery copy remains");
-    assert!(matches!(cps[0].0, BufferId::Allocated(_)));
-    assert!(matches!(cps[0].1, BufferId::Boundary(_)));
+    assert_eq!(cps.len(), 0, "zero copies — the residence is handed over:\n{}", plan.summary());
+    let slot = plan
+        .dag
+        .node_weights()
+        .find_map(|node| match node {
+            BufferNode::BufferOutput { slots } => Some(slots[0].clone()),
+            _ => None,
+        })
+        .expect("one output slot");
+    assert_eq!(slot.buffer, plan.value_buffer[&y], "backed by the chain's residence");
+    assert!(matches!(slot.buffer, BufferId::Allocated(_)));
+    assert_eq!(
+        plan.buffers[&slot.buffer].freed_by,
+        luminal::layout_ir::FreedBy::Caller,
+        "…which ESCAPES:\n{}",
+        plan.summary()
+    );
+    assert!(slot.composed_access.is_some(), "the view layout is disclosed");
 }
 
 /// (g): POISON THROUGH A VIEW. A view's operand is not READ (the poison door

@@ -13,6 +13,13 @@
 //!   4. the same matmul value bound to TWO output slots (one direct, one
 //!      through a view) — pins today's seed application (direct slot seeds,
 //!      view slot delivery-copies) and the seen_poisons dedup P1 rides.
+//!
+//! ESCAPE-AND-DISCLOSE RE-PIN (ruling 2026-08-27, supersedes the 5b typed
+//! refusal AND the alloc+copy+free baseline these probes originally
+//! measured): a folded view bound to an output now ESCAPES — the kernel's
+//! alloc is handed to the caller (FreedBy::Caller, no free), zero boundary
+//! copies, and the slot's binding discloses the elected layout. P1's
+//! claimed elimination arrived as escape semantics.
 use luminal::graph::Graph;
 use luminal::layout_ir::ExtractedNode;
 
@@ -43,38 +50,52 @@ fn report(name: &str, text: &str) {
             println!("[{name}] DPS {}: ins={ins:?} outs={outs:?}", op.op.label());
         }
     }
-    let plan = luminal::bufferize::bufferize(&dps).expect("bufferize");
+    // ESCAPE-AND-DISCLOSE RE-PIN (ruling 2026-08-27): each fixture's
+    // folded transpose VIEW output ESCAPES. Pin the improvement over the
+    // recorded alloc+copy+free baseline: ZERO copies, no free of the
+    // escaping backing buffer, the view slot backed by minted storage
+    // handed to the caller, and the layout disclosed on the binding.
+    let plan = luminal::bufferize::bufferize(&dps).expect("the view output escapes");
     let summary = plan.summary();
     println!("[{name}] plan:\n{summary}");
-    // Count plan NODES inside the ops section only (the r10 probe's string
-    // count double-counted anti-edge lines like "BufferCopy -> BufferFree").
-    let mut copies = 0usize;
-    let mut allocs = 0usize;
-    let mut frees = 0usize;
-    let mut in_ops = false;
-    for line in summary.lines() {
-        if line.starts_with("ops (") {
-            in_ops = true;
-            continue;
-        }
-        if in_ops && !line.starts_with(' ') || line.starts_with("anti (") {
-            in_ops = false;
-        }
-        if !in_ops {
-            continue;
-        }
-        let t = line.trim_start();
-        if t.starts_with("BufferCopy") {
-            copies += 1;
-        } else if t.starts_with("BufferAlloc") {
-            allocs += 1;
-        } else if t.starts_with("BufferFree") {
-            frees += 1;
-        }
-    }
-    println!(
-        "[{name}] view-nodes(dps)={views} plan: allocs={allocs} copies={copies} frees={frees}"
+    use luminal::bufferize::{BufferId, BufferNode};
+    assert!(
+        !plan
+            .dag
+            .node_indices()
+            .any(|i| matches!(&plan.dag[i], BufferNode::BufferCopy { .. })),
+        "[{name}] zero copies under escape:\n{summary}"
     );
+    let slot = plan
+        .dag
+        .node_weights()
+        .find_map(|node| match node {
+            BufferNode::BufferOutput { slots } => Some(slots[0].clone()),
+            _ => None,
+        })
+        .expect("slot 0 (the view output)");
+    assert!(
+        matches!(slot.buffer, BufferId::Allocated(_)),
+        "[{name}] the view slot is backed by the kernel's escaping alloc:\n{summary}"
+    );
+    assert_eq!(
+        plan.buffers[&slot.buffer].freed_by,
+        luminal::layout_ir::FreedBy::Caller,
+        "[{name}] the backing buffer escapes to the caller:\n{summary}"
+    );
+    assert!(
+        !plan.dag.node_indices().any(|i| matches!(
+            &plan.dag[i],
+            BufferNode::Compute { op, reads, .. }
+                if op.label() == "BufferFree" && reads.contains(&slot.buffer)
+        )),
+        "[{name}] no free for the escaping buffer:\n{summary}"
+    );
+    assert!(
+        slot.composed_access.is_some(),
+        "[{name}] the binding discloses the elected layout:\n{summary}"
+    );
+    println!("[{name}] view-nodes(dps)={views}");
 }
 
 /// Baseline P1 target: matmul -> transpose view -> bound output.

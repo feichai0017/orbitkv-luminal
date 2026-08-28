@@ -434,6 +434,42 @@ fn r10_debug_bufferize() {
             println!("DPS {}: ins={ins:?}", op.op.label());
         }
     }
-    let plan = luminal::bufferize::bufferize(&dps).expect("bufferize");
+    // ESCAPE-AND-DISCLOSE (ruling 2026-08-27): mm's boundary value is the
+    // sibling transpose VIEW of the kernel result. The kernel's scratch
+    // alloc ESCAPES — the slot is backed by it (FreedBy::Caller, no free),
+    // zero copies — and the binding discloses the weld's layout for the
+    // caller to interpret the bytes under.
+    let plan = luminal::bufferize::bufferize(&dps).expect("the view output escapes");
     println!("{}", plan.summary());
+    use luminal::bufferize::{BufferId, BufferNode};
+    assert!(
+        !plan
+            .dag
+            .node_indices()
+            .any(|i| matches!(&plan.dag[i], BufferNode::BufferCopy { .. })),
+        "zero boundary copies — the alloc itself is handed over:\n{}",
+        plan.summary()
+    );
+    let slot = plan
+        .dag
+        .node_weights()
+        .find_map(|node| match node {
+            BufferNode::BufferOutput { slots } => Some(slots[0].clone()),
+            _ => None,
+        })
+        .expect("one output slot");
+    assert!(
+        matches!(slot.buffer, BufferId::Allocated(_)),
+        "the slot is backed by the escaping kernel alloc:\n{}",
+        plan.summary()
+    );
+    assert_eq!(
+        plan.buffers[&slot.buffer].freed_by,
+        luminal::layout_ir::FreedBy::Caller,
+        "the backing buffer escapes to the caller"
+    );
+    assert!(
+        slot.composed_access.is_some(),
+        "the binding discloses the elected (weld) layout"
+    );
 }

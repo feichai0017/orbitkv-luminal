@@ -3600,6 +3600,12 @@ fn attack_u2_layout_tensor_field_naming_is_inverted() {
 /// The DPS alias table declares a May alias on slot 2; with slot 0 and
 /// slot 2 sharing a buffer this is where a donation bug would show.
 /// Nothing on the board bufferizes a duplicate-operand op.
+///
+/// Original boundary-flowing spelling (restored under escape-and-disclose,
+/// ruling 2026-08-27: the round-10 sibling routing spells the boundary
+/// value as a transpose VIEW of the kernel result, which now ESCAPES —
+/// no dodge needed). The subject stays donation safety under the
+/// duplicate-operand May alias.
 #[test]
 fn attack_u3_bufferize_duplicate_operand_accumulate() {
     let text = record(|cx| {

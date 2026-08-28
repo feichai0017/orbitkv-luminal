@@ -1810,9 +1810,13 @@ mod harness_tests {
         assert_eq!(plan.value_buffer[&v1], plan.value_buffer[&x]);
     }
 
-    /// A view bound straight to an output slot on its parent's own buffer is a
-    /// pure pass-through: zero copies, zero allocations, and the final binding
-    /// carries the VIEW's layout (region-aware boundary bookkeeping).
+    /// THE VIEW-OF-INPUT ZERO-COPY PIN (ruling 2026-08-27): a view bound
+    /// straight to an output slot on its parent's own buffer returns
+    /// zero-copy — zero copies, zero allocations — AND the slot's binding
+    /// DISCLOSES the elected layout (the view's fold chain over the input
+    /// buffer). The old silent-dense-misread hazard is closed by the layout
+    /// field, never by refusing: the caller interprets the returned buffer
+    /// under the returned layout.
     #[test]
     fn view_passthrough_to_output_slot() {
         use luminal::bufferize::{BufferId, BufferNode};
@@ -1830,6 +1834,28 @@ mod harness_tests {
                 .all(|idx| !matches!(&plan.dag[idx], BufferNode::BufferCopy { .. })),
             "pass-through needs no copy:\n{}",
             plan.summary()
+        );
+        let slot = plan
+            .dag
+            .node_weights()
+            .find_map(|node| match node {
+                BufferNode::BufferOutput { slots } => Some(slots[0].clone()),
+                _ => None,
+            })
+            .expect("one output slot");
+        assert_eq!(
+            slot.buffer, plan.value_buffer[&x],
+            "the slot is backed by the input buffer:\n{}",
+            plan.summary()
+        );
+        let access = slot
+            .composed_access
+            .as_ref()
+            .expect("the binding discloses the view layout over the input buffer");
+        assert_eq!(access.hops.len(), 1, "the row0 fold is the one hop");
+        assert_eq!(
+            access.hops[0].entries, None,
+            "MockView carries no numeric map — the hop stays fail-closed"
         );
     }
 
@@ -1880,13 +1906,18 @@ mod harness_tests {
     }
 
     /// THE REAL VIEW OP bound to an output slot on a DIFFERENT buffer than
-    /// its parent's: the Must tie binds the view into the parent's storage,
-    /// and the boundary promise is honored by exactly one BufferCopy into the
-    /// slot's buffer — the accepted price of returning a view (span-aware
-    /// seeding through views is the recorded future refinement). The view
-    /// itself still contributes no compute node.
+    /// its parent's — the original boundary-flowing spelling, re-pinned
+    /// under ESCAPE-AND-DISCLOSE (ruling 2026-08-27): the view's storage is
+    /// the caller's own input buffer, so the output returns ZERO-COPY —
+    /// the slot is backed by the input buffer, the declared output buffer
+    /// goes unused (DCE'd, never allocated by runtimes), and the binding
+    /// carries the elected layout for the caller to interpret the bytes
+    /// under. (Two prior pins died here: the pre-Phase-5 boundary copy —
+    /// "the accepted price of returning a view" — and the Phase-5b typed
+    /// refusal. Both are rejected by the ruling: "we just return the
+    /// buffer and the user interprets it".)
     #[test]
-    fn real_view_op_to_output_slot_pays_a_boundary_copy() {
+    fn real_view_op_to_output_slot_escapes_zero_copy() {
         use luminal::bufferize::BufferNode;
         use luminal_reference::ops::IndexMapApplyView;
 
@@ -1894,35 +1925,42 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(IndexMapApplyView { entries: None }), &[&x], &[("v", "row0")])[0].clone();
         g.output(&v, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize::bufferize(&g.build())
+            .expect("a view of an input returns zero-copy under escape semantics");
 
         assert_eq!(
             plan.value_buffer[&v], plan.value_buffer[&x],
             "the view value lives in its parent's buffer:\n{}",
             plan.summary()
         );
-        let copies: Vec<_> = plan
-            .dag
-            .node_indices()
-            .filter_map(|idx| match &plan.dag[idx] {
-                BufferNode::BufferCopy { src, dst, .. } => Some((src.clone(), dst.clone())),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            copies.len(),
-            1,
-            "exactly one boundary copy honors the slot:\n{}",
-            plan.summary()
-        );
-        assert_eq!(copies[0].0, plan.value_buffer[&x], "copied from the parent's buffer");
         assert!(
             plan.dag
                 .node_indices()
-                .all(|idx| !matches!(&plan.dag[idx], BufferNode::Compute { .. })),
-            "no kernel runs — a view plus a transport:\n{}",
+                .all(|idx| !matches!(
+                    &plan.dag[idx],
+                    BufferNode::BufferCopy { .. } | BufferNode::Compute { .. }
+                )),
+            "zero copies, zero kernels — the storage is already the caller's:\n{}",
             plan.summary()
         );
+        let slot = plan
+            .dag
+            .node_weights()
+            .find_map(|node| match node {
+                BufferNode::BufferOutput { slots } => Some(slots[0].clone()),
+                _ => None,
+            })
+            .expect("one output slot");
+        assert_eq!(
+            slot.buffer, plan.value_buffer[&x],
+            "the slot is backed by the INPUT buffer:\n{}",
+            plan.summary()
+        );
+        let access = slot
+            .composed_access
+            .as_ref()
+            .expect("the binding discloses the elected view layout");
+        assert_eq!(access.hops.len(), 1);
     }
 
     /// STAGE 7 / STEP 4, the view-feeds-compute boundary fixture end to end:
@@ -3921,5 +3959,197 @@ mod ring_ignition_battery {
             "{pre}\n(let g2_raw_window {raw_window})\n{S5}"
         );
         assert_quiesce("unfold_raw_window", &body, RING_AND_SUBST, 60, 10_000);
+    }
+}
+
+#[cfg(test)]
+mod escape_execution_tests {
+    //! ESCAPE-AND-DISCLOSE, executor-level (ruling 2026-08-27): hand-built
+    //! plans (the surface `load_plan` accepts — never certified by the
+    //! pre-lowering certificate) prove the reference executor's escape
+    //! path end to end: the fetch returns the BACKING buffer's bytes plus
+    //! the elected layout, the trusted host walker reads elements through
+    //! it, and the executor guard refuses minted-non-escaping storage
+    //! backing an output slot. Same dep-world discipline as
+    //! `harness_tests`: every luminal type comes from the `luminal::`
+    //! build luminal_reference links.
+    use egraph_serialize::ClassId;
+    use luminal::buffer_tensor_ir::TypedBuffer;
+    use luminal::bufferize::{
+        walk_layout_index, AccessHop, Buffer, BufferEdge, BufferId, BufferIrGraph, BufferNode,
+        ComposedAccess, EdgeKind, InputBinding, OutputBinding, Owner,
+    };
+    use luminal::index_expr::IotaExpr;
+    use luminal::layout_ir::{Access, FreedBy};
+    use luminal::prelude::petgraph::graph::DiGraph;
+    use luminal_reference::ReferenceRuntime;
+
+    /// A minimal escaped-output plan: input x `[2,3]` (BufferLit 7) is
+    /// base-copied into minted buffer A (the stand-in for a kernel
+    /// producing the parent there), and the output slot binds the
+    /// TRANSPOSE VIEW of that parent — backed by A, `freed_by` flipped to
+    /// the escape cell.
+    fn escaped_plan(freed_by: FreedBy) -> BufferIrGraph {
+        let x = ClassId::from("val$x");
+        let v = ClassId::from("val$v");
+        let input_id = BufferId::Boundary(ClassId::from("buf$B"));
+        let escaped_id = BufferId::Allocated(0);
+        let mut buffers = std::collections::HashMap::new();
+        buffers.insert(
+            input_id.clone(),
+            Buffer {
+                id: input_id.clone(),
+                access: Access::ReadOnly,
+                freed_by: FreedBy::Caller,
+                owner: Owner::Caller,
+                label: "B".to_string(),
+                dims: Some(vec![2, 3]),
+                element_bits: Some(32),
+                dtype: Some(luminal::dtype::PlanDtype::F32),
+                lit: Some(7),
+            },
+        );
+        buffers.insert(
+            escaped_id.clone(),
+            Buffer {
+                id: escaped_id.clone(),
+                access: Access::ReadWrite,
+                freed_by,
+                owner: Owner::System,
+                label: "escaped".to_string(),
+                dims: Some(vec![2, 3]),
+                element_bits: Some(32),
+                dtype: Some(luminal::dtype::PlanDtype::F32),
+                lit: None,
+            },
+        );
+        let mut dag: DiGraph<BufferNode, BufferEdge> = DiGraph::new();
+        let input = dag.add_node(BufferNode::BufferInput {
+            slots: vec![InputBinding { value: x.clone(), buffer: input_id.clone() }],
+        });
+        let copy = dag.add_node(BufferNode::BufferCopy {
+            src: input_id.clone(),
+            dst: escaped_id.clone(),
+            value: x.clone(),
+        });
+        let out = dag.add_node(BufferNode::BufferOutput {
+            slots: vec![OutputBinding {
+                index: 0,
+                value: v.clone(),
+                buffer: escaped_id.clone(),
+                dims: Some(vec![3, 2]),
+                element_bits: Some(32),
+                dtype: Some(luminal::dtype::PlanDtype::F32),
+                composed_access: Some(ComposedAccess {
+                    hops: vec![AccessHop {
+                        // Transpose: parent axis 0 reads the view's LAST
+                        // coordinate, parent axis 1 the first.
+                        entries: Some(vec![IotaExpr::Coord(0), IotaExpr::Coord(1)]),
+                        parent_dims: Some(vec![2, 3]),
+                    }],
+                }),
+            }],
+        });
+        dag.add_edge(
+            input,
+            copy,
+            BufferEdge { buffer: input_id, port: "in".to_string(), kind: EdgeKind::Data },
+        );
+        dag.add_edge(
+            copy,
+            out,
+            BufferEdge {
+                buffer: escaped_id,
+                port: "out 0".to_string(),
+                kind: EdgeKind::Data,
+            },
+        );
+        let mut value_buffer = std::collections::BTreeMap::new();
+        value_buffer.insert(x, BufferId::Allocated(0));
+        BufferIrGraph { dag, buffers, value_buffer, outputs: vec![out] }
+    }
+
+    /// PROBE 1, the executed-bytes half: the escaped slot's fetch returns
+    /// the backing buffer's bytes plus the layout, and the walker reads
+    /// every element of the transpose view correctly.
+    #[test]
+    fn escaped_output_executes_and_walks_correctly() {
+        let mut rt = ReferenceRuntime::default();
+        rt.load_plan(escaped_plan(FreedBy::Caller));
+        let staged: Vec<f32> = (0..6).map(|n| n as f32 * 10.0).collect();
+        rt.set_data_buffer(7, staged.clone());
+        rt.execute().expect("an escaping output executes");
+
+        let (data, binding) = rt.output_slot(0).expect("the universal fetch");
+        let bytes = data.as_f32().expect("f32 backing bytes");
+        assert_eq!(bytes.len(), 6, "the BACKING buffer is parent-sized");
+        let value_dims = binding.dims.clone().expect("value dims disclosed");
+        assert_eq!(value_dims, vec![3, 2]);
+        let base_dims = vec![2i64, 3];
+        for i in 0..3 {
+            for j in 0..2 {
+                let flat = walk_layout_index(
+                    binding.composed_access.as_ref(),
+                    &value_dims,
+                    &base_dims,
+                    &[i, j],
+                )
+                .expect("the walker composes the disclosed layout");
+                assert_eq!(
+                    bytes[flat],
+                    staged[j * 3 + i],
+                    "v[{i},{j}] must be x[{j},{i}]"
+                );
+            }
+        }
+        // The layout accessor alone agrees with the fetch.
+        let layout = rt.output_layout(0).expect("layout accessor");
+        assert_eq!(layout.buffer, BufferId::Allocated(0));
+    }
+
+    /// PROBE 5, reference side: a hand-built plan whose output slot is
+    /// backed by minted NON-ESCAPING storage (Owner::System +
+    /// FreedBy::Program) must be refused loudly at execute — the caller
+    /// would receive bytes the program destroys. (The cuda-lite executor
+    /// carries the same guard in `device::execute_plan`, ahead of any
+    /// device work; it is feature-gated on `device` and compile-checked
+    /// here.)
+    #[test]
+    fn executor_refuses_minted_non_escaping_output_backing() {
+        let mut rt = ReferenceRuntime::default();
+        rt.load_plan(escaped_plan(FreedBy::Program));
+        rt.set_data_buffer(7, vec![0.0f32; 6]);
+        let err = rt.execute().expect_err("the escape guard must refuse");
+        assert!(
+            err.to_string().contains("NON-ESCAPING"),
+            "the guard names the violation: {err:#}"
+        );
+    }
+
+    /// PROBE 5b: DONATED boundary storage (Owner::Caller +
+    /// FreedBy::Program) backing an output slot is refused the same way —
+    /// the guard keys on FreedBy alone, so donation status cannot slip
+    /// past the owner check (validate()'s donated arm forbids exactly
+    /// this plan shape; the executor re-checks for loaded plans).
+    #[test]
+    fn executor_refuses_donated_boundary_output_backing() {
+        let mut plan = escaped_plan(FreedBy::Caller);
+        let input_id = BufferId::Boundary(ClassId::from("buf$B"));
+        plan.buffers.get_mut(&input_id).unwrap().freed_by = FreedBy::Program;
+        for node in plan.dag.node_weights_mut() {
+            if let BufferNode::BufferOutput { slots } = node {
+                slots[0].buffer = input_id.clone();
+                slots[0].composed_access = None;
+                slots[0].dims = Some(vec![2, 3]);
+            }
+        }
+        let mut rt = ReferenceRuntime::default();
+        rt.load_plan(plan);
+        rt.set_data_buffer(7, vec![0.0f32; 6]);
+        let err = rt.execute().expect_err("the escape guard must refuse donated backing");
+        assert!(
+            err.to_string().contains("NON-ESCAPING") && err.to_string().contains("Caller"),
+            "the guard names the violation and the owner: {err:#}"
+        );
     }
 }

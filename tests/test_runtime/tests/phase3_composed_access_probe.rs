@@ -154,6 +154,10 @@ fn r10_chained_matmuls_carry_composed_access() {
         let x = cx.tensor((4usize, 8usize));
         let w1 = cx.tensor((8usize, 3usize));
         let w2 = cx.tensor((3usize, 5usize));
+        // The original boundary-flowing spelling (restored under
+        // escape-and-disclose, ruling 2026-08-27: the view-produced bound
+        // output escapes); the probe's subject is the interior composed
+        // access, which folds the same either way.
         let _ = x.matmul(w1).matmul(w2).output();
         cx.logical
             .bound_program(&luminal_reference::ReferenceBindings)

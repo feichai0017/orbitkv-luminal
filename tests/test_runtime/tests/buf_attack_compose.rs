@@ -119,21 +119,26 @@ fn diamond_bound_buffer_is_alias_parent_and_survives_writer_attack() {
         writers_of_d[0].1.is_empty() || writers_of_d[0].1[0] != d || writers_of_d[0].2[0] == d,
         "the sole writer is the chain root"
     );
-    // NOTE: Compute `reads` lists every operand buffer (the chain root's
-    // non-reading dest included), so the accumulator is the mock whose
-    // read==write buffer is an Allocated one.
+    // RULING 2026-08-27 (repair destinations are fresh single-writer
+    // buffers): the accumulator's operand is a FOLDED view, so its repair
+    // copy lands the parent bytes in a FRESHLY minted buffer the
+    // accumulator READS (re-rooted fold) while WRITING its own result
+    // buffer — the two are distinct Allocated buffers now, where the
+    // pre-ruling plan copied into the result buffer itself.
     let acc = mocks
         .iter()
         .find(|(_, reads, writes)| {
             !reads.is_empty()
-                && reads[0] == writes[0]
+                && reads[0] != d
+                && reads[0] != writes[0]
+                && matches!(reads[0], BufferId::Allocated(_))
                 && matches!(writes[0], BufferId::Allocated(_))
         })
-        .expect("the repaired accumulator reads and writes its own fresh buffer");
-    // its bytes were carried out of D by a repair copy
+        .expect("the repaired accumulator reads the fresh repair buffer, writes its own");
+    // its bytes were carried out of D by a repair copy into the buffer it READS
     assert!(
-        copies(&plan).iter().any(|(_, src, dst)| *src == d && *dst == acc.2[0]),
-        "repair copy D -> accumulator's fresh buffer:\n{}",
+        copies(&plan).iter().any(|(_, src, dst)| *src == d && *dst == acc.1[0]),
+        "repair copy D -> the fresh single-writer repair buffer:\n{}",
         plan.summary()
     );
     // no BufferCopy writes D either (no delivery needed: src == dest elided)

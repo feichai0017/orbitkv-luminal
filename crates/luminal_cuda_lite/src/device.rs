@@ -10,8 +10,12 @@
 //! NVRTC-compiled launches for compute (out-of-place: inputs are the
 //! operand buffers, the destination is a fresh zeroed slice swapped in
 //! after the launch — mirroring the reference's alias-safety
-//! convention; `ties` are ordering-only in CL-2). Phase 4 copies every
-//! output-role buffer back to host `TypedBuffer`s keyed by BufferLit.
+//! convention; `ties` are ordering-only in CL-2). Phase 4 copies each
+//! output SLOT's backing buffer back to a host `TypedBuffer`, keyed by
+//! slot index and paired with the slot's [`OutputBinding`] — the
+//! escape-and-disclose contract (ruling 2026-08-27): the caller gets
+//! the backing bytes (possibly parent-sized, for an escaped view
+//! election) plus the layout to interpret them under.
 
 use anyhow::{anyhow, bail, Context, Result};
 use cudarc::driver::{
@@ -19,7 +23,7 @@ use cudarc::driver::{
 };
 use cudarc::nvrtc::compile_ptx;
 use luminal::buffer_tensor_ir::TypedBuffer;
-use luminal::bufferize::{BufferId, BufferIrGraph, BufferNode, EdgeKind};
+use luminal::bufferize::{BufferId, BufferIrGraph, BufferNode, EdgeKind, OutputBinding};
 use luminal::dtype::PlanDtype;
 use luminal::prelude::FxHashMap;
 use std::collections::HashMap;
@@ -131,12 +135,45 @@ pub fn launch_single(source: &str, inputs: &[&[u8]], out_bytes: usize, n: usize)
     Ok(host)
 }
 
-/// Execute a bufferized plan on device 0. Returns host copies of every
-/// output-role buffer, keyed by BufferLit.
+/// Execute a bufferized plan on device 0. Returns, per output slot
+/// index, a host copy of the slot's BACKING buffer plus its
+/// [`OutputBinding`] (the elected layout) — the escape-and-disclose
+/// fetch, universal over dense and view elections.
 pub fn execute_plan(
     plan: &BufferIrGraph,
     staged: &FxHashMap<i64, TypedBuffer>,
-) -> Result<FxHashMap<i64, TypedBuffer>> {
+) -> Result<FxHashMap<usize, (TypedBuffer, OutputBinding)>> {
+    // ESCAPE GUARD (ruling 2026-08-27): an output slot's backing storage
+    // must SURVIVE the call — FreedBy::Caller, whatever the owner.
+    // FreedBy::Program backing an output hands the caller bytes the
+    // program destroys: minted non-escaping storage (Owner::System) and
+    // DONATED boundary storage (Owner::Caller — validate()'s donated arm
+    // forbids exactly this plan shape) alike. The pre-lowering
+    // certificate enforces this for planner-built plans; hand-built /
+    // externally loaded plans never met it — re-check here, loudly,
+    // before any bytes move.
+    for node in plan.dag.node_weights() {
+        if let BufferNode::BufferOutput { slots } = node {
+            for slot in slots {
+                let buffer = plan
+                    .buffers
+                    .get(&slot.buffer)
+                    .ok_or_else(|| anyhow!("output slot {} names unknown buffer", slot.index))?;
+                if buffer.freed_by != luminal::layout_ir::FreedBy::Caller {
+                    bail!(
+                        "output slot {} is backed by NON-ESCAPING buffer {} \
+                         (FreedBy::Program, {:?}-owned) — escaped output storage \
+                         must be FreedBy::Caller; refusing to hand the caller bytes \
+                         the program destroys",
+                        slot.index,
+                        buffer.label,
+                        buffer.owner,
+                    );
+                }
+            }
+        }
+    }
+
     let ctx = CudaContext::new(0).context("no CUDA device 0")?;
     let stream = ctx.default_stream();
     let mut cache = KernelCache { ctx: ctx.clone(), modules: HashMap::new() };
@@ -210,47 +247,18 @@ pub fn execute_plan(
     for node in order {
         match &plan.dag[node] {
             BufferNode::BufferInput { .. } | BufferNode::BufferOutput { .. } => {}
-            BufferNode::BufferCopy { src, dst, access, .. } => {
+            BufferNode::BufferCopy { src, dst, .. } => {
                 let (src_geo, src_dtype) =
                     geometry.get(src).ok_or_else(|| anyhow!("copy src unknown"))?.clone();
                 let (dst_geo, dst_dtype) =
                     geometry.get(dst).ok_or_else(|| anyhow!("copy dst unknown"))?.clone();
-                if let Some(access) = access {
-                    // Phase 5: the value resides in `src` through folded
-                    // views — MATERIALIZE it (strided read through the hop
-                    // chain), never byte-copy. Iteration domain = dst
-                    // geometry (the value's, per the dims join); dtype is
-                    // value-preserving by the copy contract.
-                    if src_dtype != dst_dtype {
-                        bail!(
-                            "folded copy dtype mismatch: {src_dtype:?} -> {dst_dtype:?}"
-                        );
-                    }
-                    let launches =
-                        crate::kernels::copy_through_fold(&dst_geo, dst_dtype, access)
-                            .context("folded-copy codegen")?;
-                    let src_slice = storage.get(src).unwrap().clone();
-                    let dest_bytes =
-                        dst_geo.iter().product::<usize>() * dtype_bytes(dst_dtype)?;
-                    let mut dest =
-                        stream.alloc_zeros::<u8>(dest_bytes.max(1)).context("dest alloc")?;
-                    for generated in &launches {
-                        let func = cache.function(&generated.source)?;
-                        let n = generated.n as u64;
-                        let cfg = LaunchConfig {
-                            grid_dim: (((generated.n as u32).max(1) + 255) / 256, 1, 1),
-                            block_dim: (256, 1, 1),
-                            shared_mem_bytes: 0,
-                        };
-                        let mut builder = stream.launch_builder(&func);
-                        builder.arg(&src_slice);
-                        builder.arg(&mut dest);
-                        builder.arg(&n);
-                        unsafe { builder.launch(cfg) }.context("launch folded copy")?;
-                    }
-                    storage.insert(dst.clone(), dest);
-                    continue;
-                }
+                // RULING 2026-08-27: a BufferCopy is only ever a dumb
+                // whole-buffer memcpy — the Phase-5 copy_through_fold path
+                // is deleted. This geometry/dtype equality check is the
+                // PERMANENT FENCE: a folded delivery smuggled past the
+                // bufferizer's refusal would arrive with a parent-shaped
+                // src and an output-shaped dst and must fail HERE, loudly,
+                // never move bytes.
                 if src_geo.iter().product::<usize>() != dst_geo.iter().product::<usize>()
                     || src_dtype != dst_dtype
                 {
@@ -336,21 +344,23 @@ pub fn execute_plan(
     }
     stream.synchronize().context("stream sync")?;
 
-    // Phase 4: D2H every output-role buffer, keyed by lit.
+    // Phase 4: D2H each output SLOT's backing buffer — the escaped
+    // buffer for a view election, the boundary buffer for a dense one —
+    // keyed by slot index and paired with the binding's layout. (The
+    // declared-but-unused Boundary buffer of an escaped slot never
+    // reaches this plan: buffer DCE dropped it, so Phase 1 never
+    // allocated it; and no free node exists for an escaping buffer.)
     let mut outputs = FxHashMap::default();
     for node in plan.dag.node_weights() {
         if let BufferNode::BufferOutput { slots } = node {
             for slot in slots {
-                let buffer = plan
-                    .buffers
+                let slice = storage
                     .get(&slot.buffer)
-                    .ok_or_else(|| anyhow!("output slot names unknown buffer"))?;
-                let Some(lit) = buffer.lit else { continue };
-                let slice = storage.get(&slot.buffer).unwrap();
+                    .ok_or_else(|| anyhow!("output slot {} names unknown buffer", slot.index))?;
                 let mut host = vec![0u8; slice.len()];
                 stream.memcpy_dtoh(slice, &mut host).context("D2H")?;
                 let (_, dtype) = geometry.get(&slot.buffer).unwrap();
-                outputs.insert(lit, bytes_to_typed(&host, *dtype)?);
+                outputs.insert(slot.index, (bytes_to_typed(&host, *dtype)?, slot.clone()));
             }
         }
     }

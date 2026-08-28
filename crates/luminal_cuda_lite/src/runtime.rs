@@ -36,10 +36,14 @@ pub struct CudaRuntime {
     plan: Option<BufferIrGraph>,
     /// Host-staged input payloads by BufferLit id, H2D'd at execute.
     staged: FxHashMap<i64, TypedBuffer>,
-    /// Host copies of output buffers, filled by execute (D2H).
-    outputs_host: FxHashMap<i64, TypedBuffer>,
+    /// Host copies of each output slot's BACKING buffer plus its elected
+    /// layout, filled by execute (D2H) — the escape-and-disclose fetch,
+    /// keyed by slot index (an escaped slot's backing buffer is a minted
+    /// allocation with no BufferLit, so slot order is the stable key).
+    outputs_host: FxHashMap<usize, (TypedBuffer, luminal::bufferize::OutputBinding)>,
     input_buffers: FxHashMap<NodeIndex, i64>,
-    output_buffers: FxHashMap<NodeIndex, i64>,
+    /// Bound output tensor → its slot index (program slot order).
+    output_index: FxHashMap<NodeIndex, usize>,
 }
 
 impl CudaRuntime {
@@ -176,10 +180,11 @@ impl CudaRuntime {
             .iter()
             .map(|slot| (slot.tensor, slot.buffer))
             .collect();
-        self.output_buffers = native
+        self.output_index = native
             .output_slots
             .iter()
-            .map(|slot| (slot.tensor, slot.buffer))
+            .enumerate()
+            .map(|(index, slot)| (slot.tensor, index))
             .collect();
         self.plan = Some(outcome.best_plan.clone());
         Ok(outcome)
@@ -214,18 +219,49 @@ impl CudaRuntime {
         }
     }
 
-    /// Read back an output tensor's f32 payload (already D2H'd by
-    /// execute).
+    /// Read back a DIRECT-layout output tensor's f32 payload (already
+    /// D2H'd by execute). Loud on a view-elected (escaped) output: its
+    /// backing bytes are parent-laid-out — indistinguishable by length
+    /// from row-major on a same-numel weld (e.g. a transpose) — so the
+    /// legacy dense-shaped signature must never hand them over silently.
+    /// Escaped outputs go through [`Self::fetch`] and interpret under
+    /// [`Self::output_layout`] (the escape-and-disclose contract —
+    /// `walk_layout_index` is the trusted reader).
     pub fn get_f32(&self, tensor: NodeIndex) -> Result<&Vec<f32>> {
-        let buffer = self
-            .output_buffers
+        match self.fetch(tensor)? {
+            (_, binding) if binding.composed_access.is_some() => bail!(
+                "get_f32 on a view-elected (escaped) output: the backing \
+                 bytes are not row-major over the value's dims — use fetch() \
+                 and interpret under the disclosed layout"
+            ),
+            (TypedBuffer::F32(values), _) => Ok(values),
+            (other, _) => bail!("output is {}, not f32", other.type_name()),
+        }
+    }
+
+    /// The universal escape-and-disclose fetch: the output slot's backing
+    /// bytes plus its [`luminal::bufferize::OutputBinding`] (the elected
+    /// layout).
+    pub fn fetch(
+        &self,
+        tensor: NodeIndex,
+    ) -> Result<(&TypedBuffer, &luminal::bufferize::OutputBinding)> {
+        let index = self
+            .output_index
             .get(&tensor)
             .ok_or_else(|| anyhow!("tensor has no output binding"))?;
-        match self.outputs_host.get(buffer) {
-            Some(TypedBuffer::F32(values)) => Ok(values),
-            Some(other) => bail!("output is {}, not f32", other.type_name()),
-            None => bail!("execute before get_f32"),
+        match self.outputs_host.get(index) {
+            Some((data, binding)) => Ok((data, binding)),
+            None => bail!("execute before fetch"),
         }
+    }
+
+    /// The slot's elected layout alone (see [`Self::fetch`]).
+    pub fn output_layout(
+        &self,
+        tensor: NodeIndex,
+    ) -> Result<&luminal::bufferize::OutputBinding> {
+        Ok(self.fetch(tensor)?.1)
     }
 
     /// The searched plan, for inspection and tests.

@@ -24,6 +24,52 @@ use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, NodeIndex};
 use luminal_cuda_lite::CudaRuntime;
 
+
+/// Read the device output DENSELY through its disclosed layout
+/// (escape-and-disclose, ruling 2026-08-27): a view-elected output
+/// returns its BACKING buffer's bytes (possibly parent-sized) plus the
+/// elected layout, so the honest comparison walks each element
+/// [i0, i1, ...] through the hop chain — `walk_layout_index` is the
+/// trusted reader. A dense election walks the identity, so this is the
+/// universal readback: no fixture assumes dense anymore.
+fn walked_dense(rt: &CudaRuntime, out: NodeIndex) -> Vec<f32> {
+    let (data, binding) = rt.fetch(out).expect("escape-and-disclose fetch");
+    let bytes = match data {
+        TypedBuffer::F32(values) => values,
+        other => panic!("output is {}, not f32", other.type_name()),
+    };
+    let dims = binding.dims.clone().expect("numeric output dims");
+    let base_dims = rt
+        .plan()
+        .expect("plan loaded")
+        .buffers
+        .get(&binding.buffer)
+        .and_then(|record| record.dims.clone())
+        .expect("backing buffer geometry");
+    let numel: usize = dims.iter().map(|&d| d as usize).product();
+    let rank = dims.len();
+    let mut dense = Vec::with_capacity(numel);
+    let mut coords = vec![0usize; rank];
+    for _ in 0..numel {
+        let flat = luminal::bufferize::walk_layout_index(
+            binding.composed_access.as_ref(),
+            &dims,
+            &base_dims,
+            &coords,
+        )
+        .expect("the walker reads the disclosed layout");
+        dense.push(bytes[flat]);
+        for axis in (0..rank).rev() {
+            coords[axis] += 1;
+            if coords[axis] < dims[axis] as usize {
+                break;
+            }
+            coords[axis] = 0;
+        }
+    }
+    dense
+}
+
 fn view_search_options() -> ImplementationSearchOptions {
     ImplementationSearchOptions {
         generations: 4,
@@ -84,7 +130,7 @@ fn run_differential(
         rt.set_data(*id, v.clone());
     }
     rt.execute().expect("device execute");
-    let got = rt.get_f32(out).expect("device output").clone();
+    let got = walked_dense(&rt, out);
     (want, got)
 }
 

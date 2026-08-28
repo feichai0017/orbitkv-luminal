@@ -56,6 +56,10 @@ fn chained_matmuls_bufferize() {
         let x = cx.tensor((4usize, 8usize));
         let w1 = cx.tensor((8usize, 3usize));
         let w2 = cx.tensor((3usize, 5usize));
+        // The original boundary-flowing spelling (restored under
+        // escape-and-disclose, ruling 2026-08-27: a view-produced bound
+        // output escapes, so no dodge is needed). The probe's subject is
+        // the INTERIOR sibling view feeding the second call.
         let _ = x.matmul(w1).matmul(w2).output();
         cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
     };

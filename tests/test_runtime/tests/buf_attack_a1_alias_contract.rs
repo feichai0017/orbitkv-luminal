@@ -141,10 +141,12 @@ fn a1_readonly_cohabitant_rejects_program_even_with_permit() {
 }
 
 /// ATTACK 2, arm A: value y bound to slot 0 (buffer D) AND its view v bound
-/// to slot 1 (buffer E). TODAY the direct slot's chain seeds (no view hop in
-/// it), the view rides the storage class into D, and slot E is served by one
-/// bound->bound copy D->E. Zero Allocated buffers — the current planner
-/// already achieves P1's outcome whenever ANY slot binds the direct value.
+/// to slot 1 (buffer E). The direct slot's chain seeds (no view hop in it)
+/// and y computes straight into D; ESCAPE-AND-DISCLOSE (ruling 2026-08-27,
+/// supersedes the 5b refusal and the older bound->bound copy) then returns
+/// the view slot ZERO-COPY: v's residence IS caller storage D, so slot E is
+/// backed by D too — the declared E buffer goes unused — and the binding
+/// discloses the view layout. Zero copies, zero Allocated buffers.
 #[test]
 fn a1_value_plus_view_to_two_outputs_direct_slot_first() {
     let mut g = TestGraph::new();
@@ -168,15 +170,27 @@ fn a1_value_plus_view_to_two_outputs_direct_slot_first() {
         "zero Allocated buffers:\n{}",
         plan.summary()
     );
-    let cps = copies(&plan);
-    assert_eq!(cps.len(), 1, "one copy serves the view slot:\n{}", plan.summary());
-    assert!(matches!(cps[0].0, BufferId::Boundary(_)) && matches!(cps[0].1, BufferId::Boundary(_)));
+    assert_eq!(copies(&plan).len(), 0, "zero copies — both slots ride D:\n{}", plan.summary());
+    let slots: Vec<_> = plan
+        .dag
+        .node_weights()
+        .find_map(|node| match node {
+            BufferNode::BufferOutput { slots } => Some(slots.clone()),
+            _ => None,
+        })
+        .expect("the output node");
+    assert_eq!(slots[0].buffer, plan.value_buffer[&y], "the direct slot is D");
+    assert_eq!(slots[1].buffer, plan.value_buffer[&y], "the view slot is backed by D too");
+    assert!(slots[0].composed_access.is_none(), "dense slot: direct (row-major) layout");
+    assert!(slots[1].composed_access.is_some(), "view slot: the layout is disclosed");
 }
 
 /// ATTACK 2, arm B: same program, slot order flipped (view slot is slot 0).
-/// The view slot's walk stops at the view (today's B:658-660 stop), the
-/// direct slot still seeds; the view slot is the copy. Slot order does not
-/// reopen the one-poison-two-proposals door (seen_poisons dedup).
+/// The view slot's seed walk stops at the view, the direct slot (E) still
+/// seeds — y computes into E — and the view slot returns ZERO-COPY backed
+/// by E (its residence). Slot order does not reopen the
+/// one-poison-two-proposals door (seen_poisons dedup), and it changes only
+/// WHICH caller buffer carries the bytes — never the zero-copy outcome.
 #[test]
 fn a1_value_plus_view_to_two_outputs_view_slot_first() {
     let mut g = TestGraph::new();
@@ -200,18 +214,29 @@ fn a1_value_plus_view_to_two_outputs_view_slot_first() {
         "zero Allocated buffers:\n{}",
         plan.summary()
     );
-    let cps = copies(&plan);
-    assert_eq!(cps.len(), 1, "one copy serves the view slot:\n{}", plan.summary());
+    assert_eq!(copies(&plan).len(), 0, "zero copies:\n{}", plan.summary());
+    let slots: Vec<_> = plan
+        .dag
+        .node_weights()
+        .find_map(|node| match node {
+            BufferNode::BufferOutput { slots } => Some(slots.clone()),
+            _ => None,
+        })
+        .expect("the output node");
+    assert_eq!(slots[0].buffer, plan.value_buffer[&y], "the view slot rides y's residence");
+    assert!(slots[0].composed_access.is_some(), "…with the layout disclosed");
+    assert_eq!(slots[1].buffer, plan.value_buffer[&y], "the direct slot is the residence");
 }
 
 /// ATTACK 3: an unordered reader of the cohabiting bound buffer. The chain's
-/// value reaches slot D through a VIEW (so today no seed is even proposed);
-/// the materialize path tolerates the unordered reader with a WAR anti edge
-/// ordering the read before the delivery copy. This is the certified plan an
-/// admitted P1 seed must be able to DEGRADE to (its admission would refuse:
-/// the reader has no data path before the compute).
+/// value reaches slot D through a VIEW (so today no seed is even proposed).
+/// Under escape-and-disclose the chain's minted residence escapes and backs
+/// slot D directly — D's declared buffer is never written, so the hazard
+/// this probe attacked (a delivery overwriting D while the unordered reader
+/// still needs x's bytes) is GONE, not tolerated: zero copies into D, zero
+/// WAR antis.
 #[test]
-fn a1_unordered_reader_of_cohabited_buffer_tolerated_by_copy_war_edge() {
+fn a1_unordered_reader_of_cohabited_buffer_hazard_gone_under_escape() {
     let mut g = TestGraph::new();
     let x = g.input("x", "D", Access::ReadWrite, "rm");
     // unordered reader of x, output elsewhere: keeps D's old bytes live
@@ -234,26 +259,52 @@ fn a1_unordered_reader_of_cohabited_buffer_tolerated_by_copy_war_edge() {
     let v = g.op(Box::new(MockView), &[&y], &[("v", "view")]).remove(0);
     g.output(&v, "D");
     g.output(&s, "E");
+    // ESCAPE-AND-DISCLOSE (ruling 2026-08-27): the view slot no longer
+    // writes into D at all — the chain's minted residence ESCAPES and
+    // backs slot D directly, so the hazard this probe attacked (a
+    // delivery overwriting D while the unordered reader still needs x's
+    // bytes) is GONE, not tolerated: x's buffer is never written, the
+    // WAR edge the old pin measured has nothing to order, and only s's
+    // dense delivery into E copies.
     let plan = bufferize(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
-
-    // The chain computed off-buffer; one copy delivers into D.
     assert!(matches!(plan.value_buffer[&y], BufferId::Allocated(_)));
-    let into_d: Vec<_> = copies(&plan)
+    let slot = plan
+        .dag
+        .node_weights()
+        .find_map(|node| match node {
+            BufferNode::BufferOutput { slots } => Some(slots[0].clone()),
+            _ => None,
+        })
+        .expect("slot 0");
+    assert_eq!(slot.buffer, plan.value_buffer[&y], "slot D's declared buffer is unused");
+    assert_eq!(
+        plan.buffers[&slot.buffer].freed_by,
+        luminal::layout_ir::FreedBy::Caller,
+        "the chain residence escapes:\n{}",
+        plan.summary()
+    );
+    let into_x: Vec<_> = copies(&plan)
         .into_iter()
         .filter(|(_, dst)| *dst == plan.value_buffer[&x])
         .collect();
-    assert_eq!(into_d.len(), 1, "one delivery copy into D:\n{}", plan.summary());
-    // The unordered read of x is WAR-ordered before that copy.
-    assert!(war_antis(&plan) >= 1, "reader->copy WAR anti expected:\n{}", plan.summary());
+    assert!(into_x.is_empty(), "nothing writes the input buffer anymore:\n{}", plan.summary());
+    assert_eq!(copies(&plan).len(), 1, "one dense delivery (s -> E) remains:\n{}", plan.summary());
+    assert_eq!(war_antis(&plan), 0, "no hazard left to WAR-order:\n{}", plan.summary());
 }
 
 /// ATTACK 4: a mutating consumer reaching a bound-output value THROUGH a
 /// view. y is bound to slot D (its END_OF_PROGRAM read never happens-before
 /// anything); the accumulator takes v = view(y) in place. Views decide first
 /// (v~y union), so the accumulator's write provably aliases the bound value
-/// and is vetoed; the repair copies the bytes out and mutates the copy. The
-/// shared buffer keeps exactly one writing compute.
+/// and is vetoed; the repair copies the bytes out and the consumer reads the
+/// copy. The shared buffer keeps exactly one writing compute.
+///
+/// RULING 2026-08-27 (repair destinations are fresh single-writer buffers):
+/// the repair copy of a FOLDED operand targets a FRESHLY minted
+/// parent-shaped buffer — never the tied result's buffer, whose writer
+/// votes result-shaped geometry the base-storage copy would contradict —
+/// and the consumer's operand re-roots onto it through its unchanged fold.
 #[test]
 fn a1_mutating_consumer_through_view_of_bound_value_vetoed_and_repaired() {
     let mut g = TestGraph::new();
@@ -289,10 +340,30 @@ fn a1_mutating_consumer_through_view_of_bound_value_vetoed_and_repaired() {
         .filter(|n| matches!(n, BufferNode::Compute { writes, .. } if writes.contains(&d)))
         .count();
     assert_eq!(writers_of_d, 1, "exactly one writer of the bound buffer:\n{}", plan.summary());
-    // The repair copied D's bytes into the accumulator's fresh storage.
+    // The repair copied D's bytes into a FRESH single-writer buffer the
+    // consumer re-roots onto — never the accumulator's own result buffer.
     let repair = copies(&plan)
         .into_iter()
         .find(|(src, _)| *src == d)
         .expect("repair copy reads the bound buffer");
-    assert_eq!(repair.1, plan.value_buffer[&r]);
+    assert!(matches!(repair.1, BufferId::Allocated(_)));
+    assert_ne!(
+        repair.1, plan.value_buffer[&r],
+        "fresh repair destination, not the tied result's buffer:\n{}",
+        plan.summary()
+    );
+    let consumer_operand = plan
+        .dag
+        .node_weights()
+        .find_map(|n| match n {
+            BufferNode::Compute { operand_info, .. }
+                if operand_info.first().is_some_and(|info| info.value == v) =>
+            {
+                Some(operand_info[0].clone())
+            }
+            _ => None,
+        })
+        .expect("the accumulator survives lowering");
+    assert_eq!(consumer_operand.buffer, repair.1, "the consumer reads the re-rooted view");
+    assert!(consumer_operand.composed_access.is_some(), "…through its unchanged fold");
 }

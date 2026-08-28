@@ -163,27 +163,81 @@ fn t6a_bufferize_all_four_forms() {
             CublasLtForm::AccumulateBias => "CublasLtAccumulateBias",
         };
         assert!(summary.contains(label), "{name}: kernel in plan\n{summary}");
-        // ROUND-10 RECORDED COST (was 0 allocs): the kernel claims the
-        // SIBLING's transpose-view tensor; at bufferize the view between
-        // it and the recorder's boundary tensor is realized as a
-        // BufferCopy out of a scratch alloc — the bytes are IDENTICAL
-        // (the composed roundtrip welds the layouts), so the copy is
-        // redundant and the right fix is view ALIASING in the bufferizer
-        // (the resident-geometry/M4 work), which is core machinery, not
-        // prototype scope. One scratch alloc per call until then; the
-        // output is still DELIVERED to the caller buffer (asserted).
+        // ESCAPE-AND-DISCLOSE RE-PIN (ruling 2026-08-27, supersedes the
+        // round-10 recorded cost — the "redundant identity-bytes copy"
+        // out of a scratch alloc): the kernel claims the SIBLING's
+        // transpose-view tensor as the boundary value, and that view
+        // output now ESCAPES. One alloc — the kernel dest, handed to the
+        // caller (FreedBy::Caller, no free) — ZERO copies, and the slot
+        // is backed by the alloc itself with the weld's (RM-equal)
+        // layout disclosed on the binding.
         assert_eq!(
             allocs, 1,
-            "{name}: one scratch alloc for the sibling claim (view-aliasing gap)\n{summary}"
+            "{name}: one alloc — the kernel dest, which escapes\n{summary}"
         );
         assert!(
-            summary.contains("BufferCopy"),
-            "{name}: the redundant identity-bytes copy is visible in the plan\n{summary}"
+            !summary.contains("BufferCopy"),
+            "{name}: zero boundary copies under escape (ruling 2026-08-27)\n{summary}"
+        );
+        let slot = plan
+            .dag
+            .node_weights()
+            .find_map(|node| match node {
+                luminal::bufferize::BufferNode::BufferOutput { slots } => {
+                    Some(slots[0].clone())
+                }
+                _ => None,
+            })
+            .expect("slot 0");
+        assert!(
+            matches!(slot.buffer, BufferId::Allocated(_)),
+            "{name}: the slot is backed by the escaping kernel alloc\n{summary}"
+        );
+        assert_eq!(
+            plan.buffers[&slot.buffer].freed_by,
+            luminal::layout_ir::FreedBy::Caller,
+            "{name}: the backing buffer escapes to the caller\n{summary}"
         );
         assert!(
-            summary.contains("out 0 -> pinned"),
-            "{name}: the output IS delivered to the caller buffer\n{summary}"
+            slot.composed_access.is_some(),
+            "{name}: the weld's layout is disclosed on the binding\n{summary}"
         );
+        // …and the disclosure is WALKABLE, not just present: every element
+        // of the output value resolves through the hop chain to an
+        // in-bounds flat index of the backing buffer (the walker
+        // fail-closes on unparsed entries, symbolic parent extents, and a
+        // base/final-parent mismatch — so a green walk proves all three).
+        let value_dims = slot.dims.clone().unwrap_or_else(|| {
+            panic!("{name}: escaped slot must disclose numeric value dims\n{summary}")
+        });
+        let base_dims = plan.buffers[&slot.buffer].dims.clone().unwrap_or_else(|| {
+            panic!("{name}: escaping backing buffer must carry numeric geometry\n{summary}")
+        });
+        let base_numel: usize = base_dims.iter().map(|&d| d as usize).product();
+        let numel: usize = value_dims.iter().map(|&d| d as usize).product();
+        let rank = value_dims.len();
+        let mut coords = vec![0usize; rank];
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..numel {
+            let flat = luminal::bufferize::walk_layout_index(
+                slot.composed_access.as_ref(),
+                &value_dims,
+                &base_dims,
+                &coords,
+            )
+            .unwrap_or_else(|err| {
+                panic!("{name}: disclosed layout must walk at {coords:?}: {err:#}")
+            });
+            assert!(flat < base_numel, "{name}: walked index {flat} exceeds backing numel");
+            assert!(seen.insert(flat), "{name}: two elements walk to flat index {flat}");
+            for axis in (0..rank).rev() {
+                coords[axis] += 1;
+                if coords[axis] < value_dims[axis] as usize {
+                    break;
+                }
+                coords[axis] = 0;
+            }
+        }
     }
 }
 
@@ -200,6 +254,9 @@ fn t6a_accumulate_intermediate_c_donation_observed() {
         let y = cx.tensor((4usize, 3usize));
         let z = cx.tensor((4usize, 3usize));
         let c = y + z; // intermediate C (program-freed once consumed)
+        // Original boundary-flowing spelling (restored under
+        // escape-and-disclose: the view-produced bound output escapes);
+        // this probe's subject is donation.
         let _ = (x.matmul(w) + c).output();
         cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
     };

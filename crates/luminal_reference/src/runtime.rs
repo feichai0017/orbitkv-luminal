@@ -18,7 +18,7 @@ use petgraph::algo::toposort;
 use rustc_hash::FxHashMap;
 
 use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
-use luminal::bufferize::{BufferId, BufferIrGraph, BufferNode};
+use luminal::bufferize::{BufferId, BufferIrGraph, BufferNode, OutputBinding};
 
 /// The reference backend's implementation inventory, DERIVED from the
 /// kernel registry: a matcher's op is claimed iff a kernel bearing its
@@ -270,6 +270,39 @@ impl ReferenceRuntime {
     pub fn execute(&mut self) -> Result<()> {
         let plan = self.plan.as_ref().ok_or_else(|| anyhow!("no plan loaded"))?;
 
+        // ESCAPE GUARD (ruling 2026-08-27): an output slot's backing
+        // storage must SURVIVE the call — FreedBy::Caller, whatever the
+        // owner. FreedBy::Program backing an output means the caller
+        // would receive bytes the program destroys: minted non-escaping
+        // storage (Owner::System) and DONATED boundary storage
+        // (Owner::Caller — validate()'s donated arm forbids exactly this
+        // plan shape) alike. The pre-lowering certificate rejects such
+        // plans, but hand-built / load_plan plans never pass through it —
+        // so the executor re-checks, loudly.
+        for node in plan.dag.node_weights() {
+            if let BufferNode::BufferOutput { slots } = node {
+                for slot in slots {
+                    let Some(buffer) = plan.buffers.get(&slot.buffer) else {
+                        anyhow::bail!(
+                            "output slot {} names unknown buffer {:?}",
+                            slot.index,
+                            slot.buffer
+                        );
+                    };
+                    ensure!(
+                        buffer.freed_by == luminal::layout_ir::FreedBy::Caller,
+                        "output slot {} is backed by NON-ESCAPING buffer {} \
+                         (FreedBy::Program, {:?}-owned) — escaped output storage \
+                         must be FreedBy::Caller; refusing to hand the caller bytes \
+                         the program destroys",
+                        slot.index,
+                        buffer.label,
+                        buffer.owner,
+                    );
+                }
+            }
+        }
+
         // Materialize every buffer: staged caller data where provided
         // (variant-checked against the buffer's DTYPE, length-checked
         // against the annotated geometry), zeros otherwise. The plan
@@ -364,19 +397,15 @@ impl ReferenceRuntime {
         for index in order {
             match &plan.dag[index] {
                 BufferNode::BufferInput { .. } | BufferNode::BufferOutput { .. } => {}
-                BufferNode::BufferCopy { src, dst, access, .. } => {
-                    // Phase 5: a copy carrying composed access MATERIALIZES a
-                    // folded view — this executor is permanently
-                    // materialize-only (ruling aff22598), its own searches
-                    // never elect views, so a folded copy can only arrive via
-                    // an externally-loaded plan. Refuse loudly: byte-copying
-                    // it would silently drop the fold.
-                    ensure!(
-                        access.is_none(),
-                        "reference executor received a folded-view copy \
-                         ({src:?} -> {dst:?}) — this runtime is materialize-only \
-                         and has no strided-copy path"
-                    );
+                BufferNode::BufferCopy { src, dst, .. } => {
+                    // RULING 2026-08-27: a BufferCopy is only ever a dumb
+                    // whole-buffer memcpy — the Phase-5 `access` field (and
+                    // this executor's folded-copy refusal arm) is deleted
+                    // with the field itself. The length/type checks below
+                    // are the PERMANENT FENCE: a folded delivery smuggled
+                    // past the bufferizer's refusal arrives parent-shaped
+                    // against an output-shaped dst and fails the length
+                    // check loudly, never byte-copies.
                     let data = storage
                         .get(src)
                         .ok_or_else(|| anyhow!("copy reads unknown buffer"))?
@@ -469,6 +498,40 @@ impl ReferenceRuntime {
             .get(&tensor)
             .copied()
             .ok_or_else(|| anyhow!("tensor {tensor:?} is not a bound output of this program"))
+    }
+
+    /// The escape-and-disclose fetch (ruling 2026-08-27), universal over
+    /// elections: output slot `index`'s BACKING buffer contents plus its
+    /// [`OutputBinding`] — the elected layout the caller interprets those
+    /// bytes under. A dense election returns the slot's boundary buffer
+    /// and a `None` (row-major) access; a view election returns the
+    /// escaped backing buffer (possibly parent-sized) and the folded
+    /// chain. `luminal::bufferize::walk_layout_index` is the trusted
+    /// element reader. This runtime's own searches are materialize-only
+    /// (they never elect views), so its outputs are de-facto row-major
+    /// and `get_f32` semantics are unchanged; view-elected slots arrive
+    /// only via externally loaded plans.
+    pub fn output_slot(&self, index: usize) -> Result<(&TypedBuffer, &OutputBinding)> {
+        let binding = self.output_layout(index)?;
+        let data = self
+            .storage
+            .get(&binding.buffer)
+            .ok_or_else(|| anyhow!("output slot {index} has no contents (execute first)"))?;
+        Ok((data, binding))
+    }
+
+    /// Output slot `index`'s binding — buffer identity plus the elected
+    /// layout (see [`Self::output_slot`]).
+    pub fn output_layout(&self, index: usize) -> Result<&OutputBinding> {
+        let plan = self.plan.as_ref().ok_or_else(|| anyhow!("no plan loaded"))?;
+        for node in plan.dag.node_weights() {
+            if let BufferNode::BufferOutput { slots } = node {
+                if let Some(slot) = slots.iter().find(|slot| slot.index == index) {
+                    return Ok(slot);
+                }
+            }
+        }
+        Err(anyhow!("no output slot {index} in the loaded plan"))
     }
 
     fn get_typed(&self, id: i64) -> Result<&TypedBuffer> {
