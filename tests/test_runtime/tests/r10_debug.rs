@@ -439,7 +439,7 @@ fn r10_debug_bufferize() {
     // alloc ESCAPES — the slot is backed by it (FreedBy::Caller, no free),
     // zero copies — and the binding discloses the weld's layout for the
     // caller to interpret the bytes under.
-    let plan = luminal::bufferize::bufferize(&dps).expect("the view output escapes");
+    let plan = luminal::test_support::bufferize_mock(&dps).expect("the view output escapes");
     println!("{}", plan.summary());
     use luminal::bufferize::{BufferId, BufferNode};
     assert!(

@@ -19,6 +19,12 @@ pub mod index_expr;
 pub mod subst_primitive;
 pub mod extractor;
 pub mod layout_ir;
+// Convenience mirrors of the five egglog Layout constructors + SpanExpr +
+// render_layout, for runtimes to pull from one place. THE BUFFERIZER NEVER
+// CALLS ANY OF THIS — the planner stays generic over an opaque layout type,
+// and backends may ignore this module entirely (Austin's fold-into-core
+// amendment, resident-geometry cleanup 2026-08-31).
+pub mod layouts;
 pub mod logical_op;
 pub mod implementation_search;
 pub mod test_support;

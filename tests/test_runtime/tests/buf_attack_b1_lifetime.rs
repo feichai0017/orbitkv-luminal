@@ -16,7 +16,7 @@
 //!      mutation (stale-read hole probe);
 //!  (6) executor binding is covered by code-reading (see report): no
 //!      probe here can execute MockOps (no reference kernel).
-use luminal::bufferize::{bufferize, BufferId, BufferNode, EdgeKind};
+use luminal::bufferize::{BufferId, BufferNode, EdgeKind};
 use luminal::layout_ir::{Access, FreedBy};
 use luminal::test_support::{EmptyOp, MockOp, MockView, TestGraph};
 use luminal::prelude::petgraph;
@@ -25,7 +25,7 @@ use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 
 fn computes<'a>(
-    plan: &'a luminal::bufferize::BufferIrGraph,
+    plan: &'a luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
     label: &str,
 ) -> Vec<(NodeIndex, Vec<BufferId>, Vec<BufferId>)> {
     plan.dag
@@ -39,7 +39,7 @@ fn computes<'a>(
         .collect()
 }
 
-fn copies(plan: &luminal::bufferize::BufferIrGraph) -> Vec<(NodeIndex, BufferId, BufferId)> {
+fn copies(plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>) -> Vec<(NodeIndex, BufferId, BufferId)> {
     plan.dag
         .node_indices()
         .filter_map(|i| match &plan.dag[i] {
@@ -49,7 +49,7 @@ fn copies(plan: &luminal::bufferize::BufferIrGraph) -> Vec<(NodeIndex, BufferId,
         .collect()
 }
 
-fn input_buffer(plan: &luminal::bufferize::BufferIrGraph) -> BufferId {
+fn input_buffer(plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>) -> BufferId {
     plan.dag
         .node_weights()
         .find_map(|n| match n {
@@ -89,7 +89,7 @@ fn attack1_unordered_direct_and_view_readers_both_precede_free() {
         .remove(0);
     g.output(&r1, "o1");
     g.output(&r2, "o2");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
 
     // Identify the parent buffer: written by the MockOp whose operand is the
@@ -151,7 +151,7 @@ fn attack1b_view_of_poison_bound_to_output_slot() {
         g.output(&v, "out");
         g.build()
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bufferize(&graph)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| luminal::test_support::bufferize_mock(&graph)));
     match result {
         Ok(Ok(plan)) => panic!(
             "LAUNDERED: undefined bytes delivered to a bound output through a view:\n{}",
@@ -180,7 +180,7 @@ fn attack2_program_freed_input_read_only_through_view() {
         .op(Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }), &[&v], &[("r", "rm")])
         .remove(0);
     g.output(&r, "out");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
 
     let xb = input_buffer(&plan);
@@ -212,7 +212,7 @@ fn attack3a_view_of_view_of_readonly_vetoes_writer() {
         .op(Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }), &[&v2], &[("r", "rm")])
         .remove(0);
     g.output(&r, "out");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
 
     let xb = input_buffer(&plan);
@@ -251,7 +251,7 @@ fn attack3b_passthrough_obligation_blocks_inplace_writer_via_view() {
         .remove(0);
     g.output(&x, "B"); // pass-through: B's final contents must be x
     g.output(&r, "out");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
 
     let xb = input_buffer(&plan);
@@ -292,7 +292,7 @@ fn attack3c_readwrite_input_is_admitted_as_inplace_dest_through_view() {
         .op(Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }), &[&v], &[("r", "rm")])
         .remove(0);
     g.output(&r, "out");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
 
     let xb = input_buffer(&plan);
@@ -327,7 +327,7 @@ fn attack4_view_reader_anti_ordered_before_delivery_copy_overwrite() {
         .remove(0);
     g.output(&y, "B"); // delivery copy: alloc(y) -> B, overwriting the input buffer
     g.output(&r, "C");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
 
     let xb = input_buffer(&plan);
@@ -391,7 +391,7 @@ fn attack5_view_reader_after_mutator_still_blocks_inplace() {
         )
         .remove(0);
     g.output(&r, "out");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
 
     // Identify the parent buffer (written by W, whose operand 0 is Boundary).

@@ -11,7 +11,7 @@
 //! Hand-authored graphs via luminal::test_support (MockOp/MockView/EmptyOp),
 //! per the assignment rule: these shapes are defined by the Bufferizable
 //! interface, not reachable through egg scripts.
-use luminal::bufferize::{bufferize, BufferId, BufferNode};
+use luminal::bufferize::{BufferId, BufferNode};
 use luminal::layout_ir::Access;
 use luminal::test_support::{EmptyOp, MockOp, MockView, TestGraph};
 use luminal::prelude::petgraph;
@@ -19,7 +19,7 @@ use petgraph::algo::has_path_connecting;
 use petgraph::graph::NodeIndex;
 
 fn compute_nodes<'a>(
-    plan: &'a luminal::bufferize::BufferIrGraph,
+    plan: &'a luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
     label: &str,
 ) -> Vec<(NodeIndex, &'a Vec<BufferId>, &'a Vec<BufferId>)> {
     plan.dag
@@ -33,7 +33,7 @@ fn compute_nodes<'a>(
         .collect()
 }
 
-fn copies(plan: &luminal::bufferize::BufferIrGraph) -> Vec<(BufferId, BufferId)> {
+fn copies(plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>) -> Vec<(BufferId, BufferId)> {
     plan.dag
         .node_weights()
         .filter_map(|n| match n {
@@ -71,7 +71,7 @@ fn a_view_reader_extends_parent_lifetime_single_free() {
         )
         .remove(0);
     g.output(&z, "out");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
 
     // The view folded: zero copies anywhere (the consumer's dest was seeded
@@ -133,7 +133,7 @@ fn e_view_of_view_chain_folds_to_grandparent() {
         )
         .remove(0);
     g.output(&z, "out");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
     assert_eq!(copies(&plan), vec![], "no copies through a two-view chain");
     assert!(compute_nodes(&plan, "MockView").is_empty());
@@ -161,7 +161,7 @@ fn c_view_of_readonly_input_vetoes_inplace_writer() {
         )
         .remove(0);
     g.output(&z, "out");
-    let plan = bufferize(&g.build()).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
     println!("{}", plan.summary());
 
     // x's boundary buffer is never written by any compute or copy.
@@ -232,7 +232,7 @@ fn d_unordered_view_reader_blocks_inplace_writer() {
         .remove(0);
     g.output(&r, "out_r");
     g.output(&w2, "out_w");
-    let plan = bufferize(&g.build()).expect("bufferize must still certify");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize must still certify");
     println!("{}", plan.summary());
 
     // The accumulator's in-place bid was rejected: its overwrite happens in a
@@ -278,7 +278,7 @@ fn c_view_bound_to_output_escapes_the_chain_residence() {
         .remove(0);
     let v = g.op(Box::new(MockView), &[&y], &[("v", "view")]).remove(0);
     g.output(&v, "out");
-    let plan = bufferize(&g.build()).expect("the view output escapes");
+    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("the view output escapes");
     println!("{}", plan.summary());
     let cps = copies(&plan);
     assert_eq!(cps.len(), 0, "zero copies — the residence is handed over:\n{}", plan.summary());
@@ -330,7 +330,7 @@ fn g_view_of_poison_read_panics_not_bails() {
         g.output(&z, "out");
         g.build()
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bufferize(&graph)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| luminal::test_support::bufferize_mock(&graph)));
     match result {
         Ok(Ok(plan)) => {
             panic!("LAUNDERED: read-of-undefined-through-view certified.\n{}", plan.summary());

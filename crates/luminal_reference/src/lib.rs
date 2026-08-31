@@ -9,6 +9,7 @@
 pub mod bindings;
 pub mod harness;
 pub mod kernels;
+pub mod layouts;
 pub mod ops;
 pub mod runtime;
 pub mod search;
@@ -17,6 +18,7 @@ pub use harness::{
     extract_layout_ir, extract_layout_ir_with_genome, producer_index_with_ops,
 };
 pub use bindings::ReferenceBindings;
+pub use layouts::{RefLayout, ReferenceLayoutRenderer, ReferencePlan};
 pub use runtime::{reference_allow_list, ReferenceRuntime};
 pub use search::{
     search_implementations, search_implementations_with_ops, ReferenceProfiler,

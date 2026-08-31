@@ -34,10 +34,10 @@ fn chain_eval(access: &ComposedAccess, out_coord: &[usize]) -> Vec<i64> {
 
 /// Bufferize a frontend program with views preferred, and return every
 /// (op label, operand slot index, access) that carries composed access.
-fn composed_slots(text: &str, prefer: &[&str]) -> (luminal::bufferize::BufferIrGraph, Vec<(String, usize, ComposedAccess)>) {
+fn composed_slots(text: &str, prefer: &[&str]) -> (luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>, Vec<(String, usize, ComposedAccess)>) {
     let (graph, _) = test_runtime::extract_fixture_with_genome(text, prefer);
     let dps = luminal::dps::dps_rewrite(&graph);
-    let plan = luminal::bufferize::bufferize(&dps).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&dps).expect("bufferize");
     let mut found = Vec::new();
     for node in plan.dag.node_weights() {
         if let BufferNode::Compute { op, operand_info, result_info, .. } = node {

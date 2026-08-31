@@ -44,7 +44,7 @@ fn view_search_options() -> ImplementationSearchOptions {
 }
 
 /// Load → search on the CUDA runtime; return the best plan.
-fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)]) -> BufferIrGraph {
+fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)]) -> BufferIrGraph<luminal_cuda_lite::CudaLayout> {
     let mut rt = CudaRuntime::load(cx).expect("cuda load");
     let data: FxHashMap<NodeIndex, TypedBuffer> = inputs.iter().cloned().collect();
     let outcome = rt.search(&data, &view_search_options()).expect("cuda search");
@@ -54,7 +54,7 @@ fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)]) -> BufferIrGraph {
 
 /// The plan-shape audit shared by every fixture. Returns
 /// (compute_count, copy_count, buffer_count, composed slots).
-fn audit(plan: &BufferIrGraph) -> (usize, usize, usize, Vec<(String, usize, ComposedAccess)>) {
+fn audit(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> (usize, usize, usize, Vec<(String, usize, ComposedAccess)>) {
     let mut computes = 0usize;
     let mut copies = 0usize;
     let mut composed = Vec::new();

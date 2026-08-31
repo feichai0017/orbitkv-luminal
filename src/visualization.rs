@@ -172,7 +172,7 @@ impl ToDot for crate::layout_ir::ExtractedGraph {
 
 /// The bufferized plan; the inherent renderer (bufferize.rs) carries the
 /// slot-table grammar and buffer-name labeling.
-impl ToDot for crate::bufferize::BufferIrGraph {
+impl<L: crate::bufferize::PlanLayout> ToDot for crate::bufferize::BufferIrGraph<L> {
     fn to_dot(&self) -> Result<String> {
         Ok(crate::bufferize::BufferIrGraph::to_dot(self))
     }

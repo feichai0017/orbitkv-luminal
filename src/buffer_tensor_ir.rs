@@ -23,7 +23,7 @@ use anyhow::Result;
 use egraph_serialize::ClassId;
 use petgraph::graph::{DiGraph, NodeIndex};
 
-use crate::bufferize::{Analysis, Buffer, BufferId, Bufferizer};
+use crate::bufferize::{Analysis, Buffer, BufferId, Bufferizer, PlanLayout, ValueGeometry};
 use crate::layout_ir::{Access, ExtractedGraph, ExtractedNode};
 
 // =============================================================================
@@ -602,17 +602,17 @@ pub enum BtEdge {
 /// decision explicit, nothing yet forgotten. `lower` (in `bufferize`) erases
 /// it into the executable [`crate::bufferize::BufferIrGraph`].
 #[derive(Debug, Clone)]
-pub struct BufferTensorIrGraph {
+pub struct BufferTensorIrGraph<L: PlanLayout> {
     pub dag: DiGraph<BtNode, BtEdge>,
     /// Every distinct buffer, by id (interned during assignment).
-    pub buffers: HashMap<BufferId, Buffer>,
+    pub buffers: HashMap<BufferId, Buffer<L>>,
     /// The buffer holding each value (values collapse onto buffers via reuse).
     /// A `BTreeMap` so every iteration over it is value-ordered and
     /// deterministic (see [`crate::bufferize::BufferIrGraph::value_buffer`]).
     pub value_buffer: BTreeMap<ClassId, BufferId>,
 }
 
-impl BufferTensorIrGraph {
+impl<L: PlanLayout> BufferTensorIrGraph<L> {
     fn buffer_name(&self, id: &BufferId) -> String {
         let label = self
             .buffers
@@ -918,12 +918,27 @@ impl BufferTensorIrGraph {
 /// The producer map is keyed on the (value, buffer) PAIR: after a transport,
 /// a value has two residences with different producers, and every consumer
 /// names the residence it actually uses.
-pub(crate) fn build_buffer_tensor_ir(
+pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
     graph: &ExtractedGraph,
     order: &[NodeIndex],
-    assignment: Bufferizer,
+    assignment: Bufferizer<L>,
     analysis: &Analysis,
-) -> Result<BufferTensorIrGraph> {
+    value_geometry: &HashMap<ClassId, ValueGeometry<L>>,
+) -> Result<BufferTensorIrGraph<L>> {
+    // The mint-time layout SEED for repair buffers (same contract as
+    // assignment's: the copied value supplies the layout; the annotate
+    // join is the authority and a geometry miss is a planner bug).
+    let layout_of = |value: &ClassId| -> Result<L> {
+        value_geometry
+            .get(value)
+            .map(|geometry| geometry.layout.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "value {value} has no extraction geometry — every graph \
+                     value records one before BufferTensor construction"
+                )
+            })
+    };
     let Bufferizer {
         mut buffers,
         value_buffer,
@@ -1095,6 +1110,10 @@ pub(crate) fn build_buffer_tensor_ir(
                                     element_bits: None,
                                     dtype: None,
                                     lit: None,
+                                    // Mint-time seed; the writer join
+                                    // fills the authoritative layout at
+                                    // annotate (the copy's landed value).
+                                    layout: layout_of(&operands[operand].value)?,
                                 },
                             );
                             target = id;
@@ -1252,6 +1271,11 @@ pub(crate) fn build_buffer_tensor_ir(
                                                     element_bits: None,
                                                     dtype: None,
                                                     lit: None,
+                                                    // Seed from the fold
+                                                    // ROOT — the value the
+                                                    // base-storage copy
+                                                    // actually lands here.
+                                                    layout: layout_of(&root)?,
                                                 },
                                             );
                                             let src = BufferTensor {
@@ -1408,7 +1432,7 @@ pub(crate) fn build_buffer_tensor_ir(
 /// The rebuild preserves node order (allocs and frees slot in at their
 /// placement points), so the lowering's emission order — and with it the
 /// plan's printed schedule — reads allocate → use → free.
-pub(crate) fn optimize(bt: BufferTensorIrGraph) -> Result<BufferTensorIrGraph> {
+pub(crate) fn optimize<L: PlanLayout>(bt: BufferTensorIrGraph<L>) -> Result<BufferTensorIrGraph<L>> {
     use petgraph::visit::EdgeRef;
     let BufferTensorIrGraph {
         dag,
@@ -1707,7 +1731,7 @@ pub(crate) fn optimize(bt: BufferTensorIrGraph) -> Result<BufferTensorIrGraph> {
 /// converting a genuinely unschedulable plan into a silent wrong-answer
 /// schedule. Against the frozen graph the swap gets both edges and fails
 /// loudly at the lowering's schedulability check.
-pub(crate) fn install_anti_edges(bt: &mut BufferTensorIrGraph) {
+pub(crate) fn install_anti_edges<L: PlanLayout>(bt: &mut BufferTensorIrGraph<L>) {
     let frozen = bt.dag.clone();
     let mut writers: Vec<(NodeIndex, BufferId)> = Vec::new();
     for index in frozen.node_indices() {
@@ -1804,7 +1828,7 @@ pub(crate) fn install_anti_edges(bt: &mut BufferTensorIrGraph) {
 ///
 /// MLIR has no analogue: One-Shot Bufferization's guards all live inside the
 /// per-candidate analysis query, and nothing re-checks committed decisions.
-pub(crate) fn validate(bt: &BufferTensorIrGraph) -> Result<()> {
+pub(crate) fn validate<L: PlanLayout>(bt: &BufferTensorIrGraph<L>) -> Result<()> {
     let mut producer: HashMap<(ClassId, BufferId), NodeIndex> = HashMap::new();
     for index in bt.dag.node_indices() {
         match &bt.dag[index] {
@@ -2183,7 +2207,12 @@ pub(crate) fn validate(bt: &BufferTensorIrGraph) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::MockOp;
+    use crate::test_support::{MockLayout, MockOp};
+
+    /// Hand-built graphs transport the mock layout.
+    fn mock_layout() -> MockLayout {
+        MockLayout(cid("layout$mock"))
+    }
 
     fn cid(s: &str) -> ClassId {
         ClassId::from(s)
@@ -2212,7 +2241,7 @@ mod tests {
     fn data(dag: &mut DiGraph<BtNode, BtEdge>, from: NodeIndex, to: NodeIndex, value: &str) {
         dag.add_edge(from, to, BtEdge::Data { value: cid(value) });
     }
-    fn graph(dag: DiGraph<BtNode, BtEdge>) -> BufferTensorIrGraph {
+    fn graph(dag: DiGraph<BtNode, BtEdge>) -> BufferTensorIrGraph<MockLayout> {
         BufferTensorIrGraph {
             dag,
             buffers: HashMap::new(),
@@ -2339,7 +2368,7 @@ mod tests {
     fn graph_with_records(
         dag: DiGraph<BtNode, BtEdge>,
         records: Vec<(&str, crate::layout_ir::FreedBy)>,
-    ) -> BufferTensorIrGraph {
+    ) -> BufferTensorIrGraph<MockLayout> {
         let mut buffers = HashMap::new();
         for (name, freed_by) in records {
             let id = vbuf(name);
@@ -2355,6 +2384,7 @@ mod tests {
                     element_bits: None,
                     dtype: None,
                     lit: None,
+                    layout: mock_layout(),
                 },
             );
         }
@@ -2492,7 +2522,7 @@ mod tests {
         dag: DiGraph<BtNode, BtEdge>,
         buffer: u32,
         freed_by: crate::layout_ir::FreedBy,
-    ) -> BufferTensorIrGraph {
+    ) -> BufferTensorIrGraph<MockLayout> {
         let id = BufferId::Allocated(buffer);
         let mut buffers = HashMap::new();
         buffers.insert(
@@ -2507,6 +2537,7 @@ mod tests {
                 element_bits: None,
                 dtype: None,
                 lit: None,
+                layout: mock_layout(),
             },
         );
         BufferTensorIrGraph {

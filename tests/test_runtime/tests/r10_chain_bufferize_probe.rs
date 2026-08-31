@@ -21,7 +21,7 @@ fn bufferize_and_report(name: &str, text: &str, prefer: &[&str]) {
             println!("[{name}] DPS {}: ins={ins:?}", op.op.label());
         }
     }
-    let plan = luminal::bufferize::bufferize(&dps).expect("bufferize");
+    let plan = luminal::test_support::bufferize_mock(&dps).expect("bufferize");
     let summary = plan.summary();
     let copies = summary.matches("BufferCopy").count();
     let allocs = summary.matches("BufferAlloc").count();

@@ -13,6 +13,8 @@
 use anyhow::{anyhow, bail, Context, Result};
 use luminal::buffer_tensor_ir::TypedBuffer;
 use luminal::bufferize::BufferIrGraph;
+
+use crate::layouts::CudaLayout;
 use luminal::graph;
 use luminal::implementation_search::{ImplementationSearchOptions, SearchOutcome};
 use luminal::prelude::{FxHashMap, NodeIndex};
@@ -39,7 +41,7 @@ pub struct CudaRuntime {
     /// [`crate::ops::cuda_registry_with_cublaslt`]); enabled through
     /// [`CudaRuntime::load_with_cublaslt`].
     cublaslt: bool,
-    plan: Option<BufferIrGraph>,
+    plan: Option<BufferIrGraph<CudaLayout>>,
     /// Host-staged input payloads by BufferLit id, H2D'd at execute.
     staged: FxHashMap<i64, TypedBuffer>,
     /// Host copies of each output slot's BACKING buffer plus its elected
@@ -163,7 +165,7 @@ impl CudaRuntime {
         &mut self,
         input_data: &FxHashMap<NodeIndex, TypedBuffer>,
         options: &ImplementationSearchOptions,
-    ) -> Result<SearchOutcome> {
+    ) -> Result<SearchOutcome<CudaLayout>> {
         let native = self.native.as_ref().ok_or_else(|| anyhow!("load before search"))?;
         let program = graph::LogicalProgram {
             text: format!(
@@ -222,6 +224,7 @@ impl CudaRuntime {
                 Self::allow_list()
             }),
             self.matchers(),
+            &crate::layouts::CudaLayoutRenderer,
             &mut luminal::implementation_search::StaticProfiler,
         )?;
 
@@ -315,7 +318,7 @@ impl CudaRuntime {
     }
 
     /// The searched plan, for inspection and tests.
-    pub fn plan(&self) -> Option<&BufferIrGraph> {
+    pub fn plan(&self) -> Option<&BufferIrGraph<CudaLayout>> {
         self.plan.as_ref()
     }
 }

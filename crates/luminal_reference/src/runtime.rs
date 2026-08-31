@@ -20,6 +20,8 @@ use rustc_hash::FxHashMap;
 use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 use luminal::bufferize::{BufferId, BufferIrGraph, BufferNode, OutputBinding};
 
+use crate::layouts::RefLayout;
+
 /// The reference backend's implementation inventory, DERIVED from the
 /// kernel registry: a matcher's op is claimed iff a kernel bearing its
 /// label exists in [`kernels`] (ruling 2026-08-06 — the runtime can
@@ -58,7 +60,7 @@ struct NativeSpec {
 
 #[derive(Default)]
 pub struct ReferenceRuntime {
-    plan: Option<BufferIrGraph>,
+    plan: Option<BufferIrGraph<RefLayout>>,
     /// Caller-staged data by numeric `BufferLit` id, consumed at `execute`.
     staged: FxHashMap<i64, TypedBuffer>,
     /// Post-execute storage, kept for `get_f32` / `get_bool`.
@@ -87,7 +89,7 @@ impl ReferenceRuntime {
         self.output_buffers = outputs.iter().map(|s| (s.tensor, s.buffer)).collect();
     }
 
-    pub fn load_plan(&mut self, plan: BufferIrGraph) {
+    pub fn load_plan(&mut self, plan: BufferIrGraph<RefLayout>) {
         self.lit_index = plan
             .buffers
             .values()
@@ -172,7 +174,7 @@ impl ReferenceRuntime {
         &mut self,
         input_data: &FxHashMap<petgraph::graph::NodeIndex, TypedBuffer>,
         options: &luminal::implementation_search::ImplementationSearchOptions,
-    ) -> Result<luminal::implementation_search::SearchOutcome> {
+    ) -> Result<luminal::implementation_search::SearchOutcome<RefLayout>> {
         let spec = self.native.take().ok_or_else(|| anyhow!("search before load"))?;
         let text = format!(
             "{}{}{}{}",
@@ -1203,8 +1205,15 @@ mod tests {
         )
             .expect("extracts")
             .expect("plan");
-        let plan =
-            luminal::bufferize::bufferize(&luminal::dps::dps_rewrite(&extracted)).expect("bufferizes");
+        let layouts = luminal::extractor::rendered_layout_table(
+            &serialized,
+            &extracted,
+            &crate::layouts::ReferenceLayoutRenderer,
+            &mut std::collections::HashMap::new(),
+        )
+        .expect("layouts render");
+        let plan = luminal::bufferize::bufferize(&luminal::dps::dps_rewrite(&extracted), &layouts)
+            .expect("bufferizes");
         let mut rt = crate::ReferenceRuntime::default();
         rt.stage_slots(&program.input_slots, &program.output_slots);
         rt.load_plan(plan);

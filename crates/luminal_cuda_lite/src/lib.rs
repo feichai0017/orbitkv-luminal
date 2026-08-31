@@ -29,6 +29,7 @@
 pub mod binding_check;
 pub mod bindings;
 pub mod kernels;
+pub mod layouts;
 pub mod ops;
 pub mod runtime;
 
@@ -36,6 +37,7 @@ pub mod runtime;
 pub mod device;
 
 pub use bindings::CudaBindings;
+pub use layouts::{CudaLayout, CudaLayoutRenderer, CudaPlan};
 pub use runtime::CudaRuntime;
 
 /// PLAN-TRANSPARENT (M4 Phase 5): claimable WITHOUT a kernel iff the

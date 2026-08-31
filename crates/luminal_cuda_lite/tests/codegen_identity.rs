@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 /// The PRE-Phase-3 construction, replicated verbatim: per-node geometry
 /// looked up in the shared buffer table by BufferId.
-fn sources_via_buffer_table(plan: &BufferIrGraph) -> Vec<(String, String)> {
+fn sources_via_buffer_table(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> Vec<(String, String)> {
     let geometry: HashMap<BufferId, (Vec<usize>, PlanDtype)> = plan
         .buffers
         .iter()
@@ -68,7 +68,7 @@ fn searched_plan(
     build: impl FnOnce(
         &mut luminal::graph::Graph,
     ) -> FxHashMap<luminal::prelude::petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer>,
-) -> BufferIrGraph {
+) -> BufferIrGraph<luminal_cuda_lite::CudaLayout> {
     let mut cx = luminal::graph::Graph::new();
     let data = build(&mut cx);
     let mut rt = CudaRuntime::load(&cx).expect("load");
@@ -79,7 +79,7 @@ fn searched_plan(
     rt.plan().expect("plan loaded").clone()
 }
 
-fn representative_plans() -> Vec<(&'static str, BufferIrGraph)> {
+fn representative_plans() -> Vec<(&'static str, BufferIrGraph<luminal_cuda_lite::CudaLayout>)> {
     vec![
         ("elementwise", searched_plan(|cx| {
             let a = cx.tensor((2usize, 3usize));
@@ -121,7 +121,7 @@ fn representative_plans() -> Vec<(&'static str, BufferIrGraph)> {
 /// The third tuple slot records whether the node read through a fold
 /// (any operand carrying composed access) — the Phase-5 restatement
 /// keys on it.
-fn sources_via_descriptors(plan: &BufferIrGraph) -> Vec<(String, String, bool)> {
+fn sources_via_descriptors(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> Vec<(String, String, bool)> {
     let mut out = Vec::new();
     for node in plan.dag.node_weights() {
         let BufferNode::Compute { op, reads, writes, operand_info, result_info, .. } = node

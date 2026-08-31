@@ -14,16 +14,17 @@ use luminal::implementation_search::{
     search_implementations_with_runtime, ImplementationSearchOptions, PlanProfiler, SearchOutcome,
 };
 
+use crate::layouts::{RefLayout, ReferenceLayoutRenderer};
 use crate::runtime::{reference_allow_list, ReferenceRuntime};
 
 /// The historical profiler: execute on the reference host runtime.
 #[derive(Default)]
 pub struct ReferenceProfiler;
 
-impl PlanProfiler for ReferenceProfiler {
+impl PlanProfiler<RefLayout> for ReferenceProfiler {
     fn profile(
         &mut self,
-        plan: &luminal::bufferize::BufferIrGraph,
+        plan: &luminal::bufferize::BufferIrGraph<RefLayout>,
         input_data: &FxHashMap<i64, luminal::buffer_tensor_ir::TypedBuffer>,
         trials: usize,
         _heuristic_cost: u64,
@@ -53,7 +54,7 @@ pub fn search_implementations_with_ops(
     input_data: &FxHashMap<petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
     allow_override: Option<Vec<&'static str>>,
-) -> Result<SearchOutcome> {
+) -> Result<SearchOutcome<RefLayout>> {
     let allow = allow_override.or_else(|| Some(reference_allow_list()));
     search_implementations_with_runtime(
         egraph,
@@ -62,6 +63,7 @@ pub fn search_implementations_with_ops(
         options,
         allow,
         crate::ops::built_in_matchers(),
+        &ReferenceLayoutRenderer,
         &mut ReferenceProfiler,
     )
 }
@@ -74,6 +76,6 @@ pub fn search_implementations(
     program: &LogicalProgram,
     input_data: &FxHashMap<petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
-) -> Result<SearchOutcome> {
+) -> Result<SearchOutcome<RefLayout>> {
     search_implementations_with_ops(egraph, program, input_data, options, None)
 }

@@ -51,8 +51,8 @@ impl Default for ImplementationSearchOptions {
 }
 
 #[derive(Debug)]
-pub struct SearchOutcome {
-    pub best_plan: BufferIrGraph,
+pub struct SearchOutcome<L: crate::bufferize::PlanLayout> {
+    pub best_plan: BufferIrGraph<L>,
     pub best_genome: Genome,
     pub best_nanos: u128,
     /// Plans actually profiled (distinct fingerprints).
@@ -145,13 +145,13 @@ impl SearchTimings {
 /// how its candidates are timed); the in-core implementations are the
 /// reference host executor (the historical behavior) and a static
 /// ranker that never executes.
-pub trait PlanProfiler {
+pub trait PlanProfiler<L: crate::bufferize::PlanLayout> {
     /// Best-of-`trials` cost for the plan with buffer-keyed inputs;
     /// smaller wins. `heuristic_cost` is the extracted graph's summed
     /// bytes-moved estimate, for profilers that rank without running.
     fn profile(
         &mut self,
-        plan: &crate::bufferize::BufferIrGraph,
+        plan: &crate::bufferize::BufferIrGraph<L>,
         input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
         trials: usize,
         heuristic_cost: u64,
@@ -164,10 +164,10 @@ pub trait PlanProfiler {
 #[derive(Default)]
 pub struct StaticProfiler;
 
-impl PlanProfiler for StaticProfiler {
+impl<L: crate::bufferize::PlanLayout> PlanProfiler<L> for StaticProfiler {
     fn profile(
         &mut self,
-        _plan: &crate::bufferize::BufferIrGraph,
+        _plan: &crate::bufferize::BufferIrGraph<L>,
         _input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
         _trials: usize,
         heuristic_cost: u64,
@@ -179,15 +179,16 @@ impl PlanProfiler for StaticProfiler {
 /// The runtime-owned search entry (ruling 2026-08-17): the caller
 /// supplies its OWN matcher set (None = the in-core reference
 /// registry, which Step B moves out) and its OWN profiler.
-pub fn search_implementations_with_runtime(
+pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
     egraph: &egraph_serialize::EGraph,
     program: &LogicalProgram,
     input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
     allow_override: Option<Vec<&'static str>>,
     matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
-    profiler: &mut dyn PlanProfiler,
-) -> Result<SearchOutcome> {
+    layout_renderer: &dyn crate::layout_ir::LayoutRenderer<L>,
+    profiler: &mut dyn PlanProfiler<L>,
+) -> Result<SearchOutcome<L>> {
     // Tensor-keyed at the boundary (the retired-HLIR-keyspace design);
     // buffer-keyed internally via the program's slots.
     let buffer_data: FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer> = input_data
@@ -350,6 +351,10 @@ pub fn search_implementations_with_runtime(
 
     // fingerprint → measured nanos (the dedup cache).
     let mut cache: FxHashMap<u64, u128> = FxHashMap::default();
+    // Rendered layouts are per-CLASS facts (all spellings of a class
+    // denote one function), so one cache serves every genome.
+    let mut layout_cache: std::collections::HashMap<egraph_serialize::ClassId, L> =
+        std::collections::HashMap::new();
     let mut plans_profiled = 0usize;
     let mut fingerprint_hits = 0usize;
     // Refusal accounting, minimal form (Step 5 down-payment): keep the
@@ -357,7 +362,7 @@ pub fn search_implementations_with_runtime(
     // causes instead of shrugging.
     let mut refusals: Vec<String> = Vec::new();
     let mut breakdown = RefusalBreakdown::default();
-    let mut best: Option<(u128, Genome, BufferIrGraph)> = None;
+    let mut best: Option<(u128, Genome, BufferIrGraph<L>)> = None;
 
 
     for generation in 0..options.generations {
@@ -420,7 +425,19 @@ pub fn search_implementations_with_runtime(
                 }
                 None => {
                     let build_start = Instant::now();
-                    let built = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph));
+                    // Render the elected layouts (the runtime's hook; a
+                    // refusal rejects THIS genome, loudly accounted, and
+                    // the search tries others), then bufferize under the
+                    // rendered table.
+                    let built = extractor::rendered_layout_table(
+                        egraph,
+                        &graph,
+                        layout_renderer,
+                        &mut layout_cache,
+                    )
+                    .and_then(|table| {
+                        crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph), &table)
+                    });
                     timings.plan_build_nanos += build_start.elapsed().as_nanos();
                     let plan = match built {
                         Ok(plan) => plan,
@@ -464,7 +481,15 @@ pub fn search_implementations_with_runtime(
             };
             if best.as_ref().is_none_or(|(best_nanos, _, _)| nanos < *best_nanos) {
                 let build_start = Instant::now();
-                let built = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph));
+                let built = extractor::rendered_layout_table(
+                    egraph,
+                    &graph,
+                    layout_renderer,
+                    &mut layout_cache,
+                )
+                .and_then(|table| {
+                    crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph), &table)
+                });
                 timings.plan_build_nanos += build_start.elapsed().as_nanos();
                 let Ok(plan) = built else {
                     continue;
@@ -498,11 +523,11 @@ pub fn search_implementations_with_runtime(
 /// One bucket combination's finished search: the dim ranges it covers, the
 /// representative pins it was searched at, and the winning plan.
 #[derive(Debug)]
-pub struct BucketPlan {
+pub struct BucketPlan<L: crate::bufferize::PlanLayout> {
     pub ranges: BTreeMap<crate::shape::Symbol, (usize, usize)>,
     pub representative: crate::shape::DynMap,
     pub program: LogicalProgram,
-    pub outcome: SearchOutcome,
+    pub outcome: SearchOutcome<L>,
 }
 
 /// Range-seeded bucketed search, mirroring their per-bucket model: one
@@ -515,7 +540,7 @@ pub struct BucketPlan {
 /// Slice note (documented divergence from their symbolic LLIR): each
 /// winning plan is STATIC at its representative; executing at another pin
 /// re-renders — genome transfer across renders is future work.
-pub fn bucketed_search_implementations(
+pub fn bucketed_search_implementations<L: crate::bufferize::PlanLayout>(
     graph: &crate::graph::Graph,
     dim_buckets: &BTreeMap<crate::shape::Symbol, Vec<crate::graph::DimBucket>>,
     input_data: impl Fn(
@@ -524,9 +549,10 @@ pub fn bucketed_search_implementations(
     options: &ImplementationSearchOptions,
     assembled_program: &str,
     matchers: impl Fn() -> Vec<Box<dyn crate::layout_ir::OpMatcher>>,
-    profiler: &mut dyn PlanProfiler,
+    layout_renderer: &dyn crate::layout_ir::LayoutRenderer<L>,
+    profiler: &mut dyn PlanProfiler<L>,
     bindings: &dyn crate::runtime_binding::RuntimeBindingsGenerator,
-) -> Result<Vec<BucketPlan>> {
+) -> Result<Vec<BucketPlan<L>>> {
     ensure!(!dim_buckets.is_empty(), "no dim buckets supplied");
 
     // M3 Topic C: buckets assemble NATIVELY — one recorder model, per-
@@ -627,6 +653,7 @@ pub fn bucketed_search_implementations(
             options,
             None,
             matchers(),
+            layout_renderer,
             profiler,
         )?;
         plans.push(BucketPlan { ranges, representative, program, outcome });
@@ -635,10 +662,10 @@ pub fn bucketed_search_implementations(
 }
 
 /// The covering bucket plan for a concrete dim assignment, if any.
-pub fn select_bucket<'a>(
-    plans: &'a [BucketPlan],
+pub fn select_bucket<'a, L: crate::bufferize::PlanLayout>(
+    plans: &'a [BucketPlan<L>],
     dims: &crate::shape::DynMap,
-) -> Option<&'a BucketPlan> {
+) -> Option<&'a BucketPlan<L>> {
     plans.iter().find(|plan| {
         plan.ranges.iter().all(|(dim, (min, max))| {
             dims.get(dim).is_some_and(|value| value >= min && value <= max)
@@ -774,6 +801,7 @@ mod tests {
             &ImplementationSearchOptions::default(),
             luminal_reference::assembled_program(),
             luminal_reference::ops::built_in_matchers,
+            &luminal_reference::ReferenceLayoutRenderer,
             &mut luminal_reference::ReferenceProfiler,
             &luminal_reference::ReferenceBindings,
         )

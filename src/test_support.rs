@@ -131,6 +131,54 @@ use crate::layout_ir::{
 };
 
 // =============================================================================
+// The mock layout (resident-geometry cleanup: core defines NO layout
+// vocabulary, so the trivial test-only `L` lives here)
+// =============================================================================
+
+/// The trivial TEST layout: transports the layout e-class identity and
+/// nothing else. The bufferizer's bound is `Clone + Debug` only (the
+/// equality join was dropped — layout equality is enforced in the
+/// e-graph); the `PartialEq` derive here is test-assertion convenience,
+/// not a bound the planner uses. Core never constructs one outside test
+/// support; runtimes bring their own rendered types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockLayout(pub ClassId);
+
+/// The mock rendered-layout table for a built graph: every value's layout
+/// class mapped to its identity. Works for hand-built [`TestGraph`]s and
+/// real extractions alike (the table is keyed by layout e-class, which
+/// both carry by construction).
+pub fn mock_layout_table(graph: &ExtractedGraph) -> HashMap<ClassId, MockLayout> {
+    let mut table = HashMap::new();
+    let mut record = |value: &LayoutTensorInfo| {
+        table
+            .entry(value.layout.eclass.clone())
+            .or_insert_with(|| MockLayout(value.layout.eclass.clone()));
+    };
+    for node in graph.dag.node_weights() {
+        match node {
+            ExtractedNode::BufferInput(input) => record(&input.value),
+            ExtractedNode::LayoutOp(op) => {
+                for output in &op.outputs {
+                    record(output);
+                }
+            }
+            ExtractedNode::BufferOutput(_) => {}
+        }
+    }
+    table
+}
+
+/// [`crate::bufferize::bufferize`] under the mock table — the test-side
+/// one-argument convenience every suite that does not exercise a real
+/// renderer plans through.
+pub fn bufferize_mock(
+    graph: &ExtractedGraph,
+) -> anyhow::Result<crate::bufferize::BufferIrGraph<MockLayout>> {
+    crate::bufferize::bufferize(graph, &mock_layout_table(graph))
+}
+
+// =============================================================================
 // Mock ops (interface-defined behaviors the real op set cannot express)
 // =============================================================================
 
@@ -546,7 +594,7 @@ mod harness_tests {
             &[("y", "rm")],
         );
         g.output(&results[0], "B");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
         // Out-of-place: y in a fresh alloc, then a copy into pinned B.
         let summary = plan.summary();
         assert!(summary.contains("MockOp"), "{summary}");
@@ -557,7 +605,7 @@ mod harness_tests {
     #[test]
     fn fixture_extracts_and_bufferizes() {
         let graph = extract_fixture("boundary_pass_through.egg");
-        let plan = bufferize::bufferize(&graph).expect("bufferizes");
+        let plan = bufferize_mock(&graph).expect("bufferizes");
         let summary = plan.summary();
         assert!(summary.contains("ops (0):"), "{summary}");
     }
@@ -571,7 +619,7 @@ mod harness_tests {
         use petgraph::visit::EdgeRef;
 
         let graph = extract_fixture("boundary_war_hazard.egg");
-        let plan = bufferize::bufferize(&graph).expect("bufferizes");
+        let plan = bufferize_mock(&graph).expect("bufferizes");
 
         let anti: Vec<_> = plan
             .dag
@@ -620,7 +668,7 @@ mod harness_tests {
         .clone();
         g.output(&x, "C"); // copy B -> C (reads B)
         g.output(&y, "B"); // copy alloc -> B (writes B)
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         let anti: Vec<_> = plan
             .dag
@@ -671,7 +719,7 @@ mod harness_tests {
         .clone();
         g.output(&x, "B"); // pass-through: B's final contents promised to be x
         g.output(&y, "B"); // copy alloc -> B: overwrites them
-        let err = bufferize::bufferize(&g.build()).unwrap_err();
+        let err = bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("unsupported program"), "{err}");
         assert!(err.to_string().contains("distinct final values"), "{err}");
     }
@@ -710,7 +758,7 @@ mod harness_tests {
         .clone();
         g.output(&y, "C");
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         // Find the accumulator's compute node.
         let (acc_idx, acc_reads, acc_writes) = plan
@@ -788,7 +836,7 @@ mod harness_tests {
         .clone();
         g.output(&y, "C");
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         let (reads, writes) = plan
             .dag
@@ -851,7 +899,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r2, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert_eq!(plan.value_buffer[&e], plan.value_buffer[&r1]);
         assert_eq!(plan.value_buffer[&r1], plan.value_buffer[&r2]);
@@ -888,7 +936,7 @@ mod harness_tests {
             "boundary_in_place_mutation.egg",
             &["LayoutTensorOpSqrtMutatingGeneric"],
         );
-        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -925,7 +973,7 @@ mod harness_tests {
             "boundary_alias_safe_add.egg",
             &["LayoutTensorOpAddMutatingInputAliasSafeGeneric"],
         );
-        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -963,7 +1011,7 @@ mod harness_tests {
             "boundary_alias_safe_add.egg",
             &["LayoutTensorOpAddMutatingGeneric"],
         );
-        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         let allocs = plan
             .buffers
@@ -1006,7 +1054,7 @@ mod harness_tests {
         use petgraph::visit::EdgeRef;
 
         let graph = extract_fixture("boundary_in_place_mutation.egg");
-        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         let allocs = plan
             .buffers
@@ -1058,7 +1106,7 @@ mod harness_tests {
         .clone();
         g.output(&r, "D");
         g.output(&r, "E");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert!(
             matches!(plan.value_buffer[&r], BufferId::Boundary(_)),
@@ -1117,7 +1165,7 @@ mod harness_tests {
         .clone();
         g.output(&r, "D"); // seed proposal: e ↦ D — must be rejected
         g.output(&s, "E");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert!(
             matches!(plan.value_buffer[&r], BufferId::Allocated(_)),
@@ -1164,7 +1212,7 @@ mod harness_tests {
         let b = g.input("b", "Q", Access::ReadWrite, "rm");
         g.output(&b, "P"); // copy Q -> P (reads Q, writes P)
         g.output(&a, "Q"); // copy P -> Q (reads P, writes Q)
-        let err = bufferize::bufferize(&g.build()).unwrap_err();
+        let err = bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("unschedulable"), "{err}");
     }
 
@@ -1199,7 +1247,7 @@ mod harness_tests {
         .clone();
         g.output(&y1, "D");
         g.output(&y2, "D"); // same buffer, two distinct computed values
-        let err = bufferize::bufferize(&g.build()).unwrap_err();
+        let err = bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("unsupported program"), "{err}");
         assert!(err.to_string().contains("distinct final values"), "{err}");
     }
@@ -1213,7 +1261,7 @@ mod harness_tests {
     #[test]
     fn aliased_views_in_place_fixture_rejected_as_unsupported() {
         let graph = extract_fixture("boundary_aliased_views_in_place.egg");
-        let err = bufferize::bufferize(&graph).unwrap_err();
+        let err = bufferize_mock(&graph).unwrap_err();
         assert!(err.to_string().contains("unsupported program"), "{err}");
         assert!(err.to_string().contains("pass-throughs"), "{err}");
     }
@@ -1234,7 +1282,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&y, "B"); // materialize a computed value into the Read buffer
-        let err = bufferize::bufferize(&g.build()).unwrap_err();
+        let err = bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("read-only buffer"), "{err}");
     }
 
@@ -1249,7 +1297,7 @@ mod harness_tests {
         let y = g.input("y", "B", Access::ReadWrite, "rm");
         g.output(&x, "B");
         g.output(&y, "B");
-        let err = bufferize::bufferize(&g.build()).unwrap_err();
+        let err = bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("same layout"), "{err}");
         assert!(err.to_string().contains("invalid input program"), "{err}");
     }
@@ -1260,7 +1308,7 @@ mod harness_tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadOnly, "rm");
         g.output(&x, "B");
-        let plan = bufferize::bufferize(&g.build()).expect("pass-through is legal");
+        let plan = bufferize_mock(&g.build()).expect("pass-through is legal");
         assert!(plan.summary().contains("ops (0):"), "{}", plan.summary());
     }
 
@@ -1376,7 +1424,7 @@ mod harness_tests {
     fn regenerate_golden_plans() {
         for stem in GOLDEN_SCRIPTS {
             let graph = extract_fixture(&format!("{stem}.egg"));
-            let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect(stem);
+            let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect(stem);
             fs::write(format!("output/{stem}.bufferized.txt"), plan.summary())
                 .expect("golden writes");
         }
@@ -1488,7 +1536,7 @@ mod harness_tests {
         assert_eq!(scatter.inputs[2].port, "coord0");
         assert_eq!(scatter.inputs[3].port, "coord1");
 
-        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph))
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph))
             .expect("in-place scatter bufferizes");
         let summary = plan.summary();
         assert!(summary.contains("ScatterMutatingGeneric"), "{summary}");
@@ -1584,7 +1632,7 @@ mod harness_tests {
     fn dtype_index_reads_serialized_rows_onto_buffers() {
         use luminal::dtype::PlanDtype;
         let graph = extract_fixture("boundary_gather.egg");
-        let plan = luminal::bufferize::bufferize(&luminal::dps::dps_rewrite(&graph))
+        let plan = luminal::test_support::bufferize_mock(&luminal::dps::dps_rewrite(&graph))
             .expect("mixed-dtype plan bufferizes");
 
         let mut by_lit: std::collections::HashMap<i64, PlanDtype> = Default::default();
@@ -1719,7 +1767,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert_eq!(
             plan.value_buffer[&v], plan.value_buffer[&x],
@@ -1756,7 +1804,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("a view writes nothing — Read is fine");
+        let plan = bufferize_mock(&g.build()).expect("a view writes nothing — Read is fine");
         assert_eq!(plan.value_buffer[&v], plan.value_buffer[&x]);
     }
 
@@ -1781,7 +1829,7 @@ mod harness_tests {
         let r_w = g.op(Box::new(MockOp::write_only_dest()), &[&x], &[("rW", "rm")])[0].clone();
         g.output(&r_w, "D");
         g.output(&s, "E");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert!(
             matches!(plan.value_buffer[&r_w], BufferId::Allocated(_)),
@@ -1805,7 +1853,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
         assert_eq!(plan.value_buffer[&v2], plan.value_buffer[&x]);
         assert_eq!(plan.value_buffer[&v1], plan.value_buffer[&x]);
     }
@@ -1825,7 +1873,7 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
         g.output(&v, "B");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert!(plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))));
         assert!(
@@ -1880,7 +1928,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert_eq!(
             plan.value_buffer[&v], plan.value_buffer[&x],
@@ -1925,7 +1973,7 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(IndexMapApplyView { entries: None }), &[&x], &[("v", "row0")])[0].clone();
         g.output(&v, "D");
-        let plan = bufferize::bufferize(&g.build())
+        let plan = bufferize_mock(&g.build())
             .expect("a view of an input returns zero-copy under escape semantics");
 
         assert_eq!(
@@ -1974,7 +2022,7 @@ mod harness_tests {
         use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_on_test_runtime("boundary_view_feeds_compute.egg");
-        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -2033,7 +2081,7 @@ mod harness_tests {
         use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_on_test_runtime("boundary_write_into_viewed_buffer.egg");
-        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         let launch: Vec<BufferId> = plan
             .dag
@@ -2091,7 +2139,7 @@ mod harness_tests {
         use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture("boundary_donated_input.egg");
-        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -2181,7 +2229,7 @@ mod harness_tests {
         use luminal::bufferize::{BufferId, BufferNode, Owner};
 
         let graph = extract_fixture("basic_program.egg");
-        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         // Storage that exists at launch = the buffers backing BufferInput
         // nodes (the extractor admits those from BufferInputLit membership).
@@ -2240,7 +2288,7 @@ mod harness_tests {
     fn dps_destinations_admitted_and_poisons_folded() {
         use luminal::bufferize::BufferNode;
         let graph = extract_fixture("basic_program.egg");
-        let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
         let mut computes = 0;
         for idx in plan.dag.node_indices() {
             if let BufferNode::Compute { op, reads, writes, .. } = &plan.dag[idx] {
@@ -2298,7 +2346,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r1, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         // The two writers must not share storage: exactly one of the two
         // in-place candidates survives, so r1's buffer has ONE compute writer.
@@ -2342,7 +2390,7 @@ mod harness_tests {
         g.output(&prod, "E");
 
         let rewritten = luminal::dps::dps_rewrite(&g.build());
-        let plan = bufferize::bufferize(&rewritten).expect("bufferizes");
+        let plan = bufferize_mock(&rewritten).expect("bufferizes");
 
         // Each (poison, result) pair on its own allocation — never shared.
         assert_ne!(
@@ -3982,14 +4030,29 @@ mod escape_execution_tests {
     use luminal::index_expr::IotaExpr;
     use luminal::layout_ir::{Access, FreedBy};
     use luminal::prelude::petgraph::graph::DiGraph;
-    use luminal_reference::ReferenceRuntime;
+    use luminal_reference::{RefLayout, ReferenceRuntime};
+
+    /// A hand-built plan's transported layout (never consumed by the
+    /// executor — `Buffer.layout` is opaque transport).
+    fn rm_layout(dims: &[i64]) -> RefLayout {
+        // Dep-world discipline: `luminal::layouts`, never `crate::layouts` —
+        // RefLayout is the plain `luminal` build's MirrorLayout, and the
+        // cfg(test) build's types do not unify with it.
+        use luminal::layouts::{
+            BitWidthTerm, IntExprTerm, MirrorLayout, RightMajorContiguousElementLayout, ShapeTerm,
+        };
+        MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
+            shape: ShapeTerm(dims.iter().map(|&d| IntExprTerm::Lit(d)).collect()),
+            width: BitWidthTerm(32),
+        })
+    }
 
     /// A minimal escaped-output plan: input x `[2,3]` (BufferLit 7) is
     /// base-copied into minted buffer A (the stand-in for a kernel
     /// producing the parent there), and the output slot binds the
     /// TRANSPOSE VIEW of that parent — backed by A, `freed_by` flipped to
     /// the escape cell.
-    fn escaped_plan(freed_by: FreedBy) -> BufferIrGraph {
+    fn escaped_plan(freed_by: FreedBy) -> BufferIrGraph<RefLayout> {
         let x = ClassId::from("val$x");
         let v = ClassId::from("val$v");
         let input_id = BufferId::Boundary(ClassId::from("buf$B"));
@@ -4007,6 +4070,7 @@ mod escape_execution_tests {
                 element_bits: Some(32),
                 dtype: Some(luminal::dtype::PlanDtype::F32),
                 lit: Some(7),
+                layout: rm_layout(&[2, 3]),
             },
         );
         buffers.insert(
@@ -4021,6 +4085,7 @@ mod escape_execution_tests {
                 element_bits: Some(32),
                 dtype: Some(luminal::dtype::PlanDtype::F32),
                 lit: None,
+                layout: rm_layout(&[2, 3]),
             },
         );
         let mut dag: DiGraph<BufferNode, BufferEdge> = DiGraph::new();

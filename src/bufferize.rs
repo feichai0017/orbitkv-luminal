@@ -84,6 +84,21 @@ use crate::layout_ir::{
 // Buffers and the bufferized graph
 // =============================================================================
 
+/// The OPAQUE layout parameter's bound (resident-geometry cleanup,
+/// ruling 2026-08-31; PartialEq dropped by amendment, same ruling):
+/// layouts are opaque to the bufferizer — it CLONES and TRANSPORTS
+/// layout values, and it never interprets, composes, validates,
+/// classifies, sizes, or even COMPARES them (layout equality is
+/// enforced in the e-graph, where all spellings of a layout class
+/// denote one function — no tripwire is re-derived here). There is no
+/// layout vocabulary in core: the RUNTIME provides the concrete type
+/// when it builds plans (its extraction-side layout renderer produces
+/// the values — see [`crate::layout_ir::LayoutRenderer`]), and backends
+/// are free to use layouts core has never heard of.
+/// Blanket-implemented: the bound IS the whole contract.
+pub trait PlanLayout: Clone + std::fmt::Debug {}
+impl<T: Clone + std::fmt::Debug> PlanLayout for T {}
+
 /// Storage identity. Boundary buffers are pinned by the program (identified by
 /// the BufferId e-class they came from); interior buffers are minted by the
 /// planner at compile time and owned by the system.
@@ -106,7 +121,7 @@ pub enum Owner {
 
 /// A concrete buffer in the plan.
 #[derive(Debug, Clone)]
-pub struct Buffer {
+pub struct Buffer<L: PlanLayout> {
     pub id: BufferId,
     pub access: Access,
     /// Storage deallocation responsibility (declared for boundary buffers;
@@ -130,6 +145,20 @@ pub struct Buffer {
     /// The numeric `BufferLit` id for boundary buffers — the key runtimes
     /// bind caller data by.
     pub lit: Option<i64>,
+    /// The RESIDENT layout under which this buffer's bytes were written —
+    /// TOTAL, never optional: every LayoutTensor carries a Layout by
+    /// construction (`LayoutTensorLit LogicalTensor Layout`) and boundary
+    /// bindings pin layouts, so a layoutless buffer is a planner bug and
+    /// unrepresentable here. Seeded at mint from the value the buffer was
+    /// minted for, then OVERWRITTEN at annotate time by the
+    /// writer-identity layout fill (same writer set as the dims join):
+    /// writers are the authority over the seed. Writers are never
+    /// COMPARED against each other — layout equality is enforced in the
+    /// e-graph, not re-checked here (`L` carries no `PartialEq`) — but
+    /// a buffer whose writers supplied no layout still bails loudly at
+    /// the fill (totality/presence tracking, not comparison). TRANSPORT
+    /// ONLY this train: core never consumes `L` beyond carrying it.
+    pub layout: L,
 }
 
 /// Where a program output value ends up: its value, the buffer backing it,
@@ -427,10 +456,10 @@ pub fn walk_layout_index(
 /// values are all backed by buffers and whose copies are first-class nodes. The
 /// source [`ExtractedGraph`] is left untouched.
 #[derive(Debug, Clone)]
-pub struct BufferIrGraph {
+pub struct BufferIrGraph<L: PlanLayout> {
     pub dag: DiGraph<BufferNode, BufferEdge>,
     /// Every distinct buffer in the plan, by id.
-    pub buffers: HashMap<BufferId, Buffer>,
+    pub buffers: HashMap<BufferId, Buffer<L>>,
     /// The buffer holding each value (values collapse onto buffers via reuse).
     /// A `BTreeMap` deliberately: residual iterations (the checked bits/dtype
     /// joins, diagnostics) walk it in value order, so their messages are
@@ -440,7 +469,7 @@ pub struct BufferIrGraph {
     pub outputs: Vec<NodeIndex>,
 }
 
-impl BufferIrGraph {
+impl<L: PlanLayout> BufferIrGraph<L> {
     fn buffer_name(&self, id: &BufferId) -> String {
         let label = self
             .buffers
@@ -478,7 +507,7 @@ impl BufferIrGraph {
     pub fn summary(&self) -> String {
         let mut out = String::new();
 
-        let mut buffers: Vec<&Buffer> = self.buffers.values().collect();
+        let mut buffers: Vec<&Buffer<L>> = self.buffers.values().collect();
         buffers.sort_by_key(|buffer| Self::sort_key(&buffer.id));
         out.push_str(&format!("buffers ({}):\n", buffers.len()));
         for buffer in buffers {
@@ -1575,51 +1604,93 @@ fn validate_input_program(graph: &ExtractedGraph) -> Result<()> {
 
 /// [`BufferIrGraph`] whose values are buffers and whose copies are real nodes. The
 /// source `graph` is borrowed and left untouched.
-pub fn bufferize(graph: &ExtractedGraph) -> Result<BufferIrGraph> {
-    let geometry = extraction_geometry(graph);
-    let mut plan = lower(buffer_tensor_plan(graph)?, &geometry)?;
+///
+/// `layouts` is the rendered-layout table, keyed by LAYOUT e-class (each
+/// value's `LayoutTensorInfo::layout.eclass`): the runtime's renderer
+/// produced one opaque `L` per layout class it elected (see
+/// [`crate::extractor::rendered_layout_table`]). The table must cover
+/// every value's layout class — a miss is a loud error, never a default
+/// (every LayoutTensor carries a Layout by construction, so a missing
+/// row means the renderer refused and the plan must too). Keying by
+/// layout class also covers the DPS poisons for free: `dps_rewrite`
+/// clones the tied result's layout (e-class included) onto each poison
+/// destination, so the poison's `L` IS the result's.
+pub fn bufferize<L: PlanLayout>(
+    graph: &ExtractedGraph,
+    layouts: &HashMap<ClassId, L>,
+) -> Result<BufferIrGraph<L>> {
+    let geometry = extraction_geometry(graph, layouts)?;
+    let mut plan = lower(buffer_tensor_plan(graph, &geometry)?, &geometry)?;
     annotate_buffer_geometry(&mut plan, graph, &geometry)?;
     Ok(plan)
 }
 
 /// A value's literal geometry as the extraction recorded it. `None` fields
 /// mean symbolic/underivable — numeric consumers bail loudly, never guess.
+/// The LAYOUT is total: every LayoutTensor carries one by construction,
+/// and [`extraction_geometry`] bails loudly if the rendered table has no
+/// row for a value's layout class.
 #[derive(Debug, Clone)]
-pub(crate) struct ValueGeometry {
+pub(crate) struct ValueGeometry<L: PlanLayout> {
     pub(crate) dims: Option<Vec<i64>>,
     pub(crate) element_bits: Option<i64>,
     pub(crate) dtype: Option<crate::dtype::PlanDtype>,
+    /// The value's rendered layout — opaque, transported, never read.
+    pub(crate) layout: L,
 }
 
 /// Collect every extraction value's literal geometry, keyed by e-class.
-pub(crate) fn extraction_geometry(graph: &ExtractedGraph) -> HashMap<ClassId, ValueGeometry> {
-    let mut value_geometry: HashMap<ClassId, ValueGeometry> = HashMap::new();
+pub(crate) fn extraction_geometry<L: PlanLayout>(
+    graph: &ExtractedGraph,
+    layouts: &HashMap<ClassId, L>,
+) -> Result<HashMap<ClassId, ValueGeometry<L>>> {
+    let mut value_geometry: HashMap<ClassId, ValueGeometry<L>> = HashMap::new();
+    let layout_of = |value: &crate::layout_ir::LayoutTensorInfo| -> Result<L> {
+        layouts.get(&value.layout.eclass).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "value {} carries layout class {} but the rendered layout \
+                 table has no row for it — every LayoutTensor carries a \
+                 Layout by construction, so the renderer must cover it or \
+                 the plan must refuse",
+                value.eclass,
+                value.layout.eclass,
+            )
+        })
+    };
     for node in graph.dag.node_weights() {
         match node {
             ExtractedNode::BufferInput(input) => {
-                value_geometry
-                    .entry(input.value.eclass.clone())
-                    .or_insert(ValueGeometry {
-                        dims: input.value.dims.clone(),
-                        element_bits: input.value.element_bits,
-                        dtype: input.value.dtype_enum,
-                    });
+                if !value_geometry.contains_key(&input.value.eclass) {
+                    value_geometry.insert(
+                        input.value.eclass.clone(),
+                        ValueGeometry {
+                            dims: input.value.dims.clone(),
+                            element_bits: input.value.element_bits,
+                            dtype: input.value.dtype_enum,
+                            layout: layout_of(&input.value)?,
+                        },
+                    );
+                }
             }
             ExtractedNode::LayoutOp(op) => {
                 for output in &op.outputs {
-                    value_geometry
-                        .entry(output.eclass.clone())
-                        .or_insert(ValueGeometry {
-                            dims: output.dims.clone(),
-                            element_bits: output.element_bits,
-                            dtype: output.dtype_enum,
-                        });
+                    if !value_geometry.contains_key(&output.eclass) {
+                        value_geometry.insert(
+                            output.eclass.clone(),
+                            ValueGeometry {
+                                dims: output.dims.clone(),
+                                element_bits: output.element_bits,
+                                dtype: output.dtype_enum,
+                                layout: layout_of(output)?,
+                            },
+                        );
+                    }
                 }
             }
             ExtractedNode::BufferOutput(_) => {}
         }
     }
-    value_geometry
+    Ok(value_geometry)
 }
 
 /// Thread the extraction's literal geometry (dims, element bits) and the
@@ -1641,10 +1712,10 @@ pub(crate) fn extraction_geometry(graph: &ExtractedGraph) -> HashMap<ClassId, Va
 /// deferred (Austin: cohabitant bytes in returned storage are a
 /// non-issue — "If it's in the base tensor, we can copy and expose it to
 /// the user").
-fn annotate_buffer_geometry(
-    plan: &mut BufferIrGraph,
+fn annotate_buffer_geometry<L: PlanLayout>(
+    plan: &mut BufferIrGraph<L>,
     graph: &ExtractedGraph,
-    value_geometry: &HashMap<ClassId, ValueGeometry>,
+    value_geometry: &HashMap<ClassId, ValueGeometry<L>>,
 ) -> Result<()> {
     let mut boundary_lits: HashMap<ClassId, i64> = HashMap::new();
     for node in graph.dag.node_weights() {
@@ -1684,11 +1755,25 @@ fn annotate_buffer_geometry(
     // planner contradiction and bail loudly, both writers named. There is
     // no first-wins arm anywhere.
     let mut dims_votes: HashMap<BufferId, (Vec<i64>, String)> = HashMap::new();
+    // THE WRITER-IDENTITY LAYOUT FILL (resident-geometry cleanup, ruling
+    // 2026-08-31; equality join dropped by amendment): the SAME writer
+    // set as the dims join, but NO comparison — layout equality between
+    // writers is enforced in the e-graph, so the bufferizer only
+    // transports (`L` carries no `PartialEq`). The first writer in
+    // deterministic plan-node order supplies the fill (any writer would:
+    // all writers of a buffer denote one layout function). Unlike dims
+    // (symbolic values abstain), a writer's layout is TOTAL, so every
+    // writer counts as presence; the fill happens below, and a buffer
+    // left without any writer layout bails loudly there.
+    let mut layout_votes: HashMap<BufferId, L> = HashMap::new();
     {
         let mut vote = |buffer: &BufferId, value: &ClassId, writer: String| -> Result<()> {
             let Some(geometry) = value_geometry.get(value) else {
                 return Ok(());
             };
+            layout_votes
+                .entry(buffer.clone())
+                .or_insert_with(|| geometry.layout.clone());
             let Some(dims) = &geometry.dims else {
                 return Ok(()); // symbolic: None ∨ x = x
             };
@@ -1752,6 +1837,20 @@ fn annotate_buffer_geometry(
     for buffer in plan.buffers.values_mut() {
         if let Some((dims, _)) = dims_votes.get(&buffer.id) {
             buffer.dims = Some(dims.clone());
+        }
+        // THE LAYOUT FILL: the writer's layout replaces the mint-time
+        // seed (the seed exists only so `Buffer.layout` is total by
+        // construction; writers are the authority). No writer layout
+        // means the buffer's writers supplied none — a planner bug, and
+        // the ruling's loud bail (presence tracking, never comparison).
+        match layout_votes.get(&buffer.id) {
+            Some(layout) => buffer.layout = layout.clone(),
+            None => anyhow::bail!(
+                "buffer {} has no writer-supplied layout — every buffer's \
+                 bytes are staged by some writer (input slot, writing \
+                 result, or copy), so a layoutless buffer is a planner bug",
+                buffer.label,
+            ),
         }
     }
 
@@ -1849,9 +1948,10 @@ fn annotate_buffer_geometry(
 /// returned graph is the finished BufferTensor program (optimized: poisons
 /// folded, dead buffers dropped) and the audit artifact `main` renders;
 /// [`lower`] erases it into the executable plan.
-pub(crate) fn buffer_tensor_plan(
+pub(crate) fn buffer_tensor_plan<L: PlanLayout>(
     graph: &ExtractedGraph,
-) -> Result<crate::buffer_tensor_ir::BufferTensorIrGraph> {
+    value_geometry: &HashMap<ClassId, ValueGeometry<L>>,
+) -> Result<crate::buffer_tensor_ir::BufferTensorIrGraph<L>> {
     validate_input_program(graph)?;
     let order = toposort(&graph.dag, None)
         .map_err(|_| anyhow::anyhow!("extracted graph has a cycle; cannot bufferize"))?;
@@ -1917,9 +2017,14 @@ pub(crate) fn buffer_tensor_plan(
     }
 
     let mut analysis = Analyzer::new(&analysis_ops, &facts).run()?;
-    let assignment = Bufferizer::assign(graph, &order, &mut analysis, &seeds);
-    let mut bt =
-        crate::buffer_tensor_ir::build_buffer_tensor_ir(graph, &order, assignment, &analysis)?;
+    let assignment = Bufferizer::assign(graph, &order, &mut analysis, &seeds, value_geometry)?;
+    let mut bt = crate::buffer_tensor_ir::build_buffer_tensor_ir(
+        graph,
+        &order,
+        assignment,
+        &analysis,
+        value_geometry,
+    )?;
     crate::buffer_tensor_ir::install_anti_edges(&mut bt);
     // The certificate runs AFTER the storage-lifetime pass: its lifetime arms
     // certify what `optimize` constructs (allocs, frees, their ordering
@@ -1935,9 +2040,8 @@ pub(crate) fn buffer_tensor_plan(
 // -----------------------------------------------------------------------------
 
 /// Assigns a buffer to every value and interns every boundary buffer.
-#[derive(Default)]
-pub(crate) struct Bufferizer {
-    pub(crate) buffers: HashMap<BufferId, Buffer>,
+pub(crate) struct Bufferizer<L: PlanLayout> {
+    pub(crate) buffers: HashMap<BufferId, Buffer<L>>,
     pub(crate) value_buffer: BTreeMap<ClassId, BufferId>,
     /// Buffer chosen for each storage-class representative (so all values an
     /// admitted decision placed in one allocation — an in-place producer and
@@ -1949,14 +2053,44 @@ pub(crate) struct Bufferizer {
     pub(crate) next_alloc: u32,
 }
 
-impl Bufferizer {
+/// Manual `Default` (a derive would demand `L: Default`; empty maps need
+/// no layout values).
+impl<L: PlanLayout> Default for Bufferizer<L> {
+    fn default() -> Self {
+        Bufferizer {
+            buffers: HashMap::new(),
+            value_buffer: BTreeMap::new(),
+            rep_buffer: HashMap::new(),
+            next_alloc: 0,
+        }
+    }
+}
+
+impl<L: PlanLayout> Bufferizer<L> {
     fn assign(
         graph: &ExtractedGraph,
         order: &[NodeIndex],
         analysis: &mut Analysis,
         seeds: &[Seed],
-    ) -> Self {
+        value_geometry: &HashMap<ClassId, ValueGeometry<L>>,
+    ) -> Result<Self> {
         let mut this = Bufferizer::default();
+        // The mint-time layout SEED: the value each buffer is minted for
+        // supplies its layout so `Buffer.layout` is total by
+        // construction. The annotate-time writer join is the authority
+        // and overwrites the seed; geometry is total over graph values,
+        // so a miss here is a planner bug and bails loudly.
+        let layout_of = |value: &ClassId| -> Result<L> {
+            value_geometry
+                .get(value)
+                .map(|geometry| geometry.layout.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "value {value} has no extraction geometry — every \
+                         graph value records one before assignment"
+                    )
+                })
+        };
 
         // Intern the INPUT boundary buffers first: `intern_boundary` is
         // first-wins on declarations/label, and an input's declarations are
@@ -1971,6 +2105,7 @@ impl Bufferizer {
                     input.buffer.access(),
                     input.buffer.freed_by(),
                     input.buffer.id_label.clone(),
+                    layout_of(&input.value.eclass)?,
                 );
             }
         }
@@ -2002,6 +2137,7 @@ impl Bufferizer {
                 seed.access,
                 seed.freed_by,
                 seed.buffer_label.clone(),
+                layout_of(&seed.poison)?,
             );
             // The interned buffer keeps the FIRST declarations it was seen
             // with (an input's, per the pre-pass). If that access is
@@ -2021,6 +2157,7 @@ impl Bufferizer {
                         input.buffer.access(),
                         input.buffer.freed_by(),
                         input.buffer.id_label.clone(),
+                        layout_of(&input.value.eclass)?,
                     );
                     this.bind(analysis, &input.value.eclass, id);
                 }
@@ -2035,7 +2172,8 @@ impl Bufferizer {
                         // fresh, system-owned allocation (out of place).
                         let id = match this.rep_buffer.get(&rep) {
                             Some(existing) => existing.clone(),
-                            None => this.allocate(output.label.clone()),
+                            None => this
+                                .allocate(output.label.clone(), layout_of(&output.eclass)?),
                         };
                         this.bind(analysis, &output.eclass, id);
                     }
@@ -2049,12 +2187,13 @@ impl Bufferizer {
                             slot.buffer.access(),
                             slot.buffer.freed_by(),
                             slot.buffer.id_label.clone(),
+                            layout_of(&slot.value)?,
                         );
                     }
                 }
             }
         }
-        this
+        Ok(this)
     }
 
     /// Record `value`'s buffer and remember it on the value's storage rep so
@@ -2071,6 +2210,7 @@ impl Bufferizer {
         access: Access,
         freed_by: FreedBy,
         label: String,
+        layout: L,
     ) -> BufferId {
         let id = BufferId::Boundary(eclass.clone());
         self.buffers.entry(id.clone()).or_insert_with(|| Buffer {
@@ -2083,11 +2223,12 @@ impl Bufferizer {
             element_bits: None,
             dtype: None,
             lit: None,
+            layout,
         });
         id
     }
 
-    fn allocate(&mut self, label: String) -> BufferId {
+    fn allocate(&mut self, label: String, layout: L) -> BufferId {
         let id = BufferId::Allocated(self.next_alloc);
         self.next_alloc += 1;
         self.buffers.insert(
@@ -2108,6 +2249,7 @@ impl Bufferizer {
                 element_bits: None,
                 dtype: None,
                 lit: None,
+                layout,
             },
         );
         id
@@ -2205,10 +2347,10 @@ fn validate_plan(dag: &DiGraph<BufferNode, BufferEdge>) -> Result<()> {
 /// fold, buffer DCE) ran in [`crate::buffer_tensor_ir::optimize`]. What
 /// follows the walk is the schedulability check and the lowering tripwires
 /// ([`validate_plan`]).
-pub(crate) fn lower(
-    bt: crate::buffer_tensor_ir::BufferTensorIrGraph,
-    value_geometry: &HashMap<ClassId, ValueGeometry>,
-) -> Result<BufferIrGraph> {
+pub(crate) fn lower<L: PlanLayout>(
+    bt: crate::buffer_tensor_ir::BufferTensorIrGraph<L>,
+    value_geometry: &HashMap<ClassId, ValueGeometry<L>>,
+) -> Result<BufferIrGraph<L>> {
     use crate::buffer_tensor_ir::{BtNode, BufferTensor, BufferTensorIrGraph};
     let BufferTensorIrGraph {
         dag: bt_dag,
@@ -2841,7 +2983,7 @@ mod tests {
         )[0]
         .clone();
         g.output(&x, "D");
-        let err = bufferize(&g.build()).unwrap_err();
+        let err = crate::test_support::bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("reads undefined contents"), "{err}");
     }
 
@@ -2940,7 +3082,7 @@ mod tests {
         let mut g = TestGraph::new();
         let x = g.input_binding("x", "B", Some(Access::ReadWrite), None, "rm");
         g.output(&x, "B");
-        let err = bufferize(&g.build()).unwrap_err();
+        let err = crate::test_support::bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("no deallocation responsibility"), "{err}");
     }
 
@@ -2961,7 +3103,7 @@ mod tests {
         )[0]
             .clone();
         g.output(&y, "D");
-        let err = bufferize(&g.build()).unwrap_err();
+        let err = crate::test_support::bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("declares no access level"), "{err}");
     }
 
@@ -2974,7 +3116,7 @@ mod tests {
         let mut g = TestGraph::new();
         let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
         g.output(&e, "D");
-        let err = bufferize(&g.build()).unwrap_err();
+        let err = crate::test_support::bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("returning undefined contents"), "{err}");
     }
 
@@ -3201,11 +3343,15 @@ mod tests {
             in_place: HashMap::from([((0, 0), false)]),
             op_count: 2,
         };
-        let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[]);
-        let bt = crate::buffer_tensor_ir::build_buffer_tensor_ir(&graph, &order, assignment, &analysis)
-            .expect("construction never errors on a rejected view");
-        let plan = lower(bt, &extraction_geometry(&graph))
-            .expect("a rejected view repairs, never errors");
+        let geometry = extraction_geometry(&graph, &crate::test_support::mock_layout_table(&graph))
+            .expect("mock layouts are total over the graph");
+        let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[], &geometry)
+            .expect("assignment runs");
+        let bt = crate::buffer_tensor_ir::build_buffer_tensor_ir(
+            &graph, &order, assignment, &analysis, &geometry,
+        )
+        .expect("construction never errors on a rejected view");
+        let plan = lower(bt, &geometry).expect("a rejected view repairs, never errors");
         // The repair copy (x's buffer -> fresh alloc) plus the boundary copy
         // delivering r (r's alloc -> slot E).
         let copies = plan
@@ -3396,7 +3542,7 @@ mod tests {
             )[0]
             .clone();
         g.output(&r, "out");
-        let err = bufferize(&g.build()).unwrap_err();
+        let err = crate::test_support::bufferize_mock(&g.build()).unwrap_err();
         assert!(
             err.to_string().contains("reads undefined contents"),
             "expected the propagated poison door, got: {err:#}"
@@ -3416,7 +3562,7 @@ mod tests {
         let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
         let v = g.op(Box::new(MockView), &[&e], &[("v", "view")])[0].clone();
         g.output(&v, "out");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bufferize(&g.build())));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::test_support::bufferize_mock(&g.build())));
         match result {
             Ok(Ok(plan)) => panic!(
                 "LAUNDERED: undefined bytes delivered to a bound output through a view:\n{}",
@@ -3458,7 +3604,7 @@ mod tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize(&g.build()).expect("bufferizes");
+        let plan = crate::test_support::bufferize_mock(&g.build()).expect("bufferizes");
 
         let consumer = plan
             .dag
@@ -3527,7 +3673,7 @@ mod tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize(&g.build()).expect("bufferizes");
+        let plan = crate::test_support::bufferize_mock(&g.build()).expect("bufferizes");
 
         let operand_info = plan
             .dag
@@ -3565,7 +3711,7 @@ mod tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize(&g.build()).expect("bufferizes");
+        let plan = crate::test_support::bufferize_mock(&g.build()).expect("bufferizes");
 
         let operand_info = plan
             .dag
@@ -3611,7 +3757,7 @@ mod tests {
         )[0]
         .clone();
         g.output(&v, "E");
-        let plan = bufferize(&g.build()).expect("a view of an input escapes zero-copy");
+        let plan = crate::test_support::bufferize_mock(&g.build()).expect("a view of an input escapes zero-copy");
 
         assert!(
             !plan
@@ -3690,10 +3836,15 @@ mod tests {
             in_place: HashMap::from([((0, 0), true), ((1, 0), false)]), // consumer tie REJECTED
             op_count: 2,
         };
-        let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[]);
-        let bt = crate::buffer_tensor_ir::build_buffer_tensor_ir(&graph, &order, assignment, &analysis)
-            .expect("construction never errors on a rejected consumer tie");
-        let plan = lower(bt, &extraction_geometry(&graph))
+        let geometry = extraction_geometry(&graph, &crate::test_support::mock_layout_table(&graph))
+            .expect("mock layouts are total over the graph");
+        let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[], &geometry)
+            .expect("assignment runs");
+        let bt = crate::buffer_tensor_ir::build_buffer_tensor_ir(
+            &graph, &order, assignment, &analysis, &geometry,
+        )
+        .expect("construction never errors on a rejected consumer tie");
+        let plan = lower(bt, &geometry)
             .expect("an interior folded copy lowers via the base-storage copy");
 
         // The repair copy transports the fold's ROOT PARENT (x), whole —
@@ -3805,7 +3956,7 @@ mod tests {
         )[0]
         .clone();
         g.output(&v, "E");
-        let plan = bufferize(&g.build()).expect("a minted residence escapes in place");
+        let plan = crate::test_support::bufferize_mock(&g.build()).expect("a minted residence escapes in place");
 
         assert!(
             !plan
@@ -3877,7 +4028,7 @@ mod tests {
         )[0]
         .clone();
         g.output(&v, "E");
-        let plan = bufferize(&g.build()).expect("a donated residence repairs");
+        let plan = crate::test_support::bufferize_mock(&g.build()).expect("a donated residence repairs");
 
         // ONE dumb whole-base copy transports the fold ROOT into a fresh
         // escaping buffer.
@@ -3968,7 +4119,7 @@ mod tests {
         .clone();
         g.output(&v1, "D");
         g.output(&v2, "E");
-        let plan = bufferize(&g.build()).expect("shared-base views escape together");
+        let plan = crate::test_support::bufferize_mock(&g.build()).expect("shared-base views escape together");
 
         let slots: Vec<OutputBinding> = plan
             .dag
@@ -4031,7 +4182,7 @@ mod tests {
         .clone();
         g.output(&v1, "E1");
         g.output(&v2, "E2");
-        let plan = bufferize(&g.build()).expect("one repair serves both views");
+        let plan = crate::test_support::bufferize_mock(&g.build()).expect("one repair serves both views");
 
         let copies: Vec<BufferId> = plan
             .dag
@@ -4097,22 +4248,30 @@ mod tests {
             in_place: HashMap::from([((0, 0), true), ((1, 0), false)]), // consumer tie REJECTED
             op_count: 2,
         };
-        let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[]);
-        let bt = crate::buffer_tensor_ir::build_buffer_tensor_ir(&graph, &order, assignment, &analysis)
-            .expect("construction survives the rejected tie");
-        let geometry: HashMap<ClassId, ValueGeometry> = [
+        let mock_geometry =
+            extraction_geometry(&graph, &crate::test_support::mock_layout_table(&graph))
+                .expect("mock layouts are total over the graph");
+        let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[], &mock_geometry)
+            .expect("assignment runs");
+        let bt = crate::buffer_tensor_ir::build_buffer_tensor_ir(
+            &graph, &order, assignment, &analysis, &mock_geometry,
+        )
+        .expect("construction survives the rejected tie");
+        let geometry: HashMap<ClassId, ValueGeometry<crate::test_support::MockLayout>> = [
             (x.clone(), vec![5, 3]),
             (v.clone(), vec![1, 3]),
             (r.clone(), vec![1, 3]),
         ]
         .into_iter()
         .map(|(value, dims)| {
+            let layout = mock_geometry[&value].layout.clone();
             (
                 value,
                 ValueGeometry {
                     dims: Some(dims),
                     element_bits: Some(32),
                     dtype: Some(crate::dtype::PlanDtype::F32),
+                    layout,
                 },
             )
         })

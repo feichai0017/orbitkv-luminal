@@ -421,6 +421,31 @@ pub trait OpMatcher: std::fmt::Debug {
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp>;
 }
 
+/// The runtime's LAYOUT RENDERER — the layout-side mirror of the
+/// [`OpMatcher`] registration seam (resident-geometry cleanup, ruling
+/// 2026-08-31). Where matchers turn elected op enodes into instances, the
+/// renderer turns each elected value's LAYOUT e-class into the runtime's
+/// own opaque layout value `L` — the type the bufferizer transports on
+/// [`crate::bufferize::Buffer`] without ever interpreting it. Core CALLS
+/// this hook (once per distinct layout class, see
+/// [`crate::extractor::rendered_layout_table`]) and never parses a layout
+/// spelling itself.
+///
+/// RENDERING RULE for implementors: any spelling present in the class is
+/// correct — all spellings of a layout class denote one function — and
+/// the most-structured spelling present (RightMajor > LeftMajor >
+/// Strided > ElementOffset > BitOffset) is preferred as a rendering
+/// preference only. No normalization, no analysis, and failure is LOUD:
+/// an error refuses the plan; there is no silent default layout.
+pub trait LayoutRenderer<L> {
+    /// Render one layout e-class of the serialized e-graph into `L`.
+    fn render_layout(
+        &self,
+        egraph: &egraph_serialize::EGraph,
+        class: &egraph_serialize::ClassId,
+    ) -> anyhow::Result<L>;
+}
+
 // The op INVENTORY does not live here (ruling 2026-08-06): layout_ir
 // defines the IR framework — the traits, extraction machinery, and plan
 // types — and stays distant from where ops are implemented. The

@@ -38,7 +38,7 @@ fn view_search_options(seed: u64) -> ImplementationSearchOptions {
 }
 
 /// Load → search on the CUDA runtime; return the best plan.
-fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)], seed: u64) -> BufferIrGraph {
+fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)], seed: u64) -> BufferIrGraph<luminal_cuda_lite::CudaLayout> {
     let mut rt = CudaRuntime::load(cx).expect("cuda load");
     let data: FxHashMap<NodeIndex, TypedBuffer> = inputs.iter().cloned().collect();
     let outcome = rt.search(&data, &view_search_options(seed)).expect("cuda search");
@@ -49,7 +49,7 @@ fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)], seed: u64) -> Buffe
 /// Render every compute node through the REAL dispatch path
 /// (descriptor ctx → codegen row). Returns
 /// (label, launch sources, composed operand slots).
-fn rendered(plan: &BufferIrGraph) -> Vec<(String, Vec<String>, Vec<usize>)> {
+fn rendered(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> Vec<(String, Vec<String>, Vec<usize>)> {
     let mut out = Vec::new();
     for node in plan.dag.node_weights() {
         let BufferNode::Compute { op, operand_info, result_info, .. } = node else {
@@ -79,7 +79,7 @@ fn rendered(plan: &BufferIrGraph) -> Vec<(String, Vec<String>, Vec<usize>)> {
 }
 
 /// The single node with `label` in the plan, rendered.
-fn the_one(plan: &BufferIrGraph, label: &str) -> (Vec<String>, Vec<usize>) {
+fn the_one(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>, label: &str) -> (Vec<String>, Vec<usize>) {
     let hits: Vec<_> = rendered(plan).into_iter().filter(|(l, _, _)| l == label).collect();
     assert_eq!(hits.len(), 1, "exactly one {label} in the plan:\n{}", plan.summary());
     let (_, sources, folded) = hits.into_iter().next().unwrap();

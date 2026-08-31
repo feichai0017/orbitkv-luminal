@@ -140,7 +140,7 @@ pub fn launch_single(source: &str, inputs: &[&[u8]], out_bytes: usize, n: usize)
 /// [`OutputBinding`] (the elected layout) — the escape-and-disclose
 /// fetch, universal over dense and view elections.
 pub fn execute_plan(
-    plan: &BufferIrGraph,
+    plan: &BufferIrGraph<crate::layouts::CudaLayout>,
     staged: &FxHashMap<i64, TypedBuffer>,
 ) -> Result<FxHashMap<usize, (TypedBuffer, OutputBinding)>> {
     // ESCAPE GUARD (ruling 2026-08-27): an output slot's backing storage

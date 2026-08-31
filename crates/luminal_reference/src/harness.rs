@@ -232,7 +232,13 @@ pub fn plain_plan_exists(cx: &luminal::graph::Graph) -> anyhow::Result<()> {
     .ok_or_else(|| anyhow::anyhow!("no output boundary reached"))?;
     eprintln!("[plain-plan] extract {:?}", start.elapsed());
     let start = std::time::Instant::now();
-    luminal::bufferize::bufferize(&luminal::dps::dps_rewrite(&extracted))?;
+    let layouts = extractor::rendered_layout_table(
+        &serialized,
+        &extracted,
+        &crate::layouts::ReferenceLayoutRenderer,
+        &mut std::collections::HashMap::new(),
+    )?;
+    luminal::bufferize::bufferize(&luminal::dps::dps_rewrite(&extracted), &layouts)?;
     eprintln!("[plain-plan] dps+bufferize {:?}", start.elapsed());
     Ok(())
 }

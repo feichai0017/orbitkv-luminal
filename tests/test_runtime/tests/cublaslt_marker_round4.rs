@@ -147,7 +147,7 @@ fn t6a_bufferize_all_four_forms() {
             "{name}: dest tie present"
         );
 
-        let plan = bufferize::bufferize(&dps_graph)
+        let plan = luminal::test_support::bufferize_mock(&dps_graph)
             .unwrap_or_else(|err| panic!("T6a {name}: bufferizer REFUSED: {err}"));
         let summary = plan.summary();
         let allocs = plan
@@ -266,7 +266,7 @@ fn t6a_accumulate_intermediate_c_donation_observed() {
         elected.iter().any(|(op, _)| op.form == CublasLtForm::Accumulate),
         "the Accumulate contract elected"
     );
-    let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph))
+    let plan = luminal::test_support::bufferize_mock(&luminal::dps::dps_rewrite(&graph))
         .unwrap_or_else(|err| panic!("T6a-donation: bufferizer REFUSED: {err}"));
     let allocs = plan
         .buffers

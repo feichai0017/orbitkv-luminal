@@ -428,6 +428,62 @@ pub fn extract_layout_ir_with_ops_and_matchers(
 }
 
 
+/// Build the rendered-layout table for one extracted graph: enumerate
+/// every value's LAYOUT e-class (pure enumeration — core never parses a
+/// layout spelling) and call the runtime's [`LayoutRenderer`] hook once
+/// per distinct class, reusing `cache` across calls (all spellings of a
+/// class denote one function, so a class renders the same every time —
+/// the search loop shares one cache across its genomes). A renderer
+/// error is LOUD and refuses the graph: there is no default layout.
+///
+/// Rendering the PRE-DPS graph suffices for the post-DPS one: the DPS
+/// rewrite's poison destinations clone their tied result's layout,
+/// e-class included, so the table covers them by construction.
+pub fn rendered_layout_table<L: Clone>(
+    egraph: &EGraph,
+    graph: &ExtractedGraph,
+    renderer: &dyn crate::layout_ir::LayoutRenderer<L>,
+    cache: &mut HashMap<ClassId, L>,
+) -> Result<HashMap<ClassId, L>> {
+    let mut table: HashMap<ClassId, L> = HashMap::new();
+    let render = |value: &crate::layout_ir::LayoutTensorInfo,
+                      table: &mut HashMap<ClassId, L>,
+                      cache: &mut HashMap<ClassId, L>|
+     -> Result<()> {
+        let class = &value.layout.eclass;
+        if table.contains_key(class) {
+            return Ok(());
+        }
+        let rendered = match cache.get(class) {
+            Some(rendered) => rendered.clone(),
+            None => {
+                let rendered = renderer.render_layout(egraph, class).with_context(|| {
+                    format!(
+                        "rendering the layout of value {} (layout class {class})",
+                        value.eclass
+                    )
+                })?;
+                cache.insert(class.clone(), rendered.clone());
+                rendered
+            }
+        };
+        table.insert(class.clone(), rendered);
+        Ok(())
+    };
+    for node in graph.dag.node_weights() {
+        match node {
+            ExtractedNode::BufferInput(input) => render(&input.value, &mut table, cache)?,
+            ExtractedNode::LayoutOp(op) => {
+                for output in &op.outputs {
+                    render(output, &mut table, cache)?;
+                }
+            }
+            ExtractedNode::BufferOutput(_) => {}
+        }
+    }
+    Ok(table)
+}
+
 /// One genome choice: the concrete implementation enode that produces the
 /// keyed LayoutTensor class, and which of its output slots carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
