@@ -18,7 +18,9 @@
 /// (`examples/mini/*/src/bin/measure_plan.rs`): same `(n, seed)` gives
 /// the same values on both runtimes, so the differential is exact.
 pub fn weights(n: usize, seed: usize) -> Vec<f32> {
-    (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
+    (0..n)
+        .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
+        .collect()
 }
 
 /// The stub path for builds WITHOUT the `device` feature: the CUDA-lite
@@ -46,10 +48,7 @@ pub mod device {
     /// (`examples/mini/*/src/bin/measure_plan.rs`) and
     /// `luminal_reference::harness::run_reference`, on the shared
     /// harness budget.
-    fn run_reference(
-        cx: &Graph,
-        pairs: &[(NodeIndex, TypedBuffer)],
-    ) -> Result<ReferenceRuntime> {
+    fn run_reference(cx: &Graph, pairs: &[(NodeIndex, TypedBuffer)]) -> Result<ReferenceRuntime> {
         let mut rt = ReferenceRuntime::load(cx).context("reference load")?;
         let mut vars: Vec<_> = cx.dyn_map.iter().collect();
         vars.sort();
@@ -83,7 +82,6 @@ pub mod device {
         luminal_cuda_lite::layouts::dense_f32(bytes, &binding.layout)
             .context("reading the output through its returned layout")
     }
-
 
     /// Elementwise comparison at the device_fidelity epsilon
     /// (`tests/device_fidelity.rs::assert_close`):
@@ -121,17 +119,20 @@ pub mod device {
     }
 
     /// Plan statistics: kernel launches (Compute nodes), whole-buffer
-    /// copies (BufferCopy nodes), distinct buffers, and output slots
-    /// split into dense vs escaped (VIEW-ELECTED: the slot.s returned
-    /// layout does not reduce to the identity read over its own
-    /// domain, so the backing
-    /// buffer escapes to the caller and is read through that layout).
+    /// copies (BufferCopy nodes), distinct buffers, and output slots.
+    ///
+    /// There was an `escaped` counter here, splitting outputs into dense
+    /// vs view-elected. It was print-only — never asserted, never gating
+    /// the differential — and computing it meant asking whether an
+    /// output layout reduces to the identity read, which is exactly the
+    /// question ruled out of this codebase on 2026-09-01 ("delete the
+    /// counter, and delte the whole reads_identity function"). Deleted
+    /// rather than re-expressed: nothing depended on it.
     struct PlanStats {
         kernels: usize,
         copies: usize,
         buffers: usize,
         outputs: usize,
-        escaped: usize,
     }
 
     fn plan_stats(rt: &CudaRuntime) -> Result<PlanStats> {
@@ -141,28 +142,13 @@ pub mod device {
             copies: 0,
             buffers: plan.buffers.len(),
             outputs: 0,
-            escaped: 0,
         };
         for idx in plan.dag.node_indices() {
             match &plan.dag[idx] {
                 BufferNode::BufferInput { .. } => {}
                 BufferNode::Compute { .. } => stats.kernels += 1,
                 BufferNode::BufferCopy { .. } => stats.copies += 1,
-                BufferNode::BufferOutput { slots } => {
-                    for slot in slots {
-                        stats.outputs += 1;
-                        let direct = slot
-                            .layout
-                            .mirror
-                            .literal_extents()
-                            .is_some_and(|dims| {
-                                luminal_cuda_lite::kernels::reads_identity(&slot.layout, &dims)
-                            });
-                        if !direct {
-                            stats.escaped += 1;
-                        }
-                    }
-                }
+                BufferNode::BufferOutput { slots } => stats.outputs += slots.len(),
             }
         }
         Ok(stats)
@@ -189,7 +175,12 @@ pub mod device {
         let reference = run_reference(cx, pairs).context("reference half")?;
         let mut expected = Vec::new();
         for (label, id) in outputs {
-            expected.push(reference.get_f32(*id).with_context(|| format!("reference {label}"))?.clone());
+            expected.push(
+                reference
+                    .get_f32(*id)
+                    .with_context(|| format!("reference {label}"))?
+                    .clone(),
+            );
         }
         println!("{name}: reference OK ({} ms)", t.elapsed().as_millis());
 
@@ -224,8 +215,8 @@ pub mod device {
         }
         let stats = plan_stats(&rt)?;
         println!(
-            "{name}: plan kernels={} copies={} buffers={} outputs={} escaped={}",
-            stats.kernels, stats.copies, stats.buffers, stats.outputs, stats.escaped
+            "{name}: plan kernels={} copies={} buffers={} outputs={}",
+            stats.kernels, stats.copies, stats.buffers, stats.outputs
         );
 
         // 4. Execute on device; fetch through the disclosed layout.

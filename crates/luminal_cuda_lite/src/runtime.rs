@@ -58,8 +58,10 @@ impl CudaRuntime {
     /// Record the graph's native program. Saturation happens in
     /// [`CudaRuntime::search`].
     pub fn load(graph: &graph::Graph) -> Result<Self> {
-        let (pre_schedule, input_slots, output_slots, post_checks, labeled_checks) =
-            graph.logical.bound_parts(&crate::bindings::CudaBindings).map_err(|e| anyhow!(e))?;
+        let (pre_schedule, input_slots, output_slots, post_checks, labeled_checks) = graph
+            .logical
+            .bound_parts(&crate::bindings::CudaBindings)
+            .map_err(|e| anyhow!(e))?;
         Ok(Self {
             native: Some(NativeParts {
                 pre_schedule,
@@ -104,7 +106,10 @@ impl CudaRuntime {
         lower: u64,
         upper: u64,
     ) -> Result<()> {
-        let native = self.native.as_mut().ok_or_else(|| anyhow!("load before bind"))?;
+        let native = self
+            .native
+            .as_mut()
+            .ok_or_else(|| anyhow!("load before bind"))?;
         let name = var.into();
         native.binding_seeds.push_str(&format!(
             "(set (lower-bound-of (IntVar \"{name}\")) (bigint {lower}))\n\
@@ -139,16 +144,17 @@ impl CudaRuntime {
     }
 
     fn allow_list_over(registry: &[crate::ops::RegisteredOp]) -> Vec<&'static str> {
-        let labels: Vec<&'static str> =
-            crate::kernels::cuda_kernels().iter().map(|k| k.label).collect();
+        let labels: Vec<&'static str> = crate::kernels::cuda_kernels()
+            .iter()
+            .map(|k| k.label)
+            .collect();
         registry
             .iter()
             .filter(|entry| {
                 let ctor = entry.matcher.egglog_constructor();
                 let stripped = ctor.trim_start_matches("LayoutTensorOp");
                 let kernel_bearing = labels.iter().any(|label| {
-                    stripped == *label
-                        || stripped.trim_end_matches("Generic") == *label
+                    stripped == *label || stripped.trim_end_matches("Generic") == *label
                 });
                 kernel_bearing
                     || crate::plan_transparent(entry.prototype.as_ref())
@@ -166,7 +172,10 @@ impl CudaRuntime {
         input_data: &FxHashMap<NodeIndex, TypedBuffer>,
         options: &ImplementationSearchOptions,
     ) -> Result<SearchOutcome<CudaLayout>> {
-        let native = self.native.as_ref().ok_or_else(|| anyhow!("load before search"))?;
+        let native = self
+            .native
+            .as_ref()
+            .ok_or_else(|| anyhow!("load before search"))?;
         let program = graph::LogicalProgram {
             text: format!(
                 "{}{}{}{}",
@@ -255,7 +264,10 @@ impl CudaRuntime {
     /// Run the plan on the CUDA device. Requires the `device` feature
     /// and an available device; refuses loudly otherwise.
     pub fn execute(&mut self) -> Result<()> {
-        let plan = self.plan.as_ref().ok_or_else(|| anyhow!("search before execute"))?;
+        let plan = self
+            .plan
+            .as_ref()
+            .ok_or_else(|| anyhow!("search before execute"))?;
         #[cfg(feature = "device")]
         {
             let outputs = crate::device::execute_plan(plan, &self.staged)?;
@@ -272,36 +284,34 @@ impl CudaRuntime {
         }
     }
 
-    /// Read back a DENSE output tensor's f32 payload (already
-    /// D2H'd by execute). Loud on a view-elected (escaped) output: its
-    /// backing bytes are parent-laid-out — indistinguishable by length
-    /// from row-major on a same-numel weld (e.g. a transpose) — so the
-    /// legacy dense-shaped signature must never hand them over silently.
-    /// Escaped outputs go through [`Self::fetch`] and interpret under
-    /// [`Self::output_layout`] (the escape-and-disclose contract; the
-    /// reader is [`crate::layouts::dense_f32`], this runtime evaluating
-    /// its own layout vocabulary).
+    /// Read back an output tensor's f32 payload (already D2H'd by
+    /// execute), interpreting it as row-major over the value's dims.
+    ///
+    /// NO DENSENESS CHECK HERE (ruling 2026-09-01). This is the record.
+    ///
+    /// What was checked: that the output binding's elected layout is the
+    /// flat index over the value's dims, so element `k` of the value is
+    /// at flat index `k` of the backing and this `Vec<f32>` IS the value.
+    /// A view-elected (escaped) output was refused loudly and directed to
+    /// [`Self::fetch`] + [`Self::output_layout`].
+    ///
+    /// Why it went. Austin, 2026-09-01, ruling the CL-4b write fence out
+    /// of the backend: "this is something that needs to be expressed in
+    /// egglog by matching only only to right major contiguous layouts
+    /// ouputs or something, we should not have it in the codebase here.
+    /// delete it. same with the get_f32 path."
+    ///
+    /// THE GAP. That egglog output-layout constraint IS NOT WRITTEN YET
+    /// (frozen estate, shape unruled). Until it lands, a view-elected
+    /// output is handed over here SILENTLY: the backing of a same-numel
+    /// weld such as a transpose has the right LENGTH and the wrong
+    /// ORDER, so the caller reads plausible, wrong numbers. The
+    /// escape-and-disclose path ([`Self::fetch`] under
+    /// [`Self::output_layout`], read by [`crate::layouts::dense_f32`])
+    /// remains correct for every layout and is what callers that cannot
+    /// assume a dense output should use.
     pub fn get_f32(&self, tensor: NodeIndex) -> Result<&Vec<f32>> {
-        // The row-major question is asked of the HELD LAYOUT's FUNCTION
-        // — literally the codegen read path's own simplifier
-        // ([`crate::kernels::reads_identity`]): element `k` of this
-        // value is at flat index `k` of the backing, so the dense
-        // `Vec<f32>` IS the value. Asked of the function, not the
-        // spelling: a class the renderer happens to hand back as a
-        // dense strided chain answers yes, exactly as its right-major
-        // spelling would.
-        let is_dense = |binding: &luminal::bufferize::OutputBinding<CudaLayout>| {
-            match binding.layout.mirror.literal_extents() {
-                Some(dims) => crate::kernels::reads_identity(&binding.layout, &dims),
-                None => false,
-            }
-        };
         match self.fetch(tensor)? {
-            (_, binding) if !is_dense(binding) => bail!(
-                "get_f32 on a view-elected (escaped) output: the backing \
-                 bytes are not row-major over the value's dims — use fetch() \
-                 and interpret under the disclosed layout"
-            ),
             (TypedBuffer::F32(values), _) => Ok(values),
             (other, _) => bail!("output is {}, not f32", other.type_name()),
         }

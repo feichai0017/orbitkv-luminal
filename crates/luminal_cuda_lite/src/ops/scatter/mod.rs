@@ -17,7 +17,8 @@ use luminal::layout_ir::{
 };
 
 use crate::kernels::{
-    coord_prelude, cuda_type, layout_read_index, numel, strides_of, CodegenCtx, KernelSource,
+    coord_prelude, cuda_type, layout_read_index, numel, strides_of, CodegenCtx, Coords,
+    KernelSource,
 };
 use anyhow::{bail, Result};
 
@@ -137,7 +138,11 @@ impl BufferTensorIrOp for ScatterFunctionalDps {
 
 impl Bufferizable for ScatterFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: self.dest_index(), result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: self.dest_index(),
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -154,23 +159,16 @@ impl LayoutIrOp for ScatterFunctionalDps {}
 /// not simplify to the identity; each such operand then
 /// lowers into that operand's read index via
 /// [`crate::kernels::layout_read_index`]. The WRITE side (dest0)
-/// stays fail-closed (CL-4b), and the checked-scatter injectivity
+/// is no longer fenced here (see the write-fence record in
+/// [`crate::kernels::CodegenCtx::from_descriptors`]), and the injectivity
 /// flags are untouched: the write address arithmetic is identical.
-pub(crate) fn codegen(
-    op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     let Some(scatter) = op.as_any().downcast_ref::<ScatterFunctionalDps>() else {
         bail!("scatter codegen reached with a non-Scatter op");
     };
     let rank = scatter.rank;
-    if ctx.expression_operand(scatter.dest_index()).is_some() {
-        bail!(
-            "dest operand slot {} carries a layout that does not reduce to the \
-             identity index: strided writes are not lowered (dests stay dense out-of-place; CL-4b)",
-            scatter.dest_index()
-        );
-    }
+    // The dest operand slot is not fenced — see the write-fence record in
+    // `kernels::CodegenCtx::from_descriptors`.
     let init_dims = &ctx.operand_dims[0];
     if init_dims.len() != rank {
         bail!("scatter init rank {} vs op rank {rank}", init_dims.len());
@@ -187,31 +185,41 @@ pub(crate) fn codegen(
     for axis in 0..rank {
         sig.push_str(&format!(", const int* coord{axis}"));
     }
-    // Launch 1: dest = copy(init), over dest numel. A folded init is
-    // read through its chain at the DEST coordinates (init's value
-    // spans the dest space by construction).
-    let copy_src = if let Some(layout) = ctx.expression_operand(0) {
-        if init_dims != dest_dims {
-            bail!(
-                "operand init value extents {init_dims:?} differ from dest extents \
-                 {dest_dims:?} — the scatter copy iterates the dest"
-            );
-        }
+    // Launch 1: dest = copy(init), over dest numel. The init is read
+    // through its own layout at the DEST coordinates.
+    //
+    // The init value spans the dest space by construction — asked
+    // unconditionally, not only of a folded init (asking it inside the
+    // folded arm is how the elementwise coherence check became
+    // spelling-dependent).
+    if init_dims != dest_dims {
+        bail!(
+            "operand init value extents {init_dims:?} differ from dest extents \
+             {dest_dims:?} — the scatter copy iterates the dest"
+        );
+    }
+    // The copy's `i` IS the dest coordinates decomposed, so a dense init
+    // simplifies back to `init[i]` and emits no prelude at all.
+    let (init_chain, init_idx) = layout_read_index(
+        "init",
+        ctx.operand_layout(0),
+        dest_dims,
+        Coords::FlatIndex { prefix: "c" },
+    )?;
+    let copy_src = if init_chain.is_empty() {
+        format!(
+            r#"extern "C" __global__ void k({sig}, {t}* out, unsigned long long n) {{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = init[{init_idx}];
+}}"#
+        )
+    } else {
         let prelude = coord_prelude(dest_dims);
-        let (chain, idx) = layout_read_index("init", layout, dest_dims, "c")?;
         format!(
             r#"extern "C" __global__ void k({sig}, {t}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-{prelude}{chain}    out[i] = init[{idx}];
-}}"#
-        )
-    } else {
-        // Byte-identical to pre-Train-2B codegen.
-        format!(
-            r#"extern "C" __global__ void k({sig}, {t}* out, unsigned long long n) {{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) out[i] = init[i];
+{prelude}{init_chain}    out[i] = init[{init_idx}];
 }}"#
         )
     };
@@ -232,45 +240,57 @@ pub(crate) fn codegen(
     // duplicate coordinates now races (last writer wins, nondeterminis-
     // tically) instead of faulting, and an out-of-range coordinate
     // writes out of bounds.
-    let src_layout = ctx.expression_operand(1);
-    let coord_folded = (2..2 + rank).any(|slot| ctx.expression_operand(slot).is_some());
-    let mut body = String::new();
-    if src_layout.is_some() || coord_folded {
-        body.push_str(&coord_prelude(src_dims));
-    }
-    body.push_str("    long long flat = 0;\n    long long coord;\n");
+    // Every read in this launch is evaluated at the SRC coordinates,
+    // which ARE this launch's `i` decomposed — so all of them are
+    // `Coords::FlatIndex` and a dense operand simplifies back to
+    // `name[i]`. The WRITE address `flat` is coordinate-built from the
+    // scattered coordinate VALUES: that is the op's semantics, not a
+    // layout read, and it is unaffected by any of this.
+    let mut reads = String::new();
+    let mut any_chain = false;
     for axis in 0..rank {
-        if let Some(layout) = ctx.expression_operand(axis + 2) {
-            // The coordinate value's own extents must be src's for the
-            // prelude's `c*` to be its coordinates: refuse a mismatch,
-            // never reinterpret (the elementwise contract).
-            if &ctx.operand_dims[axis + 2] != src_dims {
-                bail!(
-                    "operand coord{axis} value extents {:?} differ from src extents \
-                     {src_dims:?} — the scatter write launch \
-                     iterates src",
-                    ctx.operand_dims[axis + 2]
-                );
-            }
-            let name = format!("coord{axis}");
-            let (chain, idx) = layout_read_index(&name, layout, src_dims, "c")?;
-            body.push_str(&chain);
-            body.push_str(&format!("    coord = (long long){name}[{idx}];\n"));
-        } else {
-            body.push_str(&format!("    coord = (long long)coord{axis}[i];\n"));
+        // The coordinate value's own extents must be src's for the
+        // prelude's `c*` to be its coordinates: refuse a mismatch,
+        // never reinterpret (the elementwise contract). Asked of EVERY
+        // coordinate operand, whatever its layout spells.
+        if &ctx.operand_dims[axis + 2] != src_dims {
+            bail!(
+                "operand coord{axis} value extents {:?} differ from src extents \
+                 {src_dims:?} — the scatter write launch \
+                 iterates src",
+                ctx.operand_dims[axis + 2]
+            );
         }
-        body.push_str(&format!(
+        let name = format!("coord{axis}");
+        let (chain, idx) = layout_read_index(
+            &name,
+            ctx.operand_layout(axis + 2),
+            src_dims,
+            Coords::FlatIndex { prefix: "c" },
+        )?;
+        any_chain |= !chain.is_empty();
+        reads.push_str(&chain);
+        reads.push_str(&format!("    coord = (long long){name}[{idx}];\n"));
+        reads.push_str(&format!(
             "    flat += coord * {stride}LL;\n",
             stride = strides[axis]
         ));
     }
-    let src_read = if let Some(layout) = src_layout {
-        let (chain, idx) = layout_read_index("src", layout, src_dims, "c")?;
-        body.push_str(&chain);
-        format!("src[{idx}]")
-    } else {
-        "src[i]".to_string()
-    };
+    let (src_chain, src_idx) = layout_read_index(
+        "src",
+        ctx.operand_layout(1),
+        src_dims,
+        Coords::FlatIndex { prefix: "c" },
+    )?;
+    any_chain |= !src_chain.is_empty();
+    let mut body = String::new();
+    if any_chain {
+        body.push_str(&coord_prelude(src_dims));
+    }
+    body.push_str("    long long flat = 0;\n    long long coord;\n");
+    body.push_str(&reads);
+    body.push_str(&src_chain);
+    let src_read = format!("src[{src_idx}]");
     let scatter_src = format!(
         r#"extern "C" __global__ void k({sig}, {t}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -315,6 +335,8 @@ impl OpMatcher for ScatterFunctionalMatcher {
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ScatterFunctional { rank: coordinate_rank(site, 2) })
+        Box::new(ScatterFunctional {
+            rank: coordinate_rank(site, 2),
+        })
     }
 }

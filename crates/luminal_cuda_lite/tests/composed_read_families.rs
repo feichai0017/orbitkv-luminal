@@ -44,10 +44,16 @@ fn view_search_options(seed: u64) -> ImplementationSearchOptions {
 }
 
 /// Load → search on the CUDA runtime; return the best plan.
-fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)], seed: u64) -> BufferIrGraph<luminal_cuda_lite::CudaLayout> {
+fn plan_for(
+    cx: &Graph,
+    inputs: &[(NodeIndex, TypedBuffer)],
+    seed: u64,
+) -> BufferIrGraph<luminal_cuda_lite::CudaLayout> {
     let mut rt = CudaRuntime::load(cx).expect("cuda load");
     let data: FxHashMap<NodeIndex, TypedBuffer> = inputs.iter().cloned().collect();
-    let outcome = rt.search(&data, &view_search_options(seed)).expect("cuda search");
+    let outcome = rt
+        .search(&data, &view_search_options(seed))
+        .expect("cuda search");
     assert!(outcome.plans_profiled > 0, "no plans profiled");
     rt.plan().expect("plan loaded").clone()
 }
@@ -55,10 +61,18 @@ fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)], seed: u64) -> Buffe
 /// Render every compute node through the REAL dispatch path
 /// (descriptor ctx → codegen row). Returns
 /// (label, launch sources, composed operand slots).
-fn rendered(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> Vec<(String, Vec<String>, Vec<usize>)> {
+fn rendered(
+    plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>,
+) -> Vec<(String, Vec<String>, Vec<usize>)> {
     let mut out = Vec::new();
     for node in plan.dag.node_weights() {
-        let BufferNode::Compute { op, operand_info, result_info, .. } = node else {
+        let BufferNode::Compute {
+            op,
+            operand_info,
+            result_info,
+            ..
+        } = node
+        else {
             continue;
         };
         let label = op.label().to_string();
@@ -69,11 +83,21 @@ fn rendered(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> Vec<(String,
             .unwrap_or_else(|| panic!("elected op {label} has no codegen row"));
         let ctx = kernels::CodegenCtx::from_descriptors(&label, operand_info, result_info)
             .unwrap_or_else(|e| panic!("descriptor ctx for {label}: {e}"));
-        // "Folded" now means: the operand.s own carried LAYOUT does not
-        // simplify to the identity read over its domain (the layout IS
-        // the read path, and the simplifier is the only verdict on it).
+        // "Folded" now means: the operand's own carried LAYOUT does not
+        // simplify to the bare `i` when read at coordinates that ARE `i`
+        // decomposed — i.e. the one lowering had to emit a chain for it.
+        // Read off the production lowering itself; there is no predicate
+        // to consult any more (ruling 2026-09-01).
         let folded: Vec<usize> = (0..operand_info.len())
-            .filter(|&k| ctx.expression_operand(k).is_some())
+            .filter(|&k| {
+                !kernels::layout_read_index(
+                    "probe",
+                    ctx.operand_layout(k),
+                    &ctx.operand_dims[k],
+                    kernels::Coords::FlatIndex { prefix: "c" },
+                )
+                .map_or(false, |(chain, idx)| chain.is_empty() && idx == "i")
+            })
             .collect();
         let sources: Vec<String> = (kernel.codegen)(op.as_ref(), &ctx)
             .unwrap_or_else(|e| panic!("codegen for {label}: {e}"))
@@ -86,9 +110,20 @@ fn rendered(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> Vec<(String,
 }
 
 /// The single node with `label` in the plan, rendered.
-fn the_one(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>, label: &str) -> (Vec<String>, Vec<usize>) {
-    let hits: Vec<_> = rendered(plan).into_iter().filter(|(l, _, _)| l == label).collect();
-    assert_eq!(hits.len(), 1, "exactly one {label} in the plan:\n{}", plan.summary());
+fn the_one(
+    plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>,
+    label: &str,
+) -> (Vec<String>, Vec<usize>) {
+    let hits: Vec<_> = rendered(plan)
+        .into_iter()
+        .filter(|(l, _, _)| l == label)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "exactly one {label} in the plan:\n{}",
+        plan.summary()
+    );
     let (_, sources, folded) = hits.into_iter().next().unwrap();
     (sources, folded)
 }
@@ -118,15 +153,14 @@ fn assert_no_traps(source: &str) {
 /// materialization — it never folds), checked against hand-computed
 /// values. The CL side of the differential is textual on CPU; the
 /// device half is the A100 pass.
-fn reference_values(
-    cx: &Graph,
-    inputs: &[(NodeIndex, TypedBuffer)],
-    out: NodeIndex,
-    want: &[f32],
-) {
+fn reference_values(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)], out: NodeIndex, want: &[f32]) {
     let reference = luminal_reference::harness::run_reference(cx, inputs);
     let got = reference.get_f32(out).expect("reference output");
-    assert_eq!(got.as_slice(), want, "reference numerics diverge from the hand computation");
+    assert_eq!(
+        got.as_slice(),
+        want,
+        "reference numerics diverge from the hand computation"
+    );
 }
 
 /// EMBEDDING-STYLE GATHER, indices through a fold: data (4,3) gathered
@@ -153,11 +187,25 @@ fn gather_lowers_a_folded_coordinate_operand() {
 
     let plan = plan_for(&cx, &inputs, 0);
     let (sources, folded) = the_one(&plan, "GatherGeneric");
-    assert_eq!(folded, vec![1], "the broadcast folds into coord0 (operand 1):\n{}", plan.summary());
+    assert_eq!(
+        folded,
+        vec![1],
+        "the broadcast folds into coord0 (operand 1):\n{}",
+        plan.summary()
+    );
     assert_eq!(sources.len(), 1, "gather is a single launch");
     // The full rendered kernel, pinned: coord0 is read through its own
-    // composed layout, coord1 stays the flat read, the data read is
-    // untouched. No bounds checks anywhere (ruling 2026-08-31).
+    // composed layout and coord1's expression simplifies straight back
+    // to the flat `coord1[i]`. No bounds checks anywhere (2026-08-31).
+    //
+    // THE DATA READ MOVED (ruling 2026-09-01), and the move is the whole
+    // point of that ruling. It used to be a `flat` accumulator written
+    // out by the gather itself — `flat += coord * 3LL; flat += coord *
+    // 1LL; ... data[flat]` — a hand-rolled duplicate of what the data
+    // layout already says. Now the gathered coordinates are bound as
+    // `data_c{axis}` and the DATA LAYOUT states its own address:
+    // `data_idx = data_c0 * 3LL + data_c1 * 1LL`. Identical arithmetic,
+    // one statement of it instead of two.
     assert_eq!(
         sources[0],
         r#"extern "C" __global__ void k(const float* data, const int* coord0, const int* coord1, float* out, unsigned long long n) {
@@ -166,14 +214,14 @@ fn gather_lowers_a_folded_coordinate_operand() {
     unsigned long long rem = i;
     long long c1 = (long long)(rem % 3ULL); rem /= 3ULL;
     long long c0 = (long long)(rem % 2ULL); rem /= 2ULL;
-    long long flat = 0;
     long long coord;
     long long coord0_idx = c0 + 0LL;
     coord = (long long)coord0[coord0_idx];
-    flat += coord * 3LL;
+    long long data_c0 = coord;
     coord = (long long)coord1[i];
-    flat += coord * 1LL;
-    out[i] = data[flat];
+    long long data_c1 = coord;
+    long long data_idx = data_c0 * 3LL + data_c1 * 1LL;
+    out[i] = data[data_idx];
 }"#
     );
     // READ THE COORD0 LINE: `c0 + 0LL` is the BROADCAST layout itself —
@@ -230,7 +278,11 @@ fn gather_lowers_a_folded_data_operand() {
         "gather folded-data",
     );
     assert_no_traps(&sources[0]);
-    assert!(!sources[0].contains("data[flat]"), "no flat data read remains:\n{}", sources[0]);
+    assert!(
+        !sources[0].contains("data[flat]"),
+        "no flat data read remains:\n{}",
+        sources[0]
+    );
 }
 
 /// SCATTER, coordinate operand through a fold: init (4,3), src (2,3),
@@ -252,7 +304,10 @@ fn scatter_lowers_a_folded_coordinate_operand() {
 
     let inputs: Vec<(NodeIndex, TypedBuffer)> = vec![
         (init.id, vec![0.0f32; 12].into()),
-        (src.id, (0..6).map(|v| 10.0 + v as f32).collect::<Vec<f32>>().into()),
+        (
+            src.id,
+            (0..6).map(|v| 10.0 + v as f32).collect::<Vec<f32>>().into(),
+        ),
         (rows.id, vec![2i32, 0].into()),
     ];
 
@@ -276,7 +331,11 @@ fn scatter_lowers_a_folded_coordinate_operand() {
     assert_eq!(sources.len(), 2, "scatter is the two-launch sequence");
     // Launch 1 (init copy) has no folded operand here: byte-identical
     // to the flat template.
-    assert_contains(&sources[0], &["if (i < n) out[i] = init[i];"], "scatter copy launch");
+    assert_contains(
+        &sources[0],
+        &["if (i < n) out[i] = init[i];"],
+        "scatter copy launch",
+    );
     // Launch 2: coord0 read through its layout at the SRC coordinates;
     // the write address arithmetic is untouched by the fold.
     assert_contains(
@@ -321,7 +380,9 @@ fn scatter_lowers_all_read_side_folds() {
     let cols = cx.iota((2usize, 3usize), |c| c[1]);
     let init = init_base.permute((1, 0)); // (4,3), init[i][j] = init_base[j][i]
     let src = src_base.slice((1..3, ..)); // (2,3), src[i][j] = src_base[i+1][j]
-    let out = init.scatter(&[rows.expand_dim(1, 3usize), cols], src).output();
+    let out = init
+        .scatter(&[rows.expand_dim(1, 3usize), cols], src)
+        .output();
 
     let init_vals: Vec<f32> = (0..12).map(|v| 100.0 + v as f32).collect();
     let src_vals: Vec<f32> = (0..12).map(|v| v as f32).collect();
@@ -381,7 +442,10 @@ fn scatter_lowers_all_read_side_folds() {
     // Three composed reads, three raw index computations, zero checks.
     for source in &sources {
         assert_no_traps(source);
-        assert!(!source.contains("flags"), "no injectivity scratch:\n{source}");
+        assert!(
+            !source.contains("flags"),
+            "no injectivity scratch:\n{source}"
+        );
     }
 }
 
@@ -406,8 +470,7 @@ fn materialize_lowers_a_folded_input_operand() {
     reference_values(&cx, &inputs, out.id, &[0., 3., 1., 4.]);
 
     let plan = plan_for(
-        &cx,
-        &inputs,
+        &cx, &inputs,
         5, // the seed whose genome elects the materialize spelling (cost-tied with copy+fold)
     );
     let (sources, folded) = the_one(&plan, "IndexMapApplyMaterialize");
@@ -434,6 +497,9 @@ fn materialize_lowers_a_folded_input_operand() {
         "materialize folded input",
     );
     assert_no_traps(&sources[0]);
-    assert!(!sources[0].contains("pflat"), "no flat parent read remains:\n{}", sources[0]);
+    assert!(
+        !sources[0].contains("pflat"),
+        "no flat parent read remains:\n{}",
+        sources[0]
+    );
 }
-

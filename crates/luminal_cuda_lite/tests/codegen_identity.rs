@@ -17,8 +17,25 @@
 use luminal::bufferize::{BufferId, BufferIrGraph, BufferNode};
 use luminal::dtype::PlanDtype;
 use luminal::prelude::FxHashMap;
+use luminal_cuda_lite::kernels::Coords;
 use luminal_cuda_lite::{kernels, CudaRuntime};
 use std::collections::HashMap;
+
+/// Does this layout's read, taken at coordinates that ARE `i`
+/// decomposed over `dims`, simplify all the way back to the bare `i`?
+///
+/// There is no such predicate in the runtime any more (ruling
+/// 2026-09-01: "delete the whole reads_identity function") — production
+/// codegen never asks, it just lowers and emits whatever the expression
+/// became. This is a TEST-side observation of that expression, which is
+/// exactly what these pins are for: it asks the production lowering
+/// [`kernels::layout_read_index`] and reports whether it needed a chain.
+/// An unlowerable layout answers `false` — it is certainly not a flat
+/// read.
+fn reads_flat(layout: &luminal_cuda_lite::layouts::CudaLayout, dims: &[usize]) -> bool {
+    kernels::layout_read_index("probe", layout, dims, Coords::FlatIndex { prefix: "c" })
+        .map_or(false, |(chain, idx)| chain.is_empty() && idx == "i")
+}
 
 /// The PRE-Phase-3 construction, restated for the corrected contract:
 /// per-node geometry looked up in the shared BUFFER table by BufferId —
@@ -50,12 +67,23 @@ fn sources_via_buffer_table(
                 .mirror
                 .literal_extents()
                 .expect("plan buffer's layout has literal extents");
-            (id.clone(), (dims, buffer.layout.dtype.expect("plan buffer's layout is typed")))
+            (
+                id.clone(),
+                (
+                    dims,
+                    buffer.layout.dtype.expect("plan buffer's layout is typed"),
+                ),
+            )
         })
         .collect();
     let mut out = Vec::new();
     for node in plan.dag.node_weights() {
-        let BufferNode::Compute { op, reads, writes, .. } = node else { continue };
+        let BufferNode::Compute {
+            op, reads, writes, ..
+        } = node
+        else {
+            continue;
+        };
         let label = op.label().to_string();
         if label == "BufferAlloc" || label == "BufferFree" {
             continue;
@@ -89,7 +117,10 @@ fn sources_via_buffer_table(
 fn searched_plan(
     build: impl FnOnce(
         &mut luminal::graph::Graph,
-    ) -> FxHashMap<luminal::prelude::petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer>,
+    ) -> FxHashMap<
+        luminal::prelude::petgraph::graph::NodeIndex,
+        luminal::buffer_tensor_ir::TypedBuffer,
+    >,
 ) -> BufferIrGraph<luminal_cuda_lite::CudaLayout> {
     let mut cx = luminal::graph::Graph::new();
     let data = build(&mut cx);
@@ -103,39 +134,48 @@ fn searched_plan(
 
 fn representative_plans() -> Vec<(&'static str, BufferIrGraph<luminal_cuda_lite::CudaLayout>)> {
     vec![
-        ("elementwise", searched_plan(|cx| {
-            let a = cx.tensor((2usize, 3usize));
-            let b = cx.tensor((2usize, 3usize));
-            let _ = ((a + b) * a).output();
-            [
-                (a.id, vec![1.0f32, 2., 3., 4., 5., 6.].into()),
-                (b.id, vec![10.0f32, 20., 30., 40., 50., 60.].into()),
-            ]
-            .into_iter()
-            .collect()
-        })),
-        ("matmul", searched_plan(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let _ = x.matmul(w).output();
-            [
-                (x.id, vec![0.5f32; 32].into()),
-                (w.id, vec![0.25f32; 24].into()),
-            ]
-            .into_iter()
-            .collect()
-        })),
-        ("mul_sum", searched_plan(|cx| {
-            let a = cx.tensor((3usize, 4usize));
-            let b = cx.tensor((3usize, 4usize));
-            let _ = (a * b).sum(1).output();
-            [
-                (a.id, vec![1.0f32; 12].into()),
-                (b.id, vec![2.0f32; 12].into()),
-            ]
-            .into_iter()
-            .collect()
-        })),
+        (
+            "elementwise",
+            searched_plan(|cx| {
+                let a = cx.tensor((2usize, 3usize));
+                let b = cx.tensor((2usize, 3usize));
+                let _ = ((a + b) * a).output();
+                [
+                    (a.id, vec![1.0f32, 2., 3., 4., 5., 6.].into()),
+                    (b.id, vec![10.0f32, 20., 30., 40., 50., 60.].into()),
+                ]
+                .into_iter()
+                .collect()
+            }),
+        ),
+        (
+            "matmul",
+            searched_plan(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let _ = x.matmul(w).output();
+                [
+                    (x.id, vec![0.5f32; 32].into()),
+                    (w.id, vec![0.25f32; 24].into()),
+                ]
+                .into_iter()
+                .collect()
+            }),
+        ),
+        (
+            "mul_sum",
+            searched_plan(|cx| {
+                let a = cx.tensor((3usize, 4usize));
+                let b = cx.tensor((3usize, 4usize));
+                let _ = (a * b).sum(1).output();
+                [
+                    (a.id, vec![1.0f32; 12].into()),
+                    (b.id, vec![2.0f32; 12].into()),
+                ]
+                .into_iter()
+                .collect()
+            }),
+        ),
     ]
 }
 
@@ -148,7 +188,14 @@ fn sources_via_descriptors(
 ) -> Vec<(String, Vec<String>, bool)> {
     let mut out = Vec::new();
     for node in plan.dag.node_weights() {
-        let BufferNode::Compute { op, reads, writes, operand_info, result_info, .. } = node
+        let BufferNode::Compute {
+            op,
+            reads,
+            writes,
+            operand_info,
+            result_info,
+            ..
+        } = node
         else {
             continue;
         };
@@ -156,8 +203,16 @@ fn sources_via_descriptors(
         if label == "BufferAlloc" || label == "BufferFree" {
             continue;
         }
-        assert_eq!(operand_info.len(), reads.len(), "{label}: operand descriptors parallel reads");
-        assert_eq!(result_info.len(), writes.len(), "{label}: result descriptors parallel writes");
+        assert_eq!(
+            operand_info.len(),
+            reads.len(),
+            "{label}: operand descriptors parallel reads"
+        );
+        assert_eq!(
+            result_info.len(),
+            writes.len(),
+            "{label}: result descriptors parallel writes"
+        );
         // Phase 5: composed access is now LEGAL here — the view op is
         // electable, folded views hand their consumers the access. The
         // old zero-behavior assert (composed_access always None) died
@@ -173,7 +228,11 @@ fn sources_via_descriptors(
                 .mirror
                 .literal_extents()
                 .expect("elected slot layouts are literal in these fixtures");
-            !kernels::reads_identity(&slot.layout, &dims)
+            // Ask the PRODUCTION read path: an operand whose expression
+            // simplifies to the bare `i` emits no chain and is the flat
+            // read; anything else (including an unlowerable layout) is a
+            // fold.
+            !reads_flat(&slot.layout, &dims)
         });
         let kernel = kernels::codegen_for(op.as_ref())
             .unwrap_or_else(|| panic!("elected op {label} has no codegen row"));
@@ -227,13 +286,18 @@ mod strided {
         ShapeTerm(dims.iter().map(|&d| lit(d)).collect())
     }
     fn typed(mirror: MirrorLayout) -> CudaLayout {
-        CudaLayout { mirror, dtype: Some(PlanDtype::F32) }
+        CudaLayout {
+            mirror,
+            dtype: Some(PlanDtype::F32),
+        }
     }
     fn rm_layout(dims: &[i64]) -> CudaLayout {
-        typed(MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
-            shape: shape(dims),
-            width: BitWidthTerm(32),
-        }))
+        typed(MirrorLayout::RightMajor(
+            RightMajorContiguousElementLayout {
+                shape: shape(dims),
+                width: BitWidthTerm(32),
+            },
+        ))
     }
     fn strided_layout(dims: &[i64], chain: Vec<IntExprTerm>) -> CudaLayout {
         typed(MirrorLayout::Strided(StridedElementLayout {
@@ -277,7 +341,7 @@ mod strided {
     }
 
     /// A layout whose read does NOT reduce to the identity, for the
-    /// fail-closed write-side pins: stride 2 over the slot.s own dims.
+    /// write-side pins: stride 2 over the slot's own dims.
     fn unsimplifiable(dims: &[i64]) -> CudaLayout {
         strided_layout(dims, vec![mul(coord(0), lit(2))])
     }
@@ -344,7 +408,10 @@ mod strided {
             ],
         );
         assert_no_traps(&source);
-        assert!(!source.contains("a[i]"), "flat read must be rewritten:\n{source}");
+        assert!(
+            !source.contains("a[i]"),
+            "flat read must be rewritten:\n{source}"
+        );
         assert!(
             !source.contains("a_h0_0"),
             "Option B: no hop variables — the layout drives the read:\n{source}"
@@ -364,11 +431,7 @@ mod strided {
         let op = ops::add::AddFunctionalDps;
         let source = generate(
             &op,
-            &[
-                slot_l(layout),
-                slot(vec![4, 5]),
-                slot(vec![4, 5]),
-            ],
+            &[slot_l(layout), slot(vec![4, 5]), slot(vec![4, 5])],
             &[slot(vec![4, 5])],
         );
         assert_contains(
@@ -416,10 +479,7 @@ mod strided {
     /// or below.
     #[test]
     fn composed_offset_form_reads_one_expression() {
-        let layout = offset_layout(
-            &[3, 2],
-            add(mul(add(coord(0), lit(1)), lit(3)), coord(1)),
-        );
+        let layout = offset_layout(&[3, 2], add(mul(add(coord(0), lit(1)), lit(3)), coord(1)));
         let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
         let source = generate(
             &op,
@@ -510,7 +570,10 @@ mod strided {
             &[slot(vec![3, 2])],
         )
         .expect_err("symbolic layout extents must refuse");
-        assert!(err.to_string().contains("symbolic layout extents"), "got: {err}");
+        assert!(
+            err.to_string().contains("symbolic layout extents"),
+            "got: {err}"
+        );
         // An operand layout whose DOMAIN is not the destination's: the
         // template reads at the dest's coordinates, so this is a real
         // incoherence and refuses in the template, never reinterprets.
@@ -523,7 +586,10 @@ mod strided {
         // path and silently reinterpreted 6 elements as [3,2]. That is
         // the spelling-dependence, caught in a second place.
         for (what, layout) in [
-            ("strided spelling", strided_layout(&[2, 3], vec![coord(0), mul(coord(1), lit(3))])),
+            (
+                "strided spelling",
+                strided_layout(&[2, 3], vec![coord(0), mul(coord(1), lit(3))]),
+            ),
             ("right-major spelling", rm_layout(&[2, 3])),
         ] {
             let ctx = kernels::CodegenCtx::from_descriptors(
@@ -541,111 +607,32 @@ mod strided {
         }
     }
 
-    /// A RESULT layout whose read does NOT reduce to the identity
-    /// refuses at the single codegen entry point (strided writes are
-    /// CL-4b). RULING 2026-08-31: the fence is decided by the SIMPLIFIER
-    /// on the write function, not by the mirror constructor — a strided
-    /// chain that IS dense passes it (see
-    /// `dense_spellings_all_collapse_to_the_flat_read`), and this one
-    /// (stride 2 over a rank-1 value) does not. A CAPABILITY refusal
-    /// (the backend lowers no strided write), never a re-check of an
-    /// e-graph premise.
-    #[test]
-    fn result_that_does_not_write_at_the_identity_index_refuses() {
-        let t_layout = strided_layout(&[4], vec![mul(coord(0), lit(2))]);
-        let err = kernels::CodegenCtx::from_descriptors(
-            "ProbeOp",
-            &[slot(vec![4])],
-            &[slot_l(t_layout)],
-        )
-        .expect_err("a result that does not write at the identity index must refuse");
-        assert!(err.to_string().contains("strided writes are not lowered"), "got: {err}");
-    }
-
-    /// A dest OPERAND slot whose write index is not the identity refuses
-    /// in the template (same CL-4b line).
-    #[test]
-    fn dest_operand_that_does_not_write_at_the_identity_index_refuses() {
-        let t_layout = strided_layout(&[3, 2], vec![mul(coord(0), lit(3)), coord(1)]);
-        let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
-        let ctx = kernels::CodegenCtx::from_descriptors(
-            "Copy",
-            &[slot(vec![3, 2]), slot_l(t_layout)],
-            &[slot(vec![3, 2])],
-        )
-        .expect("ctx builds");
-        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
-            .expect_err("a dest operand that does not write at the identity index must refuse");
-        assert!(err.to_string().contains("strided writes"), "got: {err}");
-    }
-
-    /// Train-2B moved the expression-carrying kernels' READ sides into
-    /// the lowered set (`tests/composed_read_families.rs` owns those
-    /// pins); their WRITE sides stay fail-closed — a composed access on
-    /// the DPS dest operand slot refuses with the CL-4b line, never a
-    /// silently dense write through a view.
-    #[test]
-    fn expression_kernel_write_sides_stay_fail_closed() {
-        // The write-side refusal now keys on the dest OPERAND slot's
-        // own carried layout not writing at the identity index.
-        let dest_unsimplifiable = || slot_l(unsimplifiable(&[4]));
-        let coord = slot_dt(vec![4], PlanDtype::Int);
-
-        // Gather: dest0 at slot rank+1.
-        let op = ops::gather::GatherDps { rank: 1 };
-        let ctx = kernels::CodegenCtx::from_descriptors(
-            "Gather",
-            &[slot(vec![4]), coord.clone(), dest_unsimplifiable()],
-            &[slot(vec![4])],
-        )
-        .expect("ctx builds");
-        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
-            .expect_err("gather dest access must fail closed");
-        assert!(err.to_string().contains("strided writes"), "got: {err}");
-
-        // Scatter: dest0 at slot rank+2.
-        let op = ops::scatter::ScatterFunctionalDps { rank: 1 };
-        let ctx = kernels::CodegenCtx::from_descriptors(
-            "ScatterFunctional",
-            &[
-                slot(vec![4]),
-                slot(vec![2]),
-                coord.clone(),
-                dest_unsimplifiable(),
-            ],
-            &[slot(vec![4])],
-        )
-        .expect("ctx builds");
-        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
-            .expect_err("scatter dest access must fail closed");
-        assert!(err.to_string().contains("strided writes"), "got: {err}");
-
-        // Materialize: dest0 at slot 1.
-        let op = ops::index_map_apply_materialize::IndexMapApplyMaterializeDps {
-            entries: Some(vec![IotaExpr::Coord(0)]),
-        };
-        let ctx = kernels::CodegenCtx::from_descriptors(
-            "IndexMapApplyMaterialize",
-            &[slot(vec![4]), dest_unsimplifiable()],
-            &[slot(vec![4])],
-        )
-        .expect("ctx builds");
-        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
-            .expect_err("materialize dest access must fail closed");
-        assert!(err.to_string().contains("strided writes"), "got: {err}");
-
-        // Iota (dest-only signature): still the require-flat refusal.
-        let op = ops::iota::IotaDps { expr: Some(IotaExpr::Coord(0)) };
-        let ctx = kernels::CodegenCtx::from_descriptors(
-            "Iota",
-            &[dest_unsimplifiable()],
-            &[slot(vec![4])],
-        )
-        .expect("ctx builds");
-        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
-            .expect_err("iota must fail closed");
-        assert!(err.to_string().contains("does not lower"), "got: {err}");
-    }
+    // ===================================================================
+    // THREE WRITE-FENCE TESTS WERE DELETED HERE (ruling 2026-09-01).
+    //
+    //   * result_that_does_not_write_at_the_identity_index_refuses
+    //   * dest_operand_that_does_not_write_at_the_identity_index_refuses
+    //   * expression_kernel_write_sides_stay_fail_closed
+    //
+    // Each asserted that a destination whose layout is not the flat
+    // index over its dims REFUSES ("strided writes are not lowered";
+    // iota's variant, "does not lower"). Austin ruled that fence out of
+    // the backend entirely — "we should not have it in the codebase
+    // here. delete it" — so their subject no longer exists.
+    //
+    // They are deleted rather than reworded because the honest
+    // restatement of today's behavior would be "a strided destination
+    // silently emits a kernel that writes the wrong addresses", and
+    // pinning that would pin a BUG as a contract.
+    //
+    // WHERE THE PROPERTY LIVES NOW: `tests/view_admission.rs` asserts of
+    // every compute RESULT in every searched plan that its elected
+    // layout IS the flat index. That is the same property, checked where
+    // it can actually hold — over real elections — and it is the
+    // standing evidence that the unguarded gap is not being hit. When
+    // the egglog output-layout constraint lands, that assertion becomes
+    // its regression test.
+    // ===================================================================
 
     /// THE BYTE-IDENTITY PIN — unchanged text, changed meaning.
     ///
@@ -781,13 +768,15 @@ mod strided {
         }
     }
 
-    /// The write fence obeys the same rule from the other side: a dense
-    /// STRIDED destination is writable (its write index reduces to the
-    /// identity) even though it is not spelled `RightMajor` — under the
-    /// old constructor match this refused, which was a capability the
-    /// backend has being denied on a spelling.
+    /// The same rule from the write side: a dense STRIDED destination
+    /// is written at the flat index, even though it is not spelled
+    /// `RightMajor`. Under the old constructor match this refused —
+    /// a capability the backend has, denied on a spelling. (There is no
+    /// write FENCE any more, ruling 2026-09-01; what this pins is that
+    /// the emitted source is the flat one for a dense destination
+    /// however it is spelled.)
     #[test]
-    fn a_dense_strided_destination_passes_the_write_fence() {
+    fn a_dense_strided_destination_is_written_at_the_flat_index() {
         let dense_strided = strided_layout(&[2, 3], vec![coord(0), mul(coord(1), lit(3))]);
         let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
         let source = generate(
@@ -804,46 +793,100 @@ mod strided {
         );
     }
 
-    /// The simplifier is not credulous: a chain that is dense-LOOKING
-    /// but permuted, offset, or scaled must NOT collapse. (The
-    /// transpose/pitch/broadcast/offset cases above are the same point
-    /// stated through their emitted expressions; this states it as a
-    /// direct verdict, including the extent-1 rule.)
+    /// The simplification is not credulous: a chain that is
+    /// dense-LOOKING but permuted, offset, or scaled must NOT collapse
+    /// to `i`. (The transpose/pitch/broadcast/offset cases above are the
+    /// same point stated through their emitted expressions; this states
+    /// it as a direct verdict, including the extent-1 rule.)
+    ///
+    /// This once asserted on a `reads_identity` predicate. That predicate
+    /// is deleted (ruling 2026-09-01) and the behavior it named now lives
+    /// inside the one lowering, so the verdicts are read off
+    /// [`kernels::layout_read_index`] itself via [`reads_flat`] — same
+    /// cases, aimed at the surviving subject.
     #[test]
     fn only_the_identity_collapses() {
         let cases: Vec<(&str, Vec<usize>, CudaLayout, bool)> = vec![
-            ("transposed [3,2]", vec![3, 2], strided_layout(&[3, 2], vec![mul(coord(0), lit(3)), coord(1)]), false),
-            ("pitched [4,5]", vec![4, 5], strided_layout(&[4, 5], vec![coord(0), mul(coord(1), lit(8))]), false),
-            ("broadcast [2,3]", vec![2, 3], strided_layout(&[2, 3], vec![coord(0), lit(0)]), false),
-            ("nonzero base [3,2]", vec![3, 2], offset_layout(&[3, 2], add(mul(add(coord(1), lit(1)), lit(2)), coord(0))), false),
-            ("inexact division", vec![4], offset_layout(&[4], IntExprTerm::TruncDiv(Box::new(mul(coord(0), lit(3))), Box::new(lit(2)))), false),
+            (
+                "transposed [3,2]",
+                vec![3, 2],
+                strided_layout(&[3, 2], vec![mul(coord(0), lit(3)), coord(1)]),
+                false,
+            ),
+            (
+                "pitched [4,5]",
+                vec![4, 5],
+                strided_layout(&[4, 5], vec![coord(0), mul(coord(1), lit(8))]),
+                false,
+            ),
+            (
+                "broadcast [2,3]",
+                vec![2, 3],
+                strided_layout(&[2, 3], vec![coord(0), lit(0)]),
+                false,
+            ),
+            (
+                "nonzero base [3,2]",
+                vec![3, 2],
+                offset_layout(&[3, 2], add(mul(add(coord(1), lit(1)), lit(2)), coord(0))),
+                false,
+            ),
+            (
+                "inexact division",
+                vec![4],
+                offset_layout(
+                    &[4],
+                    IntExprTerm::TruncDiv(Box::new(mul(coord(0), lit(3))), Box::new(lit(2))),
+                ),
+                false,
+            ),
             ("foreign domain", vec![3, 2], rm_layout(&[2, 3]), false),
             // An extent-1 axis pins no coefficient: c is always 0, so
             // every spelling of that axis' contribution is the same
             // function. This is a fact about the function, not a licence.
-            ("extent-1 axis, stride 0", vec![1, 3], strided_layout(&[1, 3], vec![coord(0), lit(0)]), true),
-            ("extent-1 axis, wild stride", vec![1, 3], strided_layout(&[1, 3], vec![coord(0), mul(coord(1), lit(99))]), true),
+            (
+                "extent-1 axis, stride 0",
+                vec![1, 3],
+                strided_layout(&[1, 3], vec![coord(0), lit(0)]),
+                true,
+            ),
+            (
+                "extent-1 axis, wild stride",
+                vec![1, 3],
+                strided_layout(&[1, 3], vec![coord(0), mul(coord(1), lit(99))]),
+                true,
+            ),
             ("rank 0", vec![], offset_layout(&[], lit(0)), true),
             // Left-major and right-major coincide at rank 1.
-            ("left-major rank 1", vec![5], typed(MirrorLayout::LeftMajor(
-                luminal::layouts::LeftMajorContiguousElementLayout {
-                    shape: shape(&[5]),
-                    width: BitWidthTerm(32),
-                },
-            )), true),
+            (
+                "left-major rank 1",
+                vec![5],
+                typed(MirrorLayout::LeftMajor(
+                    luminal::layouts::LeftMajorContiguousElementLayout {
+                        shape: shape(&[5]),
+                        width: BitWidthTerm(32),
+                    },
+                )),
+                true,
+            ),
             // ...and diverge at rank 2, where left-major is a transpose.
-            ("left-major rank 2", vec![2, 3], typed(MirrorLayout::LeftMajor(
-                luminal::layouts::LeftMajorContiguousElementLayout {
-                    shape: shape(&[2, 3]),
-                    width: BitWidthTerm(32),
-                },
-            )), false),
+            (
+                "left-major rank 2",
+                vec![2, 3],
+                typed(MirrorLayout::LeftMajor(
+                    luminal::layouts::LeftMajorContiguousElementLayout {
+                        shape: shape(&[2, 3]),
+                        width: BitWidthTerm(32),
+                    },
+                )),
+                false,
+            ),
         ];
         for (what, dims, layout, want) in cases {
             assert_eq!(
-                kernels::reads_identity(&layout, &dims),
+                super::reads_flat(&layout, &dims),
                 want,
-                "{what}: the simplifier's verdict"
+                "{what}: does the lowered read simplify to the bare `i`?"
             );
         }
     }
@@ -863,37 +906,55 @@ fn descriptor_ctx_bails_loudly_on_unusable_layouts() {
     };
     use luminal_cuda_lite::CudaLayout;
     let rm = |shape: ShapeTerm| {
-        MirrorLayout::RightMajor(RightMajorContiguousElementLayout { shape, width: BitWidthTerm(32) })
+        MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
+            shape,
+            width: BitWidthTerm(32),
+        })
     };
     let lit_shape = ShapeTerm(vec![IntExprTerm::Lit(2), IntExprTerm::Lit(3)]);
     let filled = SlotDescriptor {
         value: luminal::prelude::egraph_serialize::ClassId::from("val$x"),
         buffer: luminal::bufferize::BufferId::Allocated(0),
-        layout: CudaLayout { mirror: rm(lit_shape.clone()), dtype: Some(PlanDtype::F32) },
+        layout: CudaLayout {
+            mirror: rm(lit_shape.clone()),
+            dtype: Some(PlanDtype::F32),
+        },
     };
     let symbolic = SlotDescriptor {
         layout: CudaLayout {
-            mirror: rm(ShapeTerm(vec![IntExprTerm::Var("n".to_string()), IntExprTerm::Lit(3)])),
+            mirror: rm(ShapeTerm(vec![
+                IntExprTerm::Var("n".to_string()),
+                IntExprTerm::Lit(3),
+            ])),
             dtype: Some(PlanDtype::F32),
         },
         ..filled.clone()
     };
     let err = kernels::CodegenCtx::from_descriptors("ProbeOp", &[symbolic], &[filled.clone()])
         .expect_err("symbolic layout extents must refuse");
-    assert!(err.to_string().contains("symbolic layout extents"), "got: {err}");
+    assert!(
+        err.to_string().contains("symbolic layout extents"),
+        "got: {err}"
+    );
     let untyped = SlotDescriptor {
-        layout: CudaLayout { mirror: rm(lit_shape), dtype: None },
+        layout: CudaLayout {
+            mirror: rm(lit_shape),
+            dtype: None,
+        },
         ..filled.clone()
     };
     let err = kernels::CodegenCtx::from_descriptors("ProbeOp", &[filled.clone()], &[untyped])
         .expect_err("a missing dtype fact must refuse");
-    assert!(err.to_string().contains("carries no dtype fact"), "got: {err}");
+    assert!(
+        err.to_string().contains("carries no dtype fact"),
+        "got: {err}"
+    );
     let ok = kernels::CodegenCtx::from_descriptors("ProbeOp", &[filled.clone()], &[filled])
         .expect("filled descriptors build");
     assert_eq!(ok.operand_dims, vec![vec![2, 3]]);
     assert!(
-        ok.expression_operand(0).is_none(),
-        "a dense layout read simplifies to the identity — no expression to lower"
+        reads_flat(ok.operand_layout(0), &ok.operand_dims[0]),
+        "a dense layout's read simplifies to the bare `i` — no chain is emitted"
     );
 }
 
@@ -916,7 +977,10 @@ fn codegen_strings_via_descriptors_match_the_buffer_table() {
     for (name, plan) in representative_plans() {
         let via_table = sources_via_buffer_table(&plan);
         let via_descriptors = sources_via_descriptors(&plan);
-        assert!(!via_table.is_empty(), "{name}: no compute kernels generated");
+        assert!(
+            !via_table.is_empty(),
+            "{name}: no compute kernels generated"
+        );
         assert_eq!(
             via_table.len(),
             via_descriptors.len(),
@@ -925,7 +989,10 @@ fn codegen_strings_via_descriptors_match_the_buffer_table() {
         for ((t_label, t_sources), (d_label, d_sources, folded)) in
             via_table.iter().zip(&via_descriptors)
         {
-            assert_eq!(t_label, d_label, "{name}: kernel order agrees between routes");
+            assert_eq!(
+                t_label, d_label,
+                "{name}: kernel order agrees between routes"
+            );
             if *folded {
                 folded_seen += 1;
                 // Divergence, in one of its two forms: a DIFFERENT
@@ -946,7 +1013,9 @@ fn codegen_strings_via_descriptors_match_the_buffer_table() {
                 }
             } else {
                 assert_eq!(
-                    t_sources.as_ref().expect("non-folded nodes generate on both routes"),
+                    t_sources
+                        .as_ref()
+                        .expect("non-folded nodes generate on both routes"),
                     d_sources,
                     "{name}/{d_label}: descriptor-derived codegen must be \
                      string-identical to the buffer table on non-folded nodes"

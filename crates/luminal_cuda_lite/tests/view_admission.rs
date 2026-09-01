@@ -49,10 +49,15 @@ fn view_search_options() -> ImplementationSearchOptions {
 }
 
 /// Load → search on the CUDA runtime; return the best plan.
-fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)]) -> BufferIrGraph<luminal_cuda_lite::CudaLayout> {
+fn plan_for(
+    cx: &Graph,
+    inputs: &[(NodeIndex, TypedBuffer)],
+) -> BufferIrGraph<luminal_cuda_lite::CudaLayout> {
     let mut rt = CudaRuntime::load(cx).expect("cuda load");
     let data: FxHashMap<NodeIndex, TypedBuffer> = inputs.iter().cloned().collect();
-    let outcome = rt.search(&data, &view_search_options()).expect("cuda search");
+    let outcome = rt
+        .search(&data, &view_search_options())
+        .expect("cuda search");
     assert!(outcome.plans_profiled > 0, "no plans profiled");
     rt.plan().expect("plan loaded").clone()
 }
@@ -71,7 +76,14 @@ fn audit(
     for node in plan.dag.node_weights() {
         match node {
             BufferNode::BufferCopy { .. } => copies += 1,
-            BufferNode::Compute { op, reads, writes, ties, operand_info, result_info } => {
+            BufferNode::Compute {
+                op,
+                reads,
+                writes,
+                ties,
+                operand_info,
+                result_info,
+            } => {
                 let label = op.label();
                 if label == "BufferAlloc" || label == "BufferFree" {
                     continue;
@@ -83,7 +95,8 @@ fn audit(
                 // subset, so the materializing spelling must lose to
                 // the fold. (Label = IR identity, house policy.)
                 assert_ne!(
-                    label, "IndexMapApplyMaterialize",
+                    label,
+                    "IndexMapApplyMaterialize",
                     "foldable movement was materialized:\n{}",
                     plan.summary()
                 );
@@ -94,8 +107,7 @@ fn audit(
                 let view_shaped = !reads.is_empty()
                     && !writes.is_empty()
                     && (0..reads.len()).all(|o| !op.operand_reads_memory(o))
-                    && (0..writes.len())
-                        .all(|r| !op.result_writes_memory(r) && derives(r));
+                    && (0..writes.len()).all(|r| !op.result_writes_memory(r) && derives(r));
                 assert!(!view_shaped, "unfolded view ({label}) reached the plan");
 
                 // Every kernel-bearing elected op has a codegen row.
@@ -110,7 +122,18 @@ fn audit(
                         .mirror
                         .literal_extents()
                         .expect("elected slot layouts are literal in these fixtures");
-                    if !luminal_cuda_lite::kernels::reads_identity(&info.layout, &dims) {
+                    // Ask the PRODUCTION read path what it emits: a read
+                    // whose expression simplifies to the bare `i` needs
+                    // no chain and is the flat read. An unlowerable
+                    // layout is certainly not one.
+                    let flat = luminal_cuda_lite::kernels::layout_read_index(
+                        "probe",
+                        &info.layout,
+                        &dims,
+                        luminal_cuda_lite::kernels::Coords::FlatIndex { prefix: "c" },
+                    )
+                    .map_or(false, |(chain, idx)| chain.is_empty() && idx == "i");
+                    if !flat {
                         composed.push((label.to_string(), slot, info.layout.clone()));
                     }
                 }
@@ -120,10 +143,27 @@ fn audit(
                         .mirror
                         .literal_extents()
                         .expect("elected slot layouts are literal in these fixtures");
+                    // THE DELETED WRITE FENCE, RESTATED AS A CORPUS
+                    // OBSERVATION. The backend no longer checks this
+                    // (ruling 2026-09-01: the constraint belongs in
+                    // egglog, matching only right-major-contiguous
+                    // outputs). Until that egglog constraint is written,
+                    // a non-dense elected result would CORRUPT rather
+                    // than refuse — so this assertion is the standing
+                    // evidence that no election in the corpus actually
+                    // produces one. If it ever fires, the gap is live.
+                    let flat = luminal_cuda_lite::kernels::layout_read_index(
+                        "probe",
+                        &info.layout,
+                        &dims,
+                        luminal_cuda_lite::kernels::Coords::FlatIndex { prefix: "c" },
+                    )
+                    .map_or(false, |(chain, idx)| chain.is_empty() && idx == "i");
                     assert!(
-                        luminal_cuda_lite::kernels::reads_identity(&info.layout, &dims),
+                        flat,
                         "{label}: a compute RESULT is produced by the node, never read \
-                         through a fold — its layout must write at the identity index"
+                         through a fold — every kernel writes out[i], so its elected \
+                         layout must BE the flat index over its dims"
                     );
                 }
             }
@@ -172,8 +212,12 @@ fn flat_index(layout: &luminal_cuda_lite::CudaLayout, out_coord: &[usize]) -> i6
                 .fold(0usize, |acc, (&c, d)| acc * d + c) as i64
         }
         M::LeftMajor(lm) => {
-            let extents: Vec<usize> =
-                lm.shape.0.iter().map(|e| eval_term(e, &[]) as usize).collect();
+            let extents: Vec<usize> = lm
+                .shape
+                .0
+                .iter()
+                .map(|e| eval_term(e, &[]) as usize)
+                .collect();
             let mut stride = 1usize;
             let mut acc = 0usize;
             for (&c, &d) in out_coord.iter().zip(&extents) {
@@ -215,7 +259,11 @@ fn transpose_consumer_folds_and_carries_the_swap_map() {
     assert_eq!(computes, 1, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(copies, 0, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(buffers, 3, "plan shape drifted:\n{}", plan.summary());
-    assert!(!composed.is_empty(), "no operand carries a folded layout:\n{}", plan.summary());
+    assert!(
+        !composed.is_empty(),
+        "no operand carries a folded layout:\n{}",
+        plan.summary()
+    );
     let (label, slot, layout) = &composed[0];
     assert_eq!(label, "MulFunctionalGeneric");
     // The layout's DOMAIN is the view's shape (3,2) — the value's own
@@ -254,7 +302,11 @@ fn slice_consumer_folds_and_carries_the_offset_map() {
     assert_eq!(computes, 1, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(copies, 0, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(buffers, 3, "plan shape drifted:\n{}", plan.summary());
-    assert!(!composed.is_empty(), "no operand carries a folded layout:\n{}", plan.summary());
+    assert!(
+        !composed.is_empty(),
+        "no operand carries a folded layout:\n{}",
+        plan.summary()
+    );
     let (_, _, layout) = &composed[0];
     assert_eq!(layout.mirror.literal_extents(), Some(vec![2, 6]));
     for i in 0..2usize {
@@ -291,7 +343,11 @@ fn broadcast_consumer_folds_and_carries_the_stride0_map() {
     assert_eq!(computes, 1, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(copies, 0, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(buffers, 3, "plan shape drifted:\n{}", plan.summary());
-    assert!(!composed.is_empty(), "no operand carries a folded layout:\n{}", plan.summary());
+    assert!(
+        !composed.is_empty(),
+        "no operand carries a folded layout:\n{}",
+        plan.summary()
+    );
     let (_, _, layout) = &composed[0];
     assert_eq!(layout.mirror.literal_extents(), Some(vec![2, 3]));
     for i in 0..2usize {
