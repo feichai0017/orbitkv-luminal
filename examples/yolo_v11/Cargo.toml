@@ -11,6 +11,15 @@ path = "src/main.rs"
 # project's release weights artifact — CSP backbone, SPPF, C2PSA
 # channel attention, per-scale DFL decode (the concat-of-slices road
 # respelled away), host letterbox/NMS.
+# Opt-in marker for this crate's heavy fidelity proofs (full genetic
+# search + decode/transcribe loops on a real runtime — llama3 measured at
+# 185s). OFF by default so the core loop stays fast; run them with
+#   cargo test -p <crate> --features zoo-proofs
+# A named feature rather than bare #[ignore] keeps "slow" distinguishable
+# from "ignored because broken".
+[features]
+zoo-proofs = []
+
 [dependencies]
 luminal = { path = "../.." }
 luminal_reference = { path = "../../crates/luminal_reference" }

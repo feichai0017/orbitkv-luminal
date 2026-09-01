@@ -25,6 +25,7 @@ fn smoke_search() -> ImplementationSearchOptions {
 /// frontier advances one row per step (rows beyond the frontier stay
 /// zero), and a second identical decoder reproduces the logits exactly.
 #[test]
+#[cfg_attr(not(feature = "zoo-proofs"), ignore = "zoo fidelity proof: a full search + decode loop (llama3 measured at 185s). The zoo is not part of the default test path — run explicitly, e.g. `cargo test -p llama3 -- --ignored`.")]
 fn tiny_decode_loop_is_deterministic_and_advances_the_cache() {
     let dims = QwenDims::tiny();
     let max_seq = 4usize;
@@ -73,6 +74,7 @@ fn tiny_decode_loop_is_deterministic_and_advances_the_cache() {
 /// originally guarded against is gone — typed buffers — but the pin
 /// stays: it exercises the primary gather spelling at scale.)
 #[test]
+#[cfg_attr(not(feature = "zoo-proofs"), ignore = "zoo fidelity proof: a full search + decode loop (llama3 measured at 185s). The zoo is not part of the default test path — run explicitly, e.g. `cargo test -p llama3 -- --ignored`.")]
 fn embedding_scale_row_gather_stays_exact() {
     const ROWS: usize = 300_000;
     const D: usize = 64;
@@ -117,6 +119,7 @@ fn embedding_scale_row_gather_stays_exact() {
 /// non-wrapping) and the residuals are exact under EVERY plan. The
 /// probe that found the bug is the proof of the fix.
 #[test]
+#[cfg_attr(not(feature = "zoo-proofs"), ignore = "zoo fidelity proof: a full search + decode loop (llama3 measured at 185s). The zoo is not part of the default test path — run explicitly, e.g. `cargo test -p llama3 -- --ignored`.")]
 fn vocab_scale_flat_index_arithmetic_stays_exact() {
     const HIDDEN: usize = 2560;
     const LAST_ROW: usize = 151_935; // Qwen3-4B vocab − 1

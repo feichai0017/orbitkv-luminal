@@ -20,6 +20,7 @@ fn smoke_search() -> ImplementationSearchOptions {
 /// frontier advances via the PositionSlots driver, bitwise-identical
 /// reruns.
 #[test]
+#[cfg_attr(not(feature = "zoo-proofs"), ignore = "zoo fidelity proof: a full search + decode loop (llama3 measured at 185s). The zoo is not part of the default test path — run explicitly, e.g. `cargo test -p llama3 -- --ignored`.")]
 fn tiny_decode_loop_is_deterministic_and_advances_the_cache() {
     let dims = Fp8Dims::tiny();
     let max_seq = 4usize;

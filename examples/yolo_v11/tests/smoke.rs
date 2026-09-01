@@ -9,6 +9,7 @@ use luminal::prelude::*;
 use yolo_v11::model::{IMG_SIZE, YoloV11};
 
 #[test]
+#[cfg_attr(not(feature = "zoo-proofs"), ignore = "zoo fidelity proof: a full search + decode loop (llama3 measured at 185s). The zoo is not part of the default test path — run explicitly, e.g. `cargo test -p llama3 -- --ignored`.")]
 fn full_graph_records_cleanly() {
     let mut cx = Graph::default();
     let img = cx.named_tensor("input.image", (1usize, 3usize, IMG_SIZE, IMG_SIZE));

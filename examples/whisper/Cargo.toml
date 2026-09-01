@@ -11,6 +11,15 @@ path = "src/main.rs"
 # openai/whisper-tiny.en — conv frontend, stored sinusoidal + learned
 # position tables, torch LayerNorm with bias, the HF projection-bias
 # asymmetry, uncached cross-attention; slot-pool decoder self-cache.
+# Opt-in marker for this crate's heavy fidelity proofs (full genetic
+# search + decode/transcribe loops on a real runtime — llama3 measured at
+# 185s). OFF by default so the core loop stays fast; run them with
+#   cargo test -p <crate> --features zoo-proofs
+# A named feature rather than bare #[ignore] keeps "slow" distinguishable
+# from "ignored because broken".
+[features]
+zoo-proofs = []
+
 [dependencies]
 luminal = { path = "../.." }
 luminal_reference = { path = "../../crates/luminal_reference" }
