@@ -304,7 +304,10 @@ pub fn run_qwen(config: QwenRunConfig) -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    println!("Recording the decode-step graph ({} layers)...", dims.layers);
+    println!(
+        "Recording the decode-step graph ({} layers)...",
+        dims.layers
+    );
     let step = DecodeStep::build(&dims, config.max_seq);
     let pairs = match &weight_source {
         Some(dir) => {
@@ -363,8 +366,7 @@ pub fn run_qwen(config: QwenRunConfig) -> Result<(), Box<dyn Error>> {
         prompt_tokens.len()
     );
     if !step_times.is_empty() {
-        let per_token =
-            step_times.iter().sum::<Duration>().as_secs_f64() / step_times.len() as f64;
+        let per_token = step_times.iter().sum::<Duration>().as_secs_f64() / step_times.len() as f64;
         println!("  decode: {per_token:.2} s/token");
     }
     Ok(())

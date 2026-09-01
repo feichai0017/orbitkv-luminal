@@ -40,7 +40,11 @@ fn entry<T: 'static>(
     label: &'static str,
     execute: fn(&dyn BufferTensorIrOp, &mut ReferenceKernelCtx) -> anyhow::Result<()>,
 ) -> ReferenceKernel {
-    ReferenceKernel { label, op_type: TypeId::of::<T>(), execute }
+    ReferenceKernel {
+        label,
+        op_type: TypeId::of::<T>(),
+        execute,
+    }
 }
 
 /// The full kernel table. One entry per executable op type; labels repeat
@@ -90,7 +94,9 @@ pub fn reference_kernels() -> &'static [ReferenceKernel] {
 /// Look up the kernel for a plan op by its concrete type.
 pub fn kernel_for(op: &dyn BufferTensorIrOp) -> Option<&'static ReferenceKernel> {
     let op_type = op.as_any().type_id();
-    reference_kernels().iter().find(|kernel| kernel.op_type == op_type)
+    reference_kernels()
+        .iter()
+        .find(|kernel| kernel.op_type == op_type)
 }
 
 /// Downcast the dispatched op to the kernel's concrete type — a mismatch
@@ -115,9 +121,7 @@ pub(crate) fn expect_op<T: 'static>(op: &dyn BufferTensorIrOp) -> anyhow::Result
 /// plus `as i64` truncation was the consumer side of the Int-in-f32
 /// smuggling (a 4.9999995 truncating to 4 while passing the bounds
 /// check).
-pub(crate) fn coordinate_columns(
-    operands: &[TypedBuffer],
-) -> anyhow::Result<Vec<Vec<i64>>> {
+pub(crate) fn coordinate_columns(operands: &[TypedBuffer]) -> anyhow::Result<Vec<Vec<i64>>> {
     operands
         .iter()
         .map(|operand| {

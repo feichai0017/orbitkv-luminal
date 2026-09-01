@@ -28,7 +28,10 @@ fn record_blocks(geometries: &[(usize, usize, usize)]) -> String {
         let w = cx.tensor((k, n));
         let _out = x.matmul(w).relu().output();
     }
-    cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+    cx.logical
+        .bound_program(&luminal_reference::ReferenceBindings)
+        .expect("recorder clean")
+        .text
 }
 
 fn probe(name: &str, geometries: &[(usize, usize, usize)], prev_nodes: Option<usize>) -> usize {
@@ -70,7 +73,11 @@ fn probe(name: &str, geometries: &[(usize, usize, usize)], prev_nodes: Option<us
     );
     // ROUND-10 RE-PIN (was == blocks): each matmul carries the original
     // site plus its transpose-sandwich sibling.
-    assert_eq!(sites, geometries.len() * 2, "original + sibling site per block");
+    assert_eq!(
+        sites,
+        geometries.len() * 2,
+        "original + sibling site per block"
+    );
     assert_eq!(ops.len(), geometries.len(), "one cublaslt kernel per block");
     assert_eq!(
         relu_ops,

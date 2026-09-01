@@ -34,7 +34,10 @@ fn bounded_program(iters: usize, with_collapse: bool) -> String {
         let x = cx.tensor((2usize, 4usize));
         let w = cx.tensor((4usize, 3usize));
         let _out = x.matmul(w).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     let preamble = luminal::egglog_snippet::assembled_program_for(&test_runtime::matchers());
     let mut program = format!("{preamble}\n\n{text}");
@@ -80,7 +83,11 @@ fn node_count(program: &str) -> usize {
     egraph
         .parse_and_run_program(None, program)
         .unwrap_or_else(|err| panic!("egglog failed: {err}"));
-    egraph.serialize(SerializeConfig::default()).egraph.nodes.len()
+    egraph
+        .serialize(SerializeConfig::default())
+        .egraph
+        .nodes
+        .len()
 }
 
 #[test]

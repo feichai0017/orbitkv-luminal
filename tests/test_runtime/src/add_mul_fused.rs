@@ -90,8 +90,16 @@ impl BufferTensorIrOp for AddMulFusedDps {
 impl Bufferizable for AddMulFusedDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
         vec![
-            AliasInfo { operand: 2, result: 0, sharing: Sharing::Must },
-            AliasInfo { operand: 3, result: 1, sharing: Sharing::Must },
+            AliasInfo {
+                operand: 2,
+                result: 0,
+                sharing: Sharing::Must,
+            },
+            AliasInfo {
+                operand: 3,
+                result: 1,
+                sharing: Sharing::Must,
+            },
         ]
     }
 }

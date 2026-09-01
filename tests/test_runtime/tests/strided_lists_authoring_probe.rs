@@ -34,7 +34,11 @@ fn strided_lists_authored_pitch_climbs_the_ladder() {
     );
     let s = test_runtime::serialize_fixture(&fx);
     let mut pitched_class_spellings: Option<std::collections::BTreeSet<String>> = None;
-    for n in s.nodes.values().filter(|n| n.op == "StridedElementLayoutLit") {
+    for n in s
+        .nodes
+        .values()
+        .filter(|n| n.op == "StridedElementLayoutLit")
+    {
         let ops: std::collections::BTreeSet<String> = s
             .nodes
             .values()

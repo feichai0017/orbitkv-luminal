@@ -28,9 +28,7 @@ fn main() {
         (model.head.weight.id, weights(6, 4).into()),
     ];
 
-    if let Err(e) =
-        support::device::run_differential("conv", &cx, &pairs, &[("logits", out.id)])
-    {
+    if let Err(e) = support::device::run_differential("conv", &cx, &pairs, &[("logits", out.id)]) {
         eprintln!("conv: FAIL: {e:#}");
         std::process::exit(1);
     }

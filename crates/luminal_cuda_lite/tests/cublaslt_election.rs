@@ -33,7 +33,9 @@ use luminal_cuda_lite::CudaRuntime;
 /// Deterministic pseudo-random values — the seeding discipline copied
 /// from `examples/support/mod.rs` (same `(n, seed)`, same values).
 fn weights(n: usize, seed: usize) -> Vec<f32> {
-    (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
+    (0..n)
+        .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
+        .collect()
 }
 
 /// One measured row of the election table.
@@ -52,7 +54,12 @@ enum Row {
 /// measured Train-3 finding; see `ops::cuda_registry_with_cublaslt`),
 /// and the table must record that honestly.
 fn search_and_count(name: &str, cx: &Graph, pairs: &[(NodeIndex, TypedBuffer)]) -> Row {
-    search_and_count_opts(name, cx, pairs, &luminal::test_support::harness_search_options())
+    search_and_count_opts(
+        name,
+        cx,
+        pairs,
+        &luminal::test_support::harness_search_options(),
+    )
 }
 
 fn search_and_count_opts(
@@ -65,7 +72,8 @@ fn search_and_count_opts(
     let mut vars: Vec<_> = cx.dyn_map.iter().collect();
     vars.sort();
     for (var, value) in vars {
-        rt.bind_dyn_range(*var, *value as u64, *value as u64).expect("dyn pin");
+        rt.bind_dyn_range(*var, *value as u64, *value as u64)
+            .expect("dyn pin");
     }
     let data: FxHashMap<NodeIndex, TypedBuffer> = pairs.iter().cloned().collect();
     let outcome = match rt.search(&data, options) {
@@ -125,7 +133,10 @@ fn cublaslt_contracts_are_registered_host_call_claims() {
     let default = CudaRuntime::allow_list();
     for form in luminal_cuda_lite::ops::cublaslt::CublasLtForm::ALL {
         let ctor = form.constructor_name();
-        assert!(with.contains(&ctor), "{ctor} missing from the marker-enabled claim set");
+        assert!(
+            with.contains(&ctor),
+            "{ctor} missing from the marker-enabled claim set"
+        );
         assert!(
             !default.contains(&ctor),
             "{ctor} in the DEFAULT claim set — the marker vocabulary must stay \
@@ -172,7 +183,9 @@ fn canonical_2d_matmul_elects_the_marker() {
     };
     let row = search_and_count_opts("matmul_2d(4x8 . 8x3)", &cx, &pairs, &options);
     let Row::Searched { elected, computes } = row else {
-        let Row::SaturationDied(msg) = row else { unreachable!() };
+        let Row::SaturationDied(msg) = row else {
+            unreachable!()
+        };
         panic!(
             "the 2D canonical matmul must SEARCH green with the marker \
              enabled; saturation died: {msg}"
@@ -340,7 +353,9 @@ fn election_row_qwen3_moe() {
     let _logits = logits.output();
 
     let block = &model.blocks[0];
-    let FeedForward::Moe(moe) = &block.ff else { unreachable!() };
+    let FeedForward::Moe(moe) = &block.ff else {
+        unreachable!()
+    };
     let pairs: Vec<(NodeIndex, TypedBuffer)> = vec![
         (ids.id, vec![2i32].into()),
         (model.embed.weight.id, weights(VOCAB * D, 1).into()),
@@ -379,7 +394,9 @@ fn election_row_gemma4_moe() {
     let _logits = logits.output();
 
     let block = &model.blocks[0];
-    let FeedForward::Moe(moe) = &block.ff else { unreachable!() };
+    let FeedForward::Moe(moe) = &block.ff else {
+        unreachable!()
+    };
     let pairs: Vec<(NodeIndex, TypedBuffer)> = vec![
         (ids.id, vec![2i32].into()),
         (model.embed.weight.id, weights(VOCAB * D, 1).into()),
@@ -422,8 +439,9 @@ fn election_row_gemma3() {
         .collect();
     let gather_idx = cx.tensor_dtyped(2, DType::Int);
     let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-    let rope_inputs: Vec<_> =
-        (0..LAYERS).map(|_| (cx.tensor((1, HD)), cx.tensor((1, HD)))).collect();
+    let rope_inputs: Vec<_> = (0..LAYERS)
+        .map(|_| (cx.tensor((1, HD)), cx.tensor((1, HD))))
+        .collect();
     let rope_rot = cx.tensor((HD, HD));
     let model = MiniGemma3::new(VOCAB, D, FF, NH, NKV, HD, LAYERS, 1, 2, &mut cx);
     let (logits, _caches_out) = model.forward(
@@ -443,7 +461,10 @@ fn election_row_gemma3() {
         (gather_idx.id, vec![0i32, 1].into()),
         (scatter_idx.id, vec![1i32].into()),
         (rope_rot.id, rope_pairing_matrix(HD, false).into()),
-        (model.final_norm.weight.expect("weighted").id, weights(D, 660).into()),
+        (
+            model.final_norm.weight.expect("weighted").id,
+            weights(D, 660).into(),
+        ),
     ];
     for (layer, block) in model.blocks.iter().enumerate() {
         let (cos_table, sin_table) =
@@ -460,20 +481,32 @@ fn election_row_gemma3() {
         pairs.push((block.gate.weight.id, weights(D * FF, seed(4)).into()));
         pairs.push((block.up.weight.id, weights(D * FF, seed(5)).into()));
         pairs.push((block.down.weight.id, weights(FF * D, seed(6)).into()));
-        pairs.push((block.input_norm.weight.expect("weighted").id, weights(D, seed(7)).into()));
+        pairs.push((
+            block.input_norm.weight.expect("weighted").id,
+            weights(D, seed(7)).into(),
+        ));
         pairs.push((
             block.post_attn_norm.weight.expect("weighted").id,
             weights(D, seed(8)).into(),
         ));
-        pairs.push((block.pre_ff_norm.weight.expect("weighted").id, weights(D, seed(9)).into()));
+        pairs.push((
+            block.pre_ff_norm.weight.expect("weighted").id,
+            weights(D, seed(9)).into(),
+        ));
         pairs.push((
             block.post_ff_norm.weight.expect("weighted").id,
             weights(D, seed(10)).into(),
         ));
         pairs.push((block.q_norm.id, weights(HD, seed(11)).into()));
         pairs.push((block.k_norm.id, weights(HD, seed(12)).into()));
-        pairs.push((caches[layer].0.id, weights(SLOTS * KV_DIM, 300 + layer).into()));
-        pairs.push((caches[layer].1.id, weights(SLOTS * KV_DIM, 320 + layer).into()));
+        pairs.push((
+            caches[layer].0.id,
+            weights(SLOTS * KV_DIM, 300 + layer).into(),
+        ));
+        pairs.push((
+            caches[layer].1.id,
+            weights(SLOTS * KV_DIM, 320 + layer).into(),
+        ));
     }
     search_and_count("gemma3", &cx, &pairs);
 }

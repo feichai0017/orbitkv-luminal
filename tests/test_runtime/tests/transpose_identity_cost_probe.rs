@@ -37,21 +37,33 @@ fn transpose_view_marginal_cost() {
     let x = cx.tensor((32usize, 48usize));
     let w = cx.tensor((48usize, 64usize));
     let _ = x.matmul(w).relu().output();
-    let p0 = cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text;
+    let p0 = cx
+        .logical
+        .bound_program(&luminal_reference::ReferenceBindings)
+        .expect("recorder clean")
+        .text;
 
     // P1: same block, plus ONE transposing view on the output.
     let mut cx = Graph::new();
     let x = cx.tensor((32usize, 48usize));
     let w = cx.tensor((48usize, 64usize));
     let _ = x.matmul(w).relu().permute((1usize, 0usize)).output();
-    let p1 = cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text;
+    let p1 = cx
+        .logical
+        .bound_program(&luminal_reference::ReferenceBindings)
+        .expect("recorder clean")
+        .text;
 
     // P2: A[m,k],B[n,k]-spelled -- the permute folds into the operand's index map.
     let mut cx = Graph::new();
     let x = cx.tensor((32usize, 48usize));
     let w = cx.tensor((64usize, 48usize));
     let _ = x.matmul(w.permute((1usize, 0usize))).relu().output();
-    let p2 = cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text;
+    let p2 = cx
+        .logical
+        .bound_program(&luminal_reference::ReferenceBindings)
+        .expect("recorder clean")
+        .text;
 
     let n0 = nodes(&p0, "P0 amk_bkn-block");
     let n1 = nodes(&p1, "P1 amk_bkn-block + output transpose view");

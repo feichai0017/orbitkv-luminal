@@ -54,8 +54,11 @@ pub use runtime::CudaRuntime;
 pub fn plan_transparent(op: &dyn luminal::layout_ir::LayoutIrOp) -> bool {
     use luminal::layout_ir::{AliasInfo, Sharing};
     let ties = op.alias_info();
-    ties == [AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
-        && !op.operand_reads_memory(0)
+    ties == [AliasInfo {
+        operand: 0,
+        result: 0,
+        sharing: Sharing::Must,
+    }] && !op.operand_reads_memory(0)
         && !op.result_writes_memory(0)
         && op.to_dps().is_none()
 }
@@ -70,7 +73,9 @@ pub fn cuda_allow_list() -> Vec<&'static str> {
     CudaRuntime::allow_list()
         .into_iter()
         .map(|constructor| {
-            constructor.strip_prefix("LayoutTensorOp").unwrap_or(constructor)
+            constructor
+                .strip_prefix("LayoutTensorOp")
+                .unwrap_or(constructor)
         })
         .collect()
 }

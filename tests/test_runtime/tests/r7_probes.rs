@@ -64,9 +64,7 @@ fn readings_over_raw_strided(s: &luminal::prelude::egraph_serialize::EGraph) -> 
     };
     s.nodes
         .values()
-        .filter(|n| {
-            n.op == "CublasLtOperandBDescriptor" || n.op == "CublasLtOperandADescriptor"
-        })
+        .filter(|n| n.op == "CublasLtOperandBDescriptor" || n.op == "CublasLtOperandADescriptor")
         .filter(|n| {
             let Some(lt) = n.children.get(1).and_then(|id| s.nodes.get(id)) else {
                 return false;
@@ -74,7 +72,10 @@ fn readings_over_raw_strided(s: &luminal::prelude::egraph_serialize::EGraph) -> 
             let lt_class = lt.eclass.clone();
             let layout = s.nodes.values().find_map(|m| {
                 if m.eclass == lt_class && m.op == "LayoutTensorLit" {
-                    m.children.get(1).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone())
+                    m.children
+                        .get(1)
+                        .and_then(|id| s.nodes.get(id))
+                        .map(|c| c.eclass.clone())
                 } else {
                     None
                 }
@@ -124,6 +125,11 @@ fn e3_negative_pitch_refuses_despite_true_injectivity() {
     );
     let s = test_runtime::serialize_fixture(&fx);
     let b = readings_over_raw_strided(&s);
-    println!("E3 negative pitch (true injectivity asserted): {b} uncertified/negative-layout reading(s)");
-    assert_eq!(b, 0, "negative pitch refused via the entry's lattice lower bound");
+    println!(
+        "E3 negative pitch (true injectivity asserted): {b} uncertified/negative-layout reading(s)"
+    );
+    assert_eq!(
+        b, 0,
+        "negative pitch refused via the entry's lattice lower bound"
+    );
 }

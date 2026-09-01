@@ -17,7 +17,10 @@ fn smoke_search() -> ImplementationSearchOptions {
 }
 
 #[test]
-#[cfg_attr(not(feature = "zoo-proofs"), ignore = "zoo fidelity proof: a full search + transcribe loop. ALSO CURRENTLY FAILING (pre-existing, not caused by the ignore): `attempt to add with overflow` in the u64 heuristic_total sum (implementation_search.rs) under dynamic-bounds pricing — suspected i64::MAX slice-end literals reaching midpoint estimation. Bisected to f2464436 and earlier. Run with `cargo test -p whisper -- --ignored`.")]
+#[cfg_attr(
+    not(feature = "zoo-proofs"),
+    ignore = "zoo fidelity proof: a full search + transcribe loop. ALSO CURRENTLY FAILING (pre-existing, not caused by the ignore): `attempt to add with overflow` in the u64 heuristic_total sum (implementation_search.rs) under dynamic-bounds pricing — suspected i64::MAX slice-end literals reaching midpoint estimation. Bisected to f2464436 and earlier. Run with `cargo test -p whisper -- --ignored`."
+)]
 fn tiny_transcribe_loop_is_deterministic_and_advances_the_cache() {
     let dims = WhisperDims::tiny();
     let mel: Vec<f32> = (0..dims.n_mels * dims.mel_frames())

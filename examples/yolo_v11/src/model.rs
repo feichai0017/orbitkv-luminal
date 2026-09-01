@@ -79,7 +79,7 @@ impl Conv {
     /// paths in the luminal e-graph. Special-cases 1x1 convs to an HLIR matmul
     /// (no unfold) since they don't need spatial windowing.
     pub fn forward_no_act(&self, x: GraphTensor) -> GraphTensor {
-                if self.k == 1 && self.s == 1 && self.p == 0 {
+        if self.k == 1 && self.s == 1 && self.p == 0 {
             return self.forward_1x1(x);
         }
         // x: (1, c_in, H, W) — keep the batch dim throughout.
@@ -201,7 +201,7 @@ impl DwConv {
     }
 
     pub fn forward_no_act(&self, x: GraphTensor) -> GraphTensor {
-                let dims = x.dims();
+        let dims = x.dims();
         let h = dims[2];
         let w = dims[3];
         let h_out = (h + 2 * self.p - self.k) / self.s + 1;
@@ -449,7 +449,7 @@ impl Sppf {
 
 /// MaxPool2d via pad (with -inf-equivalent) + unfold + max reduction.
 pub fn max_pool_2d(x: GraphTensor, k: usize, s: usize, p: usize) -> GraphTensor {
-        let dims = x.dims();
+    let dims = x.dims();
     let h = dims[2];
     let w = dims[3];
     let h_out = (h + 2 * p - k) / s + 1;
@@ -760,9 +760,9 @@ fn name_prefix_cv3_terminal(prefix: &str) -> String {
 
 pub struct Detect {
     pub scales: Vec<DetectScale>,
-    pub dfl_weight: GraphTensor, // (16,) - constant arange(16)
-    pub anchors: Vec<GraphTensor>,    // (2, 8400) precomputed
-    pub strides: Vec<GraphTensor>,    // (1, 8400) precomputed
+    pub dfl_weight: GraphTensor,   // (16,) - constant arange(16)
+    pub anchors: Vec<GraphTensor>, // (2, 8400) precomputed
+    pub strides: Vec<GraphTensor>, // (1, 8400) precomputed
     pub feat_sizes: Vec<usize>,
 }
 

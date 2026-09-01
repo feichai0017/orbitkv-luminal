@@ -57,7 +57,10 @@ pub fn cuda_registry() -> Vec<RegisteredOp> {
         matcher: impl OpMatcher + 'static,
         prototype: impl LayoutIrOp + 'static,
     ) -> RegisteredOp {
-        RegisteredOp { matcher: Box::new(matcher), prototype: Box::new(prototype) }
+        RegisteredOp {
+            matcher: Box::new(matcher),
+            prototype: Box::new(prototype),
+        }
     }
     vec![
         reg(add::AddFunctionalMatcher, add::AddFunctional),
@@ -69,14 +72,29 @@ pub fn cuda_registry() -> Vec<RegisteredOp> {
         reg(exp::ExpFunctionalMatcher, exp::ExpFunctional),
         reg(mul::MulFunctionalMatcher, mul::MulFunctional),
         reg(div::DivFunctionalMatcher, div::DivFunctional),
-        reg(trunc_div::TruncDivFunctionalMatcher, trunc_div::TruncDivFunctional),
-        reg(trunc_rem::TruncRemFunctionalMatcher, trunc_rem::TruncRemFunctional),
-        reg(reduce_sum::ReduceSumMatcher, reduce_sum::ReduceSum { axis: 0 }),
-        reg(reduce_max::ReduceMaxMatcher, reduce_max::ReduceMax { axis: 0 }),
+        reg(
+            trunc_div::TruncDivFunctionalMatcher,
+            trunc_div::TruncDivFunctional,
+        ),
+        reg(
+            trunc_rem::TruncRemFunctionalMatcher,
+            trunc_rem::TruncRemFunctional,
+        ),
+        reg(
+            reduce_sum::ReduceSumMatcher,
+            reduce_sum::ReduceSum { axis: 0 },
+        ),
+        reg(
+            reduce_max::ReduceMaxMatcher,
+            reduce_max::ReduceMax { axis: 0 },
+        ),
         reg(iota::IotaMatcher, iota::Iota { expr: None }),
         reg(gather::GatherMatcher, gather::Gather { rank: 1 }),
         reg(constant::ConstantMatcher, constant::Constant { value: 0.0 }),
-        reg(scatter::ScatterFunctionalMatcher, scatter::ScatterFunctional { rank: 1 }),
+        reg(
+            scatter::ScatterFunctionalMatcher,
+            scatter::ScatterFunctional { rank: 1 },
+        ),
         reg(exp2::Exp2FunctionalMatcher, exp2::Exp2Functional),
         reg(log2::Log2FunctionalMatcher, log2::Log2Functional),
         reg(sin::SinFunctionalMatcher, sin::SinFunctional),
@@ -131,10 +149,16 @@ pub fn cuda_registry_with_cublaslt() -> Vec<RegisteredOp> {
 /// The matcher set this runtime assembles and extracts with — the
 /// registry's matcher column.
 pub fn cuda_matchers() -> Vec<Box<dyn OpMatcher>> {
-    cuda_registry().into_iter().map(|entry| entry.matcher).collect()
+    cuda_registry()
+        .into_iter()
+        .map(|entry| entry.matcher)
+        .collect()
 }
 
 /// The matcher column of [`cuda_registry_with_cublaslt`].
 pub fn cuda_matchers_with_cublaslt() -> Vec<Box<dyn OpMatcher>> {
-    cuda_registry_with_cublaslt().into_iter().map(|entry| entry.matcher).collect()
+    cuda_registry_with_cublaslt()
+        .into_iter()
+        .map(|entry| entry.matcher)
+        .collect()
 }

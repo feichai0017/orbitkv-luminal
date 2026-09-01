@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-use crate::graph::{movement_entries, MapEntry, Movement};
+use crate::graph::{MapEntry, Movement, movement_entries};
 use crate::prelude::*;
 
 /// ONE-APPLY view composer for macro interiors (Austin's ratified rule
@@ -271,12 +271,10 @@ impl GraphTensor {
         out_dims: Vec<IntExpr>,
     ) -> GraphTensor {
         let operand = (self.id, self.dims());
-        let value = self.graph().logical.view_op(
-            &operand,
-            &entries,
-            out_dims.clone(),
-            self.dtype,
-        );
+        let value = self
+            .graph()
+            .logical
+            .view_op(&operand, &entries, out_dims.clone(), self.dtype);
         // Poisoned fallback: keep the stated out shape so downstream
         // reads stay panic-free; when recorded, with_logical re-derives
         // the dims from the recorder (R-D).
@@ -328,11 +326,7 @@ impl GraphTensor {
     }
 
     /// ONE apply (ruling 2026-08-26) — see `expand_rhs`.
-    pub fn expand_to_shape_on_axes(
-        self,
-        shape: impl ToShape,
-        axes: impl ToAxes,
-    ) -> GraphTensor {
+    pub fn expand_to_shape_on_axes(self, shape: impl ToShape, axes: impl ToAxes) -> GraphTensor {
         let shape = shape.to_shape();
         let axes = axes.to_axes();
         assert_eq!(shape.len(), self.rank() + axes.len());
@@ -629,20 +623,23 @@ impl GraphTensor {
         }
         let flat_base = flat_base.unwrap();
 
-        let mut full_flat_dest = if trailing_shape.is_empty() || trailing_numel.to_usize() == Some(1) {
-            flat_base
-        } else {
-            // The trailing offset is a pure COORDINATE FUNCTION over the
-            // trailing space (P1, 2026-08-07: no flat div/mod chain) —
-            // ONE iota + two broadcast applies replace the per-dim
-            // arange/expand scaffolding (ruling 2026-08-26).
-            let trailing_strides: Vec<IntExpr> = data_strides[k..].to_vec();
-            let trailing_offset = self.graph().iota(trailing_shape.clone(), move |c| {
-                (0..c.len()).fold(IntExpr::from(0), |acc, ti| acc + c[ti] * trailing_strides[ti])
-            });
-            flat_base.expand_rhs(trailing_shape.clone())
-                + trailing_offset.expand_lhs(vec![batch_numel])
-        };
+        let mut full_flat_dest =
+            if trailing_shape.is_empty() || trailing_numel.to_usize() == Some(1) {
+                flat_base
+            } else {
+                // The trailing offset is a pure COORDINATE FUNCTION over the
+                // trailing space (P1, 2026-08-07: no flat div/mod chain) —
+                // ONE iota + two broadcast applies replace the per-dim
+                // arange/expand scaffolding (ruling 2026-08-26).
+                let trailing_strides: Vec<IntExpr> = data_strides[k..].to_vec();
+                let trailing_offset = self.graph().iota(trailing_shape.clone(), move |c| {
+                    (0..c.len()).fold(IntExpr::from(0), |acc, ti| {
+                        acc + c[ti] * trailing_strides[ti]
+                    })
+                });
+                flat_base.expand_rhs(trailing_shape.clone())
+                    + trailing_offset.expand_lhs(vec![batch_numel])
+            };
 
         full_flat_dest = full_flat_dest.flatten();
 
@@ -794,19 +791,15 @@ impl GraphTensor {
     ) -> GraphTensor {
         let (kernel, strides, dilation) =
             (kernel.to_shape(), strides.to_shape(), dilation.to_shape());
-        let (entries, final_shape) =
-            self.unfold_map(&kernel, &strides, &dilation, self.id.index());
+        let (entries, final_shape) = self.unfold_map(&kernel, &strides, &dilation, self.id.index());
         let operand = (self.id, self.dims());
-        let logical = self.graph().logical.view_op(
-            &operand,
-            &entries,
-            final_shape.clone(),
-            self.dtype,
-        );
+        let logical =
+            self.graph()
+                .logical
+                .view_op(&operand, &entries, final_shape.clone(), self.dtype);
         // The id is minted by the recorder itself now (PR #423: the SSA
         // node IS the identity); poisoned recording keeps the source id.
-        GraphTensor::from_id(self.id, final_shape, self.graph_ref, self.dtype)
-            .with_logical(logical)
+        GraphTensor::from_id(self.id, final_shape, self.graph_ref, self.dtype).with_logical(logical)
     }
 
     /// [`unfold`](Self::unfold) opened as a [`ViewChain`], so a macro
@@ -821,8 +814,7 @@ impl GraphTensor {
     ) -> ViewChain {
         let (kernel, strides, dilation) =
             (kernel.to_shape(), strides.to_shape(), dilation.to_shape());
-        let (entries, dims) =
-            self.unfold_map(&kernel, &strides, &dilation, self.id.index());
+        let (entries, dims) = self.unfold_map(&kernel, &strides, &dilation, self.id.index());
         ViewChain {
             tensor: self,
             entries,
@@ -1117,9 +1109,9 @@ impl GraphTensor {
 mod tests {
     use crate::frontend::binary::tests::test_binary;
     use crate::frontend::unary::tests::test_unary;
-    use luminal::prelude::*;
     use crate::tests::assert_exact;
     use candle_core::{IndexOp, Tensor};
+    use luminal::prelude::*;
     use proptest::prelude::*;
 
     proptest! {
@@ -1465,7 +1457,10 @@ mod tests {
         let a = cx.tensor((2, 3));
         let repeated = (a.repeat((2, 2)) * 1.0).output();
 
-        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].into())]);
+        let rt = luminal_reference::harness::run_reference(
+            &cx,
+            &[(a.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].into())],
+        );
 
         assert_exact(
             rt.get_f32(repeated.id).unwrap(),

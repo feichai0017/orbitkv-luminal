@@ -53,8 +53,7 @@ fn corpus_scripts_all_green() {
         }
         let started = std::time::Instant::now();
         eprintln!("[corpus] running {script}");
-        let source = std::fs::read_to_string(format!("{dir}/{script}"))
-            .expect("script readable");
+        let source = std::fs::read_to_string(format!("{dir}/{script}")).expect("script readable");
         let program = format!("{program_head}\n\n{source}");
         let mut egraph = luminal::egglog_snippet::new_egraph();
         if let Err(err) = egraph.parse_and_run_program(Some(script.clone()), &program) {
@@ -84,8 +83,7 @@ fn corpus_scripts_all_green() {
 fn dump_assembled_program() {
     let program = luminal_reference::assembled_program();
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/target/assembled_program.egg");
-    std::fs::create_dir_all(concat!(env!("CARGO_MANIFEST_DIR"), "/target"))
-        .expect("target dir");
+    std::fs::create_dir_all(concat!(env!("CARGO_MANIFEST_DIR"), "/target")).expect("target dir");
     std::fs::write(path, program).expect("dump written");
     eprintln!("[dump] {} lines -> {path}", program.lines().count());
 }

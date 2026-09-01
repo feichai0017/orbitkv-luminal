@@ -295,10 +295,7 @@ impl ReferenceKernelCtx {
     /// returns Result so checked arithmetic refuses loudly (ints are
     /// semantically NON-WRAPPING — ruling 2026-08-11; an overflow is a
     /// loud kernel error, never a wrapped value).
-    pub fn binary_elementwise_i32(
-        &mut self,
-        f: impl Fn(i32, i32) -> Result<i32>,
-    ) -> Result<()> {
+    pub fn binary_elementwise_i32(&mut self, f: impl Fn(i32, i32) -> Result<i32>) -> Result<()> {
         let lhs = self.operands[0].as_i32()?;
         let rhs = self.operands[1].as_i32()?;
         anyhow::ensure!(
@@ -314,10 +311,7 @@ impl ReferenceKernelCtx {
     }
 
     /// The i64 twin of [`Self::binary_elementwise_i32`].
-    pub fn binary_elementwise_i64(
-        &mut self,
-        f: impl Fn(i64, i64) -> Result<i64>,
-    ) -> Result<()> {
+    pub fn binary_elementwise_i64(&mut self, f: impl Fn(i64, i64) -> Result<i64>) -> Result<()> {
         let lhs = self.operands[0].as_i64()?;
         let rhs = self.operands[1].as_i64()?;
         anyhow::ensure!(
@@ -732,8 +726,7 @@ impl<L: PlanLayout> BufferTensorIrGraph<L> {
                         VisualKind::LayoutIr,
                         &op.tooltip,
                     );
-                    let out_ports =
-                        crate::layout_ir::tied_out_ports(&in_slots, &out_slots, &ties);
+                    let out_ports = crate::layout_ir::tied_out_ports(&in_slots, &out_slots, &ties);
                     for (result, output) in op.outputs.iter().enumerate() {
                         let value_id = emitter.value_node(output);
                         emitter.edge_from_slot(op_id, &out_ports[result], value_id);
@@ -818,8 +811,7 @@ impl<L: PlanLayout> BufferTensorIrGraph<L> {
                         "",
                     );
                     op_ids.insert(index, op_id);
-                    let out_ports =
-                        crate::layout_ir::tied_out_ports(&in_slots, &out_slots, ties);
+                    let out_ports = crate::layout_ir::tied_out_ports(&in_slots, &out_slots, ties);
                     for (i, tensor) in operands.iter().enumerate() {
                         if let Some(value_id) =
                             residence(&mut emitter, &mut buffer_ids, &mut wired, tensor)
@@ -881,9 +873,7 @@ impl<L: PlanLayout> BufferTensorIrGraph<L> {
                         continue;
                     }
                     let operand_backed = match &self.dag[edge.target()] {
-                        BtNode::Op { operands, .. } => {
-                            operands.iter().any(|t| &t.value == value)
-                        }
+                        BtNode::Op { operands, .. } => operands.iter().any(|t| &t.value == value),
                         _ => true,
                     };
                     if operand_backed {
@@ -967,9 +957,9 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
     let mut next_position: usize = 0;
 
     let link = |dag: &mut DiGraph<BtNode, BtEdge>,
-                    producer: &HashMap<(ClassId, BufferId), NodeIndex>,
-                    tensor: &BufferTensor,
-                    to: NodeIndex| {
+                producer: &HashMap<(ClassId, BufferId), NodeIndex>,
+                tensor: &BufferTensor,
+                to: NodeIndex| {
         if let Some(&from) = producer.get(&(tensor.value.clone(), tensor.buffer.clone())) {
             dag.add_edge(
                 from,
@@ -1007,9 +997,8 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                 // repair arm below (a folded operand's copy is
                 // parent-shaped) and by the output residence split.
                 {
-                    let derives = |result: usize| {
-                        ties.iter().find(|(_, r)| *r == result).map(|(o, _)| *o)
-                    };
+                    let derives =
+                        |result: usize| ties.iter().find(|(_, r)| *r == result).map(|(o, _)| *o);
                     let is_view = !op.inputs.is_empty()
                         && !op.outputs.is_empty()
                         && (0..op.inputs.len()).all(|o| !op.op.operand_reads_memory(o))
@@ -1073,8 +1062,8 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                         continue;
                     }
                     let mut target = results[result].buffer.clone();
-                    let needs_bytes = op.op.operand_reads_memory(operand)
-                        || !op.op.result_writes_memory(result);
+                    let needs_bytes =
+                        op.op.operand_reads_memory(operand) || !op.op.result_writes_memory(result);
                     if needs_bytes {
                         // REPAIR DESTINATIONS ARE FRESH SINGLE-WRITER
                         // BUFFERS (ruling 2026-08-27) when the operand is a
@@ -1094,8 +1083,7 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                         // nothing — the parent copy IS the view's
                         // initializing write, and view and copy must share
                         // storage).
-                        if let Some(root) = view_root.get(&operands[operand].value).cloned()
-                        {
+                        if let Some(root) = view_root.get(&operands[operand].value).cloned() {
                             if op.op.result_writes_memory(result) {
                                 let id = BufferId::Allocated(next_alloc);
                                 next_alloc += 1;
@@ -1156,7 +1144,10 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                         // DEFINED producer (chained DPS: a real op's result
                         // used as a pure dest) must never be relocated — that
                         // would silently move where the earlier op writes.
-                        let old = (operands[operand].value.clone(), operands[operand].buffer.clone());
+                        let old = (
+                            operands[operand].value.clone(),
+                            operands[operand].buffer.clone(),
+                        );
                         if let Some(&producer_node) = producer.get(&old) {
                             let relocatable = dag.edges(producer_node).next().is_none()
                                 && matches!(
@@ -1221,12 +1212,9 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                             // caller takes the storage over. Zero-copy;
                             // views sharing one base share the flip.
                             BufferId::Allocated(_) => {
-                                let record =
-                                    buffers.get_mut(&src_buffer).unwrap_or_else(|| {
-                                        unreachable!(
-                                            "assignment interned every minted buffer"
-                                        )
-                                    });
+                                let record = buffers.get_mut(&src_buffer).unwrap_or_else(|| {
+                                    unreachable!("assignment interned every minted buffer")
+                                });
                                 record.freed_by = crate::layout_ir::FreedBy::Caller;
                                 src_buffer.clone()
                             }
@@ -1239,9 +1227,7 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                                 let freed_by = buffers
                                     .get(&src_buffer)
                                     .unwrap_or_else(|| {
-                                        unreachable!(
-                                            "assignment interned every boundary buffer"
-                                        )
+                                        unreachable!("assignment interned every boundary buffer")
                                     })
                                     .freed_by;
                                 match freed_by {
@@ -1265,9 +1251,7 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                                     // donated-never-backs-an-output
                                     // certificate arm by construction.
                                     crate::layout_ir::FreedBy::Program => {
-                                        if let Some(existing) =
-                                            escape_repairs.get(&src_buffer)
-                                        {
+                                        if let Some(existing) = escape_repairs.get(&src_buffer) {
                                             existing.clone()
                                         } else {
                                             let id = BufferId::Allocated(next_alloc);
@@ -1277,8 +1261,7 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                                                 Buffer {
                                                     id: id.clone(),
                                                     access: Access::ReadWrite,
-                                                    freed_by:
-                                                        crate::layout_ir::FreedBy::Caller,
+                                                    freed_by: crate::layout_ir::FreedBy::Caller,
                                                     owner: crate::bufferize::Owner::System,
                                                     label: "escape-repair".to_string(),
                                                     lit: None,
@@ -1324,8 +1307,7 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                                                 (dst.value.clone(), dst.buffer.clone()),
                                                 copy,
                                             );
-                                            escape_repairs
-                                                .insert(src_buffer.clone(), id.clone());
+                                            escape_repairs.insert(src_buffer.clone(), id.clone());
                                             id
                                         }
                                     }
@@ -1351,7 +1333,10 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                         // buffer is declared for exactly this tensor, so the
                         // sizes agree by the boundary declaration. ORDERING
                         // IS THE RUNTIME'S OBLIGATION.
-                        if buffers.get(&dest).is_some_and(|b| b.access == Access::ReadOnly) {
+                        if buffers
+                            .get(&dest)
+                            .is_some_and(|b| b.access == Access::ReadOnly)
+                        {
                             anyhow::bail!(
                                 "output slot {} requires materializing a value into \
                                  read-only buffer {:?}: ReadOnly access forbids the \
@@ -1397,9 +1382,7 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                     // node in the escaping buffer; the fold re-roots at
                     // lowering).
                     if let Some(root) = view_root.get(&tensor.value) {
-                        if let Some(&from) =
-                            producer.get(&(root.clone(), tensor.buffer.clone()))
-                        {
+                        if let Some(&from) = producer.get(&(root.clone(), tensor.buffer.clone())) {
                             dag.add_edge(
                                 from,
                                 out,
@@ -1414,8 +1397,7 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
         }
     }
     debug_assert_eq!(
-        next_position,
-        analysis.op_count,
+        next_position, analysis.op_count,
         "BufferTensor op positions diverged from analysis positions"
     );
 
@@ -1468,7 +1450,9 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
 /// The rebuild preserves node order (allocs and frees slot in at their
 /// placement points), so the lowering's emission order — and with it the
 /// plan's printed schedule — reads allocate → use → free.
-pub(crate) fn optimize<L: PlanLayout>(bt: BufferTensorIrGraph<L>) -> Result<BufferTensorIrGraph<L>> {
+pub(crate) fn optimize<L: PlanLayout>(
+    bt: BufferTensorIrGraph<L>,
+) -> Result<BufferTensorIrGraph<L>> {
     use petgraph::visit::EdgeRef;
     let BufferTensorIrGraph {
         dag,
@@ -1502,11 +1486,11 @@ pub(crate) fn optimize<L: PlanLayout>(bt: BufferTensorIrGraph<L>) -> Result<Buff
     // every placement decision below (HashMap order is not reproducible).
     let mut discovery: Vec<BufferId> = Vec::new();
     let touch = |buffer: &BufferId,
-                     index: NodeIndex,
-                     touchers: &mut HashMap<BufferId, Vec<NodeIndex>>,
-                     first_toucher: &mut HashMap<BufferId, NodeIndex>,
-                     last_toucher: &mut HashMap<BufferId, NodeIndex>,
-                     discovery: &mut Vec<BufferId>| {
+                 index: NodeIndex,
+                 touchers: &mut HashMap<BufferId, Vec<NodeIndex>>,
+                 first_toucher: &mut HashMap<BufferId, NodeIndex>,
+                 last_toucher: &mut HashMap<BufferId, NodeIndex>,
+                 discovery: &mut Vec<BufferId>| {
         touchers.entry(buffer.clone()).or_default().push(index);
         if !first_toucher.contains_key(buffer) {
             first_toucher.insert(buffer.clone(), index);
@@ -1516,7 +1500,12 @@ pub(crate) fn optimize<L: PlanLayout>(bt: BufferTensorIrGraph<L>) -> Result<Buff
     };
     for index in dag.node_indices() {
         match &dag[index] {
-            node @ BtNode::Op { op, operands, results, .. } => {
+            node @ BtNode::Op {
+                op,
+                operands,
+                results,
+                ..
+            } => {
                 if is_poison_shaped(node) {
                     let system = results
                         .iter()
@@ -1544,19 +1533,40 @@ pub(crate) fn optimize<L: PlanLayout>(bt: BufferTensorIrGraph<L>) -> Result<Buff
                 // buffer, so the buffer is still touched.)
                 for (operand, tensor) in operands.iter().enumerate() {
                     if op.operand_reads_memory(operand) {
-                        touch(&tensor.buffer, index, &mut touchers, &mut first_toucher, &mut last_toucher, &mut discovery);
+                        touch(
+                            &tensor.buffer,
+                            index,
+                            &mut touchers,
+                            &mut first_toucher,
+                            &mut last_toucher,
+                            &mut discovery,
+                        );
                     }
                 }
                 for (result, tensor) in results.iter().enumerate() {
                     if op.result_writes_memory(result) {
-                        touch(&tensor.buffer, index, &mut touchers, &mut first_toucher, &mut last_toucher, &mut discovery);
+                        touch(
+                            &tensor.buffer,
+                            index,
+                            &mut touchers,
+                            &mut first_toucher,
+                            &mut last_toucher,
+                            &mut discovery,
+                        );
                         final_resident.insert(tensor.buffer.clone(), (tensor.clone(), index));
                     }
                 }
             }
             BtNode::Input { slots } => {
                 for slot in slots {
-                    touch(&slot.buffer, index, &mut touchers, &mut first_toucher, &mut last_toucher, &mut discovery);
+                    touch(
+                        &slot.buffer,
+                        index,
+                        &mut touchers,
+                        &mut first_toucher,
+                        &mut last_toucher,
+                        &mut discovery,
+                    );
                     // The caller-installed resident: the free's operand when
                     // nothing in the program ever writes the buffer.
                     final_resident
@@ -1566,7 +1576,14 @@ pub(crate) fn optimize<L: PlanLayout>(bt: BufferTensorIrGraph<L>) -> Result<Buff
             }
             BtNode::Output { slots } => {
                 for slot in slots {
-                    touch(&slot.buffer, index, &mut touchers, &mut first_toucher, &mut last_toucher, &mut discovery);
+                    touch(
+                        &slot.buffer,
+                        index,
+                        &mut touchers,
+                        &mut first_toucher,
+                        &mut last_toucher,
+                        &mut discovery,
+                    );
                 }
             }
         }
@@ -1658,8 +1675,7 @@ pub(crate) fn optimize<L: PlanLayout>(bt: BufferTensorIrGraph<L>) -> Result<Buff
         }
         // Frees for buffers last touched here.
         for buffer in frees_after.get(&index).cloned().unwrap_or_default() {
-            let Some((resident, producer_index)) = final_resident.get(&buffer).cloned()
-            else {
+            let Some((resident, producer_index)) = final_resident.get(&buffer).cloned() else {
                 // Never a panic: a freed buffer with no final written resident
                 // means a value chain reached the free stage with no producer
                 // (e.g. undefined contents routed through views past an
@@ -1796,9 +1812,8 @@ pub(crate) fn install_anti_edges<L: PlanLayout>(bt: &mut BufferTensorIrGraph<L>)
             })
             .collect();
         for reader in readers {
-            let ordered =
-                petgraph::algo::has_path_connecting(&frozen, reader, *writer, None)
-                    || petgraph::algo::has_path_connecting(&frozen, *writer, reader, None);
+            let ordered = petgraph::algo::has_path_connecting(&frozen, reader, *writer, None)
+                || petgraph::algo::has_path_connecting(&frozen, *writer, reader, None);
             if !ordered {
                 bt.dag.add_edge(
                     reader,
@@ -1908,7 +1923,10 @@ pub(crate) fn validate<L: PlanLayout>(bt: &BufferTensorIrGraph<L>) -> Result<()>
         }
         for (result, tensor) in results.iter().enumerate() {
             let parent = &operands[derives(result).expect("checked by is_view")].value;
-            let root = view_root.get(parent).cloned().unwrap_or_else(|| parent.clone());
+            let root = view_root
+                .get(parent)
+                .cloned()
+                .unwrap_or_else(|| parent.clone());
             view_root.insert(tensor.value.clone(), root);
         }
     }
@@ -2038,13 +2056,25 @@ pub(crate) fn validate<L: PlanLayout>(bt: &BufferTensorIrGraph<L>) -> Result<()>
                 let free_shaped = results.is_empty() && !operands.is_empty();
                 if alloc_shaped {
                     for tensor in results {
-                        note(&tensor.buffer, index, &mut allocs, &mut seen, &mut lifetime_order);
+                        note(
+                            &tensor.buffer,
+                            index,
+                            &mut allocs,
+                            &mut seen,
+                            &mut lifetime_order,
+                        );
                     }
                     continue;
                 }
                 if free_shaped {
                     for tensor in operands {
-                        note(&tensor.buffer, index, &mut frees, &mut seen, &mut lifetime_order);
+                        note(
+                            &tensor.buffer,
+                            index,
+                            &mut frees,
+                            &mut seen,
+                            &mut lifetime_order,
+                        );
                     }
                     continue;
                 }
@@ -2053,23 +2083,47 @@ pub(crate) fn validate<L: PlanLayout>(bt: &BufferTensorIrGraph<L>) -> Result<()>
                 // invisible; their readers are touchers in their own right).
                 for (operand, tensor) in operands.iter().enumerate() {
                     if op.operand_reads_memory(operand) {
-                        note(&tensor.buffer, index, &mut touchers, &mut seen, &mut lifetime_order);
+                        note(
+                            &tensor.buffer,
+                            index,
+                            &mut touchers,
+                            &mut seen,
+                            &mut lifetime_order,
+                        );
                     }
                 }
                 for (result, tensor) in results.iter().enumerate() {
                     if op.result_writes_memory(result) {
-                        note(&tensor.buffer, index, &mut touchers, &mut seen, &mut lifetime_order);
+                        note(
+                            &tensor.buffer,
+                            index,
+                            &mut touchers,
+                            &mut seen,
+                            &mut lifetime_order,
+                        );
                     }
                 }
             }
             BtNode::Input { slots } => {
                 for slot in slots {
-                    note(&slot.buffer, index, &mut touchers, &mut seen, &mut lifetime_order);
+                    note(
+                        &slot.buffer,
+                        index,
+                        &mut touchers,
+                        &mut seen,
+                        &mut lifetime_order,
+                    );
                 }
             }
             BtNode::Output { slots } => {
                 for slot in slots {
-                    note(&slot.buffer, index, &mut touchers, &mut seen, &mut lifetime_order);
+                    note(
+                        &slot.buffer,
+                        index,
+                        &mut touchers,
+                        &mut seen,
+                        &mut lifetime_order,
+                    );
                     output_bound.entry(slot.buffer.clone()).or_insert(index);
                 }
             }
@@ -2202,8 +2256,7 @@ pub(crate) fn validate<L: PlanLayout>(bt: &BufferTensorIrGraph<L>) -> Result<()>
         let buffer_touchers = touchers.get(buffer).map(Vec::as_slice).unwrap_or(&[]);
         for &alloc in buffer_allocs {
             for &toucher in buffer_touchers {
-                if !petgraph::algo::has_path_connecting(&bt.dag, alloc, toucher, Some(&mut space))
-                {
+                if !petgraph::algo::has_path_connecting(&bt.dag, alloc, toucher, Some(&mut space)) {
                     anyhow::bail!(
                         "plan validation failed: {} touches buffer {:?} \
                          unordered against its allocation — some legal \
@@ -2216,8 +2269,7 @@ pub(crate) fn validate<L: PlanLayout>(bt: &BufferTensorIrGraph<L>) -> Result<()>
         }
         for &free in buffer_frees {
             for &toucher in buffer_touchers {
-                if !petgraph::algo::has_path_connecting(&bt.dag, toucher, free, Some(&mut space))
-                {
+                if !petgraph::algo::has_path_connecting(&bt.dag, toucher, free, Some(&mut space)) {
                     anyhow::bail!(
                         "plan validation failed: {} touches buffer {:?} \
                          unordered against its free — some legal schedule \
@@ -2783,8 +2835,21 @@ mod f8e4m3_semantics {
             }
         }
         probes.extend_from_slice(&[
-            447.9, 448.0, 448.1, 500.0, 1e9, -447.9, -448.0, -448.1, -500.0, -1e9,
-            1e-12, -1e-12, 0.0, -0.0, f32::NAN,
+            447.9,
+            448.0,
+            448.1,
+            500.0,
+            1e9,
+            -447.9,
+            -448.0,
+            -448.1,
+            -500.0,
+            -1e9,
+            1e-12,
+            -1e-12,
+            0.0,
+            -0.0,
+            f32::NAN,
         ]);
         for value in probes {
             let ours = kernel_quantize(value).to_bits();

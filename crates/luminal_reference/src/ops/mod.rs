@@ -29,8 +29,6 @@ pub(crate) mod add;
 pub(crate) mod cast;
 pub(crate) mod constant;
 pub(crate) mod div;
-pub(crate) mod trunc_div;
-pub(crate) mod trunc_rem;
 pub(crate) mod exp;
 pub(crate) mod exp2;
 pub(crate) mod gather;
@@ -42,6 +40,8 @@ pub(crate) mod log2;
 pub(crate) mod materialize_layout_copy;
 pub(crate) mod modulo;
 pub(crate) mod mul;
+pub(crate) mod trunc_div;
+pub(crate) mod trunc_rem;
 // (poison moved to core `luminal::poison` in Step B; re-exported below.)
 pub(crate) mod recip;
 pub(crate) mod reduce_max;
@@ -71,10 +71,10 @@ pub use index_map_apply_view::IndexMapApplyView;
 pub use iota::Iota;
 pub use less_than::LessThan;
 pub use log2::{Log2Functional, Log2Mutating};
-pub use modulo::{ModFunctional, ModMutating};
-pub use materialize_layout_copy::MaterializeLayoutCopy;
-pub use mul::{MulFunctional, MulMutating};
 pub use luminal::poison::Poison;
+pub use materialize_layout_copy::MaterializeLayoutCopy;
+pub use modulo::{ModFunctional, ModMutating};
+pub use mul::{MulFunctional, MulMutating};
 pub use recip::{RecipFunctional, RecipMutating};
 pub use reduce_max::ReduceMax;
 pub use reduce_sum::ReduceSum;
@@ -110,8 +110,6 @@ pub use add::{AddFunctionalMatcher, AddMutatingInputAliasSafeMatcher, AddMutatin
 pub use cast::CastMatcher;
 pub use constant::ConstantMatcher;
 pub use div::{DivFunctionalMatcher, DivMutatingMatcher};
-pub use trunc_div::{TruncDivFunctional, TruncDivFunctionalDps, TruncDivFunctionalMatcher};
-pub use trunc_rem::{TruncRemFunctional, TruncRemFunctionalDps, TruncRemFunctionalMatcher};
 pub use exp::{ExpFunctionalMatcher, ExpMutatingMatcher};
 pub use exp2::{Exp2FunctionalMatcher, Exp2MutatingMatcher};
 pub use gather::GatherMatcher;
@@ -120,8 +118,8 @@ pub use index_map_apply_view::IndexMapApplyViewMatcher;
 pub use iota::IotaMatcher;
 pub use less_than::LessThanMatcher;
 pub use log2::{Log2FunctionalMatcher, Log2MutatingMatcher};
-pub use modulo::{ModFunctionalMatcher, ModMutatingMatcher};
 pub use materialize_layout_copy::MaterializeLayoutCopyMatcher;
+pub use modulo::{ModFunctionalMatcher, ModMutatingMatcher};
 pub use mul::{MulFunctionalMatcher, MulMutatingMatcher};
 pub use recip::{RecipFunctionalMatcher, RecipMutatingMatcher};
 pub use reduce_max::ReduceMaxMatcher;
@@ -129,6 +127,8 @@ pub use reduce_sum::ReduceSumMatcher;
 pub use scatter::{ScatterFunctionalMatcher, ScatterMutatingMatcher};
 pub use sin::{SinFunctionalMatcher, SinMutatingMatcher};
 pub use sqrt::{SqrtFunctionalMatcher, SqrtMutatingMatcher};
+pub use trunc_div::{TruncDivFunctional, TruncDivFunctionalDps, TruncDivFunctionalMatcher};
+pub use trunc_rem::{TruncRemFunctional, TruncRemFunctionalDps, TruncRemFunctionalMatcher};
 
 /// THE registration list: every built-in matcher, one line per registered
 /// implementation. Adding an op = writing its module (instances + traits +
@@ -209,8 +209,12 @@ mod registry_contract {
     /// blanket permit the engine would have to trust.
     #[test]
     fn builtin_ops_declare_no_unconditional_permits() {
+        use super::{
+            AddFunctional, AddMutating, DivFunctional, ExpFunctional, IndexMapApplyMaterialize,
+            MaterializeLayoutCopy, MulFunctional, ReduceMax, ReduceSum, SqrtFunctional,
+            SqrtMutating,
+        };
         use luminal::test_support::test_ops::AddMulFused;
-        use super::{AddFunctional, AddMutating, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax, ReduceSum, SqrtFunctional, SqrtMutating};
         let ops: Vec<Box<dyn LayoutIrOp>> = vec![
             Box::new(SqrtFunctional),
             Box::new(ExpFunctional),
@@ -227,7 +231,9 @@ mod registry_contract {
         ];
         for op in &ops {
             assert!(
-                op.alias_info().iter().all(|info| info.sharing == Sharing::Must),
+                op.alias_info()
+                    .iter()
+                    .all(|info| info.sharing == Sharing::Must),
                 "{}",
                 op.label()
             );

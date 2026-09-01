@@ -18,8 +18,28 @@ impl MiniConvNet {
     /// Input (ch_in, h, w) with h = w = 5 and 3×3 valid convs: 5→3→1.
     pub fn new(ch_in: usize, c1: usize, c2: usize, classes: usize, cx: &mut Graph) -> Self {
         Self {
-            conv1: ConvND::new(ch_in, c1, [3, 3], [1, 1], [1, 1], [0, 0], false, &Ns::root().child("conv1"), cx),
-            conv2: ConvND::new(c1, c2, [3, 3], [1, 1], [1, 1], [0, 0], false, &Ns::root().child("conv2"), cx),
+            conv1: ConvND::new(
+                ch_in,
+                c1,
+                [3, 3],
+                [1, 1],
+                [1, 1],
+                [0, 0],
+                false,
+                &Ns::root().child("conv1"),
+                cx,
+            ),
+            conv2: ConvND::new(
+                c1,
+                c2,
+                [3, 3],
+                [1, 1],
+                [1, 1],
+                [0, 0],
+                false,
+                &Ns::root().child("conv2"),
+                cx,
+            ),
             head: Linear::new(c2, classes, false, &Ns::root().child("head"), cx),
             classes,
         }
@@ -29,8 +49,8 @@ impl MiniConvNet {
     pub fn forward(&self, x: GraphTensor) -> GraphTensor {
         let x = self.conv1.forward(x).relu(); // (1, c1, 3, 3)
         let x = self.conv2.forward(x).relu(); // (1, c2, 1, 1)
-        // Flatten features keeping the batch axis — ONE construct, ONE
-        // apply (ruling 2026-08-26): (1, c2, 1, 1) → (1, c2).
+                                              // Flatten features keeping the batch axis — ONE construct, ONE
+                                              // apply (ruling 2026-08-26): (1, c2, 1, 1) → (1, c2).
         let features = x.view().merge_dims(2, 3).merge_dims(1, 2).finish();
         let logits = self.head.forward(features); // (1, classes)
         let _ = self.classes;

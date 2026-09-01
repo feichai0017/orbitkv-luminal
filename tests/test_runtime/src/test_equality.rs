@@ -47,14 +47,15 @@ pub fn eval_term(expr: &IntExprTerm, coords: &[usize]) -> Result<i64> {
         }
         IntExprTerm::CeilDiv(a, b) => {
             let (a, b) = (eval_term(a, coords)?, eval_term(b, coords)?);
-            ensure!(b > 0, "ceil-div by non-positive divisor in layout expression");
+            ensure!(
+                b > 0,
+                "ceil-div by non-positive divisor in layout expression"
+            );
             a.div_euclid(b) + if a.rem_euclid(b) != 0 { 1 } else { 0 }
         }
         IntExprTerm::Min(a, b) => eval_term(a, coords)?.min(eval_term(b, coords)?),
         IntExprTerm::Max(a, b) => eval_term(a, coords)?.max(eval_term(b, coords)?),
-        IntExprTerm::LessThanCast(a, b) => {
-            (eval_term(a, coords)? < eval_term(b, coords)?) as i64
-        }
+        IntExprTerm::LessThanCast(a, b) => (eval_term(a, coords)? < eval_term(b, coords)?) as i64,
     })
 }
 
@@ -230,12 +231,7 @@ mod tests {
             shape: shape(&[3, 2]),
             width: BitWidthTerm(32),
         });
-        assert_same_f32(
-            (&x, &view_layout),
-            (&dense, &dense_layout),
-            &[3, 2],
-            0.0,
-        );
+        assert_same_f32((&x, &view_layout), (&dense, &dense_layout), &[3, 2], 0.0);
     }
 
     /// The offset-expression forms read identically to their spelled

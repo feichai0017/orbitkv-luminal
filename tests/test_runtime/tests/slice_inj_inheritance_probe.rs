@@ -276,7 +276,9 @@ fn class_has(s: &EGraph, class: &ClassId, op: &str) -> bool {
 fn strided_only_lt_classes(s: &EGraph) -> Vec<ClassId> {
     let mut out: Vec<ClassId> = Vec::new();
     for n in s.nodes.values().filter(|n| n.op == "LayoutTensorLit") {
-        let Some(layout) = n.children.get(1).and_then(|id| s.nodes.get(id)) else { continue };
+        let Some(layout) = n.children.get(1).and_then(|id| s.nodes.get(id)) else {
+            continue;
+        };
         let layout_class = layout.eclass.clone();
         if class_has(s, &layout_class, "StridedElementLayoutLit")
             && !class_has(s, &layout_class, "RightMajorContiguousElementLayoutLit")
@@ -295,7 +297,9 @@ fn stamped_strided_only_lt_classes(s: &EGraph) -> Vec<ClassId> {
     let strided_only = strided_only_lt_classes(s);
     let mut out: Vec<ClassId> = Vec::new();
     for n in s.nodes.values().filter(|n| n.op == "injectivity-of") {
-        let Some(lt) = n.children.first().and_then(|id| s.nodes.get(id)) else { continue };
+        let Some(lt) = n.children.first().and_then(|id| s.nodes.get(id)) else {
+            continue;
+        };
         if strided_only.contains(&lt.eclass) && !out.contains(&lt.eclass) {
             out.push(lt.eclass.clone());
         }
@@ -315,7 +319,12 @@ fn stamped_input_view_lt_classes(s: &EGraph) -> Vec<ClassId> {
         .filter(|lt_class| {
             let Some(logical) = s.nodes.values().find_map(|m| {
                 (m.eclass == *lt_class && m.op == "LayoutTensorLit")
-                    .then(|| m.children.first().and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone()))
+                    .then(|| {
+                        m.children
+                            .first()
+                            .and_then(|id| s.nodes.get(id))
+                            .map(|c| c.eclass.clone())
+                    })
                     .flatten()
             }) else {
                 return false;
@@ -327,9 +336,9 @@ fn stamped_input_view_lt_classes(s: &EGraph) -> Vec<ClassId> {
                         .first()
                         .and_then(|id| s.nodes.get(id))
                         .map(|parent| {
-                            s.nodes
-                                .values()
-                                .any(|q| q.eclass == parent.eclass && q.op == "LogicalTensorInputLit")
+                            s.nodes.values().any(|q| {
+                                q.eclass == parent.eclass && q.op == "LogicalTensorInputLit"
+                            })
                         })
                         .unwrap_or(false)
             })
@@ -341,12 +350,23 @@ fn stamped_input_view_lt_classes(s: &EGraph) -> Vec<ClassId> {
 /// Strided-only (the zero-copy pitched view, not the materialising copy).
 fn a_readings_over_the_pitched_view(s: &EGraph) -> Vec<&'static str> {
     let mut out = Vec::new();
-    for n in s.nodes.values().filter(|n| n.op == "CublasLtOperandADescriptor") {
-        let Some(lt) = n.children.get(1).and_then(|id| s.nodes.get(id)) else { continue };
+    for n in s
+        .nodes
+        .values()
+        .filter(|n| n.op == "CublasLtOperandADescriptor")
+    {
+        let Some(lt) = n.children.get(1).and_then(|id| s.nodes.get(id)) else {
+            continue;
+        };
         let lt_class = lt.eclass.clone();
         let Some(layout) = s.nodes.values().find_map(|m| {
             (m.eclass == lt_class && m.op == "LayoutTensorLit")
-                .then(|| m.children.get(1).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone()))
+                .then(|| {
+                    m.children
+                        .get(1)
+                        .and_then(|id| s.nodes.get(id))
+                        .map(|c| c.eclass.clone())
+                })
                 .flatten()
         }) else {
             continue;
@@ -357,7 +377,12 @@ fn a_readings_over_the_pitched_view(s: &EGraph) -> Vec<&'static str> {
         {
             continue;
         }
-        let op = match n.children.get(2).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone()) {
+        let op = match n
+            .children
+            .get(2)
+            .and_then(|id| s.nodes.get(id))
+            .map(|c| c.eclass.clone())
+        {
             Some(c) if class_has(s, &c, "CublasLtOperationT") => "T",
             Some(c) if class_has(s, &c, "CublasLtOperationN") => "N",
             _ => "?",
@@ -384,9 +409,19 @@ fn baseline_zero_base_slice_has_no_derived_injectivity() {
     // rewrite's transport legitimately stamps matmul-out views).
     let stamped = stamped_input_view_lt_classes(&s);
     let readings = a_readings_over_the_pitched_view(&s);
-    println!("baseline: strided-only LTs = {}, stamped input views = {}, readings = {readings:?}", views.len(), stamped.len());
-    assert!(stamped.is_empty(), "no rule and no certificate, yet an input-view LT is stamped injective");
-    assert!(readings.is_empty(), "fail-closed baseline: the pitched view must not be read");
+    println!(
+        "baseline: strided-only LTs = {}, stamped input views = {}, readings = {readings:?}",
+        views.len(),
+        stamped.len()
+    );
+    assert!(
+        stamped.is_empty(),
+        "no rule and no certificate, yet an input-view LT is stamped injective"
+    );
+    assert!(
+        readings.is_empty(),
+        "fail-closed baseline: the pitched view must not be read"
+    );
 }
 
 /// (b) THE CANDIDATE RULE fires on the r9 geometry with NO creator
@@ -398,7 +433,10 @@ fn inheritance_rule_stamps_the_slice_and_the_reading_admits_it() {
     // ROUND-10 RE-SCOPE: input-view stamps only (see the baseline test).
     let stamped = stamped_input_view_lt_classes(&s);
     let readings = a_readings_over_the_pitched_view(&s);
-    println!("with rule: stamped input-view LTs = {}, readings = {readings:?}", stamped.len());
+    println!(
+        "with rule: stamped input-view LTs = {}, readings = {readings:?}",
+        stamped.len()
+    );
     assert_eq!(
         stamped.len(),
         1,
@@ -424,7 +462,11 @@ fn broadcast_constant_entry_does_not_inherit() {
         "SETUP BROKE: the broadcast view's composed strided layout tensor was never derived"
     );
     let stamped = stamped_strided_only_lt_classes(&s);
-    println!("broadcast attack: strided-only LTs = {}, stamped = {}", views.len(), stamped.len());
+    println!(
+        "broadcast attack: strided-only LTs = {}, stamped = {}",
+        views.len(),
+        stamped.len()
+    );
     assert!(
         stamped.is_empty(),
         "MISCOMPILE HOLE: a broadcast view (out axis unread, extent 4) inherited injectivity"
@@ -439,7 +481,10 @@ fn broadcast_constant_entry_does_not_inherit() {
 fn rank3_unread_axis_attack() {
     let s = test_runtime::serialize_fixture(&rank3_attack_fixture(INHERIT_RULE_RANK2));
     let views = strided_only_lt_classes(&s);
-    assert!(!views.is_empty(), "SETUP BROKE: rank-3 view composition did not run");
+    assert!(
+        !views.is_empty(),
+        "SETUP BROKE: rank-3 view composition did not run"
+    );
     let stamped = stamped_strided_only_lt_classes(&s);
     println!("rank-3 attack, sound rule: stamped = {}", stamped.len());
     assert!(
@@ -521,7 +566,10 @@ fn nonzero_start_slice_is_outside_v1_scope_and_fails_closed() {
 fn repeated_entry_map_does_not_inherit() {
     let s = test_runtime::serialize_fixture(&repeated_entry_attack_fixture(INHERIT_RULE_RANK2));
     let views = strided_only_lt_classes(&s);
-    assert!(!views.is_empty(), "SETUP BROKE: repeated-entry view composition did not run");
+    assert!(
+        !views.is_empty(),
+        "SETUP BROKE: repeated-entry view composition did not run"
+    );
     let stamped = stamped_strided_only_lt_classes(&s);
     println!("repeated-entry attack: stamped = {}", stamped.len());
     assert!(

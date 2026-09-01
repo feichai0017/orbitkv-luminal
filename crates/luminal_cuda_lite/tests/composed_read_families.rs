@@ -486,9 +486,8 @@ fn materialize_lowers_a_folded_input_operand() {
         };
         use luminal_cuda_lite::layouts::CudaLayout;
 
-        let dims = |extents: &[i64]| {
-            ShapeTerm(extents.iter().map(|&e| IntExprTerm::Lit(e)).collect())
-        };
+        let dims =
+            |extents: &[i64]| ShapeTerm(extents.iter().map(|&e| IntExprTerm::Lit(e)).collect());
         let coord = |axis_from_end: i64| IntExprTerm::Coord { axis_from_end };
         // x^T seen at the parent VALUE's coordinates (3,2): x is (2,3)
         // row-major, so x^T[a][b] = x flat b*3 + a — the chain
@@ -499,26 +498,18 @@ fn materialize_lowers_a_folded_input_operand() {
                 // Coord counts FROM THE END: p0 (first axis) is
                 // coord(1) at rank 2. x^T[p0][p1] = x flat p0*1 + p1*3.
                 chain: vec![
-                    IntExprTerm::Mul(
-                        Box::new(coord(1)),
-                        Box::new(IntExprTerm::Lit(1)),
-                    ),
-                    IntExprTerm::Mul(
-                        Box::new(coord(0)),
-                        Box::new(IntExprTerm::Lit(3)),
-                    ),
+                    IntExprTerm::Mul(Box::new(coord(1)), Box::new(IntExprTerm::Lit(1))),
+                    IntExprTerm::Mul(Box::new(coord(0)), Box::new(IntExprTerm::Lit(3))),
                 ],
                 width: BitWidthTerm(32),
             }),
             dtype: Some(luminal::dtype::PlanDtype::F32),
         };
         let rm = |extents: &[i64]| CudaLayout {
-            mirror: MirrorLayout::RightMajor(
-                luminal::layouts::RightMajorContiguousElementLayout {
-                    shape: dims(extents),
-                    width: BitWidthTerm(32),
-                },
-            ),
+            mirror: MirrorLayout::RightMajor(luminal::layouts::RightMajorContiguousElementLayout {
+                shape: dims(extents),
+                width: BitWidthTerm(32),
+            }),
             dtype: Some(luminal::dtype::PlanDtype::F32),
         };
         let slot = |layout: CudaLayout| luminal::bufferize::SlotDescriptor {

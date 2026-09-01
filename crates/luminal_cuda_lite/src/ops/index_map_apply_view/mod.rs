@@ -67,7 +67,11 @@ impl BufferTensorIrOp for IndexMapApplyView {
 
 impl Bufferizable for IndexMapApplyView {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 0,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 

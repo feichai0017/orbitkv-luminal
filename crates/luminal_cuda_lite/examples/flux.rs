@@ -53,13 +53,17 @@ fn main() {
     let rope_rot = cx.tensor((HD, HD));
     let joint_base = cx.tensor((S, D));
     let _velocity = model
-        .forward(latent, text, t, guidance, rope_cos, rope_sin, rope_rot, joint_base)
+        .forward(
+            latent, text, t, guidance, rope_cos, rope_sin, rope_rot, joint_base,
+        )
         .output();
 
     match cx.logical.model_text() {
         Ok(model_text) => {
             let rows = model_text.lines().filter(|l| !l.trim().is_empty()).count();
-            println!("flux: MiniDit records cleanly ({rows} model rows) — the graph itself is fine.");
+            println!(
+                "flux: MiniDit records cleanly ({rows} model rows) — the graph itself is fine."
+            );
         }
         Err(e) => {
             // Louder than the known blockage: the record itself broke.

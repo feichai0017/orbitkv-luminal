@@ -21,10 +21,15 @@ fn genome_flavored(
     let mut class_ops: HashMap<&luminal::prelude::egraph_serialize::ClassId, Vec<&str>> =
         HashMap::new();
     for node in egraph.nodes.values() {
-        class_ops.entry(&node.eclass).or_default().push(node.op.as_str());
+        class_ops
+            .entry(&node.eclass)
+            .or_default()
+            .push(node.op.as_str());
     }
     let class_has = |class: &luminal::prelude::egraph_serialize::ClassId, op: &str| {
-        class_ops.get(class).is_some_and(|ops| ops.iter().any(|o| *o == op))
+        class_ops
+            .get(class)
+            .is_some_and(|ops| ops.iter().any(|o| *o == op))
     };
     let child_class = |node: &luminal::prelude::egraph_serialize::Node, index: usize| {
         node.children
@@ -53,33 +58,40 @@ fn genome_flavored(
     // non-Copy > Copy; the core additionally checks the chosen subtree
     // reaches terminals and escalates its Materialize/Copy strictness
     // only when nothing viable exists below.
-    let ordered = |candidates: &[(String, luminal::extractor::ProducerChoice)],
-                   level: usize|
-     -> Vec<usize> {
-        let admitted = test_runtime::level_admits(level);
-        let mut order: Vec<usize> = Vec::new();
-        let mut push_where = |order: &mut Vec<usize>, pred: &dyn Fn(&str, &luminal::extractor::ProducerChoice) -> bool| {
-            for (i, (name, choice)) in candidates.iter().enumerate() {
-                if admitted(name) && pred(name, choice) && !order.contains(&i) {
-                    order.push(i);
+    let ordered =
+        |candidates: &[(String, luminal::extractor::ProducerChoice)], level: usize| -> Vec<usize> {
+            let admitted = test_runtime::level_admits(level);
+            let mut order: Vec<usize> = Vec::new();
+            let mut push_where =
+                |order: &mut Vec<usize>,
+                 pred: &dyn Fn(&str, &luminal::extractor::ProducerChoice) -> bool| {
+                    for (i, (name, choice)) in candidates.iter().enumerate() {
+                        if admitted(name) && pred(name, choice) && !order.contains(&i) {
+                            order.push(i);
+                        }
+                    }
+                };
+            push_where(&mut order, &|name, choice| {
+                if name != want_name {
+                    return false;
                 }
-            }
+                let Some(node) = egraph.nodes.get(&choice.enode) else {
+                    return false;
+                };
+                let relu_real = child_class(node, ep_slot)
+                    .is_some_and(|c| class_has(&c, "CublasLtEpilogueRelu"));
+                relu_real == want_relu
+            });
+            push_where(&mut order, &|name, _| {
+                name.starts_with("LayoutTensorOpCublasLt")
+            });
+            push_where(&mut order, &|name, _| {
+                name == "LayoutTensorOpIndexMapApplyViewGeneric"
+            });
+            push_where(&mut order, &|name, _| !name.contains("Copy"));
+            push_where(&mut order, &|_, _| true);
+            order
         };
-        push_where(&mut order, &|name, choice| {
-            if name != want_name {
-                return false;
-            }
-            let Some(node) = egraph.nodes.get(&choice.enode) else { return false };
-            let relu_real =
-                child_class(node, ep_slot).is_some_and(|c| class_has(&c, "CublasLtEpilogueRelu"));
-            relu_real == want_relu
-        });
-        push_where(&mut order, &|name, _| name.starts_with("LayoutTensorOpCublasLt"));
-        push_where(&mut order, &|name, _| name == "LayoutTensorOpIndexMapApplyViewGeneric");
-        push_where(&mut order, &|name, _| !name.contains("Copy"));
-        push_where(&mut order, &|_, _| true);
-        order
-    };
     test_runtime::genome_with_ordering(egraph, &ordered)
 }
 
@@ -101,7 +113,10 @@ fn collect_ops(graph: &luminal::layout_ir::ExtractedGraph) -> Vec<(CublasLt, Vec
                 concrete.map(|c| (c, inputs, label))
             } else {
                 Some((
-                    CublasLt { form: CublasLtForm::Base, spec: None },
+                    CublasLt {
+                        form: CublasLtForm::Base,
+                        spec: None,
+                    },
                     inputs,
                     label,
                 ))
@@ -129,7 +144,9 @@ fn flavored_ops(
 }
 
 fn cublaslt_only(ops: &[(CublasLt, Vec<String>, String)]) -> Vec<&(CublasLt, Vec<String>, String)> {
-    ops.iter().filter(|(_, _, label)| label.starts_with("CublasLt")).collect()
+    ops.iter()
+        .filter(|(_, _, label)| label.starts_with("CublasLt"))
+        .collect()
 }
 
 fn timed(text: &str) -> f64 {
@@ -150,12 +167,19 @@ fn fixture5_relu() {
         let x = cx.tensor((4usize, 8usize));
         let w = cx.tensor((8usize, 3usize));
         let _out = x.matmul(w).relu().output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     println!("MEASURE fixture5 relu: {:.2}s", timed(&text));
     let ops = flavored_ops(&text, false, false, true);
     let lt = cublaslt_only(&ops);
-    assert_eq!(lt.len(), 1, "one cublaslt op (the decorated one) in the plan");
+    assert_eq!(
+        lt.len(),
+        1,
+        "one cublaslt op (the decorated one) in the plan"
+    );
     let (op, inputs, _) = lt[0];
     let spec = op.spec.as_ref().expect("spec parses");
     assert_eq!(spec.epilogue, CuEpilogue::Relu);
@@ -175,7 +199,10 @@ fn fixture5_c_fold() {
         let w = cx.tensor((8usize, 3usize));
         let c = cx.tensor((4usize, 3usize));
         let _out = (x.matmul(w) + c).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     println!("MEASURE fixture5 c-fold: {:.2}s", timed(&text));
     let ops = flavored_ops(&text, true, false, false);
@@ -205,7 +232,10 @@ fn fixture5_c_fold_reversed_orientation() {
         let w = cx.tensor((8usize, 3usize));
         let c = cx.tensor((4usize, 3usize));
         let _out = (c + x.matmul(w)).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     let ops = flavored_ops(&text, true, false, false);
     let lt = cublaslt_only(&ops);
@@ -224,7 +254,10 @@ fn fixture5_bias() {
         let w = cx.tensor((8usize, 3usize));
         let b = cx.tensor(3usize);
         let _out = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     println!("MEASURE fixture5 bias: {:.2}s", timed(&text));
 
@@ -249,8 +282,14 @@ fn fixture5_bias() {
     // multiplicity; the strict level-0 election never prefers the
     // materialize-first column-form frames.
     assert_eq!(base_ops, 8);
-    assert_eq!(bias_ops, 4, "the Bias-contract candidates exist (one per sibling base frame)");
-    assert_eq!(acc_ops, 4, "the Accumulate-of-materialized-broadcast candidates also exist");
+    assert_eq!(
+        bias_ops, 4,
+        "the Bias-contract candidates exist (one per sibling base frame)"
+    );
+    assert_eq!(
+        acc_ops, 4,
+        "the Accumulate-of-materialized-broadcast candidates also exist"
+    );
 
     let ops = flavored_ops(&text, false, true, false);
     let lt = cublaslt_only(&ops);
@@ -278,14 +317,20 @@ fn fixture5_bias_elected_by_name_alone() {
         let w = cx.tensor((8usize, 3usize));
         let b = cx.tensor(3usize);
         let _out = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     let (graph, _) = test_runtime::extract_fixture_with_genome(
         &text,
         // The CONTRACT is still elected by name alone; the view op is
         // routing infrastructure (round 10: the sibling's result reaches
         // the boundary through a transpose view), not a contract.
-        &["LayoutTensorOpCublasLtBias", "LayoutTensorOpIndexMapApplyViewGeneric"],
+        &[
+            "LayoutTensorOpCublasLtBias",
+            "LayoutTensorOpIndexMapApplyViewGeneric",
+        ],
     );
     let ops = collect_ops(&graph);
     let lt = cublaslt_only(&ops);
@@ -296,7 +341,10 @@ fn fixture5_bias_elected_by_name_alone() {
     assert!(spec.has_bias && !spec.has_c);
     assert_eq!(spec.epilogue, CuEpilogue::Bias);
     assert_eq!(inputs.len(), 3);
-    println!("fixture5 bias BY NAME: elected {label} with arity {}", inputs.len());
+    println!(
+        "fixture5 bias BY NAME: elected {label} with arity {}",
+        inputs.len()
+    );
 }
 
 /// relu(x @ w + bias): epilogue ReluBias, Bias contract, Lit arity 3.
@@ -308,7 +356,10 @@ fn fixture5_bias_relu() {
         let w = cx.tensor((8usize, 3usize));
         let b = cx.tensor(3usize);
         let _out = (x.matmul(w) + b.expand_dim(0, 4usize)).relu().output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     println!("MEASURE fixture5 bias+relu: {:.2}s", timed(&text));
     let ops = flavored_ops(&text, false, true, true);
@@ -333,8 +384,13 @@ fn fixture5_full_stack() {
         let w = cx.tensor((8usize, 3usize));
         let c = cx.tensor((4usize, 3usize));
         let b = cx.tensor(3usize);
-        let _out = ((x.matmul(w) + c) + b.expand_dim(0, 4usize)).relu().output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        let _out = ((x.matmul(w) + c) + b.expand_dim(0, 4usize))
+            .relu()
+            .output();
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     println!("MEASURE fixture5 full stack: {:.2}s", timed(&text));
     let ops = flavored_ops(&text, true, true, true);
@@ -366,7 +422,10 @@ fn fixture6_relu_then_add_c_not_folded() {
         let w = cx.tensor((8usize, 3usize));
         let c = cx.tensor((4usize, 3usize));
         let _out = (x.matmul(w).relu() + c).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     let ops = flavored_ops(&text, false, false, true);
     let lt = cublaslt_only(&ops);
@@ -374,7 +433,10 @@ fn fixture6_relu_then_add_c_not_folded() {
     let spec = lt[0].0.spec.as_ref().expect("spec parses");
     assert_eq!(spec.epilogue, CuEpilogue::Relu);
     assert!(!spec.has_c, "the post-activation add must NOT fold into C");
-    let decomposed_adds = ops.iter().filter(|(_, _, label)| label.contains("Add")).count();
+    let decomposed_adds = ops
+        .iter()
+        .filter(|(_, _, label)| label.contains("Add"))
+        .count();
     assert!(
         decomposed_adds >= 1,
         "the outer add survives as a plain op (labels: {:?})",
@@ -390,7 +452,10 @@ fn fixture6_relu_then_bias_not_folded() {
         let w = cx.tensor((8usize, 3usize));
         let b = cx.tensor(3usize);
         let _out = (x.matmul(w).relu() + b.expand_dim(0, 4usize)).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     let ops = flavored_ops(&text, false, false, true);
     let lt = cublaslt_only(&ops);
@@ -416,7 +481,10 @@ fn fixture8_diamond_base_and_decorated_coexist() {
         let mm = x.matmul(w);
         let _mm_out = mm.output();
         let _biased = (mm + b.expand_dim(0, 4usize)).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     let ops = flavored_ops(&text, false, true, false);
     let lt = cublaslt_only(&ops);
@@ -439,7 +507,10 @@ fn fixture8_diamond_base_and_decorated_coexist() {
     assert_eq!(base.logical_b, decorated.logical_b);
     assert_eq!(base.logical_site_out, decorated.logical_site_out);
     // But the CLAIMED output (the D the executor binds) differs.
-    assert_eq!(base.logical_out, base.logical_site_out, "base claims the matmul out");
+    assert_eq!(
+        base.logical_out, base.logical_site_out,
+        "base claims the matmul out"
+    );
     assert_ne!(
         base.logical_out, decorated.logical_out,
         "decorated op's D is the bias-add output, not the matmul out"

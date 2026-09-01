@@ -97,11 +97,7 @@ pub fn genome_preferring(
     egraph: &luminal::prelude::egraph_serialize::EGraph,
     preferences: &[&str],
 ) -> luminal::extractor::Genome {
-    luminal_cuda_lite::ops::cublaslt::election::genome_preferring(
-        egraph,
-        matchers(),
-        preferences,
-    )
+    luminal_cuda_lite::ops::cublaslt::election::genome_preferring(egraph, matchers(), preferences)
 }
 
 /// Re-export: the strictness-level admission predicate (rehomed core).
@@ -126,10 +122,13 @@ pub fn extract_fixture_with_genome(
 ) -> (ExtractedGraph, u64) {
     let serialized = serialize_fixture(script_text);
     let genome = genome_preferring(&serialized, preferences);
-    let graph =
-        luminal::extractor::extract_layout_ir_with_genome_and_matchers(&serialized, &genome, matchers())
-            .expect("genome extraction runs")
-            .expect("genome extraction reaches the boundary");
+    let graph = luminal::extractor::extract_layout_ir_with_genome_and_matchers(
+        &serialized,
+        &genome,
+        matchers(),
+    )
+    .expect("genome extraction runs")
+    .expect("genome extraction reaches the boundary");
     let fingerprint = luminal::extractor::plan_fingerprint(&graph);
     (graph, fingerprint)
 }

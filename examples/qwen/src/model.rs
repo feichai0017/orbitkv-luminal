@@ -152,9 +152,21 @@ impl Qwen {
                 &ns.child("post_attention_layernorm"),
                 cx,
             ),
-            gate: Linear::new_permuted(d.hidden, d.intermediate, false, &mlp.child("gate_proj"), cx),
+            gate: Linear::new_permuted(
+                d.hidden,
+                d.intermediate,
+                false,
+                &mlp.child("gate_proj"),
+                cx,
+            ),
             up: Linear::new_permuted(d.hidden, d.intermediate, false, &mlp.child("up_proj"), cx),
-            down: Linear::new_permuted(d.intermediate, d.hidden, false, &mlp.child("down_proj"), cx),
+            down: Linear::new_permuted(
+                d.intermediate,
+                d.hidden,
+                false,
+                &mlp.child("down_proj"),
+                cx,
+            ),
             n_heads: d.n_heads,
             n_kv_heads: d.n_kv_heads,
             head_dim: d.head_dim,
@@ -199,5 +211,4 @@ impl Qwen {
         let logits = self.embed.reverse(self.final_norm.forward(x));
         (logits, caches_out)
     }
-
 }

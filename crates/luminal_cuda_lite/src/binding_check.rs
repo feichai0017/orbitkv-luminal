@@ -30,14 +30,14 @@ pub struct BoundRange {
 /// occupy no bytes and cannot overlap anything. O(n log n): sort by
 /// base, check each neighbor.
 pub fn assert_disjoint(ranges: &[BoundRange]) -> Result<()> {
-    let mut sorted: Vec<&BoundRange> =
-        ranges.iter().filter(|range| range.bytes > 0).collect();
+    let mut sorted: Vec<&BoundRange> = ranges.iter().filter(|range| range.bytes > 0).collect();
     sorted.sort_by_key(|range| range.base);
     for pair in sorted.windows(2) {
         let (lo, hi) = (pair[0], pair[1]);
-        let lo_end = lo.base.checked_add(lo.bytes).unwrap_or_else(|| {
-            panic!("buffer {} range overflows the address space", lo.buffer)
-        });
+        let lo_end = lo
+            .base
+            .checked_add(lo.bytes)
+            .unwrap_or_else(|| panic!("buffer {} range overflows the address space", lo.buffer));
         if lo_end > hi.base {
             bail!(
                 "CONTRACT-1 violation: buffers {} [{:#x}, {:#x}) and {} \
@@ -61,7 +61,11 @@ mod tests {
     use super::{assert_disjoint, BoundRange};
 
     fn range(buffer: &str, base: u64, bytes: u64) -> BoundRange {
-        BoundRange { buffer: buffer.to_string(), base, bytes }
+        BoundRange {
+            buffer: buffer.to_string(),
+            base,
+            bytes,
+        }
     }
 
     #[test]
@@ -83,7 +87,10 @@ mod tests {
         .expect_err("overlap must refuse");
         let msg = err.to_string();
         assert!(msg.contains("CONTRACT-1"), "{msg}");
-        assert!(msg.contains("weights") && msg.contains("activations"), "{msg}");
+        assert!(
+            msg.contains("weights") && msg.contains("activations"),
+            "{msg}"
+        );
     }
 
     #[test]

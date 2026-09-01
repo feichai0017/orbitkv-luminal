@@ -85,8 +85,15 @@ fn fixture() -> String {
     )
 }
 
-fn class_of_child(s: &EGraph, node: &luminal::prelude::egraph_serialize::Node, i: usize) -> Option<ClassId> {
-    node.children.get(i).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone())
+fn class_of_child(
+    s: &EGraph,
+    node: &luminal::prelude::egraph_serialize::Node,
+    i: usize,
+) -> Option<ClassId> {
+    node.children
+        .get(i)
+        .and_then(|id| s.nodes.get(id))
+        .map(|c| c.eclass.clone())
 }
 
 fn render(s: &EGraph, class: &ClassId, depth: usize) -> String {
@@ -157,7 +164,11 @@ fn r9_layout_census_for_the_shared_weight_fixture() {
 
     // Strided chains present, entry-by-entry, ONE-LEVEL rendering only.
     let mut seen: Vec<ClassId> = Vec::new();
-    for n in s.nodes.values().filter(|n| n.op == "StridedElementLayoutLit") {
+    for n in s
+        .nodes
+        .values()
+        .filter(|n| n.op == "StridedElementLayoutLit")
+    {
         if seen.contains(&n.eclass) {
             continue;
         }
@@ -166,7 +177,10 @@ fn r9_layout_census_for_the_shared_weight_fixture() {
         let mut cur = chain;
         let mut entries = Vec::new();
         loop {
-            if s.nodes.values().any(|m| m.eclass == cur && m.op == "IntAffineExprNil") {
+            if s.nodes
+                .values()
+                .any(|m| m.eclass == cur && m.op == "IntAffineExprNil")
+            {
                 break;
             }
             let Some(cons) = s
@@ -184,6 +198,10 @@ fn r9_layout_census_for_the_shared_weight_fixture() {
                 break;
             }
         }
-        println!("STRIDED layout {:?}\n  chain: {}", n.eclass, entries.join("\n         "));
+        println!(
+            "STRIDED layout {:?}\n  chain: {}",
+            n.eclass,
+            entries.join("\n         ")
+        );
     }
 }

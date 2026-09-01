@@ -86,7 +86,13 @@ pub fn ref_layer_norm(x: &[f32], epsilon: f32) -> Vec<f32> {
 
 /// MoE forward for one row, k = 1: softmax routing, best expert's
 /// matmul scaled by its routing weight.
-pub fn ref_moe_k1(x: &[f32], router: &[f32], experts: &[f32], d: usize, e_count: usize) -> Vec<f32> {
+pub fn ref_moe_k1(
+    x: &[f32],
+    router: &[f32],
+    experts: &[f32],
+    d: usize,
+    e_count: usize,
+) -> Vec<f32> {
     let logits: Vec<f32> = (0..e_count)
         .map(|e| (0..d).map(|i| x[i] * router[i * e_count + e]).sum())
         .collect();
@@ -122,7 +128,15 @@ pub fn ref_block_step(
     let k = ref_matmul(x, wk, d, d);
     let v = ref_matmul(x, wv, d, d);
     let attn = ref_paged_step(
-        &q, &k, &v, k_cache, v_cache, gather, scatter_slot, n_heads, head_dim,
+        &q,
+        &k,
+        &v,
+        k_cache,
+        v_cache,
+        gather,
+        scatter_slot,
+        n_heads,
+        head_dim,
     );
     let attn_proj = ref_matmul(&attn, wo, d, d);
     let x1: Vec<f32> = x.iter().zip(&attn_proj).map(|(a, b)| a + b).collect();

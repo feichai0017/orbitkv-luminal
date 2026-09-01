@@ -32,8 +32,7 @@ pub fn load_safetensors_weights(
     model_dir: &Path,
 ) -> Result<Vec<(NodeIndex, TypedBuffer)>, Box<dyn Error>> {
     let path = model_dir.join("model_combined_qwen3moe_v1.safetensors");
-    let file = std::fs::File::open(&path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let tensors = SafeTensors::deserialize(&mmap)?;
 

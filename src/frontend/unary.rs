@@ -484,11 +484,11 @@ impl GraphTensor {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use luminal::prelude::*;
     use crate::tests::{assert_close, random_vec};
     use candle_core::{Device, Tensor};
     use candle_nn::ops::softmax;
     use itertools::Itertools;
+    use luminal::prelude::*;
     use proptest::prelude::*;
 
     fn cummax_ref_2d(a: Tensor) -> Tensor {

@@ -151,9 +151,11 @@ impl GraphTensor {
             assert_dims_eq(k, rk, "contract dim");
             // P = [a, b, c, d, f, k]: lhs (c5, c4, c3, c2, c0), rhs (c5, c4, c3, c0, c1).
             let p = vec![a, b, cc, d, f, k];
-            let mul = self
-                .record_view_map(vec![c(5, a), c(4, b), c(3, cc), c(2, d), c(0, k)], p.clone())
-                * rhs.record_view_map(vec![c(5, a), c(4, b), c(3, cc), c(0, k), c(1, f)], p);
+            let mul = self.record_view_map(
+                vec![c(5, a), c(4, b), c(3, cc), c(2, d), c(0, k)],
+                p.clone(),
+            ) * rhs
+                .record_view_map(vec![c(5, a), c(4, b), c(3, cc), c(0, k), c(1, f)], p);
 
             // Sum Reduce
             mul.sum(5)
@@ -224,9 +226,10 @@ mod tests {
 
         let _ = lhs.matmul(rhs);
 
-        let reason = cx.logical.poisoned().expect(
-            "mixed-dtype matmul must poison the recorder (matmul never casts)",
-        );
+        let reason = cx
+            .logical
+            .poisoned()
+            .expect("mixed-dtype matmul must poison the recorder (matmul never casts)");
         assert!(reason.contains("cast explicitly"), "{reason}");
     }
 

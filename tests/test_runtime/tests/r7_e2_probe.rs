@@ -14,7 +14,10 @@ fn e2_fill_depth_from_live_recorder() {
             let x = cx.tensor((4usize, 8usize));
             let w = cx.tensor((8usize, 3usize));
             let _ = x.matmul(w).relu().output();
-            cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+            cx.logical
+                .bound_program(&luminal_reference::ReferenceBindings)
+                .expect("recorder clean")
+                .text
         }),
         ("bias+relu", {
             let mut cx = Graph::new();
@@ -22,7 +25,10 @@ fn e2_fill_depth_from_live_recorder() {
             let w = cx.tensor((8usize, 3usize));
             let b = cx.tensor(3usize);
             let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).relu().output();
-            cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+            cx.logical
+                .bound_program(&luminal_reference::ReferenceBindings)
+                .expect("recorder clean")
+                .text
         }),
     ] {
         let s = test_runtime::serialize_fixture(&text);

@@ -217,12 +217,18 @@ fn hypothesis_dual_spelling_multiplicity() {
     // two frames per operand.
     assert_eq!(sites, 4, "two canonical chains x (canonicalized + sibling)");
     assert_eq!(a_readings, 8, "two frames per site's a operand");
-    assert_eq!(op_enodes, 20, "the frame cross products across the four sites");
+    assert_eq!(
+        op_enodes, 20,
+        "the frame cross products across the four sites"
+    );
 
     let ops = pinned_cublaslt(&fx);
     assert_eq!(ops.len(), 1, "election picks exactly one reading");
     let spec = ops[0].spec.as_ref().expect("spec parses");
-    println!("  elected: trans_a={} (both sound under the seeded union)", spec.trans_a);
+    println!(
+        "  elected: trans_a={} (both sound under the seeded union)",
+        spec.trans_a
+    );
     assert_eq!(spec.mnk_lits(), (4, 2, 4));
     assert!(!spec.trans_b);
 }
@@ -324,8 +330,14 @@ fn hypothesis_static_bucket_layout_multiplicity() {
     //      composed-from-pitched N (ldb=8), materialized-frame T} + outer
     //      w {storage T, column-form N}.
     // d=2: the two transpose-tie views, as in round 10.
-    assert_eq!(a_readings, 5, "outer x three ways + sibling view(w) two frames");
-    assert_eq!(b_readings, 5, "sibling view(x) three ways + outer w two frames");
+    assert_eq!(
+        a_readings, 5,
+        "outer x three ways + sibling view(w) two frames"
+    );
+    assert_eq!(
+        b_readings, 5,
+        "sibling view(x) three ways + outer w two frames"
+    );
     assert_eq!(d_readings, 2);
     assert_eq!(op_enodes, 12, "the per-site products: 3x2x1 + 2x3x1");
 
@@ -410,7 +422,10 @@ fn ruling1_symbolic_k_contiguous_mints() {
     println!("ruling1 symbolic-k contiguous: {ops} op enode(s)");
     // ROUND-11 RE-PIN (was 2): the 2 A x 2 B frame cross product on each
     // of the two sites.
-    assert_eq!(ops, 8, "the pure-contiguous symbolic-k matmul mints (frame products)");
+    assert_eq!(
+        ops, 8,
+        "the pure-contiguous symbolic-k matmul mints (frame products)"
+    );
     let elected = pinned_cublaslt(&fx);
     assert_eq!(elected.len(), 1);
     let spec = elected[0].spec.as_ref().expect("spec parses — never None");
@@ -423,7 +438,10 @@ fn ruling1_symbolic_k_contiguous_mints() {
     assert_eq!(spec.n, 2);
     assert!(matches!(spec.k, CuDim::Symbolic(_)));
     assert_eq!(spec.lda, 3, "w storage cols literal");
-    assert!(matches!(spec.ldb, CuDim::Symbolic(_)), "ldb = Symbolic(k), bound at call time");
+    assert!(
+        matches!(spec.ldb, CuDim::Symbolic(_)),
+        "ldb = Symbolic(k), bound at call time"
+    );
     assert_eq!(spec.ldd, 3);
     assert!(!spec.trans_a && !spec.trans_b);
 }

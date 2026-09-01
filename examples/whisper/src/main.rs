@@ -1,6 +1,9 @@
 use luminal::implementation_search::ImplementationSearchOptions;
 use whisper::model::WhisperDims;
-use whisper::{TOKEN_EOT, TOKEN_NO_TIMESTAMPS, TOKEN_SOT, TranscribeStep, Transcriber, audio, greedy_pick, hf, weights};
+use whisper::{
+    TOKEN_EOT, TOKEN_NO_TIMESTAMPS, TOKEN_SOT, TranscribeStep, Transcriber, audio, greedy_pick, hf,
+    weights,
+};
 
 const USAGE: &str = "\
 whisper — openai/whisper-tiny.en as pure logical ops (encoder + decoder, one graph)

@@ -12,9 +12,7 @@ use luminal_cuda_lite::layouts::CudaLayout;
 use luminal_cuda_lite::ops::cublaslt::exec::{
     bind_destination, plan_call, plan_call_from_spec, validate_ld_bounds, CSource, LtDesc,
 };
-use luminal_cuda_lite::ops::cublaslt::{
-    CuDim, CuEpilogue, CublasLt, CublasLtForm, LtMatmulSpec,
-};
+use luminal_cuda_lite::ops::cublaslt::{CuDim, CuEpilogue, CublasLt, CublasLtForm, LtMatmulSpec};
 
 fn cid(s: &str) -> ClassId {
     ClassId::from(s)
@@ -80,7 +78,10 @@ fn ld_bounds_rejects_the_rows_one_vacuous_case() {
         .expect_err("rows==1 with a short buffer must be refused");
     let msg = format!("{err:#}");
     assert!(msg.contains("refused BEFORE dispatch"), "{msg}");
-    assert!(msg.contains("vacuous"), "the refusal must name the vacuous library check: {msg}");
+    assert!(
+        msg.contains("vacuous"),
+        "the refusal must name the vacuous library check: {msg}"
+    );
     // And the same descriptor over an adequate buffer passes.
     validate_ld_bounds("A", &LtDesc::row(1, 8, 1), 8).expect("adequate");
 }
@@ -102,11 +103,16 @@ fn ld_bounds_gate_runs_for_every_descriptor_at_plan_validation() {
     // Operand element counts in Lit order [a, b]; dest = D.
     // (ROW bridge: A = 5x4 ld 4 -> 20, B = 3x5 ld 5 -> 15, D = 4x3
     // ld 3 -> 12 — numerically the same fits as the old COL pins.)
-    call.validate_against(&[20, 15], 12).expect("all descriptors fit");
-    call.validate_against(&[19, 15], 12).expect_err("A one element short");
-    call.validate_against(&[20, 14], 12).expect_err("B one element short");
-    call.validate_against(&[20, 15], 11).expect_err("D one element short");
-    call.validate_against(&[20], 12).expect_err("operand count != Lit arity");
+    call.validate_against(&[20, 15], 12)
+        .expect("all descriptors fit");
+    call.validate_against(&[19, 15], 12)
+        .expect_err("A one element short");
+    call.validate_against(&[20, 14], 12)
+        .expect_err("B one element short");
+    call.validate_against(&[20, 15], 11)
+        .expect_err("D one element short");
+    call.validate_against(&[20], 12)
+        .expect_err("operand count != Lit arity");
 }
 
 // ---------------------------------------------------------------------------
@@ -119,8 +125,14 @@ fn ld_bounds_gate_runs_for_every_descriptor_at_plan_validation() {
 fn no_c_forms_always_carry_a_valid_cdesc_aliasing_d() {
     let call = plan_call_from_spec(&base_spec(4, 3, 5)).expect("plan");
     assert_eq!(call.c_source, CSource::AliasD);
-    assert_eq!(call.c, call.d, "the aliased Cdesc mirrors the D descriptor exactly");
-    assert!(!call.beta_is_one, "beta = 0.0f on the no-C forms: C is never read");
+    assert_eq!(
+        call.c, call.d,
+        "the aliased Cdesc mirrors the D descriptor exactly"
+    );
+    assert!(
+        !call.beta_is_one,
+        "beta = 0.0f on the no-C forms: C is never read"
+    );
     // D is the EXECUTOR's dense row-major dest: ROW m x n, ld = n —
     // NEVER the spec's ldd (which describes the claimed e-graph layout
     // over the recorder's buffer; consuming it was the orientation bug).
@@ -134,8 +146,15 @@ fn c_fold_forms_read_c_from_operand_two_with_structural_beta_one() {
     spec.has_c = true;
     spec.c_tensor = Some(cid("c_lt"));
     let call = plan_call_from_spec(&spec).expect("plan");
-    assert_eq!(call.c_source, CSource::Operand(2), "contract order [a, b, c]");
-    assert!(call.beta_is_one, "beta = 1.0f is STRUCTURAL on the C-fold forms");
+    assert_eq!(
+        call.c_source,
+        CSource::Operand(2),
+        "contract order [a, b, c]"
+    );
+    assert!(
+        call.beta_is_one,
+        "beta = 1.0f is STRUCTURAL on the C-fold forms"
+    );
     assert_eq!(call.c, call.d, "C rides the D layout by rule guard");
 }
 
@@ -160,7 +179,10 @@ fn bias_epilogue_forms_refuse_at_plan_time() {
         let err = plan_call_from_spec(&spec).expect_err("bias form must refuse at plan time");
         let msg = format!("{err:#}");
         assert!(msg.contains("NOT dispatchable under"), "{msg}");
-        assert!(msg.contains("ROW"), "the refusal must name the convention: {msg}");
+        assert!(
+            msg.contains("ROW"),
+            "the refusal must name the convention: {msg}"
+        );
     }
 }
 
@@ -233,9 +255,15 @@ fn symbolic_geometry_is_a_loud_pre_dispatch_refusal() {
 
 #[test]
 fn an_elected_op_without_a_parsed_spec_refuses() {
-    let op = CublasLt { form: CublasLtForm::Base, spec: None };
+    let op = CublasLt {
+        form: CublasLtForm::Base,
+        spec: None,
+    };
     let err = plan_call(&op).expect_err("no spec");
-    assert!(format!("{err:#}").contains("no parsed LtMatmulSpec"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("no parsed LtMatmulSpec"),
+        "{err:#}"
+    );
 }
 
 // ===========================================================================
@@ -309,11 +337,16 @@ fn dest_frame_binds_a_left_major_election_as_col_order() {
     let mut call = plan_call_from_spec(&base_spec(3, 4, 8)).expect("plan");
     assert_eq!(call.d, LtDesc::row(3, 4, 4), "the spec-only default is ROW");
     bind_destination(&mut call, &left_major(&[3, 4]), "pin").expect("left-major destination");
-    assert_eq!(call.d, LtDesc::col(3, 4, 3), "a left-major election IS a COL descriptor");
+    assert_eq!(
+        call.d,
+        LtDesc::col(3, 4, 3),
+        "a left-major election IS a COL descriptor"
+    );
     assert_eq!(call.c, call.d);
     // And the bound frame covers the sibling's 12-element buffer exactly:
     // COL reach = ld*(cols-1) + rows = 3*3 + 3 = 12.
-    call.validate_against(&[24, 32], 12).expect("the bound frame fits the dest buffer");
+    call.validate_against(&[24, 32], 12)
+        .expect("the bound frame fits the dest buffer");
 }
 
 #[test]
@@ -326,8 +359,14 @@ fn dest_frame_refuses_a_permuted_frame() {
     let err = bind_destination(&mut call, &right_major(&[3, 4]), "pin")
         .expect_err("a permuted destination frame must be refused");
     let msg = format!("{err:#}");
-    assert!(msg.contains("DIVERGED"), "the refusal must name the divergence: {msg}");
-    assert!(msg.contains("[m, n] = [4, 3]"), "the refusal must print the call frame: {msg}");
+    assert!(
+        msg.contains("DIVERGED"),
+        "the refusal must name the divergence: {msg}"
+    );
+    assert!(
+        msg.contains("[m, n] = [4, 3]"),
+        "the refusal must print the call frame: {msg}"
+    );
 }
 
 #[test]
@@ -347,7 +386,10 @@ fn dest_frame_refuses_layouts_this_backend_cannot_write() {
     let strided = CudaLayout {
         mirror: MirrorLayout::Strided(StridedElementLayout {
             shape: shape(&[4, 3]),
-            chain: vec![IntExprTerm::Coord { axis_from_end: 1 }, IntExprTerm::Coord { axis_from_end: 0 }],
+            chain: vec![
+                IntExprTerm::Coord { axis_from_end: 1 },
+                IntExprTerm::Coord { axis_from_end: 0 },
+            ],
             width: BitWidthTerm(32),
         }),
         dtype: Some(PlanDtype::F32),
@@ -356,7 +398,10 @@ fn dest_frame_refuses_layouts_this_backend_cannot_write() {
     let err = bind_destination(&mut call, &strided, "pin").expect_err("strided dest");
     let msg = format!("{err:#}");
     assert!(msg.contains("STRIDED"), "{msg}");
-    assert!(msg.contains("CAPABILITY refusal"), "the refusal must classify itself: {msg}");
+    assert!(
+        msg.contains("CAPABILITY refusal"),
+        "the refusal must classify itself: {msg}"
+    );
 
     let offset = CudaLayout {
         mirror: MirrorLayout::ElementOffset(ElementOffsetExpressionLayout {
@@ -368,7 +413,10 @@ fn dest_frame_refuses_layouts_this_backend_cannot_write() {
     };
     let mut call = plan_call_from_spec(&base_spec(4, 3, 5)).expect("plan");
     let err = bind_destination(&mut call, &offset, "pin").expect_err("offset dest");
-    assert!(format!("{err:#}").contains("ELEMENT-OFFSET-EXPRESSION"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("ELEMENT-OFFSET-EXPRESSION"),
+        "{err:#}"
+    );
 }
 
 #[test]

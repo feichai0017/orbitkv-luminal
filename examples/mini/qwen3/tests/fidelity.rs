@@ -4,8 +4,8 @@
 
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use scalar_refs::*;
 use mini_qwen3::*;
+use scalar_refs::*;
 
 fn seeds_for(layer: usize) -> (usize, usize, usize, usize, usize, usize, usize) {
     let b = 200 + layer * 10;
@@ -40,8 +40,7 @@ fn mini_gqa_family(family: &str, gate_act: &dyn Fn(&[f32]) -> Vec<f32>) {
     let (logits, caches_out, embed, blocks) = match family {
         "qwen3" => {
             let model = MiniQwen3::new(VOCAB, D, FF, NH, NKV, LAYERS, &mut cx);
-            let (logits, caches_out) =
-                model.forward(ids, &caches, gather_idx, scatter_idx, step);
+            let (logits, caches_out) = model.forward(ids, &caches, gather_idx, scatter_idx, step);
             (logits, caches_out, model.embed, model.blocks)
         }
         other => panic!("unknown mini family {other}"),
@@ -122,8 +121,14 @@ fn mini_gqa_family(family: &str, gate_act: &dyn Fn(&[f32]) -> Vec<f32>) {
     rt.execute().expect("winner executes");
     assert_close(rt.get_f32(logits.id).expect("logits"), &ref_logits);
     for layer in 0..LAYERS {
-        assert_close(rt.get_f32(caches_out[layer].0.id).unwrap(), &ref_caches[layer].0);
-        assert_close(rt.get_f32(caches_out[layer].1.id).unwrap(), &ref_caches[layer].1);
+        assert_close(
+            rt.get_f32(caches_out[layer].0.id).unwrap(),
+            &ref_caches[layer].0,
+        );
+        assert_close(
+            rt.get_f32(caches_out[layer].1.id).unwrap(),
+            &ref_caches[layer].1,
+        );
     }
 }
 

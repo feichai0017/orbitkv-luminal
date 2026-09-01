@@ -75,7 +75,11 @@ impl BufferTensorIrOp for ReduceSumDps {
 
 impl Bufferizable for ReduceSumDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 1,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -88,10 +92,7 @@ impl ToDps for ReduceSumDps {
 impl LayoutIrOp for ReduceSumDps {}
 
 /// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     let Some(r) = op.as_any().downcast_ref::<ReduceSumDps>() else {
         bail!("reduce_sum codegen reached with a non-ReduceSum op");
     };
@@ -128,6 +129,8 @@ impl OpMatcher for ReduceSumMatcher {
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ReduceSum { axis: site.child_i64(1) })
+        Box::new(ReduceSum {
+            axis: site.child_i64(1),
+        })
     }
 }

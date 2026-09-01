@@ -17,7 +17,9 @@ use mini_conv::MiniConvNet;
 /// The examples' shared seeding discipline (examples/support/mod.rs,
 /// verbatim from the mini measure harnesses).
 fn weights(n: usize, seed: usize) -> Vec<f32> {
-    (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
+    (0..n)
+        .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
+        .collect()
 }
 
 #[test]
@@ -41,7 +43,11 @@ fn conv_example_graph_searches_with_zero_refusals() {
     assert!(outcome.plans_profiled > 0, "no plans profiled");
     let b = &outcome.refusal_breakdown;
     assert_eq!(
-        (b.extract_refusals, b.plan_build_refusals, b.execute_refusals),
+        (
+            b.extract_refusals,
+            b.plan_build_refusals,
+            b.execute_refusals
+        ),
         (0, 0, 0),
         "examples expect zero refusals: {}",
         b.summary()

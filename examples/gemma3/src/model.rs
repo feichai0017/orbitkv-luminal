@@ -81,9 +81,7 @@ pub struct Gemma3 {
 
 impl Gemma3 {
     pub fn init(cx: &mut Graph, dims: &Gemma3Dims) -> Self {
-        let blocks = (0..dims.layers)
-            .map(|l| Self::block(l, dims, cx))
-            .collect();
+        let blocks = (0..dims.layers).map(|l| Self::block(l, dims, cx)).collect();
         Self {
             dims: dims.clone(),
             embed: Embedding::new(
@@ -137,9 +135,21 @@ impl Gemma3 {
             ),
             q_norm: cx.named_tensor(attn.child("q_norm").leaf("weight"), d.head_dim),
             k_norm: cx.named_tensor(attn.child("k_norm").leaf("weight"), d.head_dim),
-            gate: Linear::new_permuted(d.hidden, d.intermediate, false, &mlp.child("gate_proj"), cx),
+            gate: Linear::new_permuted(
+                d.hidden,
+                d.intermediate,
+                false,
+                &mlp.child("gate_proj"),
+                cx,
+            ),
             up: Linear::new_permuted(d.hidden, d.intermediate, false, &mlp.child("up_proj"), cx),
-            down: Linear::new_permuted(d.intermediate, d.hidden, false, &mlp.child("down_proj"), cx),
+            down: Linear::new_permuted(
+                d.intermediate,
+                d.hidden,
+                false,
+                &mlp.child("down_proj"),
+                cx,
+            ),
             local,
             window: d.window,
             rope_theta: if local { 10_000.0 } else { 1_000_000.0 },
@@ -190,5 +200,4 @@ impl Gemma3 {
         let logits = self.embed.reverse(self.final_norm.forward(x));
         (logits, caches_out)
     }
-
 }

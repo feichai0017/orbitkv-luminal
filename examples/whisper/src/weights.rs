@@ -37,8 +37,7 @@ pub fn load_safetensors_weights(
     model_dir: &Path,
 ) -> Result<Vec<(NodeIndex, TypedBuffer)>, Box<dyn Error>> {
     let path = model_dir.join("model.safetensors");
-    let file = std::fs::File::open(&path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let tensors = SafeTensors::deserialize(&mmap)?;
 
@@ -70,9 +69,7 @@ pub fn load_safetensors_weights(
         match spec.dtype {
             DType::F32 => pairs.push((spec.id, view_to_f32(&view).into())),
             other => {
-                return Err(
-                    format!("'{label}': unsupported model input dtype {other:?}").into(),
-                );
+                return Err(format!("'{label}': unsupported model input dtype {other:?}").into());
             }
         }
     }

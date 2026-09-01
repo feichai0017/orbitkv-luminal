@@ -256,7 +256,9 @@ impl Whisper {
         let x = conv1d_bias(x, self.conv2_w, self.conv2_b, 3, 2, 1).gelu();
         let mut x = x.transpose(0, 1) + self.enc_pos;
         for layer in &self.enc_layers {
-            x = x + layer.attn.bidirectional(layer.attn_norm.forward(x), layer.attn_norm.forward(x));
+            x = x + layer
+                .attn
+                .bidirectional(layer.attn_norm.forward(x), layer.attn_norm.forward(x));
             let ff_in = layer.ff_norm.forward(x);
             x = x + layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
         }

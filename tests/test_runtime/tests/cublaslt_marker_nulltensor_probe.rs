@@ -9,7 +9,10 @@ fn base_program() -> String {
     let x = cx.tensor((2usize, 4usize));
     let w = cx.tensor((4usize, 3usize));
     let _out = x.matmul(w).output();
-    cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+    cx.logical
+        .bound_program(&luminal_reference::ReferenceBindings)
+        .expect("recorder clean")
+        .text
 }
 
 /// Probe (i): does the EGGLOG side accept a null LayoutTensor term, and
@@ -27,7 +30,11 @@ fn nulltensor_probe_egglog_side() {
         "{base}\n(constructor CublasLtNullTensor (CublasLtLogicalSite) LayoutTensor)\n(let probe_site (CublasLtLogicalMatmulSite v0 v1 v5))\n(let probe_null (CublasLtNullTensor probe_site))\n"
     );
     let s = test_runtime::serialize_fixture(&fx);
-    let nulls = s.nodes.values().filter(|n| n.op == "CublasLtNullTensor").count();
+    let nulls = s
+        .nodes
+        .values()
+        .filter(|n| n.op == "CublasLtNullTensor")
+        .count();
     let null_class = s
         .nodes
         .values()
@@ -61,8 +68,13 @@ fn nulltensor_probe_egglog_side() {
 /// K is the output NODE's id and shifts whenever recorder numbering
 /// does; hardcoding it is how this probe has broken twice.
 fn output_stem(base: &str) -> String {
-    let start = base.find("natout").expect("bound program has an output stem");
-    let digits: String = base[start + 6..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let start = base
+        .find("natout")
+        .expect("bound program has an output stem");
+    let digits: String = base[start + 6..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     format!("natout{digits}")
 }
 
@@ -109,7 +121,9 @@ fn nulltensor_probe_extraction_side() {
                 .dag
                 .node_weights()
                 .filter_map(|node| match node {
-                    ExtractedNode::LayoutOp(op) => Some((op.op.label().to_string(), op.inputs.len())),
+                    ExtractedNode::LayoutOp(op) => {
+                        Some((op.op.label().to_string(), op.inputs.len()))
+                    }
                     _ => None,
                 })
                 .collect();

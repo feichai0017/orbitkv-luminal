@@ -52,7 +52,13 @@ const OP_FORMS: [(&str, usize, Option<usize>, Option<usize>, usize); 4] = [
     ("LayoutTensorOpCublasLt", 2, None, None, 4),
     ("LayoutTensorOpCublasLtBias", 3, None, Some(4), 5),
     ("LayoutTensorOpCublasLtAccumulate", 3, Some(4), None, 5),
-    ("LayoutTensorOpCublasLtAccumulateBias", 4, Some(4), Some(5), 6),
+    (
+        "LayoutTensorOpCublasLtAccumulateBias",
+        4,
+        Some(4),
+        Some(5),
+        6,
+    ),
 ];
 
 // ===========================================================================
@@ -92,7 +98,13 @@ fn class_has(s: &EGraph, class: &ClassId, op: &str) -> bool {
 
 fn short(class: &ClassId) -> String {
     let text = class.to_string();
-    text.chars().rev().take(6).collect::<String>().chars().rev().collect()
+    text.chars()
+        .rev()
+        .take(6)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 // --- the independent numeric oracle (mirrors the marker's walks) ----------
@@ -180,8 +192,13 @@ fn storage_dims(s: &EGraph, logical: &ClassId) -> Option<Vec<Dim>> {
 fn pitch_factor_classes(s: &EGraph, layout_class: &ClassId) -> Vec<ClassId> {
     let mut factors: Vec<ClassId> = Vec::new();
     for layout in nodes_in_class(s, layout_class, "StridedElementLayoutLit") {
-        let Some(chain) = class_of_child(s, layout, 1) else { continue };
-        let Some(cons) = nodes_in_class(s, &chain, "IntAffineExprCons").first().copied() else {
+        let Some(chain) = class_of_child(s, layout, 1) else {
+            continue;
+        };
+        let Some(cons) = nodes_in_class(s, &chain, "IntAffineExprCons")
+            .first()
+            .copied()
+        else {
             continue;
         };
         // ROUND 10: the pitch may sit on EITHER rank-2 entry — row-major-
@@ -191,10 +208,17 @@ fn pitch_factor_classes(s: &EGraph, layout_class: &ClassId) -> Vec<ClassId> {
         // walk) and read the pitch from the OTHER entry only.
         let head = class_of_child(s, cons, 0);
         let second = class_of_child(s, cons, 1)
-            .and_then(|tail| nodes_in_class(s, &tail, "IntAffineExprCons").first().copied().cloned())
+            .and_then(|tail| {
+                nodes_in_class(s, &tail, "IntAffineExprCons")
+                    .first()
+                    .copied()
+                    .cloned()
+            })
             .and_then(|cons2| class_of_child(s, &cons2, 0));
         let is_bare = |c: &Option<ClassId>| {
-            c.as_ref().map(|c| class_has(s, c, "CoordVar")).unwrap_or(false)
+            c.as_ref()
+                .map(|c| class_has(s, c, "CoordVar"))
+                .unwrap_or(false)
         };
         let mut entries: Vec<ClassId> = Vec::new();
         if is_bare(&second) {
@@ -209,22 +233,22 @@ fn pitch_factor_classes(s: &EGraph, layout_class: &ClassId) -> Vec<ClassId> {
             entries.push(h);
         }
         for row_entry in &entries {
-        for mul in nodes_in_class(s, row_entry, "IntMul") {
-            for child in 0..2usize {
-                let other = 1 - child;
-                let other_is_coord = class_of_child(s, mul, other)
-                    .map(|c| class_has(s, &c, "CoordVar"))
-                    .unwrap_or(false);
-                if !other_is_coord {
-                    continue;
-                }
-                if let Some(factor) = class_of_child(s, mul, child) {
-                    if !factors.contains(&factor) {
-                        factors.push(factor);
+            for mul in nodes_in_class(s, row_entry, "IntMul") {
+                for child in 0..2usize {
+                    let other = 1 - child;
+                    let other_is_coord = class_of_child(s, mul, other)
+                        .map(|c| class_has(s, &c, "CoordVar"))
+                        .unwrap_or(false);
+                    if !other_is_coord {
+                        continue;
+                    }
+                    if let Some(factor) = class_of_child(s, mul, child) {
+                        if !factors.contains(&factor) {
+                            factors.push(factor);
+                        }
                     }
                 }
             }
-        }
         }
     }
     factors
@@ -250,7 +274,9 @@ fn reading_ld(
         return Dim::Unknown;
     }
     // Logical frame from the SITE: a is [m,k], out is [m,n].
-    let Some(site_node) = nodes_in_class(s, site, "CublasLtLogicalMatmulSite").first().copied()
+    let Some(site_node) = nodes_in_class(s, site, "CublasLtLogicalMatmulSite")
+        .first()
+        .copied()
     else {
         return Dim::Unknown;
     };
@@ -270,7 +296,11 @@ fn reading_ld(
     // and k is the a-storage extent that is not m (a stores a permutation
     // of (m, k) — the A[k,m],B[k,n] sibling stores [k, m]).
     let (lm, ln) = (d_st[0].clone(), d_st[1].clone());
-    let lk = if a_st[0] == lm { a_st[1].clone() } else { a_st[0].clone() };
+    let lk = if a_st[0] == lm {
+        a_st[1].clone()
+    } else {
+        a_st[0].clone()
+    };
     let rows = match (role, operation) {
         ("A", "CublasLtOperationN") => lm,
         ("A", "CublasLtOperationT") => lk,
@@ -387,7 +417,11 @@ fn dump_reading_sets(tag: &str, s: &EGraph) {
                 )
             })
             .collect();
-        println!("  [{tag}] site {} readings {}", short(&site), counts.join(" "));
+        println!(
+            "  [{tag}] site {} readings {}",
+            short(&site),
+            counts.join(" ")
+        );
         for role in ["A", "B", "D"] {
             for r in per_role.get(role).into_iter().flatten() {
                 println!(
@@ -583,7 +617,11 @@ fn check_reading_set_coherence(s: &EGraph) -> (Vec<String>, usize) {
                     "{tag}: CROSS-PAIRED — no Lit matches its own descriptors \
                      [{}]->[{}]; class Lits: {}",
                     expected_ins.iter().map(short).collect::<Vec<_>>().join(","),
-                    expected_outs.iter().map(short).collect::<Vec<_>>().join(","),
+                    expected_outs
+                        .iter()
+                        .map(short)
+                        .collect::<Vec<_>>()
+                        .join(","),
                     seen.join(" ")
                 ));
             }
@@ -620,7 +658,9 @@ fn check_reading_set_coherence(s: &EGraph) -> (Vec<String>, usize) {
     // --- orphan Lits: a dataflow spelling no op enode in the class asked --
     for (class, expected) in &expected_by_class {
         for lit in nodes_in_class(s, class, "LayoutTensorOpLit").into_iter() {
-            let Some((ins, outs, _)) = lit_signature(s, lit) else { continue };
+            let Some((ins, outs, _)) = lit_signature(s, lit) else {
+                continue;
+            };
             if !expected.iter().any(|(i, o)| i == &ins && o == &outs) {
                 violations.push(format!(
                     "class {}: ORPHAN Lit [{}]->[{}] belongs to no op enode's own readings",
@@ -668,27 +708,30 @@ fn genome_flavored(s: &EGraph, preferences: &[&str]) -> luminal::extractor::Geno
     // preference ORDER unchanged (explicit names > any CublasLt > the
     // transpose view > non-Copy > Copy) — see the round-2 battery's
     // genome comment for the rationale.
-    let ordered = |candidates: &[(String, luminal::extractor::ProducerChoice)],
-                   level: usize|
-     -> Vec<usize> {
-        let admitted = test_runtime::level_admits(level);
-        let mut order: Vec<usize> = Vec::new();
-        let mut push_where = |order: &mut Vec<usize>, pred: &dyn Fn(&str) -> bool| {
-            for (i, (name, _)) in candidates.iter().enumerate() {
-                if admitted(name) && pred(name) && !order.contains(&i) {
-                    order.push(i);
+    let ordered =
+        |candidates: &[(String, luminal::extractor::ProducerChoice)], level: usize| -> Vec<usize> {
+            let admitted = test_runtime::level_admits(level);
+            let mut order: Vec<usize> = Vec::new();
+            let mut push_where = |order: &mut Vec<usize>, pred: &dyn Fn(&str) -> bool| {
+                for (i, (name, _)) in candidates.iter().enumerate() {
+                    if admitted(name) && pred(name) && !order.contains(&i) {
+                        order.push(i);
+                    }
                 }
+            };
+            for want in preferences {
+                push_where(&mut order, &|name| name == *want);
             }
+            push_where(&mut order, &|name| {
+                name.starts_with("LayoutTensorOpCublasLt")
+            });
+            push_where(&mut order, &|name| {
+                name == "LayoutTensorOpIndexMapApplyViewGeneric"
+            });
+            push_where(&mut order, &|name| !name.contains("Copy"));
+            push_where(&mut order, &|_| true);
+            order
         };
-        for want in preferences {
-            push_where(&mut order, &|name| name == *want);
-        }
-        push_where(&mut order, &|name| name.starts_with("LayoutTensorOpCublasLt"));
-        push_where(&mut order, &|name| name == "LayoutTensorOpIndexMapApplyViewGeneric");
-        push_where(&mut order, &|name| !name.contains("Copy"));
-        push_where(&mut order, &|_| true);
-        order
-    };
     test_runtime::genome_with_ordering(s, &ordered)
 }
 
@@ -702,25 +745,24 @@ fn genome_electing(s: &EGraph, enode: &NodeId) -> (luminal::extractor::Genome, b
     let elected = index
         .values()
         .any(|candidates| candidates.iter().any(|(_, choice)| &choice.enode == enode));
-    let ordered = |candidates: &[(String, luminal::extractor::ProducerChoice)],
-                   level: usize|
-     -> Vec<usize> {
-        let admitted = test_runtime::level_admits(level);
-        let mut order: Vec<usize> = Vec::new();
-        let mut push_where = |order: &mut Vec<usize>, pred: &dyn Fn(&str) -> bool| {
-            for (i, (name, _)) in candidates.iter().enumerate() {
-                if admitted(name) && pred(name) && !order.contains(&i) {
-                    order.push(i);
+    let ordered =
+        |candidates: &[(String, luminal::extractor::ProducerChoice)], level: usize| -> Vec<usize> {
+            let admitted = test_runtime::level_admits(level);
+            let mut order: Vec<usize> = Vec::new();
+            let mut push_where = |order: &mut Vec<usize>, pred: &dyn Fn(&str) -> bool| {
+                for (i, (name, _)) in candidates.iter().enumerate() {
+                    if admitted(name) && pred(name) && !order.contains(&i) {
+                        order.push(i);
+                    }
                 }
+            };
+            for want in PIN {
+                push_where(&mut order, &|name| name == *want);
             }
+            push_where(&mut order, &|name| !name.contains("Copy"));
+            push_where(&mut order, &|_| true);
+            order
         };
-        for want in PIN {
-            push_where(&mut order, &|name| name == *want);
-        }
-        push_where(&mut order, &|name| !name.contains("Copy"));
-        push_where(&mut order, &|_| true);
-        order
-    };
     let mut genome = test_runtime::genome_with_ordering(s, &ordered);
     // The exact enode is elected UNCONDITIONALLY wherever it is a
     // candidate (the probe's point — round-10 semantics): viability-aware
@@ -751,7 +793,10 @@ fn cublaslt_in_plan(graph: &luminal::layout_ir::ExtractedGraph) -> Vec<(CublasLt
 
 fn pinned_cublaslt(text: &str) -> Vec<CublasLt> {
     let (graph, _) = test_runtime::extract_fixture_with_genome(text, PIN);
-    cublaslt_in_plan(&graph).into_iter().map(|(op, _)| op).collect()
+    cublaslt_in_plan(&graph)
+        .into_iter()
+        .map(|(op, _)| op)
+        .collect()
 }
 
 /// The B readings (our `a` operand) over one logical tensor, as
@@ -762,8 +807,12 @@ fn b_reading_forms(s: &EGraph, logical: &ClassId) -> Vec<(String, String, Dim)> 
         .filter(|r| r.role == "B" && &r.logical == logical)
         .map(|r| {
             (
-                r.operation.trim_start_matches("CublasLtOperation").to_string(),
-                r.operation.trim_start_matches("CublasLtOperation").to_string(),
+                r.operation
+                    .trim_start_matches("CublasLtOperation")
+                    .to_string(),
+                r.operation
+                    .trim_start_matches("CublasLtOperation")
+                    .to_string(),
                 r.ld,
             )
         })
@@ -999,7 +1048,9 @@ impl Fx {
         );
         let mut buffer_id = 100;
         let mut emit = |text: &mut String, name: &str, lt_expr: &str, logical: &str, rw: bool| {
-            text.push_str(&format!("(let {name} (LayoutTensorLit {logical} {lt_expr}))\n"));
+            text.push_str(&format!(
+                "(let {name} (LayoutTensorLit {logical} {lt_expr}))\n"
+            ));
             let access = if rw { "ReadWrite" } else { "ReadOnly" };
             text.push_str(&format!(
                 "(let {name}_buf (BufferLit {buffer_id}))\n\
@@ -1054,7 +1105,10 @@ fn rc1_four_way_reading_product_coherent() {
     let b = count_op(&s, "CublasLtOperandBDescriptor");
     let d = count_op(&s, "CublasLtOutputDDescriptor");
     let ops = count_cublaslt(&s);
-    println!("RC1 four-way: {} nodes, readings a={a} b={b} d={d}, {ops} op enode(s)", s.nodes.len());
+    println!(
+        "RC1 four-way: {} nodes, readings a={a} b={b} d={d}, {ops} op enode(s)",
+        s.nodes.len()
+    );
     dump_reading_sets("RC1", &s);
     assert_coherent("RC1", &s);
     // ROUND-10 RE-PIN: readings double — each matmul carries the original
@@ -1073,7 +1127,11 @@ fn rc1_four_way_reading_product_coherent() {
         .filter(|n| n.op.starts_with("LayoutTensorOpCublasLt"))
         .map(|n| n.eclass.clone())
         .collect();
-    assert_eq!(classes.len(), 8, "eight distinct op classes, one per reading set");
+    assert_eq!(
+        classes.len(),
+        8,
+        "eight distinct op classes, one per reading set"
+    );
 
     let ops = pinned_cublaslt(&fx);
     assert_eq!(ops.len(), 1, "election picks exactly one");
@@ -1126,9 +1184,7 @@ fn rc1_four_way_reading_product_coherent() {
         // finding about the CROSS-PAIRED LIT only if egglog got as far as
         // refusing the merge. A parse/vocabulary failure is setup
         // breakage and must be red, not reported as unrepresentability.
-        Err(ref msg)
-            if msg.contains("parse error") || msg.contains("Unbound") =>
-        {
+        Err(ref msg) if msg.contains("parse error") || msg.contains("Unbound") => {
             panic!("SETUP BROKE (not a finding): {msg}")
         }
         Err(_) => println!(
@@ -1143,7 +1199,9 @@ fn rc1_four_way_reading_product_coherent() {
                 println!("    {v}");
             }
             assert!(
-                violations.iter().any(|v| v.contains("CROSS-PAIRED") || v.contains("ORPHAN")),
+                violations
+                    .iter()
+                    .any(|v| v.contains("CROSS-PAIRED") || v.contains("ORPHAN")),
                 "a cross-paired Lit loaded and the checker said nothing: {violations:?}"
             );
         }
@@ -1223,7 +1281,10 @@ fn rc2_four_way_product_under_c_fold() {
     // the C-fold decorator's transpose bridge fires on the SIBLING ops
     // only (the original-relayout ops claim a non-view D whose bridge
     // premise has no transpose parent), so 4 accumulates.
-    assert_eq!(base, 8, "four sibling + four original-relayout base candidates");
+    assert_eq!(
+        base, 8,
+        "four sibling + four original-relayout base candidates"
+    );
     assert_eq!(acc, 4, "one C-folded candidate per sibling base candidate");
 
     let genome = genome_flavored(&s, &["LayoutTensorOpCublasLtAccumulate"]);
@@ -1260,14 +1321,20 @@ fn rc3_second_output_layout_stays_coherent() {
     let s = test_runtime::serialize_fixture(&fx);
     let d = count_op(&s, "CublasLtOutputDDescriptor");
     let ops = count_cublaslt(&s);
-    println!("RC3 second-out-layout: {} nodes, d={d} readings, {ops} op enode(s)", s.nodes.len());
+    println!(
+        "RC3 second-out-layout: {} nodes, d={d} readings, {ops} op enode(s)",
+        s.nodes.len()
+    );
     dump_reading_sets("RC3", &s);
     assert_coherent("RC3", &s);
     // ROUND-10 RE-PIN (was 2/2): the SIBLING site reads out through both
     // composed views (contiguous ld=3, pitched ld=8) and the original site
     // through the blanket-transposed route (ld=2) — 3 D readings, one
     // candidate per (per-site A x B x D) product.
-    assert_eq!(d, 3, "contiguous, creator-padded and relayout D readings coexist");
+    assert_eq!(
+        d, 3,
+        "contiguous, creator-padded and relayout D readings coexist"
+    );
     // ROUND-11 RE-PIN: every site operand carries TWO readable layout
     // tensors (storage frame + collapse-derived column-form frame; the
     // r8d probe pins the mechanism), so operand readings double and the
@@ -1283,7 +1350,8 @@ fn rc3_second_output_layout_stays_coherent() {
         let site_out = class_of_child(&s, site_node, 2).expect("site out");
         for r in readings_for_site(&s, &site).get("D").into_iter().flatten() {
             assert_eq!(
-                r.logical, site_out,
+                r.logical,
+                site_out,
                 "a D reading names logical {} instead of its site's out {}",
                 short(&r.logical),
                 short(&site_out)
@@ -1318,17 +1386,31 @@ fn rc4_bias_relu_chain_no_stale_d() {
         let w = cx.tensor((8usize, 3usize));
         let b = cx.tensor(3usize);
         let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).relu().output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     let s = test_runtime::serialize_fixture(&text);
     let mut per_ctor = Vec::new();
     for (ctor, ..) in OP_FORMS {
-        per_ctor.push(format!("{}={}", ctor.trim_start_matches("LayoutTensorOp"), count_op(&s, ctor)));
+        per_ctor.push(format!(
+            "{}={}",
+            ctor.trim_start_matches("LayoutTensorOp"),
+            count_op(&s, ctor)
+        ));
     }
-    println!("RC4 bias->relu chain: {} nodes, {}", s.nodes.len(), per_ctor.join(" "));
+    println!(
+        "RC4 bias->relu chain: {} nodes, {}",
+        s.nodes.len(),
+        per_ctor.join(" ")
+    );
     dump_reading_sets("RC4", &s);
     let checked = assert_coherent("RC4", &s);
-    assert!(checked >= 3, "base, bias and relu links all present ({checked} enodes)");
+    assert!(
+        checked >= 3,
+        "base, bias and relu links all present ({checked} enodes)"
+    );
 
     // Every DISTINCT claimed output across the chain is a DISTINCT logical
     // value (base y, bias y+b, relu(y+b)) — no two links share a D.
@@ -1338,7 +1420,10 @@ fn rc4_bias_relu_chain_no_stale_d() {
         .map(|r| r.logical)
         .collect();
     println!("  distinct claimed outputs: {}", d_logicals.len());
-    assert!(d_logicals.len() >= 3, "each decoration link re-mints its own D");
+    assert!(
+        d_logicals.len() >= 3,
+        "each decoration link re-mints its own D"
+    );
 
     let ops = pinned_cublaslt(&text);
     assert_eq!(ops.len(), 1, "one fused kernel elected");
@@ -1412,9 +1497,9 @@ fn per_enode_election_sweep(tag: &str, fx: &str, expect_enodes: usize) {
         let graph = extract_with_genome(&s, &genome);
         let plan = cublaslt_in_plan(&graph);
         let Some((op, _)) = plan.iter().find(|(op, _)| {
-            op.spec
-                .as_ref()
-                .is_some_and(|sp| sp.desc_a_layout_tensor == a_lt && sp.desc_b_layout_tensor == b_lt)
+            op.spec.as_ref().is_some_and(|sp| {
+                sp.desc_a_layout_tensor == a_lt && sp.desc_b_layout_tensor == b_lt
+            })
         }) else {
             // ROUND 10: an ORIGINAL-site relayout candidate claims a
             // layout tensor the boundary only reaches through a copy the
@@ -1440,12 +1525,21 @@ fn per_enode_election_sweep(tag: &str, fx: &str, expect_enodes: usize) {
             spec.lda,
             spec.ldb
         );
-        assert_eq!(spec.trans_a, want_trans_a, "{tag}: trans_a is THIS enode's reading");
-        assert_eq!(spec.trans_b, want_trans_b, "{tag}: trans_b is THIS enode's reading");
+        assert_eq!(
+            spec.trans_a, want_trans_a,
+            "{tag}: trans_a is THIS enode's reading"
+        );
+        assert_eq!(
+            spec.trans_b, want_trans_b,
+            "{tag}: trans_b is THIS enode's reading"
+        );
         assert_ld("lda", tag, &spec.lda, &want_lda);
         assert_ld("ldb", tag, &spec.ldb, &want_ldb);
     }
-    assert!(elected_any >= 2, "{tag}: at least two enodes were forced in turn");
+    assert!(
+        elected_any >= 2,
+        "{tag}: at least two enodes were forced in turn"
+    );
 }
 
 /// The dual-spelling class: one square matmul spelled A[m,k],B[k,n] and A[m,k],B[n,k], the two
@@ -1627,7 +1721,10 @@ fn rp1_candidate_product_growth() {
         };
         let mut expect = expect;
         expect.sort_unstable();
-        assert_eq!(per_site, expect, "{name}: per-site reading counts are arms x forms");
+        assert_eq!(
+            per_site, expect,
+            "{name}: per-site reading counts are arms x forms"
+        );
     }
 }
 
@@ -1636,35 +1733,50 @@ fn rp1_candidate_product_growth() {
 #[test]
 fn rp2_decoration_depth_enode_count() {
     let programs: [(&str, Box<dyn Fn(&mut Graph)>); 4] = [
-        ("plain", Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let _ = x.matmul(w).output();
-        })),
-        ("relu", Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let _ = x.matmul(w).relu().output();
-        })),
-        ("bias", Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let b = cx.tensor(3usize);
-            let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
-        })),
-        ("bias+relu", Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let b = cx.tensor(3usize);
-            let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).relu().output();
-        })),
+        (
+            "plain",
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let _ = x.matmul(w).output();
+            }),
+        ),
+        (
+            "relu",
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let _ = x.matmul(w).relu().output();
+            }),
+        ),
+        (
+            "bias",
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let b = cx.tensor(3usize);
+                let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
+            }),
+        ),
+        (
+            "bias+relu",
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let b = cx.tensor(3usize);
+                let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).relu().output();
+            }),
+        ),
     ];
     println!("MEASURE rp2 decoration depth");
     for (name, build) in &programs {
         let text = {
             let mut cx = Graph::new();
             build(&mut cx);
-            cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+            cx.logical
+                .bound_program(&luminal_reference::ReferenceBindings)
+                .expect("recorder clean")
+                .text
         };
         let started = Instant::now();
         let s = test_runtime::serialize_fixture(&text);
@@ -1672,7 +1784,11 @@ fn rp2_decoration_depth_enode_count() {
         let per_ctor: Vec<String> = OP_FORMS
             .iter()
             .map(|(ctor, ..)| {
-                format!("{}={}", ctor.trim_start_matches("LayoutTensorOpCublasLt"), count_op(&s, ctor))
+                format!(
+                    "{}={}",
+                    ctor.trim_start_matches("LayoutTensorOpCublasLt"),
+                    count_op(&s, ctor)
+                )
             })
             .collect();
         let readings = count_op(&s, "CublasLtOperandADescriptor")
@@ -1713,7 +1829,10 @@ fn rp3_product_at_scale() {
                     let w = cx.tensor((k, nn));
                     let _ = x.matmul(w).output();
                 }
-                cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+                cx.logical
+                    .bound_program(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean")
+                    .text
             };
             let started = Instant::now();
             let s = test_runtime::serialize_fixture(&text);
@@ -1738,10 +1857,26 @@ fn rp3_product_at_scale() {
             // operand make 4 candidates and 5 readings per site pair —
             // still CONSTANT per block, which is this test's law.
             assert_eq!(site_count, 2 * n, "{label} N={n}: one site pair per block");
-            assert_eq!(ops, 8 * n, "{label} N={n}: four candidates per site pair, independent of N");
-            assert_eq!(readings, 10 * n, "{label} N={n}: five readings per site pair");
+            assert_eq!(
+                ops,
+                8 * n,
+                "{label} N={n}: four candidates per site pair, independent of N"
+            );
+            assert_eq!(
+                readings,
+                10 * n,
+                "{label} N={n}: five readings per site pair"
+            );
             assert_eq!(elected.len(), n, "{label} N={n}: one kernel per block");
-            rows.push((label.to_string(), n, s.nodes.len(), ops, readings, saturate, extract));
+            rows.push((
+                label.to_string(),
+                n,
+                s.nodes.len(),
+                ops,
+                readings,
+                saturate,
+                extract,
+            ));
         }
     }
     // Program-size independence, stated as a ratio: candidates/site is 1 at
@@ -1749,7 +1884,11 @@ fn rp3_product_at_scale() {
     for (label, n, nodes, ops, _, _, _) in &rows {
         // ROUND-11 RE-PIN: four candidates per site pair, two sites per
         // block — still linear in N (the law under test).
-        assert_eq!(*ops, 8 * *n, "{label} N={n} ({nodes} nodes): candidate count tracks sites only");
+        assert_eq!(
+            *ops,
+            8 * *n,
+            "{label} N={n} ({nodes} nodes): candidate count tracks sites only"
+        );
     }
 }
 
@@ -1757,7 +1896,11 @@ fn rp3_product_at_scale() {
 // RS — SYMBOLIC EDGES
 // ===========================================================================
 
-fn symbolic_k_skeleton(tail: &str, extra_outputs: Vec<String>, out_value: Option<String>) -> String {
+fn symbolic_k_skeleton(
+    tail: &str,
+    extra_outputs: Vec<String>,
+    out_value: Option<String>,
+) -> String {
     Fx {
         decls: "(let s_var (IntVar \"s\"))\n(set (lower-bound-of s_var) (bigint 2))\n(set (upper-bound-of s_var) (bigint 8))".into(),
         m: "(IntLit 2)".into(),
@@ -1819,7 +1962,10 @@ fn rs1_bias_decorates_symbolic_k() {
         spec.epilogue, spec.m, spec.n, spec.k, spec.lda, spec.ldb, spec.ldd
     );
     assert_eq!(spec.epilogue, CuEpilogue::Bias);
-    assert!(matches!(spec.k, CuDim::Symbolic(_)), "k stays symbolic under decoration");
+    assert!(
+        matches!(spec.k, CuDim::Symbolic(_)),
+        "k stays symbolic under decoration"
+    );
     assert!(spec.bias_tensor.is_some());
     assert_eq!(spec.lda, 3, "w storage cols literal");
     assert_eq!(spec.ldd, 3);
@@ -1867,7 +2013,10 @@ fn rs2_symbolic_m_probe() {
     assert_coherent("RS2", &s);
     // ROUND-10 RE-PIN (was 2): sibling composed views of both out layouts
     // plus the original site's relayout route.
-    assert!(d >= 2, "contiguous AND creator-padded D readings coexist, got {d}");
+    assert!(
+        d >= 2,
+        "contiguous AND creator-padded D readings coexist, got {d}"
+    );
 
     let plan = {
         let (graph, _) = test_runtime::extract_fixture_with_genome(&fx, PIN);
@@ -1882,7 +2031,10 @@ fn rs2_symbolic_m_probe() {
         "  elected padded: m={} n={} k={} lda={} ldb={} ldd={}",
         spec.m, spec.n, spec.k, spec.lda, spec.ldb, spec.ldd
     );
-    assert!(matches!(spec.m, CuDim::Symbolic(_)), "call m = logical n = symbolic");
+    assert!(
+        matches!(spec.m, CuDim::Symbolic(_)),
+        "call m = logical n = symbolic"
+    );
     assert_eq!(spec.n, 2);
     assert_eq!(spec.k, 4);
     assert_eq!(spec.ldd, 8, "the literal bucket pitch");
@@ -1910,14 +2062,15 @@ fn rs3_symbolic_ld_refuses_even_with_parseable_classmate() {
     let s = test_runtime::serialize_fixture(&refuse);
     let strided_layouts = count_op(&s, "StridedElementLayoutLit");
     let b = count_op(&s, "CublasLtOperandBDescriptor");
-    println!(
-        "RS3a no-creator baseline: {strided_layouts} strided layout(s), b={b} readings"
-    );
+    println!("RS3a no-creator baseline: {strided_layouts} strided layout(s), b={b} readings");
     assert_coherent("RS3a", &s);
     // ROUND-11 RE-PIN (was 2): + the column-form frame readings. Still
     // no padded layout from nowhere — every reading rides a contiguous
     // frame.
-    assert_eq!(b, 4, "no creator, no padded layout — only the contiguous readings");
+    assert_eq!(
+        b, 4,
+        "no creator, no padded layout — only the contiguous readings"
+    );
 
     // (b) hand-certified symbolic pitch alongside the literal sibling.
     let dual = Fx {
@@ -1937,7 +2090,9 @@ fn rs3_symbolic_ld_refuses_even_with_parseable_classmate() {
     assert_coherent("RS3b", &s);
     // x is the site triple's slot-0 tensor (our `a`, the API's operand B).
     let site = sites(&s).into_iter().next().expect("one site");
-    let site_node = *nodes_in_class(&s, &site, "CublasLtLogicalMatmulSite").first().unwrap();
+    let site_node = *nodes_in_class(&s, &site, "CublasLtLogicalMatmulSite")
+        .first()
+        .unwrap();
     let x_logical = class_of_child(&s, site_node, 0).expect("site a");
     // ROUND-11 RE-PIN: under the unswapped arms + canonical form, x (the
     // site's slot-0 operand) is read by the A arm directly, and its
@@ -1950,7 +2105,9 @@ fn rs3_symbolic_ld_refuses_even_with_parseable_classmate() {
         .map(|r| {
             (
                 r.role.clone(),
-                r.operation.trim_start_matches("CublasLtOperation").to_string(),
+                r.operation
+                    .trim_start_matches("CublasLtOperation")
+                    .to_string(),
                 r.ld,
             )
         })
@@ -1970,7 +2127,10 @@ fn rs3_symbolic_ld_refuses_even_with_parseable_classmate() {
     let candidates = strided_b_candidates(&s);
     println!(
         "RS3b strided candidates: {:?}",
-        candidates.iter().map(|(_, d)| d.to_string()).collect::<Vec<_>>()
+        candidates
+            .iter()
+            .map(|(_, d)| d.to_string())
+            .collect::<Vec<_>>()
     );
     let (id, factor) = candidates
         .into_iter()
@@ -1981,7 +2141,10 @@ fn rs3_symbolic_ld_refuses_even_with_parseable_classmate() {
     assert!(hit, "RS3b: the symbolic-pitch candidate is electable");
     let graph = extract_with_genome(&s, &genome);
     let plan = cublaslt_in_plan(&graph);
-    let specs: Vec<String> = plan.iter().map(|(op, _)| format!("{}", spec_of(op).ldb)).collect();
+    let specs: Vec<String> = plan
+        .iter()
+        .map(|(op, _)| format!("{}", spec_of(op).ldb))
+        .collect();
     println!("RS3b elected ldb values: {specs:?}");
     assert!(
         plan.iter()
@@ -2008,7 +2171,11 @@ fn rs3_symbolic_ld_refuses_even_with_parseable_classmate() {
   (LayoutTensorCons w_lt0 (LayoutTensorCons x_lt0 (LayoutTensorNil)))
   (LayoutTensorCons out_lt0 (LayoutTensorNil))))
 "#;
-    let bogus = Fx { tail: bogus_tail.into(), ..Default::default() }.render();
+    let bogus = Fx {
+        tail: bogus_tail.into(),
+        ..Default::default()
+    }
+    .render();
     let s = test_runtime::serialize_fixture(&bogus);
     dump_reading_sets("RS3c", &s);
     // ROUND 10: the seeded Lit order matches the unswapped assemble rule
@@ -2025,9 +2192,16 @@ fn rs3_symbolic_ld_refuses_even_with_parseable_classmate() {
     println!(
         "RS3c: {} base op enode(s) in {} class(es)",
         class_mates.len(),
-        class_mates.iter().map(|(_, c)| c).collect::<BTreeSet<_>>().len()
+        class_mates
+            .iter()
+            .map(|(_, c)| c)
+            .collect::<BTreeSet<_>>()
+            .len()
     );
-    assert!(class_mates.len() >= 2, "the real ops and the hand-seeded class-mate");
+    assert!(
+        class_mates.len() >= 2,
+        "the real ops and the hand-seeded class-mate"
+    );
     let bogus_id = s
         .nodes
         .iter()
@@ -2035,7 +2209,9 @@ fn rs3_symbolic_ld_refuses_even_with_parseable_classmate() {
             n.op == "LayoutTensorOpCublasLt"
                 && class_of_child(&s, n, 1)
                     .and_then(|c| {
-                        nodes_in_class(&s, &c, "CublasLtOperandADescriptor").first().copied()
+                        nodes_in_class(&s, &c, "CublasLtOperandADescriptor")
+                            .first()
+                            .copied()
                     })
                     .and_then(|d| class_of_child(&s, d, 2))
                     .map(|f| class_has(&s, &f, "CublasLtOperationT"))
@@ -2117,7 +2293,9 @@ fn strided_b_candidates(s: &EGraph) -> Vec<(NodeId, Dim)> {
                 return None;
             }
             let bc = class_of_child(s, n, 2)?;
-            let desc = nodes_in_class(s, &bc, "CublasLtOperandBDescriptor").first().copied()?;
+            let desc = nodes_in_class(s, &bc, "CublasLtOperandBDescriptor")
+                .first()
+                .copied()?;
             let lt = class_of_child(s, desc, 1)?;
             let layout = layout_of_lt(s, &lt)?;
             // ROUND-11: exclude BOTH contiguous families — the collapse-
@@ -2153,13 +2331,19 @@ fn spelling_probe(tag: &str, row_entry: &str, stride_expr: &str, expect: i64) {
     .render();
     let s = test_runtime::serialize_fixture(&fx);
     let b = count_op(&s, "CublasLtOperandBDescriptor");
-    println!("{tag} `{row_entry}`: b={b} reading(s), {} candidates", count_cublaslt(&s));
+    println!(
+        "{tag} `{row_entry}`: b={b} reading(s), {} candidates",
+        count_cublaslt(&s)
+    );
     dump_reading_sets(tag, &s);
     assert_coherent(tag, &s);
     // ROUND-11 RE-PIN (was 3): + the column-form frame readings of the
     // contiguous operands; the hostile pitched reading still mints
     // exactly once beside them.
-    assert_eq!(b, 5, "{tag}: the hostile spelling mints a reading beside the contiguous one");
+    assert_eq!(
+        b, 5,
+        "{tag}: the hostile spelling mints a reading beside the contiguous one"
+    );
 
     // The oracle first: the strided reading's ld, read independently.
     // ROUND-11: the collapse-derived column-form frame layouts are
@@ -2190,17 +2374,33 @@ fn spelling_probe(tag: &str, row_entry: &str, stride_expr: &str, expect: i64) {
     // ROUND-11 RE-PIN (was 1): the pitched B reading pairs with the TWO
     // A-frame readings of its site — two candidates carrying the pitch.
     let candidates = strided_b_candidates(&s);
-    assert_eq!(candidates.len(), 2, "{tag}: the pitched reading's two A-frame pairings");
+    assert_eq!(
+        candidates.len(),
+        2,
+        "{tag}: the pitched reading's two A-frame pairings"
+    );
     let (genome, hit) = genome_electing(&s, &candidates[0].0);
     assert!(hit, "{tag}: the strided candidate is electable");
     let graph = extract_with_genome(&s, &genome);
     let plan = cublaslt_in_plan(&graph);
     assert_eq!(plan.len(), 1, "{tag}: one kernel elected");
     let spec = spec_of(&plan[0].0);
-    println!("  {tag} elected: lda={} ldb={} ldd={}", spec.lda, spec.ldb, spec.ldd);
-    assert_eq!(spec.ldb, expect, "{tag}: ldb must be the real pitch, not a normalization residue");
-    assert_ne!(spec.ldb, 1i64, "{tag}: the unit factor must never masquerade as the pitch");
-    assert_ne!(spec.ldb, 4i64, "{tag}: the contiguous sibling's ld must not be borrowed");
+    println!(
+        "  {tag} elected: lda={} ldb={} ldd={}",
+        spec.lda, spec.ldb, spec.ldd
+    );
+    assert_eq!(
+        spec.ldb, expect,
+        "{tag}: ldb must be the real pitch, not a normalization residue"
+    );
+    assert_ne!(
+        spec.ldb, 1i64,
+        "{tag}: the unit factor must never masquerade as the pitch"
+    );
+    assert_ne!(
+        spec.ldb, 4i64,
+        "{tag}: the contiguous sibling's ld must not be borrowed"
+    );
     // ROUND-11 RE-PIN (lda was exactly 3): the elected pairing may put
     // either A frame beside the pitched B reading — the storage frame
     // (lda = 3) or the column-form frame (lda = 4). Both are clamp-sound
@@ -2228,7 +2428,12 @@ fn rt1_wrapped_unit_factor_row_term() {
 /// `8 * coord` — the coefficient on the LEFT (commuted operands).
 #[test]
 fn rt2_left_coefficient_row_term() {
-    spelling_probe("RT2", "(IntMul (IntLit 8) (CoordVar a_shape 1))", "(IntLit 8)", 8);
+    spelling_probe(
+        "RT2",
+        "(IntMul (IntLit 8) (CoordVar a_shape 1))",
+        "(IntLit 8)",
+        8,
+    );
 }
 
 /// `coord * (2 * 4)` — a folded product; constant folding does not subsume,
@@ -2263,11 +2468,17 @@ fn rt4_two_static_pitches_coherent() {
     .render();
     let s = test_runtime::serialize_fixture(&fx);
     let b = count_op(&s, "CublasLtOperandBDescriptor");
-    println!("RT4 two pitches: b={b} readings, {} candidates", count_cublaslt(&s));
+    println!(
+        "RT4 two pitches: b={b} readings, {} candidates",
+        count_cublaslt(&s)
+    );
     dump_reading_sets("RT4", &s);
     assert_coherent("RT4", &s);
     // ROUND-11 RE-PIN (was 4/6): + the column-form frame readings.
-    assert_eq!(b, 6, "contiguous frames + two pitched readings + the original site's w frames");
+    assert_eq!(
+        b, 6,
+        "contiguous frames + two pitched readings + the original site's w frames"
+    );
     // Products scale with the frame doubling on the un-pitched roles.
     let rt4_ops = count_cublaslt(&s);
     println!("RT4 candidates: {rt4_ops}");
@@ -2369,41 +2580,61 @@ fn ru1_dot_product_multiplicity() {
     let corners = [
         Corner {
             name: "dot m=n=1 k=4",
-            m: 1, n: 1, k: 4,
-            sites: 2, readings: &[(2, 2, 1), (2, 2, 1)],
+            m: 1,
+            n: 1,
+            k: 4,
+            sites: 2,
+            readings: &[(2, 2, 1), (2, 2, 1)],
             mnk: (1, 1, 4),
         },
         Corner {
             name: "gemv m=1",
-            m: 1, n: 3, k: 4,
+            m: 1,
+            n: 3,
+            k: 4,
             // ROUND-11 RE-PIN (was [(2,1,1),(1,2,1)]): two frames per
             // operand even at the degenerate extents.
-            sites: 2, readings: &[(2, 2, 1), (2, 2, 1)],
+            sites: 2,
+            readings: &[(2, 2, 1), (2, 2, 1)],
             mnk: (1, 3, 4),
         },
         Corner {
             name: "gemv n=1",
-            m: 2, n: 1, k: 4,
+            m: 2,
+            n: 1,
+            k: 4,
             // ROUND-11 RE-PIN (was [(1,2,1),(2,1,1)]): as above.
-            sites: 2, readings: &[(2, 2, 1), (2, 2, 1)],
+            sites: 2,
+            readings: &[(2, 2, 1), (2, 2, 1)],
             mnk: (1, 2, 4),
         },
         Corner {
             name: "k=1",
-            m: 2, n: 3, k: 1,
-            sites: 2, readings: &[(2, 2, 1), (2, 2, 1)],
+            m: 2,
+            n: 3,
+            k: 1,
+            sites: 2,
+            readings: &[(2, 2, 1), (2, 2, 1)],
             mnk: (2, 3, 1),
         },
         Corner {
             name: "all-ones",
-            m: 1, n: 1, k: 1,
+            m: 1,
+            n: 1,
+            k: 1,
             // ROUND-11 RE-PIN (was 2 sites): the fully welded corner lets
             // every canonicalization pattern fire (see attack_a11) — 8
             // welded site families, all describing the 1x1x1 call.
             sites: 8,
             readings: &[
-                (2, 2, 1), (2, 2, 1), (2, 2, 1), (2, 2, 1),
-                (2, 2, 1), (2, 2, 1), (2, 2, 1), (2, 2, 1),
+                (2, 2, 1),
+                (2, 2, 1),
+                (2, 2, 1),
+                (2, 2, 1),
+                (2, 2, 1),
+                (2, 2, 1),
+                (2, 2, 1),
+                (2, 2, 1),
             ],
             mnk: (1, 1, 1),
         },
@@ -2436,7 +2667,12 @@ fn ru1_dot_product_multiplicity() {
 
         // THE PRODUCT LAW, PER SITE (never program-wide, never program-size).
         if site_list.len() != c.sites {
-            problems.push(format!("{}: {} sites != pinned {}", c.name, site_list.len(), c.sites));
+            problems.push(format!(
+                "{}: {} sites != pinned {}",
+                c.name,
+                site_list.len(),
+                c.sites
+            ));
         }
         let mut observed: Vec<(usize, usize, usize)> = Vec::new();
         let mut total_product = 0usize;
@@ -2452,7 +2688,10 @@ fn ru1_dot_product_multiplicity() {
                         && class_of_child(&s, n, 0).as_ref() == Some(site)
                 })
                 .count();
-            println!("    site {}: a={a} b={b} d={d} -> {here} candidate(s)", short(site));
+            println!(
+                "    site {}: a={a} b={b} d={d} -> {here} candidate(s)",
+                short(site)
+            );
             observed.push((a, b, d));
             total_product += a * b * d;
             if here != a * b * d {
@@ -2514,7 +2753,11 @@ fn ru1_dot_product_multiplicity() {
             ));
         }
     }
-    assert!(problems.is_empty(), "ru1 corner sweep:\n  {}", problems.join("\n  "));
+    assert!(
+        problems.is_empty(),
+        "ru1 corner sweep:\n  {}",
+        problems.join("\n  ")
+    );
 }
 
 /// A LEFT-MAJOR-ONLY seeded operand. The only reading of x ITSELF is the
@@ -2530,7 +2773,10 @@ fn ru2_left_major_only_election_field_check() {
     .render();
     let s = test_runtime::serialize_fixture(&fx);
     let b = count_op(&s, "CublasLtOperandBDescriptor");
-    println!("RU2 left-major-only: b={b} reading(s), {} candidates", count_cublaslt(&s));
+    println!(
+        "RU2 left-major-only: b={b} reading(s), {} candidates",
+        count_cublaslt(&s)
+    );
     dump_reading_sets("RU2", &s);
     assert_coherent("RU2", &s);
     // ROUND-11 RE-PIN (was 3/4): + the column-form frame readings.
@@ -2564,7 +2810,9 @@ fn ru2_left_major_only_election_field_check() {
             n.op.starts_with("LayoutTensorOpCublasLt")
                 && class_of_child(&s, n, 2)
                     .and_then(|c| {
-                        nodes_in_class(&s, &c, "CublasLtOperandBDescriptor").first().copied()
+                        nodes_in_class(&s, &c, "CublasLtOperandBDescriptor")
+                            .first()
+                            .copied()
                     })
                     .and_then(|d| class_of_child(&s, d, 1))
                     .map(|lt| lt == seeded[0].lt)
@@ -2582,8 +2830,16 @@ fn ru2_left_major_only_election_field_check() {
     let spec = spec_of(&elected[0]);
     println!(
         "  m={} n={} k={} trans_a={} trans_b={} lda={} ldb={} ldc={} ldd={} col={}",
-        spec.m, spec.n, spec.k, spec.trans_a, spec.trans_b, spec.lda, spec.ldb, spec.ldc,
-        spec.ldd, spec.order_col
+        spec.m,
+        spec.n,
+        spec.k,
+        spec.trans_a,
+        spec.trans_b,
+        spec.lda,
+        spec.ldb,
+        spec.ldc,
+        spec.ldd,
+        spec.order_col
     );
     assert_eq!(spec.mnk_lits(), (3, 2, 4));
     assert!(!spec.trans_a, "w is right-major: N");
@@ -2613,7 +2869,10 @@ fn ru3_m1_corner_multiplicity() {
         let x = cx.tensor((1usize, 4usize));
         let w = cx.tensor((4usize, 3usize));
         let _ = x.matmul(w).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     };
     let s = test_runtime::serialize_fixture(&text);
     let a = count_op(&s, "CublasLtOperandADescriptor");
@@ -2638,8 +2897,15 @@ fn ru3_m1_corner_multiplicity() {
     // its A=x reading, the sibling its B=x reading).
     assert_eq!(sites(&s).len(), 2, "original + sibling");
     // ROUND-11 RE-PIN (was (3,3,2)/4): + the column-form frame readings.
-    assert_eq!((a, b, d), (4, 4, 2), "the welded x layout is read two legal ways per site");
-    assert_eq!(ops, 8, "EIGHT candidates — round 4 minted TEN here from ONE site");
+    assert_eq!(
+        (a, b, d),
+        (4, 4, 2),
+        "the welded x layout is read two legal ways per site"
+    );
+    assert_eq!(
+        ops, 8,
+        "EIGHT candidates — round 4 minted TEN here from ONE site"
+    );
 
     // (2) OWN LAYOUTS ONLY: every reading's layout tensor belongs to one of
     // the site's own three logical tensors, and its ld is one of that
@@ -2648,7 +2914,9 @@ fn ru3_m1_corner_multiplicity() {
     // out is the transpose view of the original's).
     let mut own: Vec<ClassId> = Vec::new();
     for site in sites(&s) {
-        let site_node = *nodes_in_class(&s, &site, "CublasLtLogicalMatmulSite").first().unwrap();
+        let site_node = *nodes_in_class(&s, &site, "CublasLtLogicalMatmulSite")
+            .first()
+            .unwrap();
         for i in 0..3 {
             if let Some(c) = class_of_child(&s, site_node, i) {
                 if !own.contains(&c) {
@@ -2790,7 +3058,10 @@ fn ru4_weld_harvesting_is_cross_tensor() {
             let stranger = cx.tensor((1usize, 37usize));
             let _ = (stranger + stranger).output();
         }
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean")
+            .text
     }
 
     /// The GEMV site's candidate set, as a comparable fingerprint:
@@ -2809,7 +3080,9 @@ fn ru4_weld_harvesting_is_cross_tensor() {
         let site = sites(s)
             .into_iter()
             .find(|site| {
-                let node = *nodes_in_class(s, site, "CublasLtLogicalMatmulSite").first().unwrap();
+                let node = *nodes_in_class(s, site, "CublasLtLogicalMatmulSite")
+                    .first()
+                    .unwrap();
                 class_of_child(s, node, 2)
                     .and_then(|out| storage_dims(s, &out))
                     .map(|dims| dims == vec![Dim::Lit(1), Dim::Lit(3)])
@@ -2877,11 +3150,23 @@ fn ru4_weld_harvesting_is_cross_tensor() {
     println!(
         "  VERDICT: the stranger {} the raw harvest surface ({} -> {} literals; 37 {} reachable) \
          while the reading set is {}",
-        if s_poll.len() > s_plain.len() { "GREW" } else { "did not grow" },
+        if s_poll.len() > s_plain.len() {
+            "GREW"
+        } else {
+            "did not grow"
+        },
         s_plain.len(),
         s_poll.len(),
-        if s_poll.contains(&Some(37)) { "IS" } else { "is NOT" },
-        if r_plain == r_poll { "UNCHANGED" } else { "POLLUTED" }
+        if s_poll.contains(&Some(37)) {
+            "IS"
+        } else {
+            "is NOT"
+        },
+        if r_plain == r_poll {
+            "UNCHANGED"
+        } else {
+            "POLLUTED"
+        }
     );
 
     // THE BAIT MUST LAND. If the stranger's literals never reach the GEMV's
@@ -2960,7 +3245,11 @@ fn ru4_weld_harvesting_is_cross_tensor() {
             "  {label} elected GEMV: m={} n={} k={} trans_b={} lda={} ldb={} ldd={}",
             spec.m, spec.n, spec.k, spec.trans_b, spec.lda, spec.ldb, spec.ldd
         );
-        assert_eq!(spec.mnk_lits(), (1, 3, 4), "{label}: call frame (direct at m=1, round 10)");
+        assert_eq!(
+            spec.mnk_lits(),
+            (1, 3, 4),
+            "{label}: call frame (direct at m=1, round 10)"
+        );
         // Direct frame: A = x[1,4] (welded, elected N: lda = m = 1),
         // B = w[4,3] (T: ldb = n = 3), D = out[1,3] (ldd = m = 1).
         assert_eq!(spec.lda, 1, "{label}: lda");

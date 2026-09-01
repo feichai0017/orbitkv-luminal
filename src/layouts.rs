@@ -33,7 +33,7 @@
 //!    analysis — a class none of whose spellings parse is a loud error,
 //!    never a guess.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use egraph_serialize::{ClassId, EGraph, Node, NodeId};
 use std::collections::HashMap;
 
@@ -56,7 +56,9 @@ pub enum IntExprTerm {
     /// convention). The owner shape is checked at render time (a foreign
     /// shape's coordinate never silently parses); the term keeps the
     /// axis alone.
-    Coord { axis_from_end: i64 },
+    Coord {
+        axis_from_end: i64,
+    },
     Add(Box<IntExprTerm>, Box<IntExprTerm>),
     Mul(Box<IntExprTerm>, Box<IntExprTerm>),
     /// Truncated (toward-zero) division — `IntTruncDiv`.
@@ -366,7 +368,10 @@ impl<'a> Reader<'a> {
         for ids in class_nodes.values_mut() {
             ids.sort();
         }
-        Self { egraph, class_nodes }
+        Self {
+            egraph,
+            class_nodes,
+        }
     }
 
     /// Every node of `op` in `class` — unsubsumed spellings first,
@@ -378,7 +383,11 @@ impl<'a> Reader<'a> {
         class: &ClassId,
         op: &str,
     ) -> impl Iterator<Item = &'a Node> + '_ {
-        let ids = self.class_nodes.get(class).map(Vec::as_slice).unwrap_or(&[]);
+        let ids = self
+            .class_nodes
+            .get(class)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let matching = move |want_subsumed: bool| {
             let op = op.to_string();
             ids.iter()
@@ -423,21 +432,24 @@ impl<'a> Reader<'a> {
         for node in self.nodes_in_class_value(class, "RightMajorContiguousElementLayoutLit") {
             present.push("RightMajorContiguousElementLayoutLit");
             let (Some(shape), Some(width)) = (
-                self.class_of_child(node, 0).and_then(|c| self.render_shape(&c)),
-                self.class_of_child(node, 1).and_then(|c| self.render_bit_width(&c)),
+                self.class_of_child(node, 0)
+                    .and_then(|c| self.render_shape(&c)),
+                self.class_of_child(node, 1)
+                    .and_then(|c| self.render_bit_width(&c)),
             ) else {
                 continue;
             };
-            return Ok(MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
-                shape,
-                width,
-            }));
+            return Ok(MirrorLayout::RightMajor(
+                RightMajorContiguousElementLayout { shape, width },
+            ));
         }
         for node in self.nodes_in_class_value(class, "LeftMajorContiguousElementLayoutLit") {
             present.push("LeftMajorContiguousElementLayoutLit");
             let (Some(shape), Some(width)) = (
-                self.class_of_child(node, 0).and_then(|c| self.render_shape(&c)),
-                self.class_of_child(node, 1).and_then(|c| self.render_bit_width(&c)),
+                self.class_of_child(node, 0)
+                    .and_then(|c| self.render_shape(&c)),
+                self.class_of_child(node, 1)
+                    .and_then(|c| self.render_bit_width(&c)),
             ) else {
                 continue;
             };
@@ -464,7 +476,11 @@ impl<'a> Reader<'a> {
             let Some(chain) = self.render_affine_chain(&chain_class, &shape_class) else {
                 continue;
             };
-            return Ok(MirrorLayout::Strided(StridedElementLayout { shape, chain, width }));
+            return Ok(MirrorLayout::Strided(StridedElementLayout {
+                shape,
+                chain,
+                width,
+            }));
         }
         for (constructor, bit_form) in [
             ("ElementOffsetExpressionLayoutLit", false),
@@ -492,7 +508,11 @@ impl<'a> Reader<'a> {
                     continue;
                 };
                 return Ok(if bit_form {
-                    MirrorLayout::BitOffset(BitOffsetExpressionLayout { offset, shape, width })
+                    MirrorLayout::BitOffset(BitOffsetExpressionLayout {
+                        offset,
+                        shape,
+                        width,
+                    })
                 } else {
                     MirrorLayout::ElementOffset(ElementOffsetExpressionLayout {
                         offset,
@@ -517,7 +537,9 @@ impl<'a> Reader<'a> {
 
     fn render_bit_width(&self, class: &ClassId) -> Option<BitWidthTerm> {
         for node in self.nodes_in_class_value(class, "BitWidthLit") {
-            let Some(bits_class) = self.class_of_child(node, 0) else { continue };
+            let Some(bits_class) = self.class_of_child(node, 0) else {
+                continue;
+            };
             if let Some(bits) = self.parse_i64(&bits_class) {
                 return Some(BitWidthTerm(bits));
             }
@@ -527,7 +549,9 @@ impl<'a> Reader<'a> {
 
     fn render_shape(&self, class: &ClassId) -> Option<ShapeTerm> {
         for node in self.nodes_in_class_value(class, "ShapeLit") {
-            let Some(head) = self.class_of_child(node, 0) else { continue };
+            let Some(head) = self.class_of_child(node, 0) else {
+                continue;
+            };
             let mut memo = HashMap::new();
             if let Some(extents) =
                 self.render_expr_list(&head, "IntExprCons", "IntExprNil", 64, None, &mut memo)
@@ -576,8 +600,12 @@ impl<'a> Reader<'a> {
             return Some(Vec::new());
         }
         for cons in self.nodes_in_class_value(class, cons_op) {
-            let Some(element) = self.class_of_child(cons, 0) else { continue };
-            let Some(tail) = self.class_of_child(cons, 1) else { continue };
+            let Some(element) = self.class_of_child(cons, 0) else {
+                continue;
+            };
+            let Some(tail) = self.class_of_child(cons, 1) else {
+                continue;
+            };
             let Some(expr) = self.parse_int_expr(&element, 64, owner_shape, memo) else {
                 continue;
             };
@@ -650,7 +678,9 @@ impl<'a> Reader<'a> {
             return Some(IntExprTerm::Lit(self.parse_i64(&value_class)?));
         }
         for var in self.nodes_in_class_value(class, "IntVar") {
-            let Some(name_class) = self.class_of_child(var, 0) else { continue };
+            let Some(name_class) = self.class_of_child(var, 0) else {
+                continue;
+            };
             if let Some(name) = self.parse_string(&name_class) {
                 return Some(IntExprTerm::Var(name));
             }
@@ -661,12 +691,16 @@ impl<'a> Reader<'a> {
             // domain, a CoordVar owned by any OTHER shape is not one of
             // this layout's coordinates and cannot parse.
             if let Some(expected) = owner_shape {
-                let Some(owner_class) = self.class_of_child(coord, 0) else { continue };
+                let Some(owner_class) = self.class_of_child(coord, 0) else {
+                    continue;
+                };
                 if owner_class != *expected {
                     continue;
                 }
             }
-            let Some(axis_class) = self.class_of_child(coord, 1) else { continue };
+            let Some(axis_class) = self.class_of_child(coord, 1) else {
+                continue;
+            };
             return Some(IntExprTerm::Coord {
                 axis_from_end: self.parse_i64(&axis_class)?,
             });
@@ -683,15 +717,19 @@ impl<'a> Reader<'a> {
         ];
         for (kind, build) in binary_kinds {
             for node in self.nodes_in_class_value(class, kind) {
-                let Some(lhs_class) = self.class_of_child(node, 0) else { continue };
-                let Some(rhs_class) = self.class_of_child(node, 1) else { continue };
-                let Some(lhs) = self
-                    .parse_int_expr_tainting(&lhs_class, depth - 1, owner_shape, memo, tainted)
+                let Some(lhs_class) = self.class_of_child(node, 0) else {
+                    continue;
+                };
+                let Some(rhs_class) = self.class_of_child(node, 1) else {
+                    continue;
+                };
+                let Some(lhs) =
+                    self.parse_int_expr_tainting(&lhs_class, depth - 1, owner_shape, memo, tainted)
                 else {
                     continue;
                 };
-                let Some(rhs) = self
-                    .parse_int_expr_tainting(&rhs_class, depth - 1, owner_shape, memo, tainted)
+                let Some(rhs) =
+                    self.parse_int_expr_tainting(&rhs_class, depth - 1, owner_shape, memo, tainted)
                 else {
                     continue;
                 };
@@ -699,15 +737,21 @@ impl<'a> Reader<'a> {
             }
         }
         for cast in self.nodes_in_class_value(class, "IntCastFromBool") {
-            let Some(bool_class) = self.class_of_child(cast, 0) else { continue };
+            let Some(bool_class) = self.class_of_child(cast, 0) else {
+                continue;
+            };
             let Some(less_than) = self
                 .nodes_in_class_value(&bool_class, "BoolLessThanInt")
                 .next()
             else {
                 continue;
             };
-            let Some(lhs_class) = self.class_of_child(less_than, 0) else { continue };
-            let Some(rhs_class) = self.class_of_child(less_than, 1) else { continue };
+            let Some(lhs_class) = self.class_of_child(less_than, 0) else {
+                continue;
+            };
+            let Some(rhs_class) = self.class_of_child(less_than, 1) else {
+                continue;
+            };
             let Some(lhs) =
                 self.parse_int_expr_tainting(&lhs_class, depth - 1, owner_shape, memo, tainted)
             else {
@@ -816,10 +860,7 @@ mod tests {
         };
         assert_eq!(
             layout.span(),
-            add(
-                add(lit(1), lit(0)),
-                mul(add(lit(2), lit(-1)), lit(3))
-            )
+            add(add(lit(1), lit(0)), mul(add(lit(2), lit(-1)), lit(3)))
         );
     }
 

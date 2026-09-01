@@ -68,7 +68,11 @@ impl BufferTensorIrOp for SqrtFunctionalDps {
 
 impl Bufferizable for SqrtFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 1,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -81,10 +85,7 @@ impl ToDps for SqrtFunctionalDps {
 impl LayoutIrOp for SqrtFunctionalDps {}
 
 /// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    _op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(_op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     unary(ctx, "sqrtf(a[i])")
 }
 

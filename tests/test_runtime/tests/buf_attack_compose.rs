@@ -41,15 +41,17 @@ fn computes<'a>(
     plan.dag
         .node_indices()
         .filter_map(|i| match &plan.dag[i] {
-            BufferNode::Compute { op, reads, writes, .. } if op.label() == label => {
-                Some((i, reads.clone(), writes.clone()))
-            }
+            BufferNode::Compute {
+                op, reads, writes, ..
+            } if op.label() == label => Some((i, reads.clone(), writes.clone())),
             _ => None,
         })
         .collect()
 }
 
-fn copies(plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>) -> Vec<(NodeIndex, BufferId, BufferId)> {
+fn copies(
+    plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
+) -> Vec<(NodeIndex, BufferId, BufferId)> {
     plan.dag
         .node_indices()
         .filter_map(|i| match &plan.dag[i] {
@@ -75,7 +77,11 @@ fn diamond_bound_buffer_is_alias_parent_and_survives_writer_attack() {
     // chain root writer: writes r into e's storage (dest tie), seeded to D
     let r = g
         .op(
-            Box::new(MockOp { reads: vec![false], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![false],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&e],
             &[("r", "rm")],
         )
@@ -85,7 +91,11 @@ fn diamond_bound_buffer_is_alias_parent_and_survives_writer_attack() {
     // consumer through the view
     let c = g
         .op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
             &[&v],
             &[("c", "rm")],
         )
@@ -93,7 +103,11 @@ fn diamond_bound_buffer_is_alias_parent_and_survives_writer_attack() {
     // the attacker: an accumulator demanding to overwrite the shared storage
     let a = g
         .op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&v],
             &[("a", "rm")],
         )
@@ -101,20 +115,32 @@ fn diamond_bound_buffer_is_alias_parent_and_survives_writer_attack() {
     g.output(&r, "D"); // seed proposal: e -> D
     g.output(&c, "E");
     g.output(&a, "F");
-    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("the diamond must still certify");
+    let plan =
+        luminal::test_support::bufferize_mock(&g.build()).expect("the diamond must still certify");
     println!("{}", plan.summary());
 
     // (i) seed applied; the view's value resides in the BOUND buffer.
     let d = plan.value_buffer[&r].clone();
-    assert!(matches!(d, BufferId::Boundary(_)), "r seeded into D:\n{}", plan.summary());
-    assert_eq!(plan.value_buffer[&v], d, "the bound buffer is the view's alias parent");
+    assert!(
+        matches!(d, BufferId::Boundary(_)),
+        "r seeded into D:\n{}",
+        plan.summary()
+    );
+    assert_eq!(
+        plan.value_buffer[&v], d,
+        "the bound buffer is the view's alias parent"
+    );
     assert_eq!(plan.value_buffer[&e], d, "chain root poison rides D");
 
     // (ii)+(iii) the accumulator was rejected: it writes fresh storage, and D
     // has exactly one writing compute (the seeded chain-root writer).
     let mocks = computes(&plan, "MockOp");
     let writers_of_d: Vec<_> = mocks.iter().filter(|(_, _, w)| w.contains(&d)).collect();
-    assert_eq!(writers_of_d.len(), 1, "exactly one writer of the bound buffer");
+    assert_eq!(
+        writers_of_d.len(),
+        1,
+        "exactly one writer of the bound buffer"
+    );
     assert!(
         writers_of_d[0].1.is_empty() || writers_of_d[0].1[0] != d || writers_of_d[0].2[0] == d,
         "the sole writer is the chain root"
@@ -137,7 +163,9 @@ fn diamond_bound_buffer_is_alias_parent_and_survives_writer_attack() {
         .expect("the repaired accumulator reads the fresh repair buffer, writes its own");
     // its bytes were carried out of D by a repair copy into the buffer it READS
     assert!(
-        copies(&plan).iter().any(|(_, src, dst)| *src == d && *dst == acc.1[0]),
+        copies(&plan)
+            .iter()
+            .any(|(_, src, dst)| *src == d && *dst == acc.1[0]),
         "repair copy D -> the fresh single-writer repair buffer:\n{}",
         plan.summary()
     );
@@ -173,7 +201,11 @@ fn seed_into_cohabited_input_buffer_needs_may_permit() {
     let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")]).remove(0);
     let r = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&x, &e],
             &[("r", "rm")],
         )
@@ -187,7 +219,12 @@ fn seed_into_cohabited_input_buffer_needs_may_permit() {
         plan.summary()
     );
     let cps = copies(&plan);
-    assert_eq!(cps.len(), 1, "one boundary delivery copy:\n{}", plan.summary());
+    assert_eq!(
+        cps.len(),
+        1,
+        "one boundary delivery copy:\n{}",
+        plan.summary()
+    );
     assert_eq!(cps[0].2, plan.value_buffer[&x], "the delivery overwrites D");
 
     // (2) with the trusted permit: admitted, zero copies, computes in caller storage
@@ -196,7 +233,11 @@ fn seed_into_cohabited_input_buffer_needs_may_permit() {
     let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")]).remove(0);
     let r = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: true }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: true,
+            }),
             &[&x, &e],
             &[("r", "rm")],
         )
@@ -225,7 +266,11 @@ fn chain_with_interior_view_and_terminal_bound_write_certifies() {
     let e1 = g.op(Box::new(EmptyOp), &[], &[("e1", "rm")]).remove(0);
     let m1 = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&x, &e1],
             &[("m1", "rm")],
         )
@@ -234,19 +279,27 @@ fn chain_with_interior_view_and_terminal_bound_write_certifies() {
     let e2 = g.op(Box::new(EmptyOp), &[], &[("e2", "rm")]).remove(0);
     let m2 = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&v, &e2],
             &[("m2", "rm")],
         )
         .remove(0);
     g.output(&m2, "D");
-    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("composed chain must certify");
+    let plan =
+        luminal::test_support::bufferize_mock(&g.build()).expect("composed chain must certify");
     println!("{}", plan.summary());
 
     assert_eq!(copies(&plan).len(), 0, "zero copies:\n{}", plan.summary());
     let m1_buf = plan.value_buffer[&m1].clone();
     assert!(matches!(m1_buf, BufferId::Allocated(_)));
-    assert_eq!(plan.value_buffer[&v], m1_buf, "view folded onto m1's storage");
+    assert_eq!(
+        plan.value_buffer[&v], m1_buf,
+        "view folded onto m1's storage"
+    );
     assert!(
         matches!(plan.value_buffer[&m2], BufferId::Boundary(_)),
         "terminal writer computes directly into the bound buffer:\n{}",
@@ -259,7 +312,10 @@ fn chain_with_interior_view_and_terminal_bound_write_certifies() {
         .iter()
         .find(|(_, _, w)| matches!(w[0], BufferId::Boundary(_)))
         .expect("terminal writer");
-    assert_eq!(m2_node.1[0], m1_buf, "m2 reads m1's buffer via the folded view");
+    assert_eq!(
+        m2_node.1[0], m1_buf,
+        "m2 reads m1's buffer via the folded view"
+    );
     // one alloc, one free, and the free is ordered after m2's read.
     let allocs = computes(&plan, "BufferAlloc");
     let frees = computes(&plan, "BufferFree");
@@ -310,14 +366,18 @@ impl DimsGraph {
             dims: Some(dims.to_vec()),
             element_bits: Some(32),
             logical: LogicalInfo {
-                eclass: luminal::prelude::egraph_serialize::ClassId::from(format!("logical${name}")),
+                eclass: luminal::prelude::egraph_serialize::ClassId::from(format!(
+                    "logical${name}"
+                )),
                 label: name.to_string(),
                 tooltip: String::new(),
                 op: None,
                 children: Vec::new(),
             },
             layout: LayoutInfo {
-                eclass: luminal::prelude::egraph_serialize::ClassId::from(format!("layout${layout}")),
+                eclass: luminal::prelude::egraph_serialize::ClassId::from(format!(
+                    "layout${layout}"
+                )),
                 label: layout.to_string(),
                 tooltip: String::new(),
             },
@@ -327,7 +387,9 @@ impl DimsGraph {
         let n = self.fresh();
         BufferInfo {
             lit: None,
-            tensor_eclass: luminal::prelude::egraph_serialize::ClassId::from(format!("buftensor${n}")),
+            tensor_eclass: luminal::prelude::egraph_serialize::ClassId::from(format!(
+                "buftensor${n}"
+            )),
             tensor_label: name.to_string(),
             tensor_tooltip: String::new(),
             id_eclass: luminal::prelude::egraph_serialize::ClassId::from(format!("buf${name}")),
@@ -340,9 +402,10 @@ impl DimsGraph {
     fn input(&mut self, name: &str, buffer: &str, dims: &[i64]) -> LayoutTensorInfo {
         let value = self.value(name, "rm", dims);
         let buffer = self.buffer(buffer);
-        let node = self
-            .dag
-            .add_node(ExtractedNode::BufferInput(InputNode { value: value.clone(), buffer }));
+        let node = self.dag.add_node(ExtractedNode::BufferInput(InputNode {
+            value: value.clone(),
+            buffer,
+        }));
         self.producers.insert(value.eclass.clone(), node);
         value
     }
@@ -359,7 +422,10 @@ impl DimsGraph {
         let op_inputs: Vec<OpInput> = inputs
             .iter()
             .enumerate()
-            .map(|(i, value)| OpInput { port: format!("in{i}"), value: value.eclass.clone() })
+            .map(|(i, value)| OpInput {
+                port: format!("in{i}"),
+                value: value.eclass.clone(),
+            })
             .collect();
         let node = self.dag.add_node(ExtractedNode::LayoutOp(OpNode {
             op: iface,
@@ -374,7 +440,10 @@ impl DimsGraph {
             self.dag.add_edge(
                 producer,
                 node,
-                ExtractedEdge { value: value.eclass.clone(), port: format!("in{i}") },
+                ExtractedEdge {
+                    value: value.eclass.clone(),
+                    port: format!("in{i}"),
+                },
             );
         }
         self.producers.insert(out.eclass.clone(), node);
@@ -383,7 +452,11 @@ impl DimsGraph {
     fn output(&mut self, value: &luminal::prelude::egraph_serialize::ClassId, buffer: &str) {
         let index = self.slots.len();
         let buffer = self.buffer(buffer);
-        self.slots.push(OutputSlot { index, value: value.clone(), buffer });
+        self.slots.push(OutputSlot {
+            index,
+            value: value.clone(),
+            buffer,
+        });
     }
     fn build(mut self) -> ExtractedGraph {
         let slots = std::mem::take(&mut self.slots);
@@ -398,13 +471,19 @@ impl DimsGraph {
             self.dag.add_edge(
                 producer,
                 node,
-                ExtractedEdge { value: slot.value.clone(), port: format!("out {}", slot.index) },
+                ExtractedEdge {
+                    value: slot.value.clone(),
+                    port: format!("out {}", slot.index),
+                },
             );
         }
         if let ExtractedNode::BufferOutput(output) = &mut self.dag[node] {
             output.slots = slots;
         }
-        ExtractedGraph { dag: self.dag, outputs: vec![node] }
+        ExtractedGraph {
+            dag: self.dag,
+            outputs: vec![node],
+        }
     }
 }
 
@@ -432,7 +511,11 @@ fn caller_buffer_assignment_is_deterministic() {
         let x = g.input("x", "X", &[2, 3]);
         let v = g.op(Box::new(MockView), &[&x], "v", "view", &[2, 2, 3]);
         let c = g.op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
             &[&v],
             "c",
             "rm",
@@ -445,8 +528,15 @@ fn caller_buffer_assignment_is_deterministic() {
         // sanity: the view really is resident in x's caller buffer
         let xbuf = plan.value_buffer[&x.eclass].clone();
         assert!(matches!(xbuf, BufferId::Boundary(_)));
-        assert_eq!(plan.value_buffer[&v.eclass], xbuf, "view admitted onto the pinned buffer");
-        outcomes.insert(plan.backed_tensor(&xbuf).expect("assignment row").to_string());
+        assert_eq!(
+            plan.value_buffer[&v.eclass], xbuf,
+            "view admitted onto the pinned buffer"
+        );
+        outcomes.insert(
+            plan.backed_tensor(&xbuf)
+                .expect("assignment row")
+                .to_string(),
+        );
         // Option B: the carried layout is the BACKED tensor's, so a
         // load_plan caller sizes the same storage the same way.
         assert_eq!(&plan.buffers[&xbuf].layout, &table[&x.eclass]);
@@ -481,7 +571,11 @@ fn disagreeing_residents_no_longer_hit_a_geometry_door() {
     let mut g = DimsGraph::new();
     let x = g.input("x", "B", &[2, 3]);
     let r = g.op(
-        Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }),
+        Box::new(MockOp {
+            reads: vec![true],
+            in_place_operand: Some(0),
+            not_conflicting: false,
+        }),
         &[&x],
         "r",
         "rm",
@@ -518,7 +612,11 @@ fn every_compute_node_carries_filled_slot_descriptors() {
     let x = g.input("x", "X", &[2, 3]);
     let v = g.op(Box::new(MockView), &[&x], "v", "view", &[2, 2, 3]);
     let c = g.op(
-        Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }),
+        Box::new(MockOp {
+            reads: vec![true],
+            in_place_operand: None,
+            not_conflicting: false,
+        }),
         &[&v],
         "c",
         "rm",
@@ -532,15 +630,42 @@ fn every_compute_node_carries_filled_slot_descriptors() {
     let mut computes = 0usize;
     for node in plan.dag.node_weights() {
         match node {
-            BufferNode::Compute { op, reads, writes, operand_info, result_info, .. } => {
+            BufferNode::Compute {
+                op,
+                reads,
+                writes,
+                operand_info,
+                result_info,
+                ..
+            } => {
                 computes += 1;
-                assert_eq!(operand_info.len(), reads.len(), "{}: operand_info parallels reads", op.label());
-                assert_eq!(result_info.len(), writes.len(), "{}: result_info parallels writes", op.label());
+                assert_eq!(
+                    operand_info.len(),
+                    reads.len(),
+                    "{}: operand_info parallels reads",
+                    op.label()
+                );
+                assert_eq!(
+                    result_info.len(),
+                    writes.len(),
+                    "{}: result_info parallels writes",
+                    op.label()
+                );
                 for (slot, id) in operand_info.iter().zip(reads) {
-                    assert_eq!(&slot.buffer, id, "{}: descriptor buffer = reads entry", op.label());
+                    assert_eq!(
+                        &slot.buffer,
+                        id,
+                        "{}: descriptor buffer = reads entry",
+                        op.label()
+                    );
                 }
                 for (slot, id) in result_info.iter().zip(writes) {
-                    assert_eq!(&slot.buffer, id, "{}: descriptor buffer = writes entry", op.label());
+                    assert_eq!(
+                        &slot.buffer,
+                        id,
+                        "{}: descriptor buffer = writes entry",
+                        op.label()
+                    );
                 }
                 if op.label() == "MockOp" {
                     // The descriptor's ONE payload beyond identity is the
@@ -579,7 +704,11 @@ fn every_compute_node_carries_filled_slot_descriptors() {
             _ => {}
         }
     }
-    assert!(computes >= 1, "fixture must lower at least one compute:\n{}", plan.summary());
+    assert!(
+        computes >= 1,
+        "fixture must lower at least one compute:\n{}",
+        plan.summary()
+    );
     // The consumer reads the view VALUE (v) out of the parent's buffer —
     // the descriptor records the through-view identity the composed-access
     // slot will describe in Phase 3.
@@ -587,16 +716,18 @@ fn every_compute_node_carries_filled_slot_descriptors() {
         .dag
         .node_weights()
         .find_map(|n| match n {
-            BufferNode::Compute { op, operand_info, .. } if op.label() == "MockOp" => {
-                Some(operand_info[0].clone())
-            }
+            BufferNode::Compute {
+                op, operand_info, ..
+            } if op.label() == "MockOp" => Some(operand_info[0].clone()),
             _ => None,
         })
         .expect("the consumer compute");
-    assert_eq!(consumer.value, v.eclass, "operand descriptor names the VIEW value");
     assert_eq!(
-        consumer.buffer,
-        plan.value_buffer[&x.eclass],
+        consumer.value, v.eclass,
+        "operand descriptor names the VIEW value"
+    );
+    assert_eq!(
+        consumer.buffer, plan.value_buffer[&x.eclass],
         "…resident in the parent's caller buffer"
     );
     assert_eq!(
@@ -625,7 +756,9 @@ fn output_slot_bound_to_view_of_poison_current_behavior() {
         g.output(&v, "D");
         g.build()
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| luminal::test_support::bufferize_mock(&graph)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        luminal::test_support::bufferize_mock(&graph)
+    }));
     match result {
         Ok(Ok(plan)) => panic!(
             "SILENT: undefined bytes delivered to a bound output today:\n{}",

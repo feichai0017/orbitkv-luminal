@@ -9,7 +9,9 @@ use luminal_reference::ReferenceRuntime;
 use mini_qwen3::MiniQwen3;
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {
-    (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
+    (0..n)
+        .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
+        .collect()
 }
 
 fn main() {
@@ -101,7 +103,8 @@ fn measure_plan(
         let mut vars: Vec<_> = cx.dyn_map.iter().collect();
         vars.sort();
         for (var, value) in vars {
-            rt.bind_dyn_range(*var, *value as u64, *value as u64).expect("dyn pin binds");
+            rt.bind_dyn_range(*var, *value as u64, *value as u64)
+                .expect("dyn pin binds");
         }
         let data = pairs.iter().cloned().collect();
         let t = std::time::Instant::now();
@@ -161,4 +164,3 @@ fn measure_plan(
         println!("LADDER PANICKED: {msg}");
     }
 }
-

@@ -24,7 +24,6 @@ use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, NodeIndex};
 use luminal_cuda_lite::CudaRuntime;
 
-
 /// Read the device output DENSELY through its RETURNED LAYOUT
 /// (escape-and-disclose + the corrected contract, 2026-08-31): a
 /// view-elected output returns its BACKING buffer's bytes (possibly
@@ -68,16 +67,21 @@ fn run_differential(
     what: &str,
 ) -> (Vec<f32>, Vec<f32>) {
     // Reference side: the materialize route by construction.
-    let staged: Vec<(NodeIndex, TypedBuffer)> =
-        inputs.iter().map(|(id, v)| (*id, v.clone().into())).collect();
+    let staged: Vec<(NodeIndex, TypedBuffer)> = inputs
+        .iter()
+        .map(|(id, v)| (*id, v.clone().into()))
+        .collect();
     let reference = luminal_reference::harness::run_reference(cx, &staged);
     let want = reference.get_f32(out).expect("reference output").clone();
 
     // CUDA side: search under the CL allow list (view electable).
     let mut rt = CudaRuntime::load(cx).expect("cuda load");
-    let data: FxHashMap<NodeIndex, TypedBuffer> =
-        inputs.iter().map(|(id, v)| (*id, v.clone().into())).collect();
-    rt.search(&data, &view_search_options()).expect("cuda search");
+    let data: FxHashMap<NodeIndex, TypedBuffer> = inputs
+        .iter()
+        .map(|(id, v)| (*id, v.clone().into()))
+        .collect();
+    rt.search(&data, &view_search_options())
+        .expect("cuda search");
 
     // The plan must have ELECTED AND FOLDED the view: no materialize
     // computes, and at least one consumer READS THROUGH A LAYOUT THAT IS
@@ -86,13 +90,17 @@ fn run_differential(
     let plan = rt.plan().expect("plan loaded");
     let mut folded_slots = 0usize;
     for node in plan.dag.node_weights() {
-        if let BufferNode::Compute { op, operand_info, .. } = node {
+        if let BufferNode::Compute {
+            op, operand_info, ..
+        } = node
+        {
             let label = op.label();
             if label == "BufferAlloc" || label == "BufferFree" {
                 continue;
             }
             assert_ne!(
-                label, "IndexMapApplyMaterialize",
+                label,
+                "IndexMapApplyMaterialize",
                 "{what}: foldable movement was materialized:\n{}",
                 plan.summary()
             );

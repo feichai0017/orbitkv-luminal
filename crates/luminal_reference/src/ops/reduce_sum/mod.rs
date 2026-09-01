@@ -1,7 +1,9 @@
 //! Sum reduction along one axis (the axis is op metadata, not an operand).
 
-use luminal::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
 use luminal::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
+use luminal::layout_ir::{
+    AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
+};
 
 /// `ReduceSumGeneric(input) -> out`
 ///
@@ -75,7 +77,11 @@ impl BufferTensorIrOp for ReduceSumDps {
 
 impl Bufferizable for ReduceSumDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 1,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -114,13 +120,14 @@ impl OpMatcher for ReduceSumMatcher {
         ]
     }
 
-
     fn metadata_slots(&self) -> &'static [(&'static str, usize)] {
         &[("axis", 1), ("out_layout", 2)]
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ReduceSum { axis: site.child_i64(1) })
+        Box::new(ReduceSum {
+            axis: site.child_i64(1),
+        })
     }
 }
 
@@ -131,20 +138,22 @@ impl OpMatcher for ReduceSumMatcher {
 // 2026-08-13: everything about an op lives in the op's folder).
 // ---------------------------------------------------------------------------
 
-use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 use crate::kernels::expect_op;
+use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 
 /// Axis reduce-sum. Typed arms 2026-08-11: Int sums are CHECKED
 /// (non-wrapping ruling — an accumulator overflow is a loud kernel
 /// error).
-pub(crate) fn kernel(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+pub(crate) fn kernel(
+    op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
     let op = expect_op::<ReduceSumDps>(op)?;
     match &ctx.operands[0] {
         TypedBuffer::F32(_) => ctx.reduce_axis(op.axis, 0.0, |acc, x| acc + x),
         TypedBuffer::I32(_) => ctx.reduce_axis_i32(op.axis, 0, |acc, x| {
-            acc.checked_add(x).ok_or_else(|| {
-                anyhow::anyhow!("i32 reduce-sum overflow (ints are non-wrapping)")
-            })
+            acc.checked_add(x)
+                .ok_or_else(|| anyhow::anyhow!("i32 reduce-sum overflow (ints are non-wrapping)"))
         }),
         other => anyhow::bail!("reduce-sum has no {} arm", other.type_name()),
     }

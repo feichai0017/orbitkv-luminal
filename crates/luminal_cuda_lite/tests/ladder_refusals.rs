@@ -19,8 +19,8 @@
 use luminal::buffer_tensor_ir::TypedBuffer;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
-use luminal::prelude::{FxHashMap, NodeIndex};
 use luminal::prelude::Ns;
+use luminal::prelude::{FxHashMap, NodeIndex};
 use luminal::shape::IntExpr;
 use luminal_cuda_lite::CudaRuntime;
 use luminal_nn::LlamaBlock;
@@ -49,7 +49,16 @@ fn run_rung(layers: usize, d: usize, default_budget: bool) -> (usize, usize, usi
 
     let mut cx = Graph::new();
     let blocks: Vec<LlamaBlock> = (0..layers)
-        .map(|l| LlamaBlock::new(d, ff, n_heads, n_kv, &Ns::root().child("layers").index(l), &mut cx))
+        .map(|l| {
+            LlamaBlock::new(
+                d,
+                ff,
+                n_heads,
+                n_kv,
+                &Ns::root().child("layers").index(l),
+                &mut cx,
+            )
+        })
         .collect();
     let x = cx.tensor((1, d));
     let caches: Vec<_> = (0..layers)
@@ -80,14 +89,35 @@ fn run_rung(layers: usize, d: usize, default_budget: bool) -> (usize, usize, usi
     ];
     for (layer, block) in blocks.iter().enumerate() {
         pairs.push((block.wq.weight.id, weights(d * d, 91 + layer as u64).into()));
-        pairs.push((block.wk.weight.id, weights(d * kv_dim, 92 + layer as u64).into()));
-        pairs.push((block.wv.weight.id, weights(d * kv_dim, 93 + layer as u64).into()));
+        pairs.push((
+            block.wk.weight.id,
+            weights(d * kv_dim, 92 + layer as u64).into(),
+        ));
+        pairs.push((
+            block.wv.weight.id,
+            weights(d * kv_dim, 93 + layer as u64).into(),
+        ));
         pairs.push((block.wo.weight.id, weights(d * d, 94 + layer as u64).into()));
-        pairs.push((block.gate.weight.id, weights(d * ff, 95 + layer as u64).into()));
-        pairs.push((block.up.weight.id, weights(d * ff, 96 + layer as u64).into()));
-        pairs.push((block.down.weight.id, weights(ff * d, 97 + layer as u64).into()));
-        pairs.push((caches[layer].0.id, weights(SLOTS * kv_dim, 98 + layer as u64).into()));
-        pairs.push((caches[layer].1.id, weights(SLOTS * kv_dim, 99 + layer as u64).into()));
+        pairs.push((
+            block.gate.weight.id,
+            weights(d * ff, 95 + layer as u64).into(),
+        ));
+        pairs.push((
+            block.up.weight.id,
+            weights(d * ff, 96 + layer as u64).into(),
+        ));
+        pairs.push((
+            block.down.weight.id,
+            weights(ff * d, 97 + layer as u64).into(),
+        ));
+        pairs.push((
+            caches[layer].0.id,
+            weights(SLOTS * kv_dim, 98 + layer as u64).into(),
+        ));
+        pairs.push((
+            caches[layer].1.id,
+            weights(SLOTS * kv_dim, 99 + layer as u64).into(),
+        ));
     }
     let data: FxHashMap<NodeIndex, TypedBuffer> = pairs.into_iter().collect();
 
@@ -116,8 +146,16 @@ fn run_rung(layers: usize, d: usize, default_budget: bool) -> (usize, usize, usi
         outcome.plans_profiled,
         b.summary(),
     );
-    assert!(outcome.plans_profiled > 0, "L{layers} d{d}: no plans profiled");
-    (b.extract_refusals, b.with_choice_cycles, b.plan_build_refusals, b.execute_refusals)
+    assert!(
+        outcome.plans_profiled > 0,
+        "L{layers} d{d}: no plans profiled"
+    );
+    (
+        b.extract_refusals,
+        b.with_choice_cycles,
+        b.plan_build_refusals,
+        b.execute_refusals,
+    )
 }
 
 fn assert_zero(rung: &str, counts: (usize, usize, usize, usize)) {

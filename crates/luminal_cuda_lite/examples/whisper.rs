@@ -42,9 +42,7 @@ fn main() {
         (model.dec_down.weight.id, weights(FF * D, 14).into()),
     ];
 
-    if let Err(e) =
-        support::device::run_differential("whisper", &cx, &pairs, &[("out", out.id)])
-    {
+    if let Err(e) = support::device::run_differential("whisper", &cx, &pairs, &[("out", out.id)]) {
         eprintln!("whisper: FAIL: {e:#}");
         std::process::exit(1);
     }

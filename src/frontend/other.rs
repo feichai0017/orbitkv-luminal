@@ -147,9 +147,9 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    use luminal::prelude::*;
     use crate::tests::assert_close;
     use candle_core::{Device, Tensor};
+    use luminal::prelude::*;
     use proptest::prelude::*;
 
     pub fn test_init(
