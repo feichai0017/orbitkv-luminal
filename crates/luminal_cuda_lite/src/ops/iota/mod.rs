@@ -36,7 +36,9 @@ impl Bufferizable for Iota {}
 
 impl ToDps for Iota {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(IotaDps { expr: self.expr.clone() }))
+        Some(Box::new(IotaDps {
+            expr: self.expr.clone(),
+        }))
     }
 }
 
@@ -70,7 +72,11 @@ impl BufferTensorIrOp for IotaDps {
 
 impl Bufferizable for IotaDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 0,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -83,14 +89,13 @@ impl ToDps for IotaDps {
 impl LayoutIrOp for IotaDps {}
 
 /// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     let Some(iota) = op.as_any().downcast_ref::<IotaDps>() else {
         bail!("iota codegen reached with a non-Iota op");
     };
-    crate::kernels::require_flat_operands("Iota", ctx)?;
+    // Iota has a dest-only signature: its operand slots ARE the DPS
+    // dest slots, so the check that used to stand here was the write
+    // fence — see the record in `kernels::CodegenCtx::from_descriptors`.
     let Some(expr) = &iota.expr else {
         bail!("iota beyond the parsed expression subset (fail-closed, as the reference)");
     };
