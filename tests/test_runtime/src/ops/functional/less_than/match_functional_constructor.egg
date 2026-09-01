@@ -1,0 +1,3 @@
+; Comparison: the result is Bool — functional only (no mutating form:
+; a Bool result cannot overwrite a wider operand's storage).
+(constructor LayoutTensorOpLessThanGeneric (LayoutTensor LayoutTensor Layout) LayoutTensorOp)

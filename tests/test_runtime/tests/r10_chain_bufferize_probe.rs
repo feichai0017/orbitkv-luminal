@@ -45,7 +45,7 @@ fn matmul_then_elementwise_bufferize() {
         let y = x.matmul(w) * c;
         let _ = y.output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -72,7 +72,7 @@ fn chained_matmuls_bufferize() {
         // the INTERIOR sibling view feeding the second call.
         let _ = x.matmul(w1).matmul(w2).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };

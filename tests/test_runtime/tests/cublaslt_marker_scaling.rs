@@ -29,7 +29,7 @@ fn record_blocks(geometries: &[(usize, usize, usize)]) -> String {
         let _out = x.matmul(w).relu().output();
     }
     cx.logical
-        .bound_program(&luminal_reference::ReferenceBindings)
+        .bound_program(&test_runtime::TestRuntimeBindings)
         .expect("recorder clean")
         .text
 }

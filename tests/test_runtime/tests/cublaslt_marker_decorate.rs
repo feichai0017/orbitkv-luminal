@@ -168,7 +168,7 @@ fn fixture5_relu() {
         let w = cx.tensor((8usize, 3usize));
         let _out = x.matmul(w).relu().output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -200,7 +200,7 @@ fn fixture5_c_fold() {
         let c = cx.tensor((4usize, 3usize));
         let _out = (x.matmul(w) + c).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -233,7 +233,7 @@ fn fixture5_c_fold_reversed_orientation() {
         let c = cx.tensor((4usize, 3usize));
         let _out = (c + x.matmul(w)).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -255,7 +255,7 @@ fn fixture5_bias() {
         let b = cx.tensor(3usize);
         let _out = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -318,7 +318,7 @@ fn fixture5_bias_elected_by_name_alone() {
         let b = cx.tensor(3usize);
         let _out = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -357,7 +357,7 @@ fn fixture5_bias_relu() {
         let b = cx.tensor(3usize);
         let _out = (x.matmul(w) + b.expand_dim(0, 4usize)).relu().output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -388,7 +388,7 @@ fn fixture5_full_stack() {
             .relu()
             .output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -423,7 +423,7 @@ fn fixture6_relu_then_add_c_not_folded() {
         let c = cx.tensor((4usize, 3usize));
         let _out = (x.matmul(w).relu() + c).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -453,7 +453,7 @@ fn fixture6_relu_then_bias_not_folded() {
         let b = cx.tensor(3usize);
         let _out = (x.matmul(w).relu() + b.expand_dim(0, 4usize)).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -482,7 +482,7 @@ fn fixture8_diamond_base_and_decorated_coexist() {
         let _mm_out = mm.output();
         let _biased = (mm + b.expand_dim(0, 4usize)).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };

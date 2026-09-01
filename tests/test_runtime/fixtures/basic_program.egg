@@ -1,3 +1,14 @@
+; FORKED COPY -- the TestRuntime owns its fixtures outright.
+;
+; The reference corpus has its own basic_program.egg; that one cannot name a
+; mutating or view constructor, because constructors are declared only by
+; their matcher's snippet and an unknown one is an egglog PARSE failure.
+; This copy is authored against THIS runtime's vocabulary and is free to.
+;
+; Deliberately a copy, not a reach-through: the two runtimes are separate
+; and share nothing. The scripts are expected to diverge as each
+; vocabulary moves.
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Actual Program
 

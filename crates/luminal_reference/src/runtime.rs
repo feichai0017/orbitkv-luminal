@@ -696,11 +696,15 @@ mod tests {
     use luminal::graph::Graph;
     use rustc_hash::FxHashMap;
 
-    /// The allow list is DERIVED from the kernel registry; this pins the
-    /// resolved claim set so a registry edit that silently grows or
-    /// shrinks the runtime's claims is loud. (Div/Exp/Copy are claimed
-    /// because their kernels exist — the 2026-08-06 relocation closed the
-    /// over-claim the old hardcoded filter hid.)
+    /// The allow list is DERIVED from the kernel registry — which is
+    /// itself derived from the op rows (runtime split, PR #425), so
+    /// "registered" and "executable" cannot drift apart by construction.
+    /// This pins the RESOLVED claim set, so a registry edit that silently
+    /// grows or shrinks the runtime's claims is still loud: the two
+    /// derivations agreeing does not tell you they agree on the right
+    /// list. (Div/Exp are claimed because their kernels exist — the
+    /// 2026-08-06 relocation closed the over-claim the old hardcoded
+    /// filter hid.)
     #[test]
     fn allow_list_matches_the_kernel_registry() {
         let mut allow = crate::reference_allow_list();
@@ -709,7 +713,12 @@ mod tests {
             "LayoutTensorOpAddFunctionalGeneric",
             "LayoutTensorOpCastGeneric",
             "LayoutTensorOpConstantGeneric",
-            "LayoutTensorOpCopyGeneric",
+            // No CopyGeneric: `materialize_layout_copy` left this runtime
+            // with the split (PR #425). Its kernel only ever copied under
+            // IDENTICAL geometry — it asserted that rather than assuming
+            // it — so a runtime moving toward canonical-layout-only has no
+            // layout copy left to make. The op lives on the TestRuntime,
+            // which reasons about plans instead of executing them.
             "LayoutTensorOpDivFunctionalGeneric",
             "LayoutTensorOpExp2FunctionalGeneric",
             "LayoutTensorOpExpFunctionalGeneric",

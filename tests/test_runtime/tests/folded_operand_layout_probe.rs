@@ -105,7 +105,7 @@ fn transpose_view_consumer_carries_the_views_own_layout() {
         let c = cx.tensor((3usize, 2usize));
         let _ = (x.permute((1, 0)) * c).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -156,7 +156,7 @@ fn sliced_transpose_chain_arrives_as_one_layout() {
         let c = cx.tensor((6usize, 2usize));
         let _ = (x.slice((1..3, ..)).permute((1, 0)) * c).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -186,7 +186,7 @@ fn r10_chained_matmuls_read_through_folded_layouts() {
         let w2 = cx.tensor((3usize, 5usize));
         let _ = x.matmul(w1).matmul(w2).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };

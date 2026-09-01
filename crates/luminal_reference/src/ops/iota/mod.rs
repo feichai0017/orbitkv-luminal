@@ -186,16 +186,16 @@ pub(crate) fn kernel(
         // Iota is Int by its dtype rule; the i64 evaluation lands
         // checked in i32 (loud on overflow — non-wrapping ruling).
         TypedBuffer::I32(dest) => {
-            for flat in 0..numel {
+            for (flat, slot) in dest.iter_mut().enumerate().take(numel) {
                 let value = eval_at(flat, &mut coords);
-                dest[flat] = i32::try_from(value).map_err(|_| {
+                *slot = i32::try_from(value).map_err(|_| {
                     anyhow::anyhow!("iota value {value} overflows i32 (ints are non-wrapping)")
                 })?;
             }
         }
         TypedBuffer::I64(dest) => {
-            for flat in 0..numel {
-                dest[flat] = eval_at(flat, &mut coords);
+            for (flat, slot) in dest.iter_mut().enumerate().take(numel) {
+                *slot = eval_at(flat, &mut coords);
             }
         }
         other => anyhow::bail!(

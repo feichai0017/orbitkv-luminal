@@ -1387,7 +1387,7 @@ fn rc4_bias_relu_chain_no_stale_d() {
         let b = cx.tensor(3usize);
         let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).relu().output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -1774,7 +1774,7 @@ fn rp2_decoration_depth_enode_count() {
             let mut cx = Graph::new();
             build(&mut cx);
             cx.logical
-                .bound_program(&luminal_reference::ReferenceBindings)
+                .bound_program(&test_runtime::TestRuntimeBindings)
                 .expect("recorder clean")
                 .text
         };
@@ -1830,7 +1830,7 @@ fn rp3_product_at_scale() {
                     let _ = x.matmul(w).output();
                 }
                 cx.logical
-                    .bound_program(&luminal_reference::ReferenceBindings)
+                    .bound_program(&test_runtime::TestRuntimeBindings)
                     .expect("recorder clean")
                     .text
             };
@@ -2870,7 +2870,7 @@ fn ru3_m1_corner_multiplicity() {
         let w = cx.tensor((4usize, 3usize));
         let _ = x.matmul(w).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -3059,7 +3059,7 @@ fn ru4_weld_harvesting_is_cross_tensor() {
             let _ = (stranger + stranger).output();
         }
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     }

@@ -646,7 +646,7 @@ fn record(build: impl FnOnce(&mut Graph)) -> String {
     let mut cx = Graph::new();
     build(&mut cx);
     cx.logical
-        .bound_program(&luminal_reference::ReferenceBindings)
+        .bound_program(&test_runtime::TestRuntimeBindings)
         .expect("recorder clean")
         .text
 }

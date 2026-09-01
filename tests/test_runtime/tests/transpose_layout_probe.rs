@@ -152,7 +152,7 @@ fn probe_a_bare_transpose_view() {
     let _t = w.permute((1usize, 0usize)).output(); // [3,4] view
     let program = cx
         .logical
-        .bound_program(&luminal_reference::ReferenceBindings)
+        .bound_program(&test_runtime::TestRuntimeBindings)
         .expect("recorder clean")
         .text;
     println!("=== FIXTURE A native_program (w[4,3].permute((1,0)).output()) ===");
@@ -223,7 +223,7 @@ fn probe_b_matmul_amk_bnk() {
     let _out = x.matmul(w.permute((1usize, 0usize))).output();
     let program = cx
         .logical
-        .bound_program(&luminal_reference::ReferenceBindings)
+        .bound_program(&test_runtime::TestRuntimeBindings)
         .expect("recorder clean")
         .text;
     let s = test_runtime::serialize_fixture(&program);

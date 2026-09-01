@@ -112,7 +112,7 @@ fn a2_single_view_to_bound() {
         let w = cx.tensor((8usize, 3usize));
         let _ = x.matmul(w).transpose(0, 1).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -129,7 +129,7 @@ fn a2_double_view_roundtrip() {
         let w = cx.tensor((8usize, 3usize));
         let _ = x.matmul(w).transpose(0, 1).transpose(0, 1).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -149,7 +149,7 @@ fn a2_view_fanout() {
         let _ = y.transpose(0, 1).output();
         let _ = (y * c).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -177,7 +177,7 @@ fn a2_two_slots_same_value() {
         let _ = y.transpose(0, 1).output();
         let _ = y.output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };

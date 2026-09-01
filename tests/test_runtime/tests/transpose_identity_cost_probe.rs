@@ -39,7 +39,7 @@ fn transpose_view_marginal_cost() {
     let _ = x.matmul(w).relu().output();
     let p0 = cx
         .logical
-        .bound_program(&luminal_reference::ReferenceBindings)
+        .bound_program(&test_runtime::TestRuntimeBindings)
         .expect("recorder clean")
         .text;
 
@@ -50,7 +50,7 @@ fn transpose_view_marginal_cost() {
     let _ = x.matmul(w).relu().permute((1usize, 0usize)).output();
     let p1 = cx
         .logical
-        .bound_program(&luminal_reference::ReferenceBindings)
+        .bound_program(&test_runtime::TestRuntimeBindings)
         .expect("recorder clean")
         .text;
 
@@ -61,7 +61,7 @@ fn transpose_view_marginal_cost() {
     let _ = x.matmul(w.permute((1usize, 0usize))).relu().output();
     let p2 = cx
         .logical
-        .bound_program(&luminal_reference::ReferenceBindings)
+        .bound_program(&test_runtime::TestRuntimeBindings)
         .expect("recorder clean")
         .text;
 

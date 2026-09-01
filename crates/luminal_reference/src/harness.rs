@@ -122,37 +122,14 @@ pub fn extract_fixture_with_genome(script: &str, preferences: &[&str]) -> (Extra
     (graph, fingerprint)
 }
 
-/// TESTRUNTIME v0 (ruling 2026-08-13): a small tests-side runtime
-/// vocabulary — the reference registry PLUS the op variants tests need
-/// that the reference runtime deliberately does not implement (today:
-/// the view op; mutating/multi-output variants join it when the
-/// reference registry sheds them for CUDA-lite). Extraction and
-/// program assembly are runtime-injectable, so this is just a matcher
-/// list — no runtime machinery duplicated.
-pub fn test_runtime_matchers() -> Vec<Box<dyn luminal::layout_ir::OpMatcher>> {
-    let mut matchers = crate::ops::built_in_matchers();
-    matchers.push(Box::new(crate::ops::IndexMapApplyViewMatcher));
-    matchers
-}
-
-/// [`extract_fixture`] on the TESTRUNTIME's vocabulary.
-pub fn extract_fixture_on_test_runtime(script: &str) -> ExtractedGraph {
-    use egglog::SerializeConfig;
-
-    let preamble = luminal::egglog_snippet::assembled_program_for(&test_runtime_matchers());
-    let source = fs::read_to_string(fixture_path(script))
-        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
-    let program = format!("{preamble}\n\n{source}");
-
-    let mut egraph = luminal::egglog_snippet::new_egraph();
-    egraph
-        .parse_and_run_program(Some(script.to_string()), &program)
-        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
-    let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-    extractor::extract_layout_ir_with_matchers(&serialized, test_runtime_matchers())
-        .expect("extraction succeeds")
-        .unwrap_or_else(|| panic!("fixture {script} produced no extracted graph"))
-}
+// The TESTRUNTIME vocabulary used to be assembled HERE, as the reference
+// registry plus the op variants the reference runtime does not implement.
+// It moved out with those variants (runtime-split, PR #425): the test
+// runtime now owns its whole op set in its own crate — `test_runtime::
+// matchers()` — and this harness is once again about the reference
+// runtime alone. Nothing was lost: the two entry points that lived here
+// (`test_runtime_matchers`, `extract_fixture_on_test_runtime`) are
+// `test_runtime::matchers` and `test_runtime::extract_fixture_by_name`.
 
 /// Run `test_scripts/<script>` through egglog (with the full preamble) and the
 /// real extractor, returning the extracted graph. Panics on any failure — these

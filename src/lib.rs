@@ -1,3 +1,8 @@
+// `Symbol` is an immutable interned identity. Its storage uses interior
+// mutability, which makes Clippy reject every map keyed by the public symbol
+// type even though the key's hash and ordering never change.
+#![allow(clippy::mutable_key_type)]
+
 pub mod dtype;
 pub mod egglog_utils;
 pub mod frontend;

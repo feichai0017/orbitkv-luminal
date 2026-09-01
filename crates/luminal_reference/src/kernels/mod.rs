@@ -4,10 +4,10 @@
 //! keeps what is not any single op's business — the label→fn dispatch
 //! TABLE, the helpers shared by several op kernels, and the kernels for
 //! bufferizer-synthesized plan infrastructure (which has no op folder).
-//! The table is still the single implementation inventory: because
-//! [`super::reference_allow_list`] is DERIVED from this table, the runtime
-//! can neither over-claim (an allow-listed op with no kernel) nor
-//! under-claim (a kernel the search is not offered).
+//! The table is DERIVED from `crate::ops::reference_ops()`, where each
+//! op's matcher and kernel are one row: the runtime cannot over-claim
+//! (a registered op with no kernel) or under-claim (a kernel the search
+//! is not offered) because neither half can be written without the other.
 //!
 //! BUNDLE-LEVEL CLAIMS, TYPE-LEVEL DISPATCH (ruling 2026-08-06): the
 //! runtime's CLAIM is per op FAMILY — one matcher constructor covers
@@ -27,16 +27,16 @@
 use luminal::buffer_tensor_ir::{BufferTensorIrOp, ReferenceKernelCtx, TypedBuffer};
 use std::any::TypeId;
 
+#[derive(Clone, Copy)]
 pub struct ReferenceKernel {
-    /// The op's IR label (DPS forms keep the functional form's label);
-    /// the allow-list derivation matches this against matcher constructors.
+    /// The op's IR label (DPS forms keep the functional form's label).
     pub label: &'static str,
     /// The concrete op type this kernel downcasts to.
     pub op_type: TypeId,
     pub execute: fn(&dyn BufferTensorIrOp, &mut ReferenceKernelCtx) -> anyhow::Result<()>,
 }
 
-fn entry<T: 'static>(
+pub(crate) fn entry<T: 'static>(
     label: &'static str,
     execute: fn(&dyn BufferTensorIrOp, &mut ReferenceKernelCtx) -> anyhow::Result<()>,
 ) -> ReferenceKernel {
@@ -47,47 +47,32 @@ fn entry<T: 'static>(
     }
 }
 
-/// The full kernel table. One entry per executable op type; labels repeat
-/// only if two executable types legitimately share one (none do today —
-/// functional forms are not executable and have no entries).
+/// THE DISPATCH TABLE, derived from [`crate::ops::reference_ops`] plus
+/// the bufferizer-minted plan infrastructure.
+///
+/// Nothing is enumerated here that is not already an op row: the op
+/// registration list carries each op's kernel alongside its matcher, so
+/// "every registered op is executable" and "every executable op is
+/// registered" hold BY CONSTRUCTION rather than by a test that checks two
+/// hand-maintained lists agree. The only rows this adds are BufferAlloc
+/// and BufferFree, which have no matcher because they are not ops — the
+/// storage-lifetime pass mints them.
 pub fn reference_kernels() -> &'static [ReferenceKernel] {
-    use crate::ops::*;
     static KERNELS: std::sync::OnceLock<Vec<ReferenceKernel>> = std::sync::OnceLock::new();
     KERNELS.get_or_init(|| {
-        vec![
-            // ── elementwise ──
-            entry::<AddFunctionalDps>("AddFunctionalGeneric", add::kernel),
-            entry::<MulFunctionalDps>("MulFunctionalGeneric", mul::kernel),
-            entry::<DivFunctionalDps>("DivFunctionalGeneric", div::kernel),
-            entry::<TruncDivFunctionalDps>("TruncDivFunctionalGeneric", trunc_div::kernel),
-            entry::<TruncRemFunctionalDps>("TruncRemFunctionalGeneric", trunc_rem::kernel),
-            entry::<ModFunctionalDps>("ModFunctionalGeneric", modulo::kernel),
-            entry::<SqrtFunctionalDps>("SqrtFunctionalGeneric", sqrt::kernel),
-            entry::<ExpFunctionalDps>("ExpFunctionalGeneric", exp::kernel),
-            entry::<Exp2FunctionalDps>("Exp2FunctionalGeneric", exp2::kernel),
-            entry::<Log2FunctionalDps>("Log2FunctionalGeneric", log2::kernel),
-            entry::<SinFunctionalDps>("SinFunctionalGeneric", sin::kernel),
-            entry::<RecipFunctionalDps>("RecipFunctionalGeneric", recip::kernel),
-            entry::<LessThanDps>("LessThanGeneric", less_than::kernel),
-            entry::<CastDps>("CastGeneric", cast::kernel),
-            // ── sources ──
-            entry::<ConstantDps>("ConstantGeneric", constant::kernel),
-            entry::<IotaDps>("IotaGeneric", iota::kernel),
-            // ── reductions ──
-            entry::<ReduceSumDps>("ReduceSumGeneric", reduce_sum::kernel),
-            entry::<ReduceMaxDps>("ReduceMaxGeneric", reduce_max::kernel),
-            // ── data movement ──
-            entry::<GatherDps>("GatherGeneric", gather::kernel),
-            entry::<ScatterFunctionalDps>("ScatterFunctionalGeneric", scatter::kernel),
-            entry::<IndexMapApplyMaterializeDps>(
-                "IndexMapApplyMaterialize",
-                index_map_apply_materialize::kernel,
-            ),
-            entry::<MaterializeLayoutCopyDps>("CopyGeneric", materialize_layout_copy::kernel),
-            // ── plan infrastructure (bufferizer-synthesized, no matchers) ──
-            entry::<luminal::buffer_tensor_ir::BufferAlloc>("BufferAlloc", buffer_alloc),
-            entry::<luminal::buffer_tensor_ir::BufferFree>("BufferFree", buffer_free),
-        ]
+        let mut table: Vec<ReferenceKernel> = crate::ops::reference_ops()
+            .iter()
+            .map(|op| op.kernel)
+            .collect();
+        table.push(entry::<luminal::buffer_tensor_ir::BufferAlloc>(
+            "BufferAlloc",
+            buffer_alloc,
+        ));
+        table.push(entry::<luminal::buffer_tensor_ir::BufferFree>(
+            "BufferFree",
+            buffer_free,
+        ));
+        table
     })
 }
 

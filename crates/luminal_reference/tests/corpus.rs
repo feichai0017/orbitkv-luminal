@@ -38,12 +38,15 @@ fn corpus_scripts_all_green() {
     // this gate existed, so the rot went unnoticed. Deletion or
     // rewrite is a ruling.
     const STALE_SCRIPTS: &[&str] = &["foldr_example.egg"];
-    // The corpus assembles against the TESTRUNTIME matcher set (the
-    // superset: built-ins + view + test-only ops) — the assembly the
-    // view-dependent boundary scripts actually run under in the lib
-    // suite, and the shape of the old prototype's corpus runner.
+    // The corpus assembles against THE REFERENCE REGISTRY — not a
+    // superset. Every script here must be expressible in the vocabulary
+    // the reference runtime actually ships; a script that needs a
+    // view/fused/mutating spelling belongs in that runtime's own fixture
+    // tree, gated by that runtime's own corpus. That is a property of
+    // the file's HOME, never of a name filter (`STALE_SCRIPTS` above is
+    // for bit-rot, and is not a vocabulary escape hatch).
     let program_head = luminal::egglog_snippet::assembled_program_for(
-        &luminal_reference::harness::test_runtime_matchers(),
+        &luminal_reference::ops::built_in_matchers(),
     );
     let mut failures = Vec::new();
     for script in &scripts {

@@ -127,7 +127,7 @@ fn t6a_bufferize_all_four_forms() {
             let mut cx = Graph::new();
             build(&mut cx);
             cx.logical
-                .bound_program(&luminal_reference::ReferenceBindings)
+                .bound_program(&test_runtime::TestRuntimeBindings)
                 .expect("recorder clean")
                 .text
         };
@@ -271,7 +271,7 @@ fn t6a_accumulate_intermediate_c_donation_observed() {
                        // this probe's subject is donation.
         let _ = (x.matmul(w) + c).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };

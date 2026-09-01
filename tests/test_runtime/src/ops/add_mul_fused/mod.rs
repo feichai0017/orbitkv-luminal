@@ -130,11 +130,11 @@ impl OpMatcher for AddMulFusedMatcher {
         vec![
             luminal::egglog_snippet::EgglogSnippet {
                 category: luminal::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("egg/match_functional_constructor.egg"),
+                text: include_str!("match_functional_constructor.egg"),
             },
             luminal::egglog_snippet::EgglogSnippet {
                 category: luminal::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("egg/match_functional.egg"),
+                text: include_str!("match_functional.egg"),
             },
         ]
     }

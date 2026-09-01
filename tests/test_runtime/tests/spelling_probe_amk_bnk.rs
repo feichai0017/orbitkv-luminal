@@ -13,7 +13,7 @@ fn print_amk_bnk_spelling() {
     println!(
         "{}",
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     );

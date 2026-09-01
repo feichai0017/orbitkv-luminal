@@ -11,7 +11,7 @@ fn r11_squares_saturate_bounded() {
         let w = cx.tensor((4usize, 4usize));
         let _ = x.matmul(w).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -23,7 +23,7 @@ fn r11_squares_saturate_bounded() {
         let x = cx.tensor((4usize, 4usize));
         let _ = x.matmul(x.permute((1usize, 0usize))).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };

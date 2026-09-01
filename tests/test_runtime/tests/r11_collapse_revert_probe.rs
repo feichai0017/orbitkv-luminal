@@ -35,7 +35,7 @@ fn bounded_program(iters: usize, with_collapse: bool) -> String {
         let w = cx.tensor((4usize, 3usize));
         let _out = x.matmul(w).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };

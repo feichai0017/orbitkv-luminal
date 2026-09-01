@@ -30,7 +30,7 @@ fn diag_a5() {
         let y = x.matmul(w1);
         let _ = y.matmul(w2.permute((1usize, 0usize))).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };

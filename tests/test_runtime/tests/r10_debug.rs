@@ -47,7 +47,7 @@ fn r10_debug_fixture1() {
         let w = cx.tensor((4usize, 3usize));
         let _out = x.matmul(w).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -150,7 +150,7 @@ fn r10_debug_c6() {
         let c = cx.tensor((4usize, 3usize));
         let _ = ((x.matmul(w) * 2.0) + c).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -327,7 +327,7 @@ fn r10_debug_a4() {
         let y = x.matmul(w1);
         let _ = y.matmul(w2).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -374,7 +374,7 @@ fn r10_debug_g2_mincost() {
         let _ = y.output();
         let _ = (y * 2.0).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -581,7 +581,7 @@ fn r10_debug_bufferize() {
         let w = cx.tensor((8usize, 3usize));
         let _ = x.matmul(w).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };

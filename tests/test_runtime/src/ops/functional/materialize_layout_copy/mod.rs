@@ -1,6 +1,11 @@
-//! A materialize/copy between two distinct layouts of the same logical value,
-//! chosen by extraction. An ordinary op (no special-casing): its cost falls
-//! out of the tensor sizes it reads and writes.
+//! FORKED from `luminal_reference::ops::materialize_layout_copy` — the TestRuntime owns its
+//! whole op set outright and depends on no other runtime.
+//!
+//! The KERNEL is deliberately not carried over. This runtime is
+//! plan-level: it asserts on `ExtractedGraph`s and `BufferIrGraph`s and
+//! never executes, so a kernel here would be dead code demanding a
+//! dispatch table to sit in. What it needs is the matcher, the instance
+//! and the DPS form — the declarations the bufferizer reads.
 
 use luminal::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 use luminal::layout_ir::{
@@ -127,38 +132,4 @@ impl OpMatcher for MaterializeLayoutCopyMatcher {
     fn extract(&self, _site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
         Box::new(MaterializeLayoutCopy)
     }
-}
-
-// ---------------------------------------------------------------------------
-// ---- kernel ----
-// Reference-runtime execution for this op, dispatched by TypeId from the
-// label->fn table in `crate::kernels` (op-folder ruling
-// 2026-08-13: everything about an op lives in the op's folder).
-// ---------------------------------------------------------------------------
-
-use crate::kernels::move_gathered;
-use luminal::buffer_tensor_ir::ReferenceKernelCtx;
-
-/// Dense same-geometry copy (CopyGeneric / MaterializeLayoutCopy). The
-/// reference runtime holds every buffer dense row-major (no view reads in
-/// its allow list), so materializing a copy IS an element copy — but only
-/// under identical geometry, which is checked loudly rather than assumed.
-pub(crate) fn kernel(
-    _op: &dyn BufferTensorIrOp,
-    ctx: &mut ReferenceKernelCtx,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        ctx.operand_dims[0] == ctx.operand_dims[1],
-        "copy kernel: input geometry {:?} vs dest geometry {:?} — a shape-changing \
-         copy is not a dense copy and has no reference lowering",
-        ctx.operand_dims[0],
-        ctx.operand_dims[1]
-    );
-    anyhow::ensure!(
-        ctx.operands[0].len() == ctx.dests[0].len(),
-        "copy kernel length mismatch"
-    );
-    let index_of: Vec<usize> = (0..ctx.dests[0].len()).collect();
-    let source = ctx.operands[0].clone();
-    move_gathered(&source, &mut ctx.dests[0], &index_of)
 }
