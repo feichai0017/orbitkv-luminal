@@ -1,6 +1,8 @@
-//! yolo11n as pure logical ops — see model.rs for the anatomy and the
-//! per-scale DFL respelling that removes the concat-of-slices
-//! divergence road; main.rs carries the host letterbox/NMS pipeline
-//! and the (documented-heavy) reference search/execute path.
+//! Logical YOLO11 model definitions.
+//!
+//! Runtime crates own image preparation, weight loading, search, execution,
+//! and post-processing.
 
 pub mod model;
+
+pub use model::YoloV11;

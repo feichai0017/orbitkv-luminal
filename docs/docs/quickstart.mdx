@@ -15,23 +15,21 @@ cd luminal
 
 ## Hello World
 
-Simple examples demonstrate how a library works without diving in too deep. Run your first Luminal code like so:
+Runtime crates own executable examples. Run a small matrix multiplication on
+the reference runtime like so:
 
 ```bash
-cd ./examples/simple
-cargo run --release
+cargo run --release -p luminal_reference --example simple
 ```
 
-Great! You've ran your first Luminal model!
+The logical graph is built with `luminal`; loading, searching, and executing it
+happens entirely inside the reference-runtime crate.
 
-## Run Llama 3
+## Run a model with CUDA Lite
 
-Run the following to start generating text with Llama 3 8B on a CUDA device:
+With an NVIDIA GPU and CUDA installed, run the full Llama 3 logical model
+through CUDA Lite:
 
 ```bash
-cd ./examples/llama
-# Download the model
-uv run --script ./setup/setup.py
-# Run the model
-cargo run --release
+cargo run --release -p luminal_cuda_lite --example llama3 --features device
 ```

@@ -1,11 +1,10 @@
 //! The example applications' DEVICE-INDEPENDENT half, pinned as a test
 //! (Train-2 examples landing): the conv example's exact graph + seeded
-//! pairs (`examples/conv.rs`, dims from
-//! `examples/mini/conv/src/bin/measure_plan.rs`) search through
+//! pairs from the mini convolution fixture search through
 //! `CudaRuntime` on this backend's allow list with ZERO refusals, and
-//! the resulting plan exposes the stats the examples print (kernels,
-//! copies, buffers, outputs). The device half of the examples runs on
-//! the orchestrator's GPU pass; this pins everything upstream of it.
+//! the resulting plan exposes kernel/buffer/output statistics. This pins the
+//! CUDA search path without making the full-size applications into smoke
+//! tests.
 
 use luminal::buffer_tensor_ir::TypedBuffer;
 use luminal::bufferize::BufferNode;

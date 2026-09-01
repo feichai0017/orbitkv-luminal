@@ -21,8 +21,8 @@
 //!    row; only the dedicated 2D pin asserts election itself.
 //!
 //! mini_flux is EXCLUDED: blocked by the pre-existing rejoin-divergence
-//! family upstream of any marker concern (see `examples/flux.rs` — the
-//! search diverges, so attempting it here would hang, not fail fast).
+//! family upstream of any marker concern; the search diverges, so attempting
+//! it here would hang, not fail fast.
 
 use luminal::buffer_tensor_ir::TypedBuffer;
 use luminal::bufferize::BufferNode;

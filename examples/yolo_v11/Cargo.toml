@@ -3,30 +3,6 @@ name = "yolo_v11"
 version = "0.2.0"
 edition.workspace = true
 
-[[bin]]
-name = "yolo_v11"
-path = "src/main.rs"
-
-# Pure-logical zoo conversion (rulings 2026-08-12): yolo11n from the
-# project's release weights artifact — CSP backbone, SPPF, C2PSA
-# channel attention, per-scale DFL decode (the concat-of-slices road
-# respelled away), host letterbox/NMS.
-# Opt-in marker for this crate's heavy fidelity proofs (full genetic
-# search + decode/transcribe loops on a real runtime — llama3 measured at
-# 185s). OFF by default so the core loop stays fast; run them with
-#   cargo test -p <crate> --features zoo-proofs
-# A named feature rather than bare #[ignore] keeps "slow" distinguishable
-# from "ignored because broken".
-[features]
-zoo-proofs = []
-
 [dependencies]
 luminal = { path = "../.." }
-luminal_reference = { path = "../../crates/luminal_reference" }
 luminal_nn = { path = "../../crates/luminal_nn" }
-rustc-hash = "2.1"
-safetensors = "0.7.0"
-bytemuck = "1.24.0"
-memmap2 = "0.9.9"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-ureq = { version = "2", default-features = false, features = ["tls"] }

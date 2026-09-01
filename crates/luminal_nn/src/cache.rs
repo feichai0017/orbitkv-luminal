@@ -16,7 +16,6 @@ use luminal::graph::Graph;
 use luminal::prelude::Ns;
 use luminal::prelude::anyhow;
 use luminal::prelude::{GraphTensor, TypedBuffer};
-use luminal_reference::ReferenceRuntime;
 
 /// The slot-pool cache: one (slots, kv_dim) K/V input pair per layer.
 /// `kv_dim` is per-layer (gemma-4's sliding and full layers differ),
@@ -77,29 +76,6 @@ impl KvCachePool {
 pub struct CacheState {
     pub k: Vec<Vec<f32>>,
     pub v: Vec<Vec<f32>>,
-}
-
-impl CacheState {
-    /// Stage every layer's cache contents as this step's inputs.
-    pub fn stage(&self, rt: &mut ReferenceRuntime, pool: &KvCachePool) {
-        for (layer, (k, v)) in pool.layers.iter().enumerate() {
-            rt.set_data(k.id, self.k[layer].clone());
-            rt.set_data(v.id, self.v[layer].clone());
-        }
-    }
-
-    /// Read every layer's post-step cache outputs back into the state.
-    pub fn absorb(
-        &mut self,
-        rt: &ReferenceRuntime,
-        cache_outs: &[(GraphTensor, GraphTensor)],
-    ) -> anyhow::Result<()> {
-        for (layer, (k, v)) in cache_outs.iter().enumerate() {
-            self.k[layer] = rt.get_f32(k.id)?.clone();
-            self.v[layer] = rt.get_f32(v.id)?.clone();
-        }
-        Ok(())
-    }
 }
 
 /// Driver 1 — POSITION SLOTS: physical slot == absolute position (the

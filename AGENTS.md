@@ -26,11 +26,12 @@ loop is 185s, `luminal_nn`'s `decoder_block_matches_scalar_reference` is 98s and
   `cargo test -p luminal`, `-p luminal_reference`, `-p luminal_cuda_lite`,
   `-p test_runtime`, `-p luminal_nn`, plus device suites where a GPU is available.
 
-Heavy proofs are marked, not deleted. The model-zoo fidelity tests (full genetic
-search + decode loops) sit behind each zoo crate's `zoo-proofs` feature:
-`cargo test -p llama3 --features zoo-proofs`. A named feature rather than a bare
-`#[ignore]` keeps "slow on purpose" distinguishable from "ignored because broken"
-— the whisper proof is currently both, and says so in its own reason string.
+The mini model families provide execution-only smoke coverage in the runtime
+crates; for example, `cargo test --release -p luminal_reference --test
+mini_model_smoke`. Numerical and cross-runtime correctness belongs in the
+operation/runtime suites rather than model examples. A smoke test is ignored
+only for a documented blocker; `mini_flux_runs` records the current adaLN
+rejoin-divergence search issue in its reason string.
 
 ## Debugging and Correctness
 - Treat model examples as specifications of the intended architecture. Do not change model code, prompt templates, weights, or example logic to hide compiler/runtime/search bugs unless the model code is demonstrably semantically wrong.

@@ -57,19 +57,15 @@ ordered-float = "5.1.0"
 proptest = "1.9.0"
 
 [workspace]
-# M3 Step 4b: their HLIR pipeline is deleted. Crates and examples that
-# consumed it (cuda_lite/metal/python/training/bench + the model-zoo
-# examples) are PARKED — out of the workspace until their M4/4d re-seat
-# on the native ladder. They are not deleted; their sources stay put.
+# Runtime crates are re-seated on the native ladder as they become ready.
+# Model-zoo members in this workspace are backend-neutral graph definitions;
+# executable applications live under the corresponding runtime crate.
 members = [
     "crates/luminal_cuda_lite",
     "crates/luminal_reference",
     "crates/luminal_nn",
     "crates/luminal_tracing",
-    # First re-seated example (conversion directive 2026-08-10): pure
-    # logical ops on the native ladder — the pattern for the rest of
-    # the zoo.
-    "examples/qwen",
+    "examples/qwen3",
     "examples/llama3",
     "examples/paged_llama3",
     "examples/llama3_1_fp8",
@@ -78,6 +74,7 @@ members = [
     "examples/gemma4_moe",
     "examples/whisper",
     "examples/yolo_v11",
+    "examples/flux2",
     "examples/mini/llama3",
     "examples/mini/qwen3",
     "examples/mini/gemma3",
@@ -93,9 +90,8 @@ members = [
 [patch.crates-io]
 candle-kernels = { git = "https://github.com/huggingface/candle.git", rev = "a0dbd8b8aef6bde9adca3e8ad90791609d64974b" }
 
-# Mini-model demos (ruling 2026-08-07): models are DEFINED in core
-# (crates/luminal_nn); these runners belong to the reference runtime and
-# live in examples/mini/ beside the full-size example models.
+# Model examples are logical definitions only. Executable applications
+# belong to runtime crates, which bind and run these backend-neutral graphs.
 
 # Dependencies compile optimized even in dev builds: egglog's saturation
 # engine at opt-level 0 is ~17x slower on search-heavy tests (mini_gemma3
