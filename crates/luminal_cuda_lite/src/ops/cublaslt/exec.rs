@@ -33,8 +33,12 @@
 //!
 //! THE ROW CONVENTION (Train-3 orientation fix; measured on the A100
 //! with the 4x8x3 dump — see `tests/cublaslt_contracts.rs`):
-//! every emitted layout descriptor declares CUBLASLT_ORDER_ROW. This
-//! DECLARES REALITY, in two halves:
+//! every emitted layout descriptor DECLARES its order explicitly —
+//! never the library's COL default, and (since the destination-frame
+//! fix below) never a constant at the dispatch site either. The order
+//! is a field of [`LtDesc`]. A and B are ROW; C and D are whatever the
+//! plan's elected destination layout resolves to. This DECLARES
+//! REALITY, in two halves:
 //!
 //!  * A and B: the marker spec's readings are COL views over the
 //!    operand buffers' bytes (frozen estate convention R9/R10). A COL
@@ -45,39 +49,104 @@
 //!    carry over verbatim (a COL view's ld and the underlying
 //!    row-major storage's row pitch are the same number, padded
 //!    layouts included).
-//!  * D (and C, which rides D's layout by rule guard): the EXECUTOR'S
-//!    destination convention is authoritative — the CL executor is
-//!    out-of-place and materializes every result value DENSE
-//!    ROW-MAJOR in the value's own dims (the disclosure downstream
-//!    walks exactly that). The spec's ldd/ldc describe the CLAIMED
-//!    e-graph layout over the RECORDER's out buffer — a buffer the
-//!    executor never writes — so the bridge derives D from the call
-//!    frame alone: ROW `m x n` with ld = n (the dense row pitch).
-//!    Writing the spec's COL D descriptor into the fresh dest was the
-//!    orientation bug: bytes landed COL-major (element (r,c) at
-//!    c*m + r) while the disclosure reads row-major (r*n + c) —
-//!    element 0 agreed, element 1 did not.
+//!  * D (and C, which rides D's layout by rule guard): the PLAN'S
+//!    disclosed destination layout is authoritative. What is NOT
+//!    authoritative is the spec's ldd/ldc — those describe the CLAIMED
+//!    e-graph layout over the RECORDER's out buffer, a buffer the
+//!    executor never writes, and consuming them was the orientation
+//!    bug: bytes landed COL-major at the spec's pitch while the
+//!    disclosure read row-major (element 0 agreed, element 1 did not).
+//!    The bridge therefore builds the D FRAME from the call
+//!    (`m x n`) and takes its ORDER from the destination value's
+//!    elected layout via [`bind_destination`] — ROW `ld = n` for a
+//!    right-major election, COL `ld = m` for a left-major one.
+//!    Hardcoding ROW here instead was the second orientation failure;
+//!    see the note below.
 //!
 //! The CM-swap alternative (compute D^T with swapped roles under COL
 //! defaults) is REJECTED: cuBLASLt's bias epilogue adds bias[i] to
 //! row i of the API's D, and the marker's bias contract is per-row of
 //! the call's D (length m) — a role swap would silently turn it into
 //! a per-column bias. ROW order keeps bias semantics intact.
+//!
+//! THE DESTINATION FRAME IS THE PLAN'S, NOT A CONSTANT (regression fix,
+//! 2026-08-31 — see [`bind_destination`]). The paragraph above says
+//! "the executor materializes every result DENSE ROW-MAJOR in the
+//! value's own dims (the disclosure downstream walks exactly that)".
+//! Under Option B that second clause STOPPED BEING TRUE: the plan
+//! carries each value's ELECTED layout and every consumer — the
+//! codegen read path, the output-slot disclosure, `dense_f32` — reads
+//! through it, so "dense row-major" is no longer a law the executor
+//! may assume. On the marker's own transpose-sandwich the elected
+//! destination layout is LEFT-major: the site that dispatches is the
+//! SIBLING (D' = B^T A^T = out^T, an `m' x n'` frame), and the e-graph
+//! elects for that sibling value exactly the layout that makes the
+//! ORIGINAL out right-major over the same bytes — `LeftMajor[m', n']`.
+//! Writing ROW there produced an exact product in transposed byte
+//! order: the SAME failure shape as the original orientation bug, one
+//! convention further along.
+//!
+//! So the destination ORDER is resolved against the plan, not assumed:
+//! [`LtOrder`] is a field of every [`LtDesc`], `plan_call` emits the
+//! spec-only DEFAULT (ROW), and the executor calls [`bind_destination`]
+//! with the result slot's elected layout before dispatch.
 
 use anyhow::{bail, Result};
 
 use super::{CuDim, CuEpilogue, CublasLt, CublasLtForm, LtMatmulSpec};
 
-/// One descriptor's ROW-order geometry: `rows x cols` with leading
-/// dimension `ld` = the ROW pitch (elements between consecutive rows),
-/// all resolved literals (elements, not bytes). Every descriptor the
-/// bridge emits is declared CUBLASLT_ORDER_ROW at dispatch — see the
-/// module doc's ROW CONVENTION.
+/// A descriptor's storage ORDER — the cuBLASLt
+/// `CUBLASLT_MATRIX_LAYOUT_ORDER` attribute, carried EXPLICITLY on
+/// every descriptor rather than hardcoded at the dispatch site. Two
+/// bugs (Train-3's orientation bug and the Option-B destination-frame
+/// regression) both had the same shape: an order convention that lived
+/// only in prose while the bytes said otherwise. It is data now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LtOrder {
+    /// `CUBLASLT_ORDER_ROW`: element `(r, c)` at `r*ld + c`; `ld` is the
+    /// ROW pitch and the descriptor reaches `ld*(rows-1) + cols`.
+    Row,
+    /// `CUBLASLT_ORDER_COL`: element `(r, c)` at `c*ld + r`; `ld` is the
+    /// COLUMN pitch and the descriptor reaches `ld*(cols-1) + rows`.
+    Col,
+}
+
+/// One descriptor's geometry: `rows x cols` with leading dimension `ld`
+/// and its storage [`LtOrder`], all resolved literals (elements, not
+/// bytes). A and B are always [`LtOrder::Row`] — the frozen estate's
+/// COL readings re-expressed, see the module doc's ROW CONVENTION; C
+/// and D carry whatever the plan's elected destination layout says
+/// (see [`bind_destination`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LtDesc {
     pub rows: i64,
     pub cols: i64,
     pub ld: i64,
+    pub order: LtOrder,
+}
+
+impl LtDesc {
+    /// A ROW-order descriptor (the operand convention).
+    pub fn row(rows: i64, cols: i64, ld: i64) -> Self {
+        Self { rows, cols, ld, order: LtOrder::Row }
+    }
+
+    /// A COL-order descriptor.
+    pub fn col(rows: i64, cols: i64, ld: i64) -> Self {
+        Self { rows, cols, ld, order: LtOrder::Col }
+    }
+
+    /// How many elements past the base pointer this descriptor
+    /// dereferences: `ld * (major_lines - 1) + minor_extent`, where the
+    /// MAJOR lines are rows in ROW order and columns in COL order.
+    /// `None` on i64 overflow.
+    fn reach(&self) -> Option<i64> {
+        let (major, minor) = match self.order {
+            LtOrder::Row => (self.rows, self.cols),
+            LtOrder::Col => (self.cols, self.rows),
+        };
+        self.ld.checked_mul(major - 1)?.checked_add(minor)
+    }
 }
 
 /// Where the C pointer comes from. The C DESCRIPTOR always exists
@@ -126,12 +195,16 @@ fn literal(dim: &CuDim, what: &str) -> Result<i64> {
     }
 }
 
-/// The REAL ld bounds validation (contract 4), in ROW order. The
-/// library's own check is self-consistency only — `ld >= cols` when
-/// there is more than one row — and VACUOUS at rows == 1 (a single row
-/// never dereferences ld), so a too-small buffer would be read/written
-/// out of bounds without a word. This check is the one that counts:
-/// `ld*(rows-1) + cols <= elems`, plus positivity.
+/// The REAL ld bounds validation (contract 4) — A VENDOR CHECK, not a
+/// type re-check: it stays under every cleanup (see the CHECK TAXONOMY
+/// on [`bind_destination`]). The library's own check is
+/// self-consistency only — `ld >= minor extent` when there is more than
+/// one major line — and VACUOUS at a single major line (one row in ROW
+/// order, one column in COL order, never dereferences ld), so a
+/// too-small buffer would be read/written out of bounds without a word.
+/// This check is the one that counts: [`LtDesc::reach`] `<= elems`,
+/// plus positivity. ORDER-AWARE, because the reach is (the ROW formula
+/// applied to a COL descriptor understates it whenever `rows > cols`).
 pub fn validate_ld_bounds(who: &str, desc: &LtDesc, elems: usize) -> Result<()> {
     if desc.rows < 1 || desc.cols < 1 {
         bail!(
@@ -143,25 +216,120 @@ pub fn validate_ld_bounds(who: &str, desc: &LtDesc, elems: usize) -> Result<()> 
     if desc.ld < 1 {
         bail!("cuBLASLt {who}: ld {} < 1 — refused before dispatch", desc.ld);
     }
-    let needed = desc
-        .ld
-        .checked_mul(desc.rows - 1)
-        .and_then(|v| v.checked_add(desc.cols))
-        .ok_or_else(|| {
-            anyhow::anyhow!("cuBLASLt {who}: ld*(rows-1)+cols overflows i64 — refused")
-        })?;
+    let needed = desc.reach().ok_or_else(|| {
+        anyhow::anyhow!("cuBLASLt {who}: the descriptor's element reach overflows i64 — refused")
+    })?;
     if needed as i128 > elems as i128 {
         bail!(
-            "cuBLASLt {who}: descriptor {}x{} ld {} needs {} elements but the \
-             buffer holds {} — out-of-bounds access refused BEFORE dispatch \
-             (the library's own ld check is vacuous at rows==1)",
+            "cuBLASLt {who}: descriptor {}x{} ld {} ({:?} order) needs {} elements \
+             but the buffer holds {} — out-of-bounds access refused BEFORE dispatch \
+             (the library's own ld check is vacuous at a single major line, \
+             i.e. rows==1 in ROW order)",
             desc.rows,
             desc.cols,
             desc.ld,
+            desc.order,
             needed,
             elems
         );
     }
+    Ok(())
+}
+
+/// THE PLAN/CALL-FRAME COHERENCE FENCE — resolve the C/D descriptors
+/// against the destination value's ELECTED layout, the one the plan
+/// disclosed and every downstream reader walks.
+///
+/// CHECK TAXONOMY (standing ruling, written here so the next cleanup
+/// does not delete this again). Three kinds of executor-side check, and
+/// only ONE of them is disposable:
+///
+///  1. E-GRAPH RE-CHECKS — re-verifying a fact a rule PREMISE already
+///     guarantees (the marker's F32 end-to-end scope, C's dims and fold
+///     status matching D's by rule guard). These are OUT: they restate
+///     the e-graph's own postconditions in the executor's voice and
+///     rot. Correction 4 of 2026-08-31 removed them; they stay removed.
+///  2. VENDOR CHECKS — verifying the LIBRARY's behavior where its own
+///     guarantees are absent or vacuous: the TF32 strictness detector
+///     (contract 5) and [`validate_ld_bounds`] (contract 4, whose
+///     library counterpart is vacuous at rows == 1). These STAY.
+///  3. COHERENCE FENCES — agreement between the PLAN's vocabulary
+///     (elected layouts, extents, orders) and a CALL FRAME THE EXECUTOR
+///     ITSELF BUILDS from a different vocabulary (m/n/k, descriptors,
+///     lds). These STAY, and this is the category correction 4 got
+///     wrong: it classified the `[m, n]` frame check as (1) and deleted
+///     it. It is not (1). No e-graph rule has ever seen `LtCall` — the
+///     bridge in this module invents it — so nothing upstream can
+///     guarantee the two agree. Deleting the fence is how an exact
+///     product landed in transposed byte order twice.
+///
+/// This function is the fence, and it does more than the deleted check:
+/// the old one compared EXTENTS only (`dest_dims == [m, n]`), which the
+/// Option-B regression walked straight through — the extents were
+/// `[m, n]` and the ORDER was the thing that had diverged. Resolving
+/// the order here means the frame cannot silently disagree at all: the
+/// only two orders cuBLASLt has are the only two layouts admitted, and
+/// the descriptor carries the answer to the dispatch site.
+///
+/// Admitted destination layouts, both exactly expressible as a cuBLASLt
+/// matrix layout over the `m x n` frame:
+///  * `RightMajor[m, n]` — `(r, c)` at `r*n + c` → ROW, `ld = n`;
+///  * `LeftMajor[m, n]`  — `(r, c)` at `c*m + r` → COL, `ld = m`.
+///
+/// Everything else is a CAPABILITY REFUSAL, the exact mirror of the
+/// kernel path's non-direct-result refusal in
+/// `kernels::CodegenCtx::from_descriptors`: this backend writes no
+/// strided and no offset-expression destination, by kernel or by
+/// library call. Loud, never wrong bytes.
+///
+/// C rides D's frame (`c == d` throughout this bridge): the marker's
+/// rule guard cross-checks the C and D layout CLASSES, so a C-fold
+/// form's C operand is stored the same way its D is.
+pub fn bind_destination(
+    call: &mut LtCall,
+    dest: &crate::layouts::CudaLayout,
+    who: &str,
+) -> Result<()> {
+    use luminal::layouts::MirrorLayout as M;
+    let extents = dest.mirror.literal_extents().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cuBLASLt {who}: the destination's elected layout has SYMBOLIC extents \
+             — the call frame cannot be checked against it; refused before dispatch"
+        )
+    })?;
+    if extents.len() != 2
+        || extents[0] as i128 != call.m as i128
+        || extents[1] as i128 != call.n as i128
+    {
+        bail!(
+            "cuBLASLt {who}: the plan's elected destination layout spans {extents:?} \
+             but the call frame is [m, n] = [{}, {}] — the plan's vocabulary and the \
+             executor's call frame have DIVERGED; refused before dispatch (never \
+             land bytes under a disclosure that does not describe them)",
+            call.m,
+            call.n
+        );
+    }
+    let desc = match &dest.mirror {
+        M::RightMajor(_) => LtDesc::row(call.m, call.n, call.n.max(1)),
+        M::LeftMajor(_) => LtDesc::col(call.m, call.n, call.m.max(1)),
+        other => bail!(
+            "cuBLASLt {who}: the plan elected a {} destination layout; this backend \
+             writes only the two dense orders cuBLASLt can express (RightMajor -> \
+             CUBLASLT_ORDER_ROW, LeftMajor -> CUBLASLT_ORDER_COL). Strided and \
+             offset-expression destinations are NOT lowered — a CAPABILITY refusal \
+             (the host-call mirror of the codegen path's non-direct-result refusal), \
+             never a guess. Layout: {other:?}",
+            match other {
+                M::Strided(_) => "STRIDED",
+                M::ElementOffset(_) => "ELEMENT-OFFSET-EXPRESSION",
+                M::BitOffset(_) => "BIT-OFFSET-EXPRESSION",
+                _ => unreachable!("the dense orders are matched above"),
+            }
+        ),
+    };
+    call.d = desc;
+    call.c = desc;
     Ok(())
 }
 
@@ -229,16 +397,22 @@ pub fn plan_call_from_spec(spec: &LtMatmulSpec) -> Result<LtCall> {
     // padded layouts included), clamped to >= 1 (contract 4's
     // emission rule).
     let ld = |dim: &CuDim, what: &str| -> Result<i64> { Ok(literal(dim, what)?.max(1)) };
-    let a = LtDesc { rows: a_rows, cols: a_cols, ld: ld(&spec.lda, "lda")? };
-    let b = LtDesc { rows: b_rows, cols: b_cols, ld: ld(&spec.ldb, "ldb")? };
-    // D is the EXECUTOR's destination, not the spec's claim: the CL
-    // executor materializes every result DENSE ROW-MAJOR in the
-    // value's dims (the out-of-place convention the disclosure walks),
-    // so ld = n — the dense row pitch. The spec's ldd describes the
-    // claimed e-graph layout over the RECORDER's out buffer, which the
-    // executor never writes; consuming it here was the orientation
-    // bug.
-    let d = LtDesc { rows: d_rows, cols: d_cols, ld: n.max(1) };
+    let a = LtDesc::row(a_rows, a_cols, ld(&spec.lda, "lda")?);
+    let b = LtDesc::row(b_rows, b_cols, ld(&spec.ldb, "ldb")?);
+    // D is the EXECUTOR's destination, not the spec's claim. The spec's
+    // ldd describes the claimed e-graph layout over the RECORDER's out
+    // buffer — a buffer the executor never writes — so consuming it
+    // here was the orientation bug.
+    //
+    // What stands here is the SPEC-ONLY DEFAULT: dense ROW `m x n`,
+    // ld = n. It is the right answer for a caller with no plan (the
+    // hand-built direct-dispatch contract tests) and it is NOT the
+    // final word for a planned dispatch: the executor calls
+    // [`bind_destination`] with the result slot's ELECTED layout, which
+    // may resolve this frame to COL (the transpose-sandwich sibling
+    // does). Assuming ROW here and never re-resolving it was the
+    // Option-B destination-frame regression.
+    let d = LtDesc::row(d_rows, d_cols, n.max(1));
     // C rides the D layout by rule guard (the marker cross-checks the
     // layout classes), so Cdesc == Ddesc geometry on EVERY form — the
     // valid-Cdesc contract for the no-C forms comes for free. On the

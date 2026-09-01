@@ -2,9 +2,15 @@
 //! validation and call planning for the cuBLASLt host call, no device
 //! required. The device-gated halves live in `tests/cublaslt_contracts.rs`.
 
+use luminal::dtype::PlanDtype;
+use luminal::layouts::{
+    BitWidthTerm, ElementOffsetExpressionLayout, IntExprTerm, LeftMajorContiguousElementLayout,
+    MirrorLayout, RightMajorContiguousElementLayout, ShapeTerm, StridedElementLayout,
+};
 use luminal::prelude::egraph_serialize::ClassId;
+use luminal_cuda_lite::layouts::CudaLayout;
 use luminal_cuda_lite::ops::cublaslt::exec::{
-    plan_call, plan_call_from_spec, validate_ld_bounds, CSource, LtDesc,
+    bind_destination, plan_call, plan_call_from_spec, validate_ld_bounds, CSource, LtDesc,
 };
 use luminal_cuda_lite::ops::cublaslt::{
     CuDim, CuEpilogue, CublasLt, CublasLtForm, LtMatmulSpec,
@@ -56,10 +62,10 @@ fn base_spec(m: i64, n: i64, k: i64) -> LtMatmulSpec {
 #[test]
 fn ld_bounds_accepts_contiguous_row_layouts() {
     // 4x3 ROW-contiguous: ld = 3 (row pitch), needs 3*3+3 = 12 elements.
-    validate_ld_bounds("A", &LtDesc { rows: 4, cols: 3, ld: 3 }, 12).expect("exact fit");
+    validate_ld_bounds("A", &LtDesc::row(4, 3, 3), 12).expect("exact fit");
     // Padded: ld = 6 over the same view needs 6*3+3 = 21.
-    validate_ld_bounds("A", &LtDesc { rows: 4, cols: 3, ld: 6 }, 21).expect("padded fit");
-    validate_ld_bounds("A", &LtDesc { rows: 4, cols: 3, ld: 6 }, 64).expect("slack");
+    validate_ld_bounds("A", &LtDesc::row(4, 3, 6), 21).expect("padded fit");
+    validate_ld_bounds("A", &LtDesc::row(4, 3, 6), 64).expect("slack");
 }
 
 #[test]
@@ -70,24 +76,24 @@ fn ld_bounds_rejects_the_rows_one_vacuous_case() {
     // would be read out of bounds without a word. OUR check must
     // reject: 1x8 needs cols = 8 elements regardless of ld; the
     // buffer holds 4.
-    let err = validate_ld_bounds("A", &LtDesc { rows: 1, cols: 8, ld: 1 }, 4)
+    let err = validate_ld_bounds("A", &LtDesc::row(1, 8, 1), 4)
         .expect_err("rows==1 with a short buffer must be refused");
     let msg = format!("{err:#}");
     assert!(msg.contains("refused BEFORE dispatch"), "{msg}");
     assert!(msg.contains("vacuous"), "the refusal must name the vacuous library check: {msg}");
     // And the same descriptor over an adequate buffer passes.
-    validate_ld_bounds("A", &LtDesc { rows: 1, cols: 8, ld: 1 }, 8).expect("adequate");
+    validate_ld_bounds("A", &LtDesc::row(1, 8, 1), 8).expect("adequate");
 }
 
 #[test]
 fn ld_bounds_rejects_short_buffers_and_degenerate_geometry() {
     // ld too large for the buffer.
-    validate_ld_bounds("B", &LtDesc { rows: 4, cols: 3, ld: 8 }, 12)
+    validate_ld_bounds("B", &LtDesc::row(4, 3, 8), 12)
         .expect_err("ld 8 over 12 elements (needs 8*3+3 = 27)");
     // Zero/negative ld and empty geometry are refused outright.
-    validate_ld_bounds("B", &LtDesc { rows: 4, cols: 3, ld: 0 }, 64).expect_err("ld 0");
-    validate_ld_bounds("B", &LtDesc { rows: 0, cols: 3, ld: 1 }, 64).expect_err("rows 0");
-    validate_ld_bounds("B", &LtDesc { rows: 4, cols: 0, ld: 4 }, 64).expect_err("cols 0");
+    validate_ld_bounds("B", &LtDesc::row(4, 3, 0), 64).expect_err("ld 0");
+    validate_ld_bounds("B", &LtDesc::row(0, 3, 1), 64).expect_err("rows 0");
+    validate_ld_bounds("B", &LtDesc::row(4, 0, 4), 64).expect_err("cols 0");
 }
 
 #[test]
@@ -118,7 +124,7 @@ fn no_c_forms_always_carry_a_valid_cdesc_aliasing_d() {
     // D is the EXECUTOR's dense row-major dest: ROW m x n, ld = n —
     // NEVER the spec's ldd (which describes the claimed e-graph layout
     // over the recorder's buffer; consuming it was the orientation bug).
-    assert_eq!(call.d, LtDesc { rows: 4, cols: 3, ld: 3 });
+    assert_eq!(call.d, LtDesc::row(4, 3, 3));
 }
 
 #[test]
@@ -169,8 +175,8 @@ fn row_bridge_flips_the_spec_col_readings() {
     // => ROW A' = 5x4 ld 4 at T, ROW B' = 3x5 ld 5 at T.
     let call = plan_call_from_spec(&base_spec(4, 3, 5)).expect("plan");
     assert!(call.trans_a && call.trans_b, "N/N spec => T/T ROW call");
-    assert_eq!(call.a, LtDesc { rows: 5, cols: 4, ld: 4 });
-    assert_eq!(call.b, LtDesc { rows: 3, cols: 5, ld: 5 });
+    assert_eq!(call.a, LtDesc::row(5, 4, 4));
+    assert_eq!(call.b, LtDesc::row(3, 5, 5));
 
     // Spec trans_a: COL A' stored [k, m] = 5x4 ld 5 presented as
     // op(A') = m x k => ROW A' = 4x5 ld 5 at N.
@@ -178,8 +184,8 @@ fn row_bridge_flips_the_spec_col_readings() {
     spec.trans_a = true;
     spec.lda = CuDim::Literal(5); // contiguous COL: ld = rows' = k
     let call = plan_call_from_spec(&spec).expect("plan");
-    assert_eq!(call.a, LtDesc { rows: 4, cols: 5, ld: 5 });
-    assert_eq!(call.b, LtDesc { rows: 3, cols: 5, ld: 5 });
+    assert_eq!(call.a, LtDesc::row(4, 5, 5));
+    assert_eq!(call.b, LtDesc::row(3, 5, 5));
     assert!(!call.trans_a && call.trans_b);
 }
 
@@ -230,4 +236,181 @@ fn an_elected_op_without_a_parsed_spec_refuses() {
     let op = CublasLt { form: CublasLtForm::Base, spec: None };
     let err = plan_call(&op).expect_err("no spec");
     assert!(format!("{err:#}").contains("no parsed LtMatmulSpec"), "{err:#}");
+}
+
+// ===========================================================================
+// THE PLAN/CALL-FRAME COHERENCE FENCE — `exec::bind_destination`.
+//
+// WHY THESE PINS EXIST, ON THE CPU TIER. The destination-frame
+// regression (Option B, 2026-08-31) reached the main line because the
+// ONLY test that could see it was device-gated, so the landing could
+// not run it: the marker's transpose-sandwich elects a LEFT-major
+// destination layout for the sibling site, the executor wrote dense
+// ROW-major anyway, and the product came out exact in transposed byte
+// order. Everything about that agreement is decidable WITHOUT a GPU —
+// it is a question about a hand-built `LtCall` and a hand-built
+// layout — so it is pinned here, on the spin tier, where the next
+// occurrence is caught before anyone reaches an A100.
+//
+// CLASSIFICATION (the taxonomy on `exec::bind_destination`): these are
+// COHERENCE fences, not e-graph re-checks. No rule has ever seen an
+// `LtCall`; the bridge invents it. They are not disposable.
+// ===========================================================================
+
+fn shape(dims: &[i64]) -> ShapeTerm {
+    ShapeTerm(dims.iter().map(|&d| IntExprTerm::Lit(d)).collect())
+}
+
+fn right_major(dims: &[i64]) -> CudaLayout {
+    CudaLayout {
+        mirror: MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
+            shape: shape(dims),
+            width: BitWidthTerm(32),
+        }),
+        dtype: Some(PlanDtype::F32),
+    }
+}
+
+fn left_major(dims: &[i64]) -> CudaLayout {
+    CudaLayout {
+        mirror: MirrorLayout::LeftMajor(LeftMajorContiguousElementLayout {
+            shape: shape(dims),
+            width: BitWidthTerm(32),
+        }),
+        dtype: Some(PlanDtype::F32),
+    }
+}
+
+#[test]
+fn dest_frame_binds_a_right_major_election_as_row_order() {
+    // The ordinary case: the elected destination is dense row-major over
+    // the call's own [m, n] frame, so D is ROW with ld = n — the frame
+    // `plan_call` already defaults to, now CONFIRMED against the plan
+    // rather than assumed.
+    let mut call = plan_call_from_spec(&base_spec(4, 3, 5)).expect("plan");
+    bind_destination(&mut call, &right_major(&[4, 3]), "pin").expect("row-major destination");
+    assert_eq!(call.d, LtDesc::row(4, 3, 3));
+    assert_eq!(call.c, call.d, "C rides D's frame by rule guard");
+}
+
+#[test]
+fn dest_frame_binds_a_left_major_election_as_col_order() {
+    // THE REGRESSION PIN, in the exact shape the A100 dumped for the
+    // 4x8x3 matmul. The marker elects the transpose-sandwich SIBLING:
+    // D' = B^T A^T = out^T, so the call frame is [m, n] = [3, 4] and the
+    // e-graph elects for that sibling value the layout that makes the
+    // ORIGINAL out[4, 3] right-major over the same bytes — LeftMajor[3, 4],
+    // element (i, j) at i + 3j.
+    //
+    // That is CUBLASLT_ORDER_COL with ld = m = 3, and nothing else.
+    // Writing ROW here (the old hardcoded convention) put an exact
+    // product down in transposed byte order: element 1 of the disclosed
+    // out read out(1, 0) instead of out(0, 1).
+    let mut call = plan_call_from_spec(&base_spec(3, 4, 8)).expect("plan");
+    assert_eq!(call.d, LtDesc::row(3, 4, 4), "the spec-only default is ROW");
+    bind_destination(&mut call, &left_major(&[3, 4]), "pin").expect("left-major destination");
+    assert_eq!(call.d, LtDesc::col(3, 4, 3), "a left-major election IS a COL descriptor");
+    assert_eq!(call.c, call.d);
+    // And the bound frame covers the sibling's 12-element buffer exactly:
+    // COL reach = ld*(cols-1) + rows = 3*3 + 3 = 12.
+    call.validate_against(&[24, 32], 12).expect("the bound frame fits the dest buffer");
+}
+
+#[test]
+fn dest_frame_refuses_a_permuted_frame() {
+    // The check correction 4 deleted, restored and CPU-pinned: the
+    // plan's destination spans [n, m] while the executor's call frame is
+    // [m, n]. Extents alone catch this one; it is the weaker half of the
+    // fence and it still must bite.
+    let mut call = plan_call_from_spec(&base_spec(4, 3, 5)).expect("plan");
+    let err = bind_destination(&mut call, &right_major(&[3, 4]), "pin")
+        .expect_err("a permuted destination frame must be refused");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("DIVERGED"), "the refusal must name the divergence: {msg}");
+    assert!(msg.contains("[m, n] = [4, 3]"), "the refusal must print the call frame: {msg}");
+}
+
+#[test]
+fn dest_frame_refuses_a_rank_mismatch() {
+    let mut call = plan_call_from_spec(&base_spec(4, 3, 5)).expect("plan");
+    let err = bind_destination(&mut call, &right_major(&[2, 2, 3]), "pin")
+        .expect_err("a rank-3 destination has no matmul frame");
+    assert!(format!("{err:#}").contains("DIVERGED"), "{err:#}");
+}
+
+#[test]
+fn dest_frame_refuses_layouts_this_backend_cannot_write() {
+    // CAPABILITY refusal, the host-call mirror of the codegen path's
+    // non-direct-result refusal: cuBLASLt has exactly two matrix orders,
+    // so a strided or offset-expression destination is not writable by
+    // this route. Loud, never wrong bytes.
+    let strided = CudaLayout {
+        mirror: MirrorLayout::Strided(StridedElementLayout {
+            shape: shape(&[4, 3]),
+            chain: vec![IntExprTerm::Coord { axis_from_end: 1 }, IntExprTerm::Coord { axis_from_end: 0 }],
+            width: BitWidthTerm(32),
+        }),
+        dtype: Some(PlanDtype::F32),
+    };
+    let mut call = plan_call_from_spec(&base_spec(4, 3, 5)).expect("plan");
+    let err = bind_destination(&mut call, &strided, "pin").expect_err("strided dest");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("STRIDED"), "{msg}");
+    assert!(msg.contains("CAPABILITY refusal"), "the refusal must classify itself: {msg}");
+
+    let offset = CudaLayout {
+        mirror: MirrorLayout::ElementOffset(ElementOffsetExpressionLayout {
+            offset: IntExprTerm::Coord { axis_from_end: 0 },
+            shape: shape(&[4, 3]),
+            width: BitWidthTerm(32),
+        }),
+        dtype: Some(PlanDtype::F32),
+    };
+    let mut call = plan_call_from_spec(&base_spec(4, 3, 5)).expect("plan");
+    let err = bind_destination(&mut call, &offset, "pin").expect_err("offset dest");
+    assert!(format!("{err:#}").contains("ELEMENT-OFFSET-EXPRESSION"), "{err:#}");
+}
+
+#[test]
+fn dest_frame_refuses_symbolic_extents() {
+    let symbolic = CudaLayout {
+        mirror: MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
+            shape: ShapeTerm(vec![IntExprTerm::Var("s".into()), IntExprTerm::Lit(3)]),
+            width: BitWidthTerm(32),
+        }),
+        dtype: Some(PlanDtype::F32),
+    };
+    let mut call = plan_call_from_spec(&base_spec(4, 3, 5)).expect("plan");
+    let err = bind_destination(&mut call, &symbolic, "pin").expect_err("symbolic dest");
+    assert!(format!("{err:#}").contains("SYMBOLIC"), "{err:#}");
+}
+
+// ---------------------------------------------------------------------------
+// Contract 4, ORDER-AWARENESS: the ld reach is a function of the
+// descriptor's order. The ROW formula applied to a COL descriptor
+// UNDERSTATES the reach whenever rows > cols, which is exactly the
+// direction that lets an out-of-bounds write through.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ld_bounds_reach_is_order_aware() {
+    // COL 8x2 ld 8: reach = 8*(2-1) + 8 = 16. The ROW formula would say
+    // 8*(8-1) + 2 = 58 (over-strict, refusing a legal call) — and the
+    // mirror case below is the dangerous one.
+    validate_ld_bounds("D", &LtDesc::col(8, 2, 8), 16).expect("COL exact fit");
+    validate_ld_bounds("D", &LtDesc::col(8, 2, 8), 15).expect_err("COL one element short");
+
+    // COL 2x8 ld 2: reach = 2*7 + 2 = 16. The ROW formula would say
+    // 2*1 + 8 = 10 and ACCEPT a 10-element buffer — 6 elements of
+    // out-of-bounds write, silently.
+    validate_ld_bounds("D", &LtDesc::col(2, 8, 2), 16).expect("COL exact fit");
+    let err = validate_ld_bounds("D", &LtDesc::col(2, 8, 2), 10)
+        .expect_err("the ROW formula would have let this through");
+    assert!(format!("{err:#}").contains("needs 16 elements"), "{err:#}");
+
+    // The vacuous-library case has a COL twin: a single COLUMN never
+    // dereferences ld in COL order, exactly as a single row does not in
+    // ROW order.
+    validate_ld_bounds("D", &LtDesc::col(8, 1, 1), 4)
+        .expect_err("COL rows==8 cols==1 still needs 8 elements");
 }

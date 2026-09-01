@@ -28,7 +28,7 @@ use cudarc::cublaslt::sys;
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DevicePtrMut};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::exec::{CSource, LtCall};
+use super::exec::{CSource, LtCall, LtDesc, LtOrder};
 
 /// Workspace owned by US (contract: no silent fallback algos). 32 MiB —
 /// cuBLASLt's own recommendation ceiling for pre-Hopper devices is
@@ -120,27 +120,34 @@ pub fn assert_compute_strictness() -> Result<()> {
     handle().map(|_| ())
 }
 
-/// RAII matrix layout — ROW order, ALWAYS: every descriptor the bridge
-/// emits is ROW-major (see `exec.rs`'s ROW CONVENTION), declared via
-/// CUBLASLT_MATRIX_LAYOUT_ORDER = CUBLASLT_ORDER_ROW on each layout.
-/// The library default is COL; relying on it was the Train-3
-/// orientation bug (D bytes landed COL-major under a row-major
-/// disclosure).
+/// RAII matrix layout. CUBLASLT_MATRIX_LAYOUT_ORDER is ALWAYS declared
+/// explicitly and ALWAYS read off the [`LtDesc`] — never a constant
+/// here, and never the library default. The library default is COL;
+/// relying on it was the Train-3 orientation bug (D bytes landed
+/// COL-major under a row-major disclosure), and hardcoding ROW here
+/// while the plan elected a left-major destination was the Option-B
+/// destination-frame regression. The order is DATA on the descriptor
+/// (see `exec.rs`'s ROW CONVENTION for A/B and
+/// `exec::bind_destination` for C/D) precisely so this site cannot
+/// hold an opinion of its own.
 struct Layout {
     raw: sys::cublasLtMatrixLayout_t,
 }
 
 impl Layout {
-    fn new(rows: i64, cols: i64, ld: i64) -> Result<Self> {
+    fn new(desc: &LtDesc) -> Result<Self> {
         let raw = lt::create_matrix_layout(
             sys::cudaDataType_t::CUDA_R_32F,
-            u64::try_from(rows).map_err(|_| anyhow!("negative rows"))?,
-            u64::try_from(cols).map_err(|_| anyhow!("negative cols"))?,
-            ld,
+            u64::try_from(desc.rows).map_err(|_| anyhow!("negative rows"))?,
+            u64::try_from(desc.cols).map_err(|_| anyhow!("negative cols"))?,
+            desc.ld,
         )
         .map_err(|e| anyhow!("cublasLtMatrixLayoutCreate: {e:?}"))?;
         let layout = Self { raw };
-        let order = sys::cublasLtOrder_t::CUBLASLT_ORDER_ROW;
+        let order = match desc.order {
+            LtOrder::Row => sys::cublasLtOrder_t::CUBLASLT_ORDER_ROW,
+            LtOrder::Col => sys::cublasLtOrder_t::CUBLASLT_ORDER_COL,
+        };
         unsafe {
             lt::set_matrix_layout_attribute(
                 layout.raw,
@@ -149,7 +156,7 @@ impl Layout {
                 std::mem::size_of::<sys::cublasLtOrder_t>(),
             )
         }
-        .map_err(|e| anyhow!("cublasLtMatrixLayoutSetAttribute(ORDER_ROW): {e:?}"))?;
+        .map_err(|e| anyhow!("cublasLtMatrixLayoutSetAttribute({order:?}): {e:?}"))?;
         Ok(layout)
     }
 }
@@ -195,7 +202,10 @@ pub fn dispatch(
         return Err(anyhow!(
             "cuBLASLt {:?}: bias-epilogue dispatch refused — the library does \
              not support BIAS/RELU_BIAS with a ROW-order D (measured \
-             CUBLAS_STATUS_NOT_SUPPORTED on the A100); refused BEFORE dispatch",
+             CUBLAS_STATUS_NOT_SUPPORTED on the A100), and no COL-order D \
+             dispatch of the marker's per-row bias has been measured on \
+             hardware; refused BEFORE dispatch for every destination order \
+             until one is",
             call.form
         ));
     }
@@ -275,10 +285,10 @@ pub fn dispatch(
 
     // Layouts: A, B, and a VALID Cdesc on EVERY call (contract 3 — a
     // NULL Cdesc segfaults), plus D.
-    let a_layout = Layout::new(call.a.rows, call.a.cols, call.a.ld)?;
-    let b_layout = Layout::new(call.b.rows, call.b.cols, call.b.ld)?;
-    let c_layout = Layout::new(call.c.rows, call.c.cols, call.c.ld)?;
-    let d_layout = Layout::new(call.d.rows, call.d.cols, call.d.ld)?;
+    let a_layout = Layout::new(&call.a)?;
+    let b_layout = Layout::new(&call.b)?;
+    let c_layout = Layout::new(&call.c)?;
+    let d_layout = Layout::new(&call.d)?;
 
     // Workspace: OURS, explicitly, sized into the preference so the
     // heuristic can only pick algos that fit it. Zero heuristic hits is

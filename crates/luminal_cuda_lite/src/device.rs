@@ -314,28 +314,68 @@ pub fn execute_plan(
                 if let Some(dps) =
                     op.as_any().downcast_ref::<crate::ops::cublaslt::CublasLtDps>()
                 {
-                    let call = crate::ops::cublaslt::exec::plan_call(&dps.op)
+                    let mut call = crate::ops::cublaslt::exec::plan_call(&dps.op)
                         .with_context(|| format!("cuBLASLt call planning for {label}"))?;
                     if writes.len() != 1 {
                         bail!("{label}: single-destination contract, got {}", writes.len());
                     }
+                    // THE PLAN/CALL-FRAME COHERENCE FENCE — restored,
+                    // strengthened, and CLASSIFIED (2026-08-31; the full
+                    // taxonomy lives on `exec::bind_destination`).
+                    //
+                    // Correction 4 of the Option-B landing deleted the
+                    // `[m, n]` frame check here as "runtime type-checking
+                    // ... rule premises, not our business". THAT
+                    // CLASSIFICATION WAS WRONG, and this is the note that
+                    // keeps the next cleanup from repeating it:
+                    //
+                    //  * An E-GRAPH RE-CHECK restates a fact a rule
+                    //    premise guarantees (F32 scope; C's dims/fold
+                    //    matching D's by rule guard). Those are gone and
+                    //    stay gone.
+                    //  * A VENDOR CHECK verifies the library where its own
+                    //    guarantees are vacuous (TF32 detector, ld bounds).
+                    //    Those stay.
+                    //  * A COHERENCE FENCE reconciles the PLAN's vocabulary
+                    //    (elected layouts) with a CALL FRAME THE EXECUTOR
+                    //    INVENTS (m/n/k, descriptors, orders, lds). No
+                    //    e-graph rule has ever seen an `LtCall`, so nothing
+                    //    upstream can guarantee the two agree. This is that
+                    //    fence. It is NOT disposable.
+                    //
+                    // It also does what the deleted check could not: the
+                    // old one compared EXTENTS only, and the regression it
+                    // was supposed to catch had matching extents and a
+                    // diverging ORDER (the transpose-sandwich sibling's
+                    // elected destination layout is LEFT-major). So the
+                    // fence RESOLVES the C/D order from the elected layout
+                    // instead of asserting a convention.
+                    let dest_slot = result_info.first().ok_or_else(|| {
+                        anyhow!("{label}: host-call node carries no result descriptor")
+                    })?;
+                    crate::ops::cublaslt::exec::bind_destination(
+                        &mut call,
+                        &dest_slot.layout,
+                        label,
+                    )
+                    .with_context(|| {
+                        format!("cuBLASLt destination frame binding for {label}")
+                    })?;
                     let input_count = reads.len().saturating_sub(writes.len());
                     let inputs: Vec<CudaSlice<u8>> = reads[..input_count]
                         .iter()
                         .map(|id| storage.get(id).unwrap().clone())
                         .collect();
                     let operand_refs: Vec<&CudaSlice<u8>> = inputs.iter().collect();
-                    // RUNTIME TYPE-CHECKING DIES (corrected contract,
+                    // E-GRAPH RE-CHECKS STAY DEAD (corrected contract,
                     // 2026-08-31, correction 4): the F32 end-to-end
-                    // re-check, the [m, n] frame re-check, and the
-                    // C-operand dims/fold re-checks that stood here
-                    // re-verified facts the e-graph guarantees by rule
-                    // premise (the marker's contracts match F32 dense
-                    // frames; Cdesc == Ddesc by rule guard) — they are
-                    // REMOVED. Checks against the LIBRARY's behavior
-                    // stay where they live (the TF32 strictness
-                    // detector and the ld-bounds guard in the cublaslt
-                    // op module verify the vendor, not our types).
+                    // re-check and the C-operand dims/fold re-checks
+                    // that stood here restated facts the e-graph
+                    // guarantees by rule premise (the marker's contracts
+                    // match F32 dense frames; Cdesc == Ddesc by rule
+                    // guard). They are REMOVED and stay removed. The
+                    // frame check that stood alongside them was NOT one
+                    // of them — see the coherence fence above.
                     let (dest_dims, dest_dtype) = geometry.get(&writes[0]).unwrap().clone();
                     let dest_bytes =
                         dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
