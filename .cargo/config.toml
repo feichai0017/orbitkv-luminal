@@ -1,14 +1,3 @@
-# Compilation cache shared across every checkout of this repo (main and
-# every prototype worktree). The dependency tree is 463 crates built at
-# `opt-level = 3` even in dev (see [profile.dev.package."*"] in
-# Cargo.toml), so a fresh worktree otherwise recompiles all of it from
-# scratch — measured at 7-16 GB of artifacts per tree. With the wrapper,
-# the second and later trees hit cache on every unchanged dependency.
-# Cache size is set in ~/.config/sccache/config.toml; `sccache --show-stats`
-# reports hit rates.
-[build]
-rustc-wrapper = "sccache"
-
 [target.aarch64-unknown-linux-gnu]
 rustflags = [
     "-Ctarget-feature=+fp16,+fhm"
