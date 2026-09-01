@@ -58,7 +58,11 @@ impl ToDot for crate::egglog_utils::SerializedEGraph {
         for (cluster, (class, (typ, members))) in classes.iter().enumerate() {
             let mut members: Vec<_> = members.iter().collect();
             members.sort_by_key(|node| node.to_string());
-            let border = if self.roots.contains(class) { "#2563eb" } else { "#9ca3af" };
+            let border = if self.roots.contains(class) {
+                "#2563eb"
+            } else {
+                "#9ca3af"
+            };
             out.push_str(&format!(
                 "  subgraph cluster_{cluster} {{\n    label=\"{}\";\n    color=\"{border}\";\n",
                 escape_dot_string(&format!("{typ} {class}"))
@@ -81,7 +85,9 @@ impl ToDot for crate::egglog_utils::SerializedEGraph {
                 // Children outside the retained snapshot (stripped classes)
                 // simply have no cluster to point at.
                 if let Some((cluster, anchor)) = anchors.get(child) {
-                    out.push_str(&format!("  n{src} -> n{anchor} [lhead=cluster_{cluster}];\n"));
+                    out.push_str(&format!(
+                        "  n{src} -> n{anchor} [lhead=cluster_{cluster}];\n"
+                    ));
                 }
             }
         }
@@ -101,18 +107,22 @@ impl ToDot for crate::graph::LogicalGraph {
             anyhow::bail!("logical graph poisoned: {reason}");
         }
         let live = self.live_set();
-        let mut out_keys: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
+        let mut out_keys: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
         for (id, key) in self.viz_outputs() {
-            out_keys.entry(id.0).or_default().push(key);
+            out_keys.entry(id.index()).or_default().push(key);
         }
         let mut out = String::from("digraph LogicalGraph {\n  node [fontname=\"Helvetica\"];\n  edge [fontname=\"Helvetica\"];\n");
-        for (index, (constructor, operands, dims, dtype, input_label)) in
-            self.viz_rows().enumerate()
-        {
-            if !live[index] {
+        for (id, node) in self.viz_nodes() {
+            if !live.contains(&id) {
                 continue;
             }
-            let dims_text = dims
+            let index = id.index();
+            let input_label = match &node.op {
+                crate::graph::LogicalOp::Input { label } => Some(label.as_str()),
+                _ => None,
+            };
+            let dims_text = node
+                .dims
                 .iter()
                 .map(|dim| dim.to_string())
                 .collect::<Vec<_>>()
@@ -120,16 +130,16 @@ impl ToDot for crate::graph::LogicalGraph {
             let mut lines = vec![
                 match input_label {
                     Some(name) => format!("v{index} = input {name}"),
-                    None => format!("v{index} = {constructor}"),
+                    None => format!("v{index} = {}", node.op.constructor()),
                 },
-                format!("[{dims_text}] {dtype:?}"),
+                format!("[{dims_text}] {:?}", node.dtype),
             ];
-            if let Some(keys) = out_keys.get(&(index as u32)) {
+            if let Some(keys) = out_keys.get(&index) {
                 for key in keys {
                     lines.push(format!("out {key}"));
                 }
             }
-            let boundary = input_label.is_some() || out_keys.contains_key(&(index as u32));
+            let boundary = input_label.is_some() || out_keys.contains_key(&index);
             let (fill, border) = if boundary {
                 ("#dbeafe", "#2563eb")
             } else {
@@ -143,12 +153,16 @@ impl ToDot for crate::graph::LogicalGraph {
             out.push_str(&format!(
                 "  n{index} [shape=box, style=\"rounded,filled\", fillcolor=\"{fill}\", color=\"{border}\", label=\"{label}\"];\n"
             ));
-            for (slot, operand) in operands.iter().enumerate() {
+            let operands = self.viz_operands(id);
+            for (slot, operand) in &operands {
                 // Position labels only where order matters (2+ operands).
                 if operands.len() > 1 {
-                    out.push_str(&format!("  n{} -> n{index} [label=\"{slot}\"];\n", operand.0));
+                    out.push_str(&format!(
+                        "  n{} -> n{index} [label=\"{slot}\"];\n",
+                        operand.index()
+                    ));
                 } else {
-                    out.push_str(&format!("  n{} -> n{index};\n", operand.0));
+                    out.push_str(&format!("  n{} -> n{index};\n", operand.index()));
                 }
             }
         }
@@ -186,10 +200,7 @@ pub fn save_html(html: &str, path: &str) -> Result<()> {
 
 /// Open a dot source in the Luminal Visualizer (browser).
 pub fn open_dot(dot: &str) {
-    let url = format!(
-        "http://viz.luminal.com/?dot={}",
-        urlencoding::encode(dot)
-    );
+    let url = format!("http://viz.luminal.com/?dot={}", urlencoding::encode(dot));
     let _ = open::that(&url);
 }
 
@@ -228,9 +239,7 @@ mod tests {
             )
             .expect("program parses");
         egraph.run_program(commands).expect("program runs");
-        let (sort, value) = egraph
-            .eval_expr(&var!("root"))
-            .expect("root resolves");
+        let (sort, value) = egraph.eval_expr(&var!("root")).expect("root resolves");
         let serialized = crate::egglog_utils::SerializedEGraph::new(&egraph, vec![(sort, value)]);
         let dot = serialized.to_dot().expect("snapshot renders");
         assert!(dot.contains("cluster_"), "eclass clusters missing:\n{dot}");

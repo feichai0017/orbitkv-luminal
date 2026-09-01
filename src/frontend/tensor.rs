@@ -27,9 +27,6 @@ pub struct GraphTensor {
     /// recorder cross-checks these against its own recorded dims.
     pub(crate) dims: ArrayVec<[IntExpr; 10]>,
     pub dtype: DType,
-    /// The SSA value this handle names in the logical graph (M3 Step 4a).
-    /// `None` = unrecorded (a poisoned/uncovered path).
-    pub logical_value: Option<crate::graph::ValueId>,
 }
 
 impl From<&GraphTensor> for GraphTensor {
@@ -49,19 +46,9 @@ impl GraphTensor {
         Self {
             id,
             graph_ref,
-            logical_value: None,
             dims: shape.to_shape().into_iter().collect(),
             dtype,
         }
-    }
-
-    /// Attach the recorded logical value to this handle.
-    pub(crate) fn with_logical(
-        mut self,
-        value: Option<crate::graph::ValueId>,
-    ) -> Self {
-        self.logical_value = value;
-        self
     }
 
     /// Get a mutable reference to the graph this tensor belongs to
@@ -82,12 +69,7 @@ impl GraphTensor {
     pub fn output(&self) -> GraphTensor {
         let source = *self;
         let dims = source.dims();
-        self.graph().logical.output(
-            source.id.index(),
-            &(source.logical_value, dims),
-            source.id.index(),
-            None,
-        );
+        self.graph().logical.output(&(source.id, dims), None);
         source
     }
 
@@ -97,12 +79,7 @@ impl GraphTensor {
     pub fn output_named(&self, name: &str) -> GraphTensor {
         let source = *self;
         let dims = source.dims();
-        self.graph().logical.output(
-            source.id.index(),
-            &(source.logical_value, dims),
-            source.id.index(),
-            Some(name),
-        );
+        self.graph().logical.output(&(source.id, dims), Some(name));
         source
     }
 
@@ -117,10 +94,7 @@ impl GraphTensor {
     /// authoring surface must know it, not panic on spelling).
     pub(crate) fn dims_agree(&self, rhs: &GraphTensor) -> bool {
         let (a, b) = (self.dims(), rhs.dims());
-        a.len() == b.len()
-            && a.iter()
-                .zip(&b)
-                .all(|(x, y)| x == y || x.egglog_equal(y))
+        a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x == y || x.egglog_equal(y))
     }
 
     /// The tensor's rank — the public shape surface is dims()/rank()
