@@ -179,8 +179,9 @@ fn sources_via_descriptors(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) 
 // M4 Phase 4: strided READS through synthetic ComposedAccess descriptors —
 // string-level gates, host-side (no device). Each test builds a CodegenCtx
 // through `from_descriptors` (the only codegen path) and asserts the
-// generated source contains the exact index expressions and per-axis
-// bounds traps; the flat `a[i]` fast path must stay byte-identical.
+// generated source contains the exact index expressions — and, since
+// the 2026-08-31 ruling, NO bounds checks at all; the flat `a[i]` fast
+// path must stay byte-identical.
 // ---------------------------------------------------------------------------
 
 mod strided {
@@ -291,6 +292,17 @@ mod strided {
         }
     }
 
+    /// This runtime emits no `__trap()` (ruling 2026-08-31; the record
+    /// is the NO RUNTIME BOUNDS TRAPS note in `luminal_cuda_lite::
+    /// kernels`). Traps returning belongs behind a feature flag, and
+    /// this assertion is what will notice if one comes back by accident.
+    fn assert_no_traps(source: &str) {
+        assert!(
+            !source.contains("__trap"),
+            "the CUDA runtime emits no traps:\n{source}"
+        );
+    }
+
     /// Transpose, OPTION B: out [3,2] reading its parent's bytes through
     /// the SLOT'S OWN composed strided layout (shape [3,2], chain
     /// from-end [coord0*3, coord1] — element (i,j) at parent flat
@@ -314,11 +326,10 @@ mod strided {
                 "long long c0 = (long long)(rem % 3ULL); rem /= 3ULL;",
                 // the layout's offset expression, lowered directly
                 "long long a_idx = (c1 * 3LL) + c0;",
-                // ONE final trap against the strided span (1 + (2-1)*3 + (3-1) = 6)
-                "if (a_idx < 0 || a_idx >= (((1LL + ((2LL + -1LL) * 3LL)) + (3LL + -1LL)))) __trap();",
                 "out[i] = a[a_idx];",
             ],
         );
+        assert_no_traps(&source);
         assert!(!source.contains("a[i]"), "flat read must be rewritten:\n{source}");
         assert!(
             !source.contains("a_h0_0"),
@@ -351,11 +362,10 @@ mod strided {
             &[
                 // pitch 8, not the value's 5
                 "long long a_idx = c1 + (c0 * 8LL);",
-                // span trap: 1 + (5-1) + (4-1)*8 = 29
-                "if (a_idx < 0 || a_idx >= (((1LL + (5LL + -1LL)) + ((4LL + -1LL) * 8LL)))) __trap();",
                 "out[i] = a[a_idx] + b[i];",
             ],
         );
+        assert_no_traps(&source);
     }
 
     /// Broadcast-shaped map: out [2,3] reading parent [1,3] with a Lit 0
@@ -376,24 +386,22 @@ mod strided {
             &[
                 // the dead axis contributes the literal zero residue
                 "long long a_idx = c1 + 0LL;",
-                // span trap: 1 + (3-1) + 0 = 3 (the PARENT ROW's reach)
-                "if (a_idx < 0 || a_idx >= (((1LL + (3LL + -1LL)) + 0LL))) __trap();",
                 "out[i] = a[a_idx];",
             ],
         );
+        assert_no_traps(&source);
     }
 
     /// Two folds, OPTION B: the e-graph composes — the slot carries ONE
     /// layout whose offset expression is the whole composition (here the
     /// synthetic composition of a transpose then a +1-row offset into a
     /// [4,3] parent: (c1+1)*3 + c0), spelled as an offset-EXPRESSION
-    /// form. Pins the offset-form BOUNDS HONESTY COST: an offset
-    /// function does not disclose its reach (`SpanExpr` deliberately
-    /// unimplemented), so the ONLY trap left is non-negativity — the
-    /// per-hop parent-extent traps of the hop machinery are gone, and
-    /// nothing bounds the read from above at this layer.
+    /// form. The whole composition is ONE expression: no hop variables,
+    /// no intermediate reads, and (ruling 2026-08-31) no bounds check of
+    /// any kind — nothing constrains this read at this layer, from above
+    /// or below.
     #[test]
-    fn composed_offset_form_reads_one_expression_and_loses_the_reach_trap() {
+    fn composed_offset_form_reads_one_expression() {
         let layout = offset_layout(
             &[3, 2],
             add(mul(add(coord(0), lit(1)), lit(3)), coord(1)),
@@ -408,14 +416,13 @@ mod strided {
             &source,
             &[
                 "long long a_idx = (((c1 + 1LL) * 3LL) + c0);",
-                // the only remaining trap: non-negativity
-                "if (a_idx < 0) __trap();",
                 "out[i] = a[a_idx];",
             ],
         );
+        assert_no_traps(&source);
         assert!(
-            !source.contains("a_idx >="),
-            "offset-form layouts disclose no reach — no upper-bound trap exists:\n{source}"
+            !source.contains("a_idx <") && !source.contains("a_idx >="),
+            "the read index is computed and used, never tested:\n{source}"
         );
         assert!(!source.contains("a_h0_0"), "no hop variables:\n{source}");
     }
@@ -424,8 +431,8 @@ mod strided {
     /// = 0) on a [2,3] value whose SLOT LAYOUT is the transpose
     /// composition over a [3,2] parent (element (c0,c1) at parent flat
     /// c1*2 + c0). The reduced coordinate is the loop variable, and the
-    /// read is the layout's own offset expression — no hop chain, no
-    /// per-hop parent-extent traps, one span trap.
+    /// read is the layout's own offset expression — no hop chain, and
+    /// no bounds checks.
     #[test]
     fn reduce_reads_through_the_slot_layout() {
         // shape [2,3]; from-end coord(0) = c1, coord(1) = c0.

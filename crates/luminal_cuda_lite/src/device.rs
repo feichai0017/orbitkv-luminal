@@ -98,10 +98,9 @@ impl KernelCache {
 /// Bring-up/test helper: NVRTC-compile `source` (entry `k`), launch it
 /// once over `n` threads on device 0 with the given input byte buffers
 /// followed by one zeroed `out_bytes` output and the `n` argument (the
-/// standard generated-kernel signature, no scratch), and return the
-/// output bytes. Used by the Phase-4 synthetic-descriptor device gates
-/// to launch strided-read kernels outside a plan; a `__trap()` in the
-/// kernel surfaces as an `Err` from the synchronize.
+/// standard generated-kernel signature), and return the output bytes.
+/// Used by the Phase-4 synthetic-descriptor device gates to launch
+/// strided-read kernels outside a plan.
 pub fn launch_single(source: &str, inputs: &[&[u8]], out_bytes: usize, n: usize) -> Result<Vec<u8>> {
     let ctx = CudaContext::new(0).context("no CUDA device 0")?;
     let stream = ctx.default_stream();
@@ -388,17 +387,9 @@ pub fn execute_plan(
                 let dest_bytes =
                     dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
                 let mut dest = stream.alloc_zeros::<u8>(dest_bytes.max(1)).context("dest alloc")?;
-                let mut scratch: Option<CudaSlice<u8>> = None;
 
                 for generated in &launches {
                     let func = cache.function(&generated.source)?;
-                    if generated.scratch_bytes > 0 && scratch.is_none() {
-                        scratch = Some(
-                            stream
-                                .alloc_zeros::<u8>(generated.scratch_bytes)
-                                .context("scratch alloc")?,
-                        );
-                    }
                     let n = generated.n as u64;
                     let cfg = LaunchConfig {
                         grid_dim: (((generated.n as u32).max(1) + 255) / 256, 1, 1),
@@ -408,9 +399,6 @@ pub fn execute_plan(
                     let mut builder = stream.launch_builder(&func);
                     for input in &inputs {
                         builder.arg(input);
-                    }
-                    if generated.scratch_bytes > 0 {
-                        builder.arg(scratch.as_mut().unwrap());
                     }
                     builder.arg(&mut dest);
                     builder.arg(&n);

@@ -122,17 +122,49 @@ impl CodegenCtx {
 // below lowers that layout's offset expression DIRECTLY, retiring the
 // per-slot hop chain for this family.
 //
-// BOUNDS HONESTY (pinned in `codegen_identity::strided`): the hop chain
-// trapped EVERY intermediate index against its hop's parent extents; a
-// composed expression has no intermediate parents, so the trap surface
-// shrinks to ONE final check of the flat element index — against the
-// layout's own SPAN where the layout discloses one (the packed ladder:
-// right-major / left-major / strided), and against NOTHING but
-// non-negativity for the offset-expression forms, which deliberately do
-// not disclose their reach (`SpanExpr` is unimplemented there). That is
-// the cost of the composed read: out-of-bounds inside the expression is
-// caught only if the final index escapes the span (packed) or goes
-// negative (offset forms).
+// NO RUNTIME BOUNDS TRAPS (ruling 2026-08-31). This runtime emits NO
+// `__trap()`. It once did, and the question was considered rather than
+// forgotten — this note is the record.
+//
+// What was checked, and where:
+//   * here in `layout_read_index`, per read: the flat element index
+//     against the layout's disclosed SPAN for the packed ladder
+//     (right-major / left-major / strided), and non-negativity alone for
+//     the offset-expression forms (`ElementOffset` / `BitOffset`, whose
+//     `SpanExpr` is deliberately unimplemented — an offset function does
+//     not say how far it reaches);
+//   * in the `BitOffset` arm: that the bit offset divides evenly by the
+//     element width, a mid-element bit offset having no element read;
+//   * in `ops::index_map_apply_materialize`: each mapped coordinate
+//     against the parent's extent;
+//   * in `ops::gather` / `ops::scatter`: each gathered/scattered
+//     coordinate against the indexed axis extent — these read from an
+//     index BUFFER, so they were the only DATA-derived checks;
+//   * in `ops::scatter`: injectivity, `atomicExch(&flags[flat],1u)!=0u`
+//     over a zeroed scratch buffer, catching two sources writing one
+//     destination element.
+//
+// Why they went. Austin, 2026-08-31: "in the cuda runtime, we should
+// have no traps. We can put them back in, later, with a flag or
+// something but for now lets get all __trap out of the cuda codegen."
+// On the individual checks: the span check is "legitimately useless"; a
+// negative offset "would be someone violating their contract, which is
+// ub and we shouldn't test for it in runtime"; the bit-divisibility
+// check "would also be indicative of a bug somewhere in our compiler,
+// which we would have to solve directly, vs having this test at runtime
+// in every kernel." The data-derived index checks went with them: an
+// out-of-range index in a user tensor is UB at this layer, not a
+// diagnosed error.
+//
+// The consequence, stated plainly: an out-of-range index — from a
+// mis-composed layout, a compiler bug, or an out-of-range value in a
+// user index tensor — is now an out-of-bounds device access, i.e.
+// undefined behaviour, not a diagnosed fault. Debug it with
+// `compute-sanitizer`, which sees what these checks used to.
+//
+// Restoring them belongs behind a feature flag (a `checked` cargo
+// feature gating the emission), not behind a runtime branch in every
+// thread of every kernel.
 // ===========================================================================
 
 /// Is this layout the DIRECT read for a value of `dims` — row-major,
@@ -201,8 +233,9 @@ fn lower_layout_term(
 /// Lower one operand's SLOT LAYOUT to C statements computing its flat
 /// element read index at the current coordinates
 /// `{in_prefix}0..{in_prefix}{rank-1}` (front-indexed). Returns
-/// `(code, index_var)`; the statements bind `{operand}_idx` plus the
-/// single final bounds trap described in the module note above. The
+/// `(code, index_var)`; the statements bind `{operand}_idx` and nothing
+/// else — no bounds check is emitted, deliberately (see the NO RUNTIME
+/// BOUNDS TRAPS note above for what used to be here and why). The
 /// layout's own domain (its shape) must be LITERAL and equal the slot's
 /// value dims — a foreign-domain layout is a planner/renderer
 /// incoherence and refuses loudly.
@@ -212,7 +245,7 @@ pub fn layout_read_index(
     slot_dims: &[usize],
     in_prefix: &str,
 ) -> Result<(String, String)> {
-    use luminal::layouts::{MirrorLayout, SpanExpr};
+    use luminal::layouts::MirrorLayout;
     let rank = slot_dims.len();
     let idx = format!("{operand}_idx");
     let check_domain = |shape: &luminal::layouts::ShapeTerm| -> Result<()> {
@@ -232,8 +265,9 @@ pub fn layout_read_index(
         }
         Ok(())
     };
-    // (code lines, offset expr, span bound: Some(packed reach) / None)
-    let (offset, span): (String, Option<String>) = match &layout.mirror {
+    // The flat element offset expression. No bound travels with it: see
+    // the NO RUNTIME BOUNDS TRAPS note above.
+    let offset: String = match &layout.mirror {
         MirrorLayout::RightMajor(rm) => {
             check_domain(&rm.shape)?;
             let strides = strides_of(slot_dims);
@@ -245,7 +279,7 @@ pub fn layout_read_index(
                     .collect::<Vec<_>>()
                     .join(" + ")
             };
-            (flat, Some(format!("{}LL", numel(slot_dims))))
+            flat
         }
         MirrorLayout::LeftMajor(lm) => {
             check_domain(&lm.shape)?;
@@ -261,7 +295,7 @@ pub fn layout_read_index(
                     .collect::<Vec<_>>()
                     .join(" + ")
             };
-            (flat, Some(format!("{}LL", numel(slot_dims))))
+            flat
         }
         MirrorLayout::Strided(st) => {
             check_domain(&st.shape)?;
@@ -270,63 +304,54 @@ pub fn layout_read_index(
                 .iter()
                 .map(|s| lower_layout_term(s, rank, in_prefix))
                 .collect::<Result<Vec<_>>>()?;
-            let flat = if summands.is_empty() {
+            if summands.is_empty() {
                 "0LL".to_string()
             } else {
                 summands.join(" + ")
-            };
-            // The strided span IS disclosed (SpanExpr): 1 + Σ summand at
-            // the last coordinate of each axis — a literal expression
-            // here (rank 0: no coordinates survive the substitution).
-            let span = lower_layout_term(&st.span(), 0, in_prefix)?;
-            (flat, Some(span))
+            }
         }
         MirrorLayout::ElementOffset(eo) => {
             check_domain(&eo.shape)?;
-            // NO DISCLOSED REACH: an offset function alone does not say
-            // how far it points (SpanExpr deliberately unimplemented) —
-            // the only honest trap left is non-negativity.
-            (lower_layout_term(&eo.offset, rank, in_prefix)?, None)
+            lower_layout_term(&eo.offset, rank, in_prefix)?
         }
         MirrorLayout::BitOffset(bo) => {
             check_domain(&bo.shape)?;
             let bits = lower_layout_term(&bo.offset, rank, in_prefix)?;
             let width = bo.width.0;
-            // Bit form: element index = bit offset / width, with a
-            // divisibility trap (a mid-element bit offset has no element
-            // read). Same undisclosed-reach story as ElementOffset.
+            // Bit form: element index = bit offset / width. The bit
+            // offset's divisibility by the element width is a COMPILER
+            // invariant (a mid-element bit offset has no element read) —
+            // it used to be re-derived at runtime in every thread; see
+            // the NO RUNTIME BOUNDS TRAPS note above for why it is not.
             let bits_var = format!("{operand}_bits");
             let code = format!(
-                "    long long {bits_var} = {bits};\n    if ({bits_var} < 0 || ({bits_var} % {width}LL) != 0) __trap();\n    long long {idx} = {bits_var} / {width}LL;\n"
+                "    long long {bits_var} = {bits};\n    long long {idx} = {bits_var} / {width}LL;\n"
             );
             return Ok((code, idx));
         }
     };
-    let mut code = format!("    long long {idx} = {offset};\n");
-    match span {
-        Some(span) => code.push_str(&format!(
-            "    if ({idx} < 0 || {idx} >= ({span})) __trap();\n"
-        )),
-        None => code.push_str(&format!("    if ({idx} < 0) __trap();\n")),
-    }
-    Ok((code, idx))
+    Ok((format!("    long long {idx} = {offset};\n"), idx))
 }
 
 /// One generated launch: entry name is always `k`; `n` is the launch
-/// size (one thread per index). `scratch_bytes > 0` asks the executor
-/// for a zero-initialized device scratch buffer passed as the
-/// second-to-last argument (before `out`, `n`) — scatter's injectivity
-/// flags use this.
+/// size (one thread per index). Every launch takes the same argument
+/// list — the op's inputs, then `out`, then `n`.
+///
+/// There was once a `scratch_bytes` field asking the executor for a
+/// zero-initialized device scratch buffer (passed before `out`), with
+/// exactly one user: scatter's injectivity `flags`. That check went with
+/// the rest of the traps (2026-08-31), leaving the scratch facility with
+/// no caller, so it went too rather than sit unexercised — restore it
+/// alongside the check.
 #[derive(Debug)]
 pub struct KernelSource {
     pub source: String,
     pub n: usize,
-    pub scratch_bytes: usize,
 }
 
 impl KernelSource {
     pub(crate) fn plain(source: String, n: usize) -> Self {
-        Self { source, n, scratch_bytes: 0 }
+        Self { source, n }
     }
 }
 

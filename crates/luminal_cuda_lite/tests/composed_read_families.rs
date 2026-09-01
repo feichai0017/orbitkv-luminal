@@ -5,16 +5,15 @@
 //! operands ("operand N carries a composed access this kernel does not
 //! lower"). Everything here is host-side: real searched plans through
 //! the CUDA ladder, rendered to CUDA source strings (the
-//! codegen_identity discipline), pinned for composed index arithmetic +
-//! bounds traps. UNDER THE CORRECTED CONTRACT (2026-08-31) the hop chain
-//! is gone: each read operand carries ONE composed layout (the e-graph
-//! composed it at view creation) and the kernels lower that layout's own
-//! offset expression. The pins below therefore show ONE index expression
-//! and ONE final trap per folded operand — against the layout's SPAN
-//! where the constructor discloses one (the packed ladder), and against
-//! non-negativity alone for the offset-expression forms, which disclose
-//! no reach. That narrowing of the trap surface is the honest cost of
-//! composing in the e-graph instead of the planner. Numeric
+//! codegen_identity discipline), pinned for composed index arithmetic.
+//! UNDER THE CORRECTED CONTRACT (2026-08-31) the hop chain is gone: each
+//! read operand carries ONE composed layout (the e-graph composed it at
+//! view creation) and the kernels lower that layout's own offset
+//! expression. The pins below therefore show ONE index expression per
+//! folded operand and NO bounds check of any kind — this runtime emits
+//! no `__trap()` (same-day ruling; the record is the NO RUNTIME BOUNDS
+//! TRAPS note in `luminal_cuda_lite::kernels`), which is why every pin
+//! here also calls `assert_no_traps`. Numeric
 //! truth for the gather family comes from the reference runtime on the
 //! SAME graph (materialize-only by ruling aff22598 — flat kernels),
 //! pinned against hand-computed values. WRITE sides stay fail-closed:
@@ -103,6 +102,18 @@ fn assert_contains(source: &str, needles: &[&str], what: &str) {
     }
 }
 
+/// This runtime emits no `__trap()` — not for layout reads, not for the
+/// DATA-derived gather/scatter coordinates that used to be checked here
+/// (ruling 2026-08-31; the record is the NO RUNTIME BOUNDS TRAPS note in
+/// `luminal_cuda_lite::kernels`). Out-of-range indexing is UB at this
+/// layer, and this assertion notices if a trap comes back by accident.
+fn assert_no_traps(source: &str) {
+    assert!(
+        !source.contains("__trap"),
+        "the CUDA runtime emits no traps:\n{source}"
+    );
+}
+
 /// Numeric truth from the reference runtime (flat kernels /
 /// materialization — it never folds), checked against hand-computed
 /// values. The CL side of the differential is textual on CPU; the
@@ -144,10 +155,9 @@ fn gather_lowers_a_folded_coordinate_operand() {
     let (sources, folded) = the_one(&plan, "GatherGeneric");
     assert_eq!(folded, vec![1], "the broadcast folds into coord0 (operand 1):\n{}", plan.summary());
     assert_eq!(sources.len(), 1, "gather is a single launch");
-    // The full rendered kernel, pinned: coord0 is read through its
-    // chain (hop 0 = the broadcast map, parent (2,), entry c0), with
-    // the per-axis chain trap AND the gather's own value-extent traps;
-    // coord1 stays the flat read; the data read is untouched.
+    // The full rendered kernel, pinned: coord0 is read through its own
+    // composed layout, coord1 stays the flat read, the data read is
+    // untouched. No bounds checks anywhere (ruling 2026-08-31).
     assert_eq!(
         sources[0],
         r#"extern "C" __global__ void k(const float* data, const int* coord0, const int* coord1, float* out, unsigned long long n) {
@@ -159,22 +169,20 @@ fn gather_lowers_a_folded_coordinate_operand() {
     long long flat = 0;
     long long coord;
     long long coord0_idx = c0 + 0LL;
-    if (coord0_idx < 0 || coord0_idx >= (((1LL + (2LL + -1LL)) + 0LL))) __trap();
     coord = (long long)coord0[coord0_idx];
-    if (coord < 0 || coord >= 4LL) __trap();
     flat += coord * 3LL;
     coord = (long long)coord1[i];
-    if (coord < 0 || coord >= 3LL) __trap();
     flat += coord * 1LL;
     out[i] = data[flat];
 }"#
     );
     // READ THE COORD0 LINE: `c0 + 0LL` is the BROADCAST layout itself —
     // the stride-0 residue on the expanded axis and the bare coordinate
-    // on the live one — with ONE trap against that layout's disclosed
-    // span (1 + (2-1) + 0 = 2 elements of `rows`). The gather's own
-    // value-extent traps (`coord >= 4`, `coord >= 3`) are unchanged:
-    // they guard the INDIRECTION, not the layout.
+    // on the live one. Three checks used to sit in this kernel: one on
+    // `coord0_idx` against the broadcast layout's disclosed span, and
+    // two on the gathered `coord` against the data extents (4 and 3).
+    // All three are gone; the address arithmetic around them is
+    // unchanged, line for line.
 }
 
 /// GATHER, data through a fold: the data operand is a permute view, so
@@ -209,30 +217,29 @@ fn gather_lowers_a_folded_data_operand() {
     assert_contains(
         &sources[0],
         &[
-            // The gathered coordinates are trapped against the data
-            // VALUE's extents (4,3), then become the layout's coordinates.
-            "if (coord < 0 || coord >= 4LL) __trap();",
+            // The gathered coordinates become the layout's coordinates
+            // directly — they were checked against the data VALUE's
+            // extents (4,3) here until the 2026-08-31 ruling.
             "long long data_c0 = coord;",
-            "if (coord < 0 || coord >= 3LL) __trap();",
             "long long data_c1 = coord;",
             // The permute's COMPOSED layout, lowered once: data[i][j]
             // lives at base flat j*4 + i.
             "long long data_idx = data_c0 * 1LL + data_c1 * 4LL;",
-            // ONE trap, against the layout's disclosed span (base numel).
-            "if (data_idx < 0 || data_idx >= (12LL)) __trap();",
             "out[i] = data[data_idx];",
         ],
         "gather folded-data",
     );
+    assert_no_traps(&sources[0]);
     assert!(!sources[0].contains("data[flat]"), "no flat data read remains:\n{}", sources[0]);
 }
 
 /// SCATTER, coordinate operand through a fold: init (4,3), src (2,3),
 /// coord0 = rows(2,) broadcast to (2,3), coord1 = a column iota — the
 /// qwen3_moe field shape ("ScatterFunctional: operand 2 carries a
-/// composed access") in miniature. The checked-scatter contract is
-/// untouched: same flags scratch, same atomicExch trap, same write
-/// address arithmetic.
+/// composed access") in miniature. The write address arithmetic is
+/// untouched by folding; the injectivity check that used to accompany
+/// it (and its `flags` scratch buffer) is gone — see the NO RUNTIME
+/// BOUNDS TRAPS note in `luminal_cuda_lite::kernels`.
 #[test]
 fn scatter_lowers_a_folded_coordinate_operand() {
     let mut cx = Graph::new();
@@ -270,28 +277,36 @@ fn scatter_lowers_a_folded_coordinate_operand() {
     // Launch 1 (init copy) has no folded operand here: byte-identical
     // to the flat template.
     assert_contains(&sources[0], &["if (i < n) out[i] = init[i];"], "scatter copy launch");
-    // Launch 2: coord0 read through its chain at the SRC coordinates;
-    // the write side (flat address, injectivity flags) untouched.
+    // Launch 2: coord0 read through its layout at the SRC coordinates;
+    // the write address arithmetic is untouched by the fold.
     assert_contains(
         &sources[1],
         &[
             // src-coordinate prelude over (2,3)
             "long long c1 = (long long)(rem % 3ULL); rem /= 3ULL;",
             "long long c0 = (long long)(rem % 2ULL); rem /= 2ULL;",
-            // the broadcast LAYOUT, lowered once, with one span trap
+            // the broadcast LAYOUT, lowered once
             "long long coord0_idx = c0 + 0LL;",
-            "if (coord0_idx < 0 || coord0_idx >= (((1LL + (2LL + -1LL)) + 0LL))) __trap();",
             "coord = (long long)coord0[coord0_idx];",
-            // the scatter's own value-extent traps stand
-            "if (coord < 0 || coord >= 4LL) __trap();",
-            "if (coord < 0 || coord >= 3LL) __trap();",
-            // coord1 stays flat; the checked-write contract is intact
+            // coord1 stays flat
             "coord = (long long)coord1[i];",
-            "if (atomicExch(&flags[flat], 1u) != 0u) __trap();",
+            "flat += coord * 3LL;",
+            "flat += coord * 1LL;",
             "out[flat] = src[i];",
         ],
         "scatter write launch",
     );
+    // The write is now UNCHECKED: no coordinate range check, and no
+    // `atomicExch(&flags[flat], 1u)` injectivity check — so no `flags`
+    // parameter either. The kernel signature ends `..., float* out,
+    // unsigned long long n`.
+    assert_no_traps(&sources[1]);
+    for source in &sources {
+        assert!(
+            !source.contains("flags"),
+            "the flags scratch buffer went with its only reader:\n{source}"
+        );
+    }
 }
 
 /// SCATTER with every read-side operand folded: init a permute view,
@@ -347,32 +362,27 @@ fn scatter_lowers_all_read_side_folds() {
         &sources[0],
         &[
             "long long init_idx = c0 * 1LL + c1 * 4LL;",
-            "if (init_idx < 0 || init_idx >= (12LL)) __trap();",
             "out[i] = init[init_idx];",
         ],
         "scatter all-folds copy launch",
     );
-    // Launch 2: src through its SLICE layout (+1 row), coord0 through
-    // its broadcast layout; write side untouched.
-    //
-    // BOUNDS HONESTY, visible here: the slice composes to an
-    // ElementOffset form, which discloses NO reach (`SpanExpr` is
-    // deliberately unimplemented for it), so its only trap is
-    // non-negativity — where the hop machinery trapped every
-    // intermediate coordinate against its parent's extents. This is the
-    // documented cost of composing in the e-graph.
+    // Launch 2: src through its SLICE layout (+1 row = the `+ 3LL`),
+    // coord0 through its broadcast layout; write side untouched.
     assert_contains(
         &sources[1],
         &[
             "long long coord0_idx = c0 + 0LL;",
             "coord = (long long)coord0[coord0_idx];",
             "long long src_idx = (((c0 * 3LL) + 3LL) + c1);",
-            "if (src_idx < 0) __trap();",
-            "if (atomicExch(&flags[flat], 1u) != 0u) __trap();",
             "out[flat] = src[src_idx];",
         ],
         "scatter all-folds write launch",
     );
+    // Three composed reads, three raw index computations, zero checks.
+    for source in &sources {
+        assert_no_traps(source);
+        assert!(!source.contains("flags"), "no injectivity scratch:\n{source}");
+    }
 }
 
 /// MATERIALIZE with a folded input: a view chain folded onto the
@@ -410,21 +420,20 @@ fn materialize_lowers_a_folded_input_operand() {
     assert_contains(
         &sources[0],
         &[
-            // The op's own map lands on the input VALUE's coordinates,
-            // trapped against the value extents (3,2)...
-            "if (idx < 0 || idx >= 3LL) __trap();",
+            // The op's own map lands on the input VALUE's coordinates
+            // (each was checked against the value extents 3 and 2 until
+            // the 2026-08-31 ruling)...
             "long long parent_c0 = idx;",
-            "if (idx < 0 || idx >= 2LL) __trap();",
             "long long parent_c1 = idx;",
             // ...and the folded permute's COMPOSED LAYOUT is evaluated at
             // THOSE coordinates (composition on top), once: x^T[a][b] is
             // x flat b*3 + a.
             "long long parent_idx = parent_c0 * 1LL + parent_c1 * 3LL;",
-            "if (parent_idx < 0 || parent_idx >= (6LL)) __trap();",
             "out[i] = parent[parent_idx];",
         ],
         "materialize folded input",
     );
+    assert_no_traps(&sources[0]);
     assert!(!sources[0].contains("pflat"), "no flat parent read remains:\n{}", sources[0]);
 }
 

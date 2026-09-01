@@ -131,15 +131,15 @@ pub(crate) fn codegen(
     let prelude = coord_prelude(out_dims);
     if let Some(layout) = ctx.non_direct_operand(0) {
         // The strided branch: the op's map lands on the input VALUE's
-        // coordinates (`parent_c*`, trapped against the value extents —
-        // the map's own checked contract), then the slot's carried
-        // layout carries them to the residence.
+        // coordinates (`parent_c*`), then the slot's carried layout
+        // carries them to the residence. Each mapped coordinate was once
+        // checked against the parent extent here; no longer — see the NO
+        // RUNTIME BOUNDS TRAPS note in `crate::kernels`.
         let mut body = String::from("    long long idx;\n");
         for (k, entry) in entries.iter().enumerate() {
             let value = lower_expr(entry, out_dims.len())?;
             body.push_str(&format!(
-                "    idx = {value};\n    if (idx < 0 || idx >= {ext}LL) __trap();\n    long long parent_c{k} = idx;\n",
-                ext = parent_dims[k]
+                "    idx = {value};\n    long long parent_c{k} = idx;\n"
             ));
         }
         let (chain, pidx) = layout_read_index("parent", layout, parent_dims, "parent_c")?;
@@ -159,8 +159,7 @@ pub(crate) fn codegen(
     for (k, entry) in entries.iter().enumerate() {
         let value = lower_expr(entry, out_dims.len())?;
         body.push_str(&format!(
-            "    idx = {value};\n    if (idx < 0 || idx >= {ext}LL) __trap();\n    pflat += idx * {stride}LL;\n",
-            ext = parent_dims[k],
+            "    idx = {value};\n    pflat += idx * {stride}LL;\n",
             stride = parent_strides[k]
         ));
     }
