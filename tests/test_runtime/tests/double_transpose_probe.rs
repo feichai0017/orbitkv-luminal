@@ -56,7 +56,10 @@ fn double_transpose_rejoins_via_the_collapse_rule() {
         .values()
         .filter(|n| n.op == "LogicalIndexMapApply")
         .collect();
-    assert!(applies.len() >= 2, "both applies must survive to the egraph");
+    assert!(
+        applies.len() >= 2,
+        "both applies must survive to the egraph"
+    );
     let child_class = |n: &&luminal::prelude::egraph_serialize::Node| {
         n.children
             .first()

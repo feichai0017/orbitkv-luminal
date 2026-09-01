@@ -14,10 +14,19 @@ fn census(name: &str, build: impl Fn(&mut Graph)) {
                 if let Some(rest) = line.strip_prefix("(let v") {
                     let id: usize = rest.split_whitespace().next().unwrap().parse().unwrap();
                     let d = if rest.contains("(LogicalIndexMapApply v") {
-                        let op: usize = rest.split("(LogicalIndexMapApply v").nth(1).unwrap()
-                            .split_whitespace().next().unwrap().parse().unwrap();
+                        let op: usize = rest
+                            .split("(LogicalIndexMapApply v")
+                            .nth(1)
+                            .unwrap()
+                            .split_whitespace()
+                            .next()
+                            .unwrap()
+                            .parse()
+                            .unwrap();
                         depth.get(&op).copied().unwrap_or(0) + 1
-                    } else { 0 };
+                    } else {
+                        0
+                    };
                     max_chain = max_chain.max(d);
                     depth.insert(id, d);
                 }

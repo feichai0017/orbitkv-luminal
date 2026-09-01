@@ -113,12 +113,23 @@ fn a_readings_over_the_pitched_view(s: &EGraph) -> Vec<&'static str> {
         s.nodes.values().any(|n| &n.eclass == class && n.op == op)
     };
     let mut out = Vec::new();
-    for n in s.nodes.values().filter(|n| n.op == "CublasLtOperandADescriptor") {
-        let Some(lt) = n.children.get(1).and_then(|id| s.nodes.get(id)) else { continue };
+    for n in s
+        .nodes
+        .values()
+        .filter(|n| n.op == "CublasLtOperandADescriptor")
+    {
+        let Some(lt) = n.children.get(1).and_then(|id| s.nodes.get(id)) else {
+            continue;
+        };
         let lt_class = lt.eclass.clone();
         let Some(layout) = s.nodes.values().find_map(|m| {
             (m.eclass == lt_class && m.op == "LayoutTensorLit")
-                .then(|| m.children.get(1).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone()))
+                .then(|| {
+                    m.children
+                        .get(1)
+                        .and_then(|id| s.nodes.get(id))
+                        .map(|c| c.eclass.clone())
+                })
                 .flatten()
         }) else {
             continue;
@@ -129,7 +140,12 @@ fn a_readings_over_the_pitched_view(s: &EGraph) -> Vec<&'static str> {
         {
             continue;
         }
-        let op = match n.children.get(2).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone()) {
+        let op = match n
+            .children
+            .get(2)
+            .and_then(|id| s.nodes.get(id))
+            .map(|c| c.eclass.clone())
+        {
             Some(c) if class_has(&c, "CublasLtOperationT") => "T",
             Some(c) if class_has(&c, "CublasLtOperationN") => "N",
             _ => "?",

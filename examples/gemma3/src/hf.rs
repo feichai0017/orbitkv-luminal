@@ -169,7 +169,10 @@ pub fn combine_safetensors_to_bf16(
                 .unwrap_or(name)
                 .to_string();
             let tensor = st.tensor(name)?;
-            all_tensors.insert(stored_name.clone(), stored_tensor_bf16(&stored_name, &tensor));
+            all_tensors.insert(
+                stored_name.clone(),
+                stored_tensor_bf16(&stored_name, &tensor),
+            );
         }
     }
 

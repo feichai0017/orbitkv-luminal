@@ -17,7 +17,8 @@ const SCHEDULE: &str = "(run-schedule (saturate (saturate (run)) (run subst-walk
 
 #[test]
 fn raw_strided_never_climbs_to_bit_offset() {
-    let fx = format!(r#"(let a_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 4) (IntExprNil)))))
+    let fx = format!(
+        r#"(let a_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 4) (IntExprNil)))))
 (let x_logical (LogicalTensorInputLit (LogicalIdLit "x") a_shape (F32)))
 (let x_static (StridedElementLayoutLit a_shape
   (IntAffineExprCons (IntMul (CoordVar a_shape 1) (IntLit 8))
@@ -28,15 +29,22 @@ fn raw_strided_never_climbs_to_bit_offset() {
 (let x_contig (RightMajorContiguousElementLayoutLit a_shape (bits-of (F32))))
 (let x_contig_lt (LayoutTensorLit x_logical x_contig))
 {SCHEDULE}
-"#);
+"#
+    );
     let s = test_runtime::serialize_fixture(&fx);
     for target in ["StridedElementLayoutLit"] {
         let mut seen: Vec<luminal::prelude::egraph_serialize::ClassId> = Vec::new();
         for n in s.nodes.values().filter(|n| n.op == target) {
-            if seen.contains(&n.eclass) { continue; }
+            if seen.contains(&n.eclass) {
+                continue;
+            }
             seen.push(n.eclass.clone());
-            let ops: std::collections::BTreeSet<String> = s.nodes.values()
-                .filter(|m| m.eclass == n.eclass).map(|m| m.op.clone()).collect();
+            let ops: std::collections::BTreeSet<String> = s
+                .nodes
+                .values()
+                .filter(|m| m.eclass == n.eclass)
+                .map(|m| m.op.clone())
+                .collect();
             println!("class {:?} spellings {:?}", n.eclass, ops);
         }
     }

@@ -11,8 +11,8 @@ use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, Ns, TypedBuffer};
-use luminal_reference::ReferenceRuntime;
 use luminal_nn::{CacheState, KvCachePool, PositionSlots};
+use luminal_reference::ReferenceRuntime;
 use model::{Gemma3, Gemma3Dims};
 use std::error::Error;
 use std::io::Write as _;
@@ -76,14 +76,8 @@ impl DecodeStep {
         let model = Gemma3::init(&mut cx, dims);
         let token = cx.tensor_dtyped(1, DType::Int);
         let q_pos = cx.tensor_dtyped(1, DType::Int);
-        let rope_local = (
-            cx.tensor((1, dims.head_dim)),
-            cx.tensor((1, dims.head_dim)),
-        );
-        let rope_global = (
-            cx.tensor((1, dims.head_dim)),
-            cx.tensor((1, dims.head_dim)),
-        );
+        let rope_local = (cx.tensor((1, dims.head_dim)), cx.tensor((1, dims.head_dim)));
+        let rope_global = (cx.tensor((1, dims.head_dim)), cx.tensor((1, dims.head_dim)));
         let rope_rot = cx.tensor((dims.head_dim, dims.head_dim));
         let gather_idx = cx.tensor_dtyped(max_seq, DType::Int);
         let scatter_idx = cx.tensor_dtyped(1, DType::Int);
@@ -301,7 +295,10 @@ pub fn run_gemma3(config: Gemma3RunConfig) -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    println!("Recording the decode-step graph ({} layers)...", dims.layers);
+    println!(
+        "Recording the decode-step graph ({} layers)...",
+        dims.layers
+    );
     let step = DecodeStep::build(&dims, config.max_seq);
     let pairs = match &model_dir {
         Some(dir) => {
@@ -360,8 +357,7 @@ pub fn run_gemma3(config: Gemma3RunConfig) -> Result<(), Box<dyn Error>> {
         prompt_tokens.len()
     );
     if !step_times.is_empty() {
-        let per_token =
-            step_times.iter().sum::<Duration>().as_secs_f64() / step_times.len() as f64;
+        let per_token = step_times.iter().sum::<Duration>().as_secs_f64() / step_times.len() as f64;
         println!("  decode: {per_token:.2} s/token");
     }
     Ok(())

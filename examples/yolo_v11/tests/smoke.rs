@@ -9,21 +9,35 @@ use luminal::prelude::*;
 use yolo_v11::model::{IMG_SIZE, YoloV11};
 
 #[test]
-#[cfg_attr(not(feature = "zoo-proofs"), ignore = "zoo fidelity proof: a full search + decode loop (llama3 measured at 185s). The zoo is not part of the default test path — run explicitly, e.g. `cargo test -p llama3 -- --ignored`.")]
+#[cfg_attr(
+    not(feature = "zoo-proofs"),
+    ignore = "zoo fidelity proof: a full search + decode loop (llama3 measured at 185s). The zoo is not part of the default test path — run explicitly, e.g. `cargo test -p llama3 -- --ignored`."
+)]
 fn full_graph_records_cleanly() {
     let mut cx = Graph::default();
     let img = cx.named_tensor("input.image", (1usize, 3usize, IMG_SIZE, IMG_SIZE));
     let yolo = YoloV11::init(&mut cx);
     let _logits = yolo.forward(img).output();
-    let program = cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean — no poison");
+    let program = cx
+        .logical
+        .bound_program(&luminal_reference::ReferenceBindings)
+        .expect("recorder clean — no poison");
     assert!(
         program.text.contains("(LogicalIndexMapApply"),
         "conv unfolds record as index-map views"
     );
     // The respelling holds: per-scale anchors exist as separate inputs.
-    let labels: Vec<String> = cx.logical.input_specs().into_iter().map(|s| s.label).collect();
+    let labels: Vec<String> = cx
+        .logical
+        .input_specs()
+        .into_iter()
+        .map(|s| s.label)
+        .collect();
     for i in 0..3 {
-        assert!(labels.contains(&format!("yolo.anchors.{i}")), "per-scale anchors {i}");
+        assert!(
+            labels.contains(&format!("yolo.anchors.{i}")),
+            "per-scale anchors {i}"
+        );
     }
 }
 
@@ -40,8 +54,10 @@ fn saturation_probe() {
     let yolo = YoloV11::init(&mut cx);
     let _logits = yolo.forward(img).output();
     let _ = (img, yolo);
-    let mut pairs: Vec<(petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer)> =
-        Vec::new();
+    let mut pairs: Vec<(
+        petgraph::graph::NodeIndex,
+        luminal::buffer_tensor_ir::TypedBuffer,
+    )> = Vec::new();
     for (seed, spec) in cx.logical.input_specs().into_iter().enumerate() {
         // Geometry comes from the graph itself; fill deterministic junk.
         assert_eq!(

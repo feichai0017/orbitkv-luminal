@@ -150,7 +150,11 @@ fn probe_a_bare_transpose_view() {
     let mut cx = Graph::new();
     let w = cx.tensor((4usize, 3usize)); // stored row-major [4,3]
     let _t = w.permute((1usize, 0usize)).output(); // [3,4] view
-    let program = cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text;
+    let program = cx
+        .logical
+        .bound_program(&test_runtime::TestRuntimeBindings)
+        .expect("recorder clean")
+        .text;
     println!("=== FIXTURE A native_program (w[4,3].permute((1,0)).output()) ===");
     println!("{program}");
 
@@ -217,7 +221,11 @@ fn probe_b_matmul_amk_bnk() {
     let x = cx.tensor((2usize, 4usize));
     let w = cx.tensor((3usize, 4usize)); // stored [n,k]
     let _out = x.matmul(w.permute((1usize, 0usize))).output();
-    let program = cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text;
+    let program = cx
+        .logical
+        .bound_program(&test_runtime::TestRuntimeBindings)
+        .expect("recorder clean")
+        .text;
     let s = test_runtime::serialize_fixture(&program);
     println!("=== FIXTURE B: {} nodes ===", s.nodes.len());
     for (class, desc) in logical_apply_classes(&s) {

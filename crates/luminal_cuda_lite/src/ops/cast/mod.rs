@@ -68,7 +68,11 @@ impl BufferTensorIrOp for CastDps {
 
 impl Bufferizable for CastDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 1,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -83,10 +87,7 @@ impl LayoutIrOp for CastDps {}
 /// The CUDA lowering, colocated with its op. The conversion is driven
 /// by the buffer dtypes the plan annotated — the op carries no dtype
 /// field of its own.
-pub(crate) fn codegen(
-    _op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(_op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     let to = cuda_type(ctx.dest_dtypes[0])?;
     unary(ctx, &format!("({to})a[i]"))
 }

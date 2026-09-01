@@ -94,9 +94,12 @@ impl MiniQwen3Moe {
         layers: usize,
         cx: &mut Graph,
     ) -> Self {
-        let (embed, blocks, final_norm) =
-            moe_lm_new(vocab, d, experts, top_k, n_heads, layers, cx);
-        Self { embed, blocks, final_norm }
+        let (embed, blocks, final_norm) = moe_lm_new(vocab, d, experts, top_k, n_heads, layers, cx);
+        Self {
+            embed,
+            blocks,
+            final_norm,
+        }
     }
 
     pub fn forward(

@@ -2,8 +2,8 @@
 //! test module, 2026-08-13).
 
 use luminal::prelude::*;
-use scalar_refs::*;
 use mini_flux::*;
+use scalar_refs::*;
 
 /// MiniDit vs a full scalar reference: 1 double + 1 single block,
 /// d=16, 2 heads (head_dim 8 = the 4-axis rope table width), 4 image
@@ -45,7 +45,9 @@ fn mini_dit_matches_scalar_reference() {
     let rope_rot = cx.tensor((HD, HD));
     let joint_base = cx.tensor((S, D));
     let velocity = model
-        .forward(latent, text, t, guidance, rope_cos, rope_sin, rope_rot, joint_base)
+        .forward(
+            latent, text, t, guidance, rope_cos, rope_sin, rope_rot, joint_base,
+        )
         .output();
 
     let (cos_table, sin_table) = mini_dit_rope_tables(S_TXT, GRID, GRID);
@@ -89,7 +91,10 @@ fn mini_dit_matches_scalar_reference() {
         (model.ff_out.weight.id, weights(MLP * D, 524).into()),
         (model.ctx_ff_in.weight.id, weights(D * 2 * MLP, 525).into()),
         (model.ctx_ff_out.weight.id, weights(MLP * D, 526).into()),
-        (model.single_proj.weight.id, weights(D * (3 * D + 2 * MLP), 527).into()),
+        (
+            model.single_proj.weight.id,
+            weights(D * (3 * D + 2 * MLP), 527).into(),
+        ),
         (model.single_out_attn.weight.id, weights(D * D, 531).into()),
         (model.single_out_mlp.weight.id, weights(MLP * D, 532).into()),
         (model.single_qnorm.id, weights(HD, 529).into()),
@@ -146,7 +151,10 @@ fn mini_dit_matches_scalar_reference() {
             for head in 0..NH {
                 for pair in 0..HD / 2 {
                     let base = row * D + head * HD + 2 * pair;
-                    let (c0, s0) = (cos_table[row * HD + 2 * pair], sin_table[row * HD + 2 * pair]);
+                    let (c0, s0) = (
+                        cos_table[row * HD + 2 * pair],
+                        sin_table[row * HD + 2 * pair],
+                    );
                     let (c1, s1) = (
                         cos_table[row * HD + 2 * pair + 1],
                         sin_table[row * HD + 2 * pair + 1],
@@ -172,9 +180,7 @@ fn mini_dit_matches_scalar_reference() {
         }
         out
     };
-    let add = |a: &[f32], b: &[f32]| -> Vec<f32> {
-        a.iter().zip(b).map(|(x, y)| x + y).collect()
-    };
+    let add = |a: &[f32], b: &[f32]| -> Vec<f32> { a.iter().zip(b).map(|(x, y)| x + y).collect() };
 
     // Conditioning.
     let sinusoid = |x: f32| -> Vec<f32> {
@@ -188,13 +194,23 @@ fn mini_dit_matches_scalar_reference() {
     };
     let temb = add(
         &ref_matmul(
-            &ref_silu(&ref_matmul(&sinusoid(t_val), &weights(T_CH * D, 502), T_CH, D)),
+            &ref_silu(&ref_matmul(
+                &sinusoid(t_val),
+                &weights(T_CH * D, 502),
+                T_CH,
+                D,
+            )),
             &weights(D * D, 503),
             D,
             D,
         ),
         &ref_matmul(
-            &ref_silu(&ref_matmul(&sinusoid(g_val), &weights(T_CH * D, 504), T_CH, D)),
+            &ref_silu(&ref_matmul(
+                &sinusoid(g_val),
+                &weights(T_CH * D, 504),
+                T_CH,
+                D,
+            )),
             &weights(D * D, 505),
             D,
             D,
@@ -207,8 +223,8 @@ fn mini_dit_matches_scalar_reference() {
     let triple = |m: &[f32], set: usize| {
         let base = set * 3 * D;
         (
-            m[base..base + D].to_vec(),           // shift
-            m[base + D..base + 2 * D].to_vec(),   // scale
+            m[base..base + D].to_vec(),             // shift
+            m[base + D..base + 2 * D].to_vec(),     // scale
             m[base + 2 * D..base + 3 * D].to_vec(), // gate
         )
     };
@@ -258,11 +274,19 @@ fn mini_dit_matches_scalar_reference() {
     let attn_img = &attn[S_TXT * D..];
     img = add(
         &img,
-        &gate_rows(&matmul_rows(attn_img, &weights(D * D, 514), S_IMG, D, D), &gate0, S_IMG),
+        &gate_rows(
+            &matmul_rows(attn_img, &weights(D * D, 514), S_IMG, D, D),
+            &gate0,
+            S_IMG,
+        ),
     );
     txt = add(
         &txt,
-        &gate_rows(&matmul_rows(attn_txt, &weights(D * D, 518), S_TXT, D, D), &c_gate0, S_TXT),
+        &gate_rows(
+            &matmul_rows(attn_txt, &weights(D * D, 518), S_TXT, D, D),
+            &c_gate0,
+            S_TXT,
+        ),
     );
     let ff = swiglu_rows(
         &matmul_rows(
@@ -276,7 +300,11 @@ fn mini_dit_matches_scalar_reference() {
     );
     img = add(
         &img,
-        &gate_rows(&matmul_rows(&ff, &weights(MLP * D, 524), S_IMG, MLP, D), &gate1, S_IMG),
+        &gate_rows(
+            &matmul_rows(&ff, &weights(MLP * D, 524), S_IMG, MLP, D),
+            &gate1,
+            S_IMG,
+        ),
     );
     let c_ff = swiglu_rows(
         &matmul_rows(
@@ -290,14 +318,24 @@ fn mini_dit_matches_scalar_reference() {
     );
     txt = add(
         &txt,
-        &gate_rows(&matmul_rows(&c_ff, &weights(MLP * D, 526), S_TXT, MLP, D), &c_gate1, S_TXT),
+        &gate_rows(
+            &matmul_rows(&c_ff, &weights(MLP * D, 526), S_TXT, MLP, D),
+            &c_gate1,
+            S_TXT,
+        ),
     );
 
     // Single-stream block over [txt ‖ img].
     let mut hidden = concat_rows(&txt, &img);
     let (s_shift, s_scale, s_gate) = triple(&m_single, 0);
     let normed = ada_rows(&ln_rows(&hidden, S), &s_scale, &s_shift, S);
-    let proj = matmul_rows(&normed, &weights(D * (3 * D + 2 * MLP), 527), S, D, 3 * D + 2 * MLP);
+    let proj = matmul_rows(
+        &normed,
+        &weights(D * (3 * D + 2 * MLP), 527),
+        S,
+        D,
+        3 * D + 2 * MLP,
+    );
     let width = 3 * D + 2 * MLP;
     let slice_cols = |x: &[f32], from: usize, to: usize| {
         let mut out = Vec::with_capacity(S * (to - from));

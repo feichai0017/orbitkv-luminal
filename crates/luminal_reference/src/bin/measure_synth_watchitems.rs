@@ -10,7 +10,9 @@ fn random_vec(n: usize) -> Vec<f32> {
     let mut state = 0x9e3779b97f4a7c15u64;
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((state >> 40) as f32 / (1u64 << 24) as f32) - 0.5
         })
         .collect()
@@ -69,7 +71,10 @@ fn measure_plan(
             .search(&data, &luminal::test_support::harness_search_options())
             .expect("search finds a plan");
         let search_ms = t.elapsed().as_millis();
-        println!("{name}: SEARCH wall_ms={search_ms} [{}]", outcome.timings.summary());
+        println!(
+            "{name}: SEARCH wall_ms={search_ms} [{}]",
+            outcome.timings.summary()
+        );
         let summary = outcome.best_plan.summary();
         let mut in_ops = false;
         let mut total = 0usize;

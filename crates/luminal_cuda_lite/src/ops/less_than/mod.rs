@@ -70,7 +70,11 @@ impl BufferTensorIrOp for LessThanDps {
 
 impl Bufferizable for LessThanDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 2, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 2,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -83,10 +87,7 @@ impl ToDps for LessThanDps {
 impl LayoutIrOp for LessThanDps {}
 
 /// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    _op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(_op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     binary(ctx, "(a[i] < b[i]) ? 1 : 0")
 }
 

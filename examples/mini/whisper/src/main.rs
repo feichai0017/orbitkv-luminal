@@ -5,7 +5,9 @@ use luminal::prelude::*;
 use mini_whisper::MiniWhisper;
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {
-    (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
+    (0..n)
+        .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
+        .collect()
 }
 
 fn main() {

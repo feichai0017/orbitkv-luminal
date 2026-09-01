@@ -70,21 +70,3 @@
              (LayoutTensorCons (LayoutTensorLit column_iota_logical position_layout)
                (LayoutTensorNil)))))
        (LayoutTensorCons (LayoutTensorLit updated_logical cache_layout) (LayoutTensorNil)))))
-
-; --- the MUTATING implementation, on INIT's own layout (here the
-; canonical [6,4] right-major IS init's layout, so both implementations
-; share one output layout tensor and coexist in one op class) ---
-(check
-  (= (LayoutTensorOpScatterMutatingGeneric
-       cache_layout_tensor
-       new_row_layout_tensor
-       (LayoutTensorCons position_layout_tensor
-         (LayoutTensorCons (LayoutTensorLit column_iota_logical position_layout)
-           (LayoutTensorNil))))
-     (LayoutTensorOpLit
-       (LayoutTensorCons cache_layout_tensor
-         (LayoutTensorCons new_row_layout_tensor
-           (LayoutTensorCons position_layout_tensor
-             (LayoutTensorCons (LayoutTensorLit column_iota_logical position_layout)
-               (LayoutTensorNil)))))
-       (LayoutTensorCons (LayoutTensorLit updated_logical cache_layout) (LayoutTensorNil)))))

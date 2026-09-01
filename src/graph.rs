@@ -5,9 +5,9 @@
 //! load/bind/with_ops/search.
 
 use petgraph::{
+    Direction,
     stable_graph::{NodeIndex, StableDiGraph},
     visit::EdgeRef,
-    Direction,
 };
 use rustc_hash::FxHashSet;
 
@@ -146,7 +146,7 @@ impl Graph {
 // unrepresentable — the old resolve() cross-check tripwire is deleted.
 
 use crate::shape::{IntExpr, Term};
-use anyhow::{bail, Result as AnyResult};
+use anyhow::{Result as AnyResult, bail};
 
 /// One index-map entry, in-memory. Movement composition happens on this
 /// tree — substituting our OWN just-emitted terms, never reconstructing
@@ -183,7 +183,10 @@ impl MapEntry {
     /// space. Purely construction-time; nothing recorded is rewritten.
     pub(crate) fn substitute(&self, replacements: &[MapEntry], rank: usize) -> MapEntry {
         match self {
-            MapEntry::Coord { from_end, extent: _ } => replacements[rank - 1 - from_end].clone(),
+            MapEntry::Coord {
+                from_end,
+                extent: _,
+            } => replacements[rank - 1 - from_end].clone(),
             MapEntry::Lit(value) => MapEntry::Lit(*value),
             MapEntry::Add(a, b) => MapEntry::Add(
                 Box::new(a.substitute(replacements, rank)),
@@ -1034,176 +1037,182 @@ pub(crate) fn movement_entries(
 ) -> Result<(Vec<MapEntry>, Vec<IntExpr>), String> {
     let prev_rank = prev_dims.len();
     let pair: (Vec<MapEntry>, Vec<IntExpr>) = match movement {
-            Movement::Permute(axes) => {
-                if axes.len() != prev_rank {
-                    return Err(format!("permute arity {} vs rank {prev_rank}", axes.len()));
-                }
-                let mut replacement = vec![MapEntry::Lit(0.into()); prev_rank];
-                for (q, &p) in axes.iter().enumerate() {
-                    replacement[p] = MapEntry::Coord {
-                        from_end: prev_rank - 1 - q,
-                        extent: prev_dims[p].clone(),
-                    };
-                }
-                let new_dims = axes.iter().map(|&p| prev_dims[p].clone()).collect();
-                (replacement, new_dims)
+        Movement::Permute(axes) => {
+            if axes.len() != prev_rank {
+                return Err(format!("permute arity {} vs rank {prev_rank}", axes.len()));
             }
-            Movement::ExpandDim { axis, size } => {
-                if axis > prev_rank {
-                    return Err(format!("expand_dim axis {axis} vs rank {prev_rank}"));
-                }
-                let new_rank = prev_rank + 1;
-                let replacement = (0..prev_rank)
-                    .map(|p| {
+            let mut replacement = vec![MapEntry::Lit(0.into()); prev_rank];
+            for (q, &p) in axes.iter().enumerate() {
+                replacement[p] = MapEntry::Coord {
+                    from_end: prev_rank - 1 - q,
+                    extent: prev_dims[p].clone(),
+                };
+            }
+            let new_dims = axes.iter().map(|&p| prev_dims[p].clone()).collect();
+            (replacement, new_dims)
+        }
+        Movement::ExpandDim { axis, size } => {
+            if axis > prev_rank {
+                return Err(format!("expand_dim axis {axis} vs rank {prev_rank}"));
+            }
+            let new_rank = prev_rank + 1;
+            let replacement = (0..prev_rank)
+                .map(|p| {
+                    let q = if p < axis { p } else { p + 1 };
+                    MapEntry::Coord {
+                        from_end: new_rank - 1 - q,
+                        extent: prev_dims[p].clone(),
+                    }
+                })
+                .collect();
+            let mut new_dims = prev_dims.to_vec();
+            new_dims.insert(axis, size);
+            (replacement, new_dims)
+        }
+        Movement::RemoveDim { axis } => {
+            if axis >= prev_rank || prev_dims[axis].to_usize().is_some_and(|d| d != 1) {
+                return Err(format!(
+                    "remove_dim axis {axis} of dims {prev_dims:?} (must be a size-1 axis)"
+                ));
+            }
+            let new_rank = prev_rank - 1;
+            let replacement = (0..prev_rank)
+                .map(|p| {
+                    if p == axis {
+                        MapEntry::Lit(0.into())
+                    } else {
+                        let q = if p < axis { p } else { p - 1 };
+                        MapEntry::Coord {
+                            from_end: new_rank - 1 - q,
+                            extent: prev_dims[p].clone(),
+                        }
+                    }
+                })
+                .collect();
+            let mut new_dims = prev_dims.to_vec();
+            new_dims.remove(axis);
+            (replacement, new_dims)
+        }
+        Movement::SplitDims { axis, inner } => {
+            if axis >= prev_rank {
+                return Err(format!("split_dims axis {axis} vs rank {prev_rank}"));
+            }
+            // Frontend simplification restored (revert ruling 2026-08-27).
+            let outer = (prev_dims[axis] / inner).simplify();
+            let new_rank = prev_rank + 1;
+            let replacement = (0..prev_rank)
+                .map(|p| {
+                    if p == axis {
+                        MapEntry::Add(
+                            Box::new(MapEntry::Mul(
+                                Box::new(MapEntry::Coord {
+                                    from_end: new_rank - 1 - axis,
+                                    extent: outer,
+                                }),
+                                inner,
+                            )),
+                            Box::new(MapEntry::Coord {
+                                from_end: new_rank - 1 - (axis + 1),
+                                extent: inner,
+                            }),
+                        )
+                    } else {
                         let q = if p < axis { p } else { p + 1 };
                         MapEntry::Coord {
                             from_end: new_rank - 1 - q,
                             extent: prev_dims[p].clone(),
                         }
-                    })
-                    .collect();
-                let mut new_dims = prev_dims.to_vec();
-                new_dims.insert(axis, size);
-                (replacement, new_dims)
+                    }
+                })
+                .collect();
+            let mut new_dims = prev_dims.to_vec();
+            new_dims[axis] = outer;
+            new_dims.insert(axis + 1, inner);
+            (replacement, new_dims)
+        }
+        Movement::MergeDims { axis1, axis2 } => {
+            if axis1 >= axis2 || axis2 >= prev_rank {
+                return Err(format!("merge_dims ({axis1},{axis2}) vs rank {prev_rank}"));
             }
-            Movement::RemoveDim { axis } => {
-                if axis >= prev_rank || prev_dims[axis].to_usize().is_some_and(|d| d != 1) {
-                    return Err(format!(
-                        "remove_dim axis {axis} of dims {prev_dims:?} (must be a size-1 axis)"
-                    ));
-                }
-                let new_rank = prev_rank - 1;
-                let replacement = (0..prev_rank)
-                    .map(|p| {
-                        if p == axis {
-                            MapEntry::Lit(0.into())
-                        } else {
-                            let q = if p < axis { p } else { p - 1 };
-                            MapEntry::Coord {
-                                from_end: new_rank - 1 - q,
-                                extent: prev_dims[p].clone(),
-                            }
+            let inner = prev_dims[axis2].clone();
+            // Frontend simplification restored (revert ruling 2026-08-27).
+            let merged = (prev_dims[axis1] * prev_dims[axis2]).simplify();
+            let new_rank = prev_rank - 1;
+            let merged_coord = MapEntry::Coord {
+                from_end: new_rank - 1 - axis1,
+                extent: merged,
+            };
+            let replacement = (0..prev_rank)
+                .map(|p| {
+                    if p == axis1 {
+                        MapEntry::Div(Box::new(merged_coord.clone()), inner)
+                    } else if p == axis2 {
+                        MapEntry::Rem(Box::new(merged_coord.clone()), inner)
+                    } else {
+                        let q = if p < axis2 { p } else { p - 1 };
+                        MapEntry::Coord {
+                            from_end: new_rank - 1 - q,
+                            extent: prev_dims[p].clone(),
                         }
-                    })
-                    .collect();
-                let mut new_dims = prev_dims.to_vec();
-                new_dims.remove(axis);
-                (replacement, new_dims)
+                    }
+                })
+                .collect();
+            let mut new_dims = prev_dims.to_vec();
+            new_dims[axis1] = merged;
+            new_dims.remove(axis2);
+            (replacement, new_dims)
+        }
+        Movement::Repeat(repeats) => {
+            if repeats.len() != prev_rank {
+                return Err(format!(
+                    "repeat arity {} vs rank {prev_rank}",
+                    repeats.len()
+                ));
             }
-            Movement::SplitDims { axis, inner } => {
-                if axis >= prev_rank {
-                    return Err(format!("split_dims axis {axis} vs rank {prev_rank}"));
-                }
-                // Frontend simplification restored (revert ruling 2026-08-27).
-                let outer = (prev_dims[axis] / inner).simplify();
-                let new_rank = prev_rank + 1;
-                let replacement = (0..prev_rank)
-                    .map(|p| {
-                        if p == axis {
-                            MapEntry::Add(
-                                Box::new(MapEntry::Mul(
-                                    Box::new(MapEntry::Coord {
-                                        from_end: new_rank - 1 - axis,
-                                        extent: outer,
-                                    }),
-                                    inner,
-                                )),
-                                Box::new(MapEntry::Coord {
-                                    from_end: new_rank - 1 - (axis + 1),
-                                    extent: inner,
-                                }),
-                            )
-                        } else {
-                            let q = if p < axis { p } else { p + 1 };
-                            MapEntry::Coord {
-                                from_end: new_rank - 1 - q,
-                                extent: prev_dims[p].clone(),
-                            }
+            let replacement = (0..prev_rank)
+                .map(|p| {
+                    if repeats[p].to_usize() == Some(1) {
+                        MapEntry::Coord {
+                            from_end: prev_rank - 1 - p,
+                            extent: prev_dims[p].clone(),
                         }
-                    })
-                    .collect();
-                let mut new_dims = prev_dims.to_vec();
-                new_dims[axis] = outer;
-                new_dims.insert(axis + 1, inner);
-                (replacement, new_dims)
-            }
-            Movement::MergeDims { axis1, axis2 } => {
-                if axis1 >= axis2 || axis2 >= prev_rank {
-                    return Err(format!("merge_dims ({axis1},{axis2}) vs rank {prev_rank}"));
-                }
-                let inner = prev_dims[axis2].clone();
-                // Frontend simplification restored (revert ruling 2026-08-27).
-                let merged = (prev_dims[axis1] * prev_dims[axis2]).simplify();
-                let new_rank = prev_rank - 1;
-                let merged_coord = MapEntry::Coord {
-                    from_end: new_rank - 1 - axis1,
-                    extent: merged,
-                };
-                let replacement = (0..prev_rank)
-                    .map(|p| {
-                        if p == axis1 {
-                            MapEntry::Div(Box::new(merged_coord.clone()), inner)
-                        } else if p == axis2 {
-                            MapEntry::Rem(Box::new(merged_coord.clone()), inner)
-                        } else {
-                            let q = if p < axis2 { p } else { p - 1 };
-                            MapEntry::Coord {
-                                from_end: new_rank - 1 - q,
-                                extent: prev_dims[p].clone(),
-                            }
-                        }
-                    })
-                    .collect();
-                let mut new_dims = prev_dims.to_vec();
-                new_dims[axis1] = merged;
-                new_dims.remove(axis2);
-                (replacement, new_dims)
-            }
-            Movement::Repeat(repeats) => {
-                if repeats.len() != prev_rank {
-                    return Err(format!("repeat arity {} vs rank {prev_rank}", repeats.len()));
-                }
-                let replacement = (0..prev_rank)
-                    .map(|p| {
-                        if repeats[p].to_usize() == Some(1) {
-                            MapEntry::Coord {
+                    } else {
+                        // Frontend simplification restored (revert
+                        // ruling 2026-08-27).
+                        let tiled = (prev_dims[p] * repeats[p]).simplify();
+                        MapEntry::Rem(
+                            Box::new(MapEntry::Coord {
                                 from_end: prev_rank - 1 - p,
-                                extent: prev_dims[p].clone(),
-                            }
-                        } else {
-                            // Frontend simplification restored (revert
-                            // ruling 2026-08-27).
-                            let tiled = (prev_dims[p] * repeats[p]).simplify();
-                            MapEntry::Rem(
-                                Box::new(MapEntry::Coord {
-                                    from_end: prev_rank - 1 - p,
-                                    extent: tiled,
-                                }),
-                                prev_dims[p].clone(),
-                            )
-                        }
-                    })
-                    .collect();
-                let new_dims = prev_dims
-                    .iter()
-                    .zip(&repeats)
-                    .map(|(d, r)| (*d * *r).simplify())
-                    .collect();
-                (replacement, new_dims)
+                                extent: tiled,
+                            }),
+                            prev_dims[p].clone(),
+                        )
+                    }
+                })
+                .collect();
+            let new_dims = prev_dims
+                .iter()
+                .zip(&repeats)
+                .map(|(d, r)| (*d * *r).simplify())
+                .collect();
+            (replacement, new_dims)
+        }
+        Movement::Shrink { new_dims } => {
+            if new_dims.len() != prev_rank {
+                return Err(format!(
+                    "shrink arity {} vs rank {prev_rank}",
+                    new_dims.len()
+                ));
             }
-            Movement::Shrink { new_dims } => {
-                if new_dims.len() != prev_rank {
-                    return Err(format!("shrink arity {} vs rank {prev_rank}", new_dims.len()));
-                }
-                let replacement = (0..prev_rank)
-                    .map(|p| MapEntry::Coord {
-                        from_end: prev_rank - 1 - p,
-                        extent: new_dims[p].clone(),
-                    })
-                    .collect();
-                (replacement, new_dims)
-            }
-        };
+            let replacement = (0..prev_rank)
+                .map(|p| MapEntry::Coord {
+                    from_end: prev_rank - 1 - p,
+                    extent: new_dims[p].clone(),
+                })
+                .collect();
+            (replacement, new_dims)
+        }
+    };
     Ok(pair)
 }
 

@@ -18,8 +18,8 @@
 //!      probe here can execute MockOps (no reference kernel).
 use luminal::bufferize::{BufferId, BufferNode, EdgeKind};
 use luminal::layout_ir::{Access, FreedBy};
-use luminal::test_support::{EmptyOp, MockOp, MockView, TestGraph};
 use luminal::prelude::petgraph;
+use luminal::test_support::{EmptyOp, MockOp, MockView, TestGraph};
 use petgraph::algo::has_path_connecting;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
@@ -31,15 +31,17 @@ fn computes<'a>(
     plan.dag
         .node_indices()
         .filter_map(|i| match &plan.dag[i] {
-            BufferNode::Compute { op, reads, writes, .. } if op.label() == label => {
-                Some((i, reads.clone(), writes.clone()))
-            }
+            BufferNode::Compute {
+                op, reads, writes, ..
+            } if op.label() == label => Some((i, reads.clone(), writes.clone())),
             _ => None,
         })
         .collect()
 }
 
-fn copies(plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>) -> Vec<(NodeIndex, BufferId, BufferId)> {
+fn copies(
+    plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
+) -> Vec<(NodeIndex, BufferId, BufferId)> {
     plan.dag
         .node_indices()
         .filter_map(|i| match &plan.dag[i] {
@@ -49,7 +51,9 @@ fn copies(plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLa
         .collect()
 }
 
-fn input_buffer(plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>) -> BufferId {
+fn input_buffer(
+    plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
+) -> BufferId {
     plan.dag
         .node_weights()
         .find_map(|n| match n {
@@ -74,7 +78,11 @@ fn attack1_unordered_direct_and_view_readers_both_precede_free() {
     // writer W: produces y in a System allocation (in-place into p's poison)
     let y = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&x, &p],
             &[("y", "rm")],
         )
@@ -82,10 +90,26 @@ fn attack1_unordered_direct_and_view_readers_both_precede_free() {
     let v = g.op(Box::new(MockView), &[&y], &[("v", "view")]).remove(0);
     // two UNORDERED readers: one direct, one through the alias
     let r1 = g
-        .op(Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }), &[&y], &[("r1", "rm")])
+        .op(
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
+            &[&y],
+            &[("r1", "rm")],
+        )
         .remove(0);
     let r2 = g
-        .op(Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }), &[&v], &[("r2", "rm")])
+        .op(
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
+            &[&v],
+            &[("r2", "rm")],
+        )
         .remove(0);
     g.output(&r1, "o1");
     g.output(&r2, "o2");
@@ -97,14 +121,22 @@ fn attack1_unordered_direct_and_view_readers_both_precede_free() {
     let mocks = computes(&plan, "MockOp");
     let parent = mocks
         .iter()
-        .find(|(_, r, w)| matches!(r[0], BufferId::Boundary(_)) && matches!(w[0], BufferId::Allocated(_)))
+        .find(|(_, r, w)| {
+            matches!(r[0], BufferId::Boundary(_)) && matches!(w[0], BufferId::Allocated(_))
+        })
         .expect("writer W")
         .2[0]
         .clone();
 
     // Exactly one alloc, one free of the parent (no alias-driven double free).
-    let allocs: Vec<_> = computes(&plan, "BufferAlloc").into_iter().filter(|(_, _, w)| w[0] == parent).collect();
-    let frees: Vec<_> = computes(&plan, "BufferFree").into_iter().filter(|(_, r, _)| r[0] == parent).collect();
+    let allocs: Vec<_> = computes(&plan, "BufferAlloc")
+        .into_iter()
+        .filter(|(_, _, w)| w[0] == parent)
+        .collect();
+    let frees: Vec<_> = computes(&plan, "BufferFree")
+        .into_iter()
+        .filter(|(_, r, _)| r[0] == parent)
+        .collect();
     assert_eq!(allocs.len(), 1, "one alloc of the parent");
     assert_eq!(frees.len(), 1, "one free of the parent");
     let free = frees[0].0;
@@ -116,7 +148,11 @@ fn attack1_unordered_direct_and_view_readers_both_precede_free() {
         .iter()
         .filter(|(_, r, w)| r[0] == parent && w[0] != parent)
         .collect();
-    assert_eq!(readers.len(), 2, "direct reader + view reader both read the parent buffer");
+    assert_eq!(
+        readers.len(),
+        2,
+        "direct reader + view reader both read the parent buffer"
+    );
     for (idx, _, _) in &readers {
         assert!(
             has_path_connecting(&plan.dag, *idx, free, None),
@@ -131,7 +167,11 @@ fn attack1_unordered_direct_and_view_readers_both_precede_free() {
         .edges_directed(free, petgraph::Direction::Incoming)
         .filter(|e| e.weight().kind == EdgeKind::Anti)
         .count();
-    assert!(anti_into_free >= 1, "the unordered toucher needs an Anti edge into the free:\n{}", plan.summary());
+    assert!(
+        anti_into_free >= 1,
+        "the unordered toucher needs an Anti edge into the free:\n{}",
+        plan.summary()
+    );
 }
 
 /// ATTACK 1b — SECOND ENTRANCE to the poison door the P2 advocate found:
@@ -151,7 +191,9 @@ fn attack1b_view_of_poison_bound_to_output_slot() {
         g.output(&v, "out");
         g.build()
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| luminal::test_support::bufferize_mock(&graph)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        luminal::test_support::bufferize_mock(&graph)
+    }));
     match result {
         Ok(Ok(plan)) => panic!(
             "LAUNDERED: undefined bytes delivered to a bound output through a view:\n{}",
@@ -174,10 +216,24 @@ fn attack1b_view_of_poison_bound_to_output_slot() {
 #[test]
 fn attack2_program_freed_input_read_only_through_view() {
     let mut g = TestGraph::new();
-    let x = g.input_binding("x", "xb", Some(Access::ReadWrite), Some(FreedBy::Program), "rm");
+    let x = g.input_binding(
+        "x",
+        "xb",
+        Some(Access::ReadWrite),
+        Some(FreedBy::Program),
+        "rm",
+    );
     let v = g.op(Box::new(MockView), &[&x], &[("v", "view")]).remove(0);
     let r = g
-        .op(Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }), &[&v], &[("r", "rm")])
+        .op(
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
+            &[&v],
+            &[("r", "rm")],
+        )
         .remove(0);
     g.output(&r, "out");
     let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
@@ -185,8 +241,16 @@ fn attack2_program_freed_input_read_only_through_view() {
 
     let xb = input_buffer(&plan);
     assert!(matches!(xb, BufferId::Boundary(_)));
-    let frees: Vec<_> = computes(&plan, "BufferFree").into_iter().filter(|(_, r, _)| r[0] == xb).collect();
-    assert_eq!(frees.len(), 1, "exactly one free of the donated buffer:\n{}", plan.summary());
+    let frees: Vec<_> = computes(&plan, "BufferFree")
+        .into_iter()
+        .filter(|(_, r, _)| r[0] == xb)
+        .collect();
+    assert_eq!(
+        frees.len(),
+        1,
+        "exactly one free of the donated buffer:\n{}",
+        plan.summary()
+    );
     // The reader-through-the-view precedes the free.
     let reader = computes(&plan, "MockOp")
         .into_iter()
@@ -206,10 +270,22 @@ fn attack2_program_freed_input_read_only_through_view() {
 fn attack3a_view_of_view_of_readonly_vetoes_writer() {
     let mut g = TestGraph::new();
     let x = g.input("x", "x", Access::ReadOnly, "rm");
-    let v1 = g.op(Box::new(MockView), &[&x], &[("v1", "view1")]).remove(0);
-    let v2 = g.op(Box::new(MockView), &[&v1], &[("v2", "view2")]).remove(0);
+    let v1 = g
+        .op(Box::new(MockView), &[&x], &[("v1", "view1")])
+        .remove(0);
+    let v2 = g
+        .op(Box::new(MockView), &[&v1], &[("v2", "view2")])
+        .remove(0);
     let r = g
-        .op(Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }), &[&v2], &[("r", "rm")])
+        .op(
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
+            &[&v2],
+            &[("r", "rm")],
+        )
         .remove(0);
     g.output(&r, "out");
     let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
@@ -223,14 +299,17 @@ fn attack3a_view_of_view_of_readonly_vetoes_writer() {
                 "read-only caller storage written by {} through a two-view chain",
                 op.label()
             ),
-            BufferNode::BufferCopy { dst, .. } => assert_ne!(dst, &xb, "copy into read-only caller storage"),
+            BufferNode::BufferCopy { dst, .. } => {
+                assert_ne!(dst, &xb, "copy into read-only caller storage")
+            }
             _ => {}
         }
     }
     // Repair: the accumulator got a copy OUT of the caller's buffer.
     let cps = copies(&plan);
     assert!(
-        cps.iter().any(|(_, src, dst)| *src == xb && matches!(dst, BufferId::Allocated(_))),
+        cps.iter()
+            .any(|(_, src, dst)| *src == xb && matches!(dst, BufferId::Allocated(_))),
         "repair copies the parent bytes out of the read-only buffer:\n{}",
         plan.summary()
     );
@@ -247,7 +326,15 @@ fn attack3b_passthrough_obligation_blocks_inplace_writer_via_view() {
     let x = g.input("x", "B", Access::ReadWrite, "rm");
     let v = g.op(Box::new(MockView), &[&x], &[("v", "view")]).remove(0);
     let r = g
-        .op(Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }), &[&v], &[("r", "rm")])
+        .op(
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
+            &[&v],
+            &[("r", "rm")],
+        )
         .remove(0);
     g.output(&x, "B"); // pass-through: B's final contents must be x
     g.output(&r, "out");
@@ -262,14 +349,17 @@ fn attack3b_passthrough_obligation_blocks_inplace_writer_via_view() {
                 "pass-through buffer written by {}",
                 op.label()
             ),
-            BufferNode::BufferCopy { dst, .. } => assert_ne!(dst, &xb, "copy into pass-through buffer"),
+            BufferNode::BufferCopy { dst, .. } => {
+                assert_ne!(dst, &xb, "copy into pass-through buffer")
+            }
             _ => {}
         }
     }
     // The accumulator relocated: repair copy B -> fresh alloc.
     let cps = copies(&plan);
     assert!(
-        cps.iter().any(|(_, src, dst)| *src == xb && matches!(dst, BufferId::Allocated(_))),
+        cps.iter()
+            .any(|(_, src, dst)| *src == xb && matches!(dst, BufferId::Allocated(_))),
         "repair copy expected:\n{}",
         plan.summary()
     );
@@ -289,7 +379,15 @@ fn attack3c_readwrite_input_is_admitted_as_inplace_dest_through_view() {
     let x = g.input("x", "xb", Access::ReadWrite, "rm");
     let v = g.op(Box::new(MockView), &[&x], &[("v", "view")]).remove(0);
     let r = g
-        .op(Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }), &[&v], &[("r", "rm")])
+        .op(
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
+            &[&v],
+            &[("r", "rm")],
+        )
         .remove(0);
     g.output(&r, "out");
     let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
@@ -298,8 +396,14 @@ fn attack3c_readwrite_input_is_admitted_as_inplace_dest_through_view() {
     let xb = input_buffer(&plan);
     let acc = computes(&plan, "MockOp").pop().expect("accumulator");
     // Admitted: reads and writes the CALLER's buffer in place.
-    assert_eq!(acc.1[0], xb, "accumulator reads the caller buffer through the view");
-    assert_eq!(acc.2[0], xb, "accumulator WRITES the caller's ReadWrite input buffer in place");
+    assert_eq!(
+        acc.1[0], xb,
+        "accumulator reads the caller buffer through the view"
+    );
+    assert_eq!(
+        acc.2[0], xb,
+        "accumulator WRITES the caller's ReadWrite input buffer in place"
+    );
     // The output is served by a delivery copy out of the caller's buffer.
     let cps = copies(&plan);
     assert_eq!(cps.len(), 1);
@@ -319,11 +423,27 @@ fn attack4_view_reader_anti_ordered_before_delivery_copy_overwrite() {
     let mut g = TestGraph::new();
     let x = g.input("x", "B", Access::ReadWrite, "rm");
     let y = g
-        .op(Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }), &[&x], &[("y", "rm")])
+        .op(
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
+            &[&x],
+            &[("y", "rm")],
+        )
         .remove(0);
     let v = g.op(Box::new(MockView), &[&x], &[("v", "view")]).remove(0);
     let r = g
-        .op(Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }), &[&v], &[("r", "rm")])
+        .op(
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
+            &[&v],
+            &[("r", "rm")],
+        )
         .remove(0);
     g.output(&y, "B"); // delivery copy: alloc(y) -> B, overwriting the input buffer
     g.output(&r, "C");
@@ -346,7 +466,10 @@ fn attack4_view_reader_anti_ordered_before_delivery_copy_overwrite() {
         .into_iter()
         .find(|(_, _, w)| w[0] == copy_c.1)
         .expect("view reader feeds slot C");
-    assert_eq!(reader.1[0], xb, "the reader reads the input buffer through the folded view");
+    assert_eq!(
+        reader.1[0], xb,
+        "the reader reads the input buffer through the folded view"
+    );
 
     // THE EDGE: Anti(reader -> copy-into-B). Without it, an eager executor
     // may overwrite x mid-read — the exact WAR that a materialized view
@@ -356,8 +479,17 @@ fn attack4_view_reader_anti_ordered_before_delivery_copy_overwrite() {
         .edges_directed(copy_b, petgraph::Direction::Incoming)
         .filter(|e| e.weight().kind == EdgeKind::Anti)
         .collect();
-    assert_eq!(anti.len(), 1, "exactly one WAR anti into the overwriting copy:\n{}", plan.summary());
-    assert_eq!(anti[0].source(), reader.0, "the anti's source is the reader-through-the-view");
+    assert_eq!(
+        anti.len(),
+        1,
+        "exactly one WAR anti into the overwriting copy:\n{}",
+        plan.summary()
+    );
+    assert_eq!(
+        anti[0].source(),
+        reader.0,
+        "the anti's source is the reader-through-the-view"
+    );
 }
 
 /// ATTACK 5 — stale-read probe: a reader through the view that is
@@ -372,7 +504,11 @@ fn attack5_view_reader_after_mutator_still_blocks_inplace() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let y = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&x, &p],
             &[("y", "rm")],
         )
@@ -380,12 +516,24 @@ fn attack5_view_reader_after_mutator_still_blocks_inplace() {
     let v = g.op(Box::new(MockView), &[&y], &[("v", "view")]).remove(0);
     // in-place mutator of y (accumulator)
     let m = g
-        .op(Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }), &[&y], &[("m", "rm")])
+        .op(
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
+            &[&y],
+            &[("m", "rm")],
+        )
         .remove(0);
     // reader of the view, ordered AFTER the mutator (consumes m too)
     let r = g
         .op(
-            Box::new(MockOp { reads: vec![true, true], in_place_operand: None, not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
             &[&v, &m],
             &[("r", "rm")],
         )
@@ -398,7 +546,9 @@ fn attack5_view_reader_after_mutator_still_blocks_inplace() {
     let mocks = computes(&plan, "MockOp");
     let parent = mocks
         .iter()
-        .find(|(_, r, w)| matches!(r[0], BufferId::Boundary(_)) && matches!(w[0], BufferId::Allocated(_)))
+        .find(|(_, r, w)| {
+            matches!(r[0], BufferId::Boundary(_)) && matches!(w[0], BufferId::Allocated(_))
+        })
         .expect("writer W")
         .2[0]
         .clone();
@@ -410,9 +560,19 @@ fn attack5_view_reader_after_mutator_still_blocks_inplace() {
         .into_iter()
         .filter(|(_, src, dst)| *src == parent && matches!(dst, BufferId::Allocated(_)))
         .collect();
-    assert_eq!(repairs.len(), 1, "the mutator relocated via a repair copy:\n{}", plan.summary());
+    assert_eq!(
+        repairs.len(),
+        1,
+        "the mutator relocated via a repair copy:\n{}",
+        plan.summary()
+    );
     let parent_writers = mocks.iter().filter(|(_, _, w)| w[0] == parent).count();
-    assert_eq!(parent_writers, 1, "the shared buffer keeps exactly one writer:\n{}", plan.summary());
+    assert_eq!(
+        parent_writers,
+        1,
+        "the shared buffer keeps exactly one writer:\n{}",
+        plan.summary()
+    );
     // And the late reader still reads the parent buffer through the fold.
     // (Identified as the MockOp whose SECOND operand is the mutator's
     // relocated buffer — the plan's `reads` vector lists every operand
@@ -422,5 +582,8 @@ fn attack5_view_reader_after_mutator_still_blocks_inplace() {
         .iter()
         .find(|(_, r, _)| r.len() == 2 && r[1] == mutator_buffer)
         .expect("the view reader consumes the relocated mutator result");
-    assert_eq!(late_reader.1[0], parent, "reader reads the OLD value's bytes in the parent buffer");
+    assert_eq!(
+        late_reader.1[0], parent,
+        "reader reads the OLD value's bytes in the parent buffer"
+    );
 }

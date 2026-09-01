@@ -216,7 +216,9 @@ pub fn dispatch(
         .context("cuBLASLt pre-dispatch bounds validation")?;
 
     let handle = handle()?;
-    let guard = handle.lock().map_err(|_| anyhow!("cuBLASLt handle mutex poisoned"))?;
+    let guard = handle
+        .lock()
+        .map_err(|_| anyhow!("cuBLASLt handle mutex poisoned"))?;
 
     // Matmul descriptor: strict F32 compute (contract 1/5), HOST
     // pointer mode (contract 2), transposes, epilogue.
@@ -296,7 +298,8 @@ pub fn dispatch(
     let workspace = stream
         .alloc_zeros::<u8>(WORKSPACE_BYTES)
         .context("cuBLASLt workspace alloc")?;
-    let pref = lt::create_matmul_pref().map_err(|e| anyhow!("cublasLtMatmulPreferenceCreate: {e:?}"))?;
+    let pref =
+        lt::create_matmul_pref().map_err(|e| anyhow!("cublasLtMatmulPreferenceCreate: {e:?}"))?;
     struct Pref {
         raw: sys::cublasLtMatmulPreference_t,
     }

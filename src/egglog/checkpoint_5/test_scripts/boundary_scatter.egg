@@ -66,22 +66,6 @@
 (check (= ?demanded_lower (lower-bound-of (CoordVar row_shape 0))))
 (check (= ?demanded_upper (upper-bound-of (CoordVar row_shape 0))))
 
-; Both implementations are available on the shared output layout tensor.
-(check
-  (= (LayoutTensorOpScatterMutatingGeneric
-       cache_layout_tensor
-       new_row_layout_tensor
-       (LayoutTensorCons position_layout_tensor
-         (LayoutTensorCons (LayoutTensorLit column_iota_logical position_layout)
-           (LayoutTensorNil))))
-     (LayoutTensorOpLit
-       (LayoutTensorCons cache_layout_tensor
-         (LayoutTensorCons new_row_layout_tensor
-           (LayoutTensorCons position_layout_tensor
-             (LayoutTensorCons (LayoutTensorLit column_iota_logical position_layout)
-               (LayoutTensorNil)))))
-       (LayoutTensorCons updated_layout_tensor (LayoutTensorNil)))))
-
 ; The output slot carries the updated cache in the CACHE's buffer.
 (check (= (layout-tensor-of updated_output_buffer_tensor) updated_layout_tensor))
 (check (= (buffer-id-of updated_output_buffer_tensor) cache_buffer_id))

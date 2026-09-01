@@ -68,7 +68,9 @@ fn assert_close(want: &[f32], got: &[f32], what: &str) {
 
 /// Deterministic values (the shared example seeding discipline).
 fn weights(n: usize, seed: usize) -> Vec<f32> {
-    (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
+    (0..n)
+        .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
+        .collect()
 }
 
 /// Host reference for one call: ROW-order walk (the bridge's ROW
@@ -127,7 +129,9 @@ fn to_device(stream: &Arc<cudarc::driver::CudaStream>, host: &[f32]) -> CudaSlic
 fn from_device(stream: &Arc<cudarc::driver::CudaStream>, slice: &CudaSlice<u8>) -> Vec<f32> {
     let mut host = vec![0u8; slice.len()];
     stream.memcpy_dtoh(slice, &mut host).expect("D2H");
-    host.chunks_exact(4).map(|c| f32::from_ne_bytes(c.try_into().unwrap())).collect()
+    host.chunks_exact(4)
+        .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 /// Build the canonical contiguous call for one form (m=3, n=4, k=5) —
@@ -146,7 +150,11 @@ fn call_for(form: CublasLtForm) -> LtCall {
         b: LtDesc::row(k, n, n),
         c: LtDesc::row(m, n, n),
         d: LtDesc::row(m, n, n),
-        c_source: if form.has_c() { CSource::Operand(2) } else { CSource::AliasD },
+        c_source: if form.has_c() {
+            CSource::Operand(2)
+        } else {
+            CSource::AliasD
+        },
         beta_is_one: form.has_c(),
         relu: false,
         bias_operand: form.has_bias().then(|| if form.has_c() { 3 } else { 2 }),
@@ -158,8 +166,9 @@ fn call_for(form: CublasLtForm) -> LtCall {
 /// fallback in effect).
 #[test]
 fn tf32_strictness_detector_is_green() {
-    device_call::assert_compute_strictness()
-        .expect("strict CUBLAS_COMPUTE_32F must be in effect (TF32 is graph-modeled, never a flag)");
+    device_call::assert_compute_strictness().expect(
+        "strict CUBLAS_COMPUTE_32F must be in effect (TF32 is graph-modeled, never a flag)",
+    );
 }
 
 /// The four contract forms, each under the bridge's ROW convention:
@@ -203,7 +212,10 @@ fn all_four_contract_forms_execute_green() {
                 .expect_err("bias-epilogue forms must be refused under the ROW convention");
             let msg = format!("{err:#}");
             assert!(msg.contains("refused BEFORE dispatch"), "{form:?}: {msg}");
-            assert!(msg.contains("ROW-order D"), "{form:?} refusal must name the finding: {msg}");
+            assert!(
+                msg.contains("ROW-order D"),
+                "{form:?} refusal must name the finding: {msg}"
+            );
             stream.synchronize().expect("sync");
             assert!(
                 from_device(&stream, &dest).iter().all(|&v| v == 0.0),
@@ -276,9 +288,12 @@ fn marker_elected_plan_matches_decomposed_route_tolerance_based() {
         (cx, a, b, out)
     };
     let data_for = |a: NodeIndex, b: NodeIndex| -> FxHashMap<NodeIndex, TypedBuffer> {
-        [(a, TypedBuffer::from(weights(32, 1))), (b, TypedBuffer::from(weights(24, 2)))]
-            .into_iter()
-            .collect()
+        [
+            (a, TypedBuffer::from(weights(32, 1))),
+            (b, TypedBuffer::from(weights(24, 2))),
+        ]
+        .into_iter()
+        .collect()
     };
     // The seeded budget the CPU election pin measured green (see
     // tests/cublaslt_election.rs).
@@ -295,13 +310,14 @@ fn marker_elected_plan_matches_decomposed_route_tolerance_based() {
     let mut fused = CudaRuntime::load_with_cublaslt(&cx).expect("load fused");
     let data = data_for(a.id, b.id);
     fused.search(&data, &options).expect("fused search");
-    let elected = fused
-        .plan()
-        .expect("plan")
-        .dag
-        .node_weights()
-        .any(|n| matches!(n, BufferNode::Compute { op, .. } if op.label().starts_with("CublasLt")));
-    assert!(elected, "the fused route must actually elect the marker for this comparison");
+    let elected =
+        fused.plan().expect("plan").dag.node_weights().any(
+            |n| matches!(n, BufferNode::Compute { op, .. } if op.label().starts_with("CublasLt")),
+        );
+    assert!(
+        elected,
+        "the fused route must actually elect the marker for this comparison"
+    );
     fused.set_data(a.id, weights(32, 1));
     fused.set_data(b.id, weights(24, 2));
     fused.execute().expect("fused execute");

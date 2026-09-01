@@ -9,7 +9,9 @@
 //! form — with no input there is nothing to mutate.
 
 use luminal::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
-use luminal::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
+use luminal::layout_ir::{
+    AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
+};
 
 /// `IotaGeneric() -> out`
 ///
@@ -39,12 +41,13 @@ impl Bufferizable for Iota {}
 
 impl ToDps for Iota {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(IotaDps { expr: self.expr.clone() }))
+        Some(Box::new(IotaDps {
+            expr: self.expr.clone(),
+        }))
     }
 }
 
 impl LayoutIrOp for Iota {}
-
 
 /// Destination-passing form of [`Iota`], signature spelled slot by slot:
 ///
@@ -84,7 +87,11 @@ impl BufferTensorIrOp for IotaDps {
 
 impl Bufferizable for IotaDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 0,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -125,7 +132,6 @@ impl OpMatcher for IotaMatcher {
         ]
     }
 
-
     fn metadata_slots(&self) -> &'static [(&'static str, usize)] {
         &[("expr", 0), ("shape", 1), ("out_layout", 2)]
     }
@@ -136,7 +142,9 @@ impl OpMatcher for IotaMatcher {
     /// fixpoint-invariants stratum panics on a PROVEN violation. An enode
     /// reaching this matcher is certified by construction.
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(Iota { expr: parse_int_expr(site, &site.child_class(0), 64, Some(&site.child_class(1))) })
+        Box::new(Iota {
+            expr: parse_int_expr(site, &site.child_class(0), 64, Some(&site.child_class(1))),
+        })
     }
 }
 
@@ -147,14 +155,17 @@ impl OpMatcher for IotaMatcher {
 // 2026-08-13: everything about an op lives in the op's folder).
 // ---------------------------------------------------------------------------
 
-use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 use crate::kernels::expect_op;
+use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 
 /// Iota coordinate generator. Typed dests 2026-08-11: the exact i64
 /// evaluation lands in NATIVE integer storage (the old `as f32` store
 /// was the producer side of the Int-in-f32 smuggling and its 2^24
 /// exactness cliff).
-pub(crate) fn kernel(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+pub(crate) fn kernel(
+    op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
     let op = expect_op::<IotaDps>(op)?;
     let Some(expr) = &op.expr else {
         anyhow::bail!("iota reference kernel supports Lit/Coord/Add/Mul expressions only");
@@ -175,16 +186,16 @@ pub(crate) fn kernel(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) ->
         // Iota is Int by its dtype rule; the i64 evaluation lands
         // checked in i32 (loud on overflow — non-wrapping ruling).
         TypedBuffer::I32(dest) => {
-            for flat in 0..numel {
+            for (flat, slot) in dest.iter_mut().enumerate().take(numel) {
                 let value = eval_at(flat, &mut coords);
-                dest[flat] = i32::try_from(value).map_err(|_| {
+                *slot = i32::try_from(value).map_err(|_| {
                     anyhow::anyhow!("iota value {value} overflows i32 (ints are non-wrapping)")
                 })?;
             }
         }
         TypedBuffer::I64(dest) => {
-            for flat in 0..numel {
-                dest[flat] = eval_at(flat, &mut coords);
+            for (flat, slot) in dest.iter_mut().enumerate().take(numel) {
+                *slot = eval_at(flat, &mut coords);
             }
         }
         other => anyhow::bail!(

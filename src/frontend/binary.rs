@@ -453,10 +453,10 @@ impl F32Pow for f32 {
 // #[cfg(test)]
 #[cfg(test)]
 pub(super) mod tests {
-    use luminal::prelude::*;
     use crate::tests::{assert_close, random_vec};
     use candle_core::{DType, Device, Tensor};
     use itertools::Itertools;
+    use luminal::prelude::*;
     use proptest::prelude::*;
 
     pub fn identity(v: Vec<f32>) -> Vec<f32> {

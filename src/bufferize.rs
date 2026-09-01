@@ -77,7 +77,7 @@ use petgraph::algo::toposort;
 use petgraph::graph::{DiGraph, NodeIndex};
 
 use crate::layout_ir::{
-    must_ties, permits_sharing, Access, ExtractedGraph, ExtractedNode, FreedBy, LayoutIrOp,
+    Access, ExtractedGraph, ExtractedNode, FreedBy, LayoutIrOp, must_ties, permits_sharing,
 };
 
 // =============================================================================
@@ -422,7 +422,11 @@ impl<L: PlanLayout> BufferIrGraph<L> {
                 Owner::Caller => "caller",
                 Owner::System => "system",
             };
-            let writable = if buffer.access == Access::ReadWrite { "rw" } else { "ro" };
+            let writable = if buffer.access == Access::ReadWrite {
+                "rw"
+            } else {
+                "ro"
+            };
             out.push_str(&format!(
                 "  {} [{owner}, {writable}]\n",
                 self.buffer_name(&buffer.id)
@@ -434,7 +438,9 @@ impl<L: PlanLayout> BufferIrGraph<L> {
         for idx in self.dag.node_indices() {
             match &self.dag[idx] {
                 BufferNode::BufferInput { .. } => {}
-                BufferNode::Compute { op, reads, writes, .. } => op_lines.push(format!(
+                BufferNode::Compute {
+                    op, reads, writes, ..
+                } => op_lines.push(format!(
                     "  {}: [{}] -> [{}]",
                     op.label(),
                     self.names(reads),
@@ -449,8 +455,11 @@ impl<L: PlanLayout> BufferIrGraph<L> {
                     let mut slots: Vec<&OutputBinding<L>> = slots.iter().collect();
                     slots.sort_by_key(|slot| slot.index);
                     for slot in slots {
-                        output_lines
-                            .push(format!("  out {} -> {}", slot.index, self.buffer_name(&slot.buffer)));
+                        output_lines.push(format!(
+                            "  out {} -> {}",
+                            slot.index,
+                            self.buffer_name(&slot.buffer)
+                        ));
                     }
                 }
             }
@@ -523,7 +532,9 @@ impl<L: PlanLayout> BufferIrGraph<L> {
                     // supplies is the edge's label, not the box's.
                     ("Input".to_string(), "rounded,filled", "#dbeafe", "#2563eb")
                 }
-                BufferNode::Compute { op, reads, ties, .. } => {
+                BufferNode::Compute {
+                    op, reads, ties, ..
+                } => {
                     // Single-source rules only (<HR/> separators, borderless
                     // cells): a CELLBORDER next to the outer BORDER renders
                     // as an ugly double line.
@@ -591,8 +602,7 @@ impl<L: PlanLayout> BufferIrGraph<L> {
             let weight = edge.weight();
             // Dependency ordering (Anti edges and the alloc -> first-toucher
             // edge, whose port marks it) renders dashed; bytes render solid.
-            let is_dependency =
-                weight.kind == EdgeKind::Anti || weight.port == "alloc";
+            let is_dependency = weight.kind == EdgeKind::Anti || weight.port == "alloc";
             let (c, style) = if is_dependency {
                 ("#000000", "dashed")
             } else {
@@ -621,7 +631,10 @@ impl<L: PlanLayout> BufferIrGraph<L> {
                         label = dot_escape(&self.buffer_name(&weight.buffer));
                     }
                 }
-                if let BufferNode::Compute { op, writes, ties, .. } = &self.dag[edge.source()] {
+                if let BufferNode::Compute {
+                    op, writes, ties, ..
+                } = &self.dag[edge.source()]
+                {
                     if let Some(result) = writes.iter().position(|b| b == &weight.buffer) {
                         if let Some(&(operand, _)) = ties.iter().find(|(_, r)| *r == result) {
                             tail = format!(
@@ -1006,7 +1019,9 @@ impl<'a> Analyzer<'a> {
     fn happens_before(&self, reader_site: Option<(usize, usize)>, writer_op: usize) -> bool {
         match reader_site {
             None => false,
-            Some((reader_op, _)) => reader_op != writer_op && self.reachable[reader_op].contains(&writer_op),
+            Some((reader_op, _)) => {
+                reader_op != writer_op && self.reachable[reader_op].contains(&writer_op)
+            }
         }
     }
 
@@ -1129,7 +1144,8 @@ impl<'a> Analyzer<'a> {
             return;
         }
         let decided_in_place = self.try_in_place(op, operand, result);
-        self.in_place.insert((op.position, operand), decided_in_place);
+        self.in_place
+            .insert((op.position, operand), decided_in_place);
         if decided_in_place {
             // Commit: the tied result now shares the operand's buffer.
             let operand_value = &op.operands[operand];
@@ -1183,7 +1199,11 @@ impl<'a> Analyzer<'a> {
         // reader (no dependence path to this op) is a conflict, not a free pass.
         // Skipped entirely for non-writing candidates: there is no new write to
         // interfere with anything.
-        let raw_scan = if introduces_write { self.reads.clone() } else { Vec::new() };
+        let raw_scan = if introduces_write {
+            self.reads.clone()
+        } else {
+            Vec::new()
+        };
         for read in raw_scan {
             if read.site == Some((op.position, operand)) {
                 // "A use cannot conflict with itself. Note: just being the same
@@ -1279,7 +1299,9 @@ impl<'a> Analyzer<'a> {
     fn alias_set_is_read_only(&mut self, operand_value: &ClassId) -> bool {
         // The read-only seeds are few; check each against the operand's set.
         let read_only: Vec<ClassId> = self.facts.read_only.iter().cloned().collect();
-        read_only.iter().any(|ro| self.alias.same(ro, operand_value))
+        read_only
+            .iter()
+            .any(|ro| self.alias.same(ro, operand_value))
     }
 }
 
@@ -1369,9 +1391,7 @@ fn validate_input_program(graph: &ExtractedGraph) -> Result<()> {
             continue;
         };
         for (operand, input) in op.inputs.iter().enumerate() {
-            if undefined.contains(&input.value)
-                && op.op.operand_reads_memory(operand)
-            {
+            if undefined.contains(&input.value) && op.op.operand_reads_memory(operand) {
                 anyhow::bail!(
                     "invalid input program: op {} reads undefined contents \
                      through operand {}: undefined (poison) values are \
@@ -1426,8 +1446,10 @@ fn validate_input_program(graph: &ExtractedGraph) -> Result<()> {
                 .entry(input.buffer.id_eclass.clone())
                 .or_default()
                 .insert(input.value.eclass.clone());
-            input_layouts
-                .insert(input.value.eclass.clone(), input.value.layout.eclass.clone());
+            input_layouts.insert(
+                input.value.eclass.clone(),
+                input.value.layout.eclass.clone(),
+            );
         }
     }
     let mut output_buffers: Vec<ClassId> = Vec::new();
@@ -1490,9 +1512,7 @@ fn validate_input_program(graph: &ExtractedGraph) -> Result<()> {
         // named the same layout twice), not region analysis.
         for (i, a) in demanded.iter().enumerate() {
             for b in &demanded[i + 1..] {
-                if input_layouts.get(a).is_some()
-                    && input_layouts.get(a) == input_layouts.get(b)
-                {
+                if input_layouts.get(a).is_some() && input_layouts.get(a) == input_layouts.get(b) {
                     anyhow::bail!(
                         "invalid input program: output buffer {} is demanded \
                          to hold two different values ({} and {}) under the \
@@ -1675,7 +1695,11 @@ pub(crate) fn buffer_tensor_plan<L: PlanLayout>(
             position,
             iface: op.op.as_ref(),
             operands: op.inputs.iter().map(|input| input.value.clone()).collect(),
-            results: op.outputs.iter().map(|output| output.eclass.clone()).collect(),
+            results: op
+                .outputs
+                .iter()
+                .map(|output| output.eclass.clone())
+                .collect(),
         })
         .collect();
 
@@ -1689,7 +1713,9 @@ pub(crate) fn buffer_tensor_plan<L: PlanLayout>(
     // (assignment and graph building never read `facts`).
     let seeds = find_seeds(graph, &order, &analysis_ops);
     for seed in &seeds {
-        facts.pinned.insert(seed.poison.clone(), seed.buffer_eclass.clone());
+        facts
+            .pinned
+            .insert(seed.poison.clone(), seed.buffer_eclass.clone());
     }
 
     let mut analysis = Analyzer::new(&analysis_ops, &facts).run()?;
@@ -1962,7 +1988,13 @@ fn validate_plan<L: PlanLayout>(dag: &DiGraph<BufferNode<L>, BufferEdge>) -> Res
                      writer must be folded before the WAR scan"
                 );
             }
-            BufferNode::Compute { op, reads, writes, ties, .. } => {
+            BufferNode::Compute {
+                op,
+                reads,
+                writes,
+                ties,
+                ..
+            } => {
                 if reads.is_empty()
                     && !writes.is_empty()
                     && (0..writes.len()).all(|result| op.result_is_undefined(result))
@@ -1978,8 +2010,7 @@ fn validate_plan<L: PlanLayout>(dag: &DiGraph<BufferNode<L>, BufferEdge>) -> Res
                         op.label()
                     );
                 }
-                let derives =
-                    |result: usize| ties.iter().any(|(_, r)| *r == result);
+                let derives = |result: usize| ties.iter().any(|(_, r)| *r == result);
                 if !reads.is_empty()
                     && !writes.is_empty()
                     && (0..reads.len()).all(|operand| !op.operand_reads_memory(operand))
@@ -2258,14 +2289,8 @@ pub(crate) fn lower<L: PlanLayout>(
                     reads: reads.clone(),
                     writes: writes.clone(),
                     ties: ties.clone(),
-                    operand_info: operands
-                        .iter()
-                        .map(&describe)
-                        .collect::<Result<Vec<_>>>()?,
-                    result_info: results
-                        .iter()
-                        .map(&describe)
-                        .collect::<Result<Vec<_>>>()?,
+                    operand_info: operands.iter().map(&describe).collect::<Result<Vec<_>>>()?,
+                    result_info: results.iter().map(&describe).collect::<Result<Vec<_>>>()?,
                 });
                 for (idx, tensor) in operands.iter().enumerate() {
                     if let Some(&from) = producer.get(&residence(tensor)) {
@@ -2352,9 +2377,7 @@ pub(crate) fn lower<L: PlanLayout>(
                     }
                     let source = producer
                         .iter()
-                        .find(|((value, buffer), _)| {
-                            *value == slot.value && *buffer != slot.buffer
-                        })
+                        .find(|((value, buffer), _)| *value == slot.value && *buffer != slot.buffer)
                         .map(|((_, buffer), node)| (buffer.clone(), *node));
                     if let Some((src_buffer, from)) = source {
                         // MINT SITE — cause 2 (BOUNDARY PLACEMENT): this
@@ -2423,10 +2446,8 @@ pub(crate) fn lower<L: PlanLayout>(
         if operand_backed {
             continue; // the operand-derived edge already exists
         }
-        let (Some(&from), Some(&to)) = (
-            lowered.get(&edge.source()),
-            lowered.get(&edge.target()),
-        ) else {
+        let (Some(&from), Some(&to)) = (lowered.get(&edge.source()), lowered.get(&edge.target()))
+        else {
             continue;
         };
         let buffer = match &bt_dag[edge.source()] {
@@ -2674,7 +2695,10 @@ mod tests {
         .clone();
         g.output(&x, "D");
         let err = crate::test_support::bufferize_mock(&g.build()).unwrap_err();
-        assert!(err.to_string().contains("reads undefined contents"), "{err}");
+        assert!(
+            err.to_string().contains("reads undefined contents"),
+            "{err}"
+        );
     }
 
     /// A read-only input donated as the in-place destination: writing it is
@@ -2773,7 +2797,10 @@ mod tests {
         let x = g.input_binding("x", "B", Some(Access::ReadWrite), None, "rm");
         g.output(&x, "B");
         let err = crate::test_support::bufferize_mock(&g.build()).unwrap_err();
-        assert!(err.to_string().contains("no deallocation responsibility"), "{err}");
+        assert!(
+            err.to_string().contains("no deallocation responsibility"),
+            "{err}"
+        );
     }
 
     /// INPUT-PROGRAM VALIDATION: every boundary buffer must DECLARE its
@@ -2791,10 +2818,13 @@ mod tests {
             &[&x],
             &[("y", "rm")],
         )[0]
-            .clone();
+        .clone();
         g.output(&y, "D");
         let err = crate::test_support::bufferize_mock(&g.build()).unwrap_err();
-        assert!(err.to_string().contains("declares no access level"), "{err}");
+        assert!(
+            err.to_string().contains("declares no access level"),
+            "{err}"
+        );
     }
 
     /// INPUT-PROGRAM VALIDATION, output arm (user-directed): a boundary
@@ -2807,7 +2837,10 @@ mod tests {
         let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
         g.output(&e, "D");
         let err = crate::test_support::bufferize_mock(&g.build()).unwrap_err();
-        assert!(err.to_string().contains("returning undefined contents"), "{err}");
+        assert!(
+            err.to_string().contains("returning undefined contents"),
+            "{err}"
+        );
     }
 
     /// Cross-operand gate helper: an op reading x through operand 0 while
@@ -2874,8 +2907,16 @@ mod tests {
         impl crate::layout_ir::Bufferizable for DoubleTie {
             fn alias_info(&self) -> Vec<AliasInfo> {
                 vec![
-                    AliasInfo { operand: 0, result: 0, sharing: Sharing::Must },
-                    AliasInfo { operand: 1, result: 0, sharing: Sharing::Must },
+                    AliasInfo {
+                        operand: 0,
+                        result: 0,
+                        sharing: Sharing::Must,
+                    },
+                    AliasInfo {
+                        operand: 1,
+                        result: 0,
+                        sharing: Sharing::Must,
+                    },
                 ]
             }
         }
@@ -2989,7 +3030,11 @@ mod tests {
             ..Default::default()
         };
         let mut analysis = Analyzer::new(&ops, &facts).run().unwrap();
-        assert_eq!(analysis.in_place.get(&(0, 0)), Some(&true), "view admits first");
+        assert_eq!(
+            analysis.in_place.get(&(0, 0)),
+            Some(&true),
+            "view admits first"
+        );
         assert_eq!(
             analysis.in_place.get(&(1, 0)),
             Some(&false),
@@ -3020,7 +3065,11 @@ mod tests {
         let x = g.input("x", "D", Access::ReadWrite, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row")])[0].clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
             &[&v],
             &[("r", "rm")],
         )[0]
@@ -3148,8 +3197,16 @@ mod tests {
             ..Default::default()
         };
         let analysis = Analyzer::new(&ops, &facts).run().unwrap();
-        assert_eq!(analysis.in_place.get(&(1, 0)), Some(&true), "output-nearer op wins");
-        assert_eq!(analysis.in_place.get(&(0, 0)), Some(&false), "loser vetoed by commit");
+        assert_eq!(
+            analysis.in_place.get(&(1, 0)),
+            Some(&true),
+            "output-nearer op wins"
+        );
+        assert_eq!(
+            analysis.in_place.get(&(0, 0)),
+            Some(&false),
+            "loser vetoed by commit"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3169,7 +3226,10 @@ mod tests {
         let d = vbuf("D");
         let mut dag: DiGraph<BufferNode<crate::test_support::MockLayout>, BufferEdge> =
             DiGraph::new();
-        dag.add_node(BufferNode::BufferCopy { src: d.clone(), dst: d.clone() });
+        dag.add_node(BufferNode::BufferCopy {
+            src: d.clone(),
+            dst: d.clone(),
+        });
         let err = validate_plan(&dag).unwrap_err();
         assert!(err.to_string().contains("self-copy"), "{err}");
     }
@@ -3223,13 +3283,16 @@ mod tests {
         let mut g = TestGraph::new();
         let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
         let v = g.op(Box::new(MockView), &[&e], &[("v", "view")])[0].clone();
-        let r = g
-            .op(
-                Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }),
-                &[&v],
-                &[("r", "rm")],
-            )[0]
-            .clone();
+        let r = g.op(
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
+            &[&v],
+            &[("r", "rm")],
+        )[0]
+        .clone();
         g.output(&r, "out");
         let err = crate::test_support::bufferize_mock(&g.build()).unwrap_err();
         assert!(
@@ -3251,7 +3314,9 @@ mod tests {
         let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
         let v = g.op(Box::new(MockView), &[&e], &[("v", "view")])[0].clone();
         g.output(&v, "out");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::test_support::bufferize_mock(&g.build())));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::test_support::bufferize_mock(&g.build())
+        }));
         match result {
             Ok(Ok(plan)) => panic!(
                 "LAUNDERED: undefined bytes delivered to a bound output through a view:\n{}",
@@ -3283,13 +3348,18 @@ mod tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(
-            Box::new(MockViewWithMap { entries: entries.clone() }),
+            Box::new(MockViewWithMap {
+                entries: entries.clone(),
+            }),
             &[&x],
             &[("v", "row0")],
         )[0]
         .clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v],
             &[("r", "rm")],
         )[0]
@@ -3302,11 +3372,12 @@ mod tests {
             .dag
             .node_weights()
             .find_map(|node| match node {
-                BufferNode::Compute { op, operand_info, result_info, .. }
-                    if op.label() == "MockOp" =>
-                {
-                    Some((operand_info.clone(), result_info.clone()))
-                }
+                BufferNode::Compute {
+                    op,
+                    operand_info,
+                    result_info,
+                    ..
+                } if op.label() == "MockOp" => Some((operand_info.clone(), result_info.clone())),
                 _ => None,
             })
             .expect("the consumer survives lowering");
@@ -3338,25 +3409,33 @@ mod tests {
         use crate::index_expr::IotaExpr;
         use crate::test_support::{MockViewWithMap, TestGraph};
         let inner = vec![IotaExpr::Coord(1), IotaExpr::Coord(0)]; // v1 over x
-        let outer = vec![
-            IotaExpr::Add(Box::new(IotaExpr::Coord(0)), Box::new(IotaExpr::Lit(1))),
-        ]; // v2 over v1
+        let outer = vec![IotaExpr::Add(
+            Box::new(IotaExpr::Coord(0)),
+            Box::new(IotaExpr::Lit(1)),
+        )]; // v2 over v1
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v1 = g.op(
-            Box::new(MockViewWithMap { entries: inner.clone() }),
+            Box::new(MockViewWithMap {
+                entries: inner.clone(),
+            }),
             &[&x],
             &[("v1", "row0")],
         )[0]
         .clone();
         let v2 = g.op(
-            Box::new(MockViewWithMap { entries: outer.clone() }),
+            Box::new(MockViewWithMap {
+                entries: outer.clone(),
+            }),
             &[&v1],
             &[("v2", "row1")],
         )[0]
         .clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v2],
             &[("r", "rm")],
         )[0]
@@ -3369,14 +3448,17 @@ mod tests {
             .dag
             .node_weights()
             .find_map(|node| match node {
-                BufferNode::Compute { op, operand_info, .. } if op.label() == "MockOp" => {
-                    Some(operand_info.clone())
-                }
+                BufferNode::Compute {
+                    op, operand_info, ..
+                } if op.label() == "MockOp" => Some(operand_info.clone()),
                 _ => None,
             })
             .expect("the consumer survives lowering");
         assert_eq!(operand_info[0].value, v2);
-        assert_eq!(operand_info[0].buffer, plan.value_buffer[&x], "both folds redirect to x");
+        assert_eq!(
+            operand_info[0].buffer, plan.value_buffer[&x],
+            "both folds redirect to x"
+        );
         let table = crate::test_support::mock_layout_table(&graph);
         assert_eq!(
             &operand_info[0].layout, &table[&v2],
@@ -3396,7 +3478,10 @@ mod tests {
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v],
             &[("r", "rm")],
         )[0]
@@ -3409,16 +3494,22 @@ mod tests {
             .dag
             .node_weights()
             .find_map(|node| match node {
-                BufferNode::Compute { op, operand_info, .. } if op.label() == "MockOp" => {
-                    Some(operand_info.clone())
-                }
+                BufferNode::Compute {
+                    op, operand_info, ..
+                } if op.label() == "MockOp" => Some(operand_info.clone()),
                 _ => None,
             })
             .expect("the consumer survives lowering");
         assert_eq!(operand_info[0].value, v);
-        assert_eq!(operand_info[0].buffer, plan.value_buffer[&x], "the fold's redirect");
+        assert_eq!(
+            operand_info[0].buffer, plan.value_buffer[&x],
+            "the fold's redirect"
+        );
         let table = crate::test_support::mock_layout_table(&graph);
-        assert_eq!(&operand_info[0].layout, &table[&v], "the view's own layout, verbatim");
+        assert_eq!(
+            &operand_info[0].layout, &table[&v],
+            "the view's own layout, verbatim"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3447,14 +3538,17 @@ mod tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(
-            Box::new(MockViewWithMap { entries: entries.clone() }),
+            Box::new(MockViewWithMap {
+                entries: entries.clone(),
+            }),
             &[&x],
             &[("v", "row0")],
         )[0]
         .clone();
         g.output(&v, "E");
         let graph = g.build();
-        let plan = crate::test_support::bufferize_mock(&graph).expect("a view of an input escapes zero-copy");
+        let plan = crate::test_support::bufferize_mock(&graph)
+            .expect("a view of an input escapes zero-copy");
 
         assert!(
             !plan
@@ -3472,7 +3566,10 @@ mod tests {
                 _ => None,
             })
             .expect("one output slot");
-        assert_eq!(slot.buffer, plan.value_buffer[&x], "backed by the INPUT buffer");
+        assert_eq!(
+            slot.buffer, plan.value_buffer[&x],
+            "backed by the INPUT buffer"
+        );
         assert!(
             !plan.buffers.contains_key(&BufferId::Boundary(cid("buf$E"))),
             "the declared output buffer is unused and DCE'd:\n{}",
@@ -3487,7 +3584,10 @@ mod tests {
         // Option B's disclosure: the slot carries the VIEW value's own
         // elected layout, verbatim from the rendered table.
         let table = crate::test_support::mock_layout_table(&graph);
-        assert_eq!(&slot.layout, &table[&v], "the view's own layout rides the binding");
+        assert_eq!(
+            &slot.layout, &table[&v],
+            "the view's own layout rides the binding"
+        );
         assert_ne!(
             table[&v], table[&x],
             "the view's layout is a DIFFERENT function from its parent's — \
@@ -3522,13 +3622,19 @@ mod tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "D", Access::ReadWrite, "rm");
         let v = g.op(
-            Box::new(MockViewWithMap { entries: entries.clone() }),
+            Box::new(MockViewWithMap {
+                entries: entries.clone(),
+            }),
             &[&x],
             &[("v", "row0")],
         )[0]
         .clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&v],
             &[("r", "rm")],
         )[0]
@@ -3553,8 +3659,8 @@ mod tests {
             &graph, &order, assignment, &analysis, &geometry,
         )
         .expect("construction never errors on a rejected consumer tie");
-        let plan = lower(bt, &geometry)
-            .expect("an interior folded copy lowers via the base-storage copy");
+        let plan =
+            lower(bt, &geometry).expect("an interior folded copy lowers via the base-storage copy");
 
         // The repair copy moves the fold's BASE STORAGE — the parent's
         // buffer, whole. The node carries only {src, dst}; the copy is
@@ -3575,7 +3681,10 @@ mod tests {
                     plan.summary()
                 )
             });
-        assert_eq!(copy_src, plan.value_buffer[&x], "copied FROM the parent's buffer");
+        assert_eq!(
+            copy_src, plan.value_buffer[&x],
+            "copied FROM the parent's buffer"
+        );
         assert_eq!(
             plan.backed_tensor(&copy_dst),
             Some(&x),
@@ -3589,7 +3698,8 @@ mod tests {
             plan.summary()
         );
         assert_ne!(
-            copy_dst, plan.value_buffer[&r],
+            copy_dst,
+            plan.value_buffer[&r],
             "the repair destination is FRESH, never the tied result's \
              (result-shaped) buffer:\n{}",
             plan.summary()
@@ -3607,7 +3717,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            writers_of_dst, 1,
+            writers_of_dst,
+            1,
             "the repair copy is the fresh buffer's SOLE writer:\n{}",
             plan.summary()
         );
@@ -3639,8 +3750,14 @@ mod tests {
         let BufferNode::Compute { operand_info, .. } = &plan.dag[consumer] else {
             unreachable!()
         };
-        assert_eq!(operand_info[0].value, v, "the slot's VALUE stays the view's");
-        assert_eq!(operand_info[0].buffer, copy_dst, "…now anchored on the copied buffer");
+        assert_eq!(
+            operand_info[0].value, v,
+            "the slot's VALUE stays the view's"
+        );
+        assert_eq!(
+            operand_info[0].buffer, copy_dst,
+            "…now anchored on the copied buffer"
+        );
         let table = crate::test_support::mock_layout_table(&graph);
         assert_eq!(
             &operand_info[0].layout, &table[&v],
@@ -3665,20 +3782,26 @@ mod tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let p = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&x],
             &[("p", "rm")],
         )[0]
         .clone();
         let v = g.op(
-            Box::new(MockViewWithMap { entries: entries.clone() }),
+            Box::new(MockViewWithMap {
+                entries: entries.clone(),
+            }),
             &[&p],
             &[("v", "t")],
         )[0]
         .clone();
         g.output(&v, "E");
         let graph = g.build();
-        let plan = crate::test_support::bufferize_mock(&graph).expect("a minted residence escapes in place");
+        let plan = crate::test_support::bufferize_mock(&graph)
+            .expect("a minted residence escapes in place");
 
         assert!(
             !plan
@@ -3697,7 +3820,8 @@ mod tests {
             })
             .expect("one output slot");
         assert_eq!(
-            slot.buffer, plan.value_buffer[&p],
+            slot.buffer,
+            plan.value_buffer[&p],
             "backed by the parent's minted residence:\n{}",
             plan.summary()
         );
@@ -3725,7 +3849,10 @@ mod tests {
         // Option B's disclosure: the binding carries the VIEW value's own
         // elected layout — the delivery geometry over the escaping buffer.
         let table = crate::test_support::mock_layout_table(&graph);
-        assert_eq!(&slot.layout, &table[&v], "the view's own layout rides the binding");
+        assert_eq!(
+            &slot.layout, &table[&v],
+            "the view's own layout rides the binding"
+        );
         assert_eq!(
             plan.backed_tensor(&slot.buffer),
             Some(&p),
@@ -3753,14 +3880,17 @@ mod tests {
             "rm",
         );
         let v = g.op(
-            Box::new(MockViewWithMap { entries: vec![IotaExpr::Coord(0)] }),
+            Box::new(MockViewWithMap {
+                entries: vec![IotaExpr::Coord(0)],
+            }),
             &[&x],
             &[("v", "row0")],
         )[0]
         .clone();
         g.output(&v, "E");
         let graph = g.build();
-        let plan = crate::test_support::bufferize_mock(&graph).expect("a donated residence repairs");
+        let plan =
+            crate::test_support::bufferize_mock(&graph).expect("a donated residence repairs");
 
         // ONE dumb whole-base copy (a LIFETIME repair — cause 3) moves the
         // fold's base storage into a fresh escaping buffer. The node
@@ -3774,7 +3904,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(copies.len(), 1, "one base-storage copy:\n{}", plan.summary());
+        assert_eq!(
+            copies.len(),
+            1,
+            "one base-storage copy:\n{}",
+            plan.summary()
+        );
         let (copy_src, copy_dst) = copies[0].clone();
         assert_eq!(
             plan.backed_tensor(&copy_dst),
@@ -3782,11 +3917,21 @@ mod tests {
             "the destination's ASSIGNMENT names the fold ROOT — the value \
              whose bytes the whole-buffer memcpy moved"
         );
-        assert_eq!(copy_src, plan.value_buffer[&x], "…from the donated residence");
-        assert!(matches!(copy_dst, BufferId::Allocated(_)), "…into minted storage");
+        assert_eq!(
+            copy_src, plan.value_buffer[&x],
+            "…from the donated residence"
+        );
+        assert!(
+            matches!(copy_dst, BufferId::Allocated(_)),
+            "…into minted storage"
+        );
         let record = &plan.buffers[&copy_dst];
         assert_eq!(record.owner, Owner::System);
-        assert_eq!(record.freed_by, FreedBy::Caller, "the repair destination ESCAPES");
+        assert_eq!(
+            record.freed_by,
+            FreedBy::Caller,
+            "the repair destination ESCAPES"
+        );
 
         let slot = plan
             .dag
@@ -3796,9 +3941,13 @@ mod tests {
                 _ => None,
             })
             .expect("one output slot");
-        assert_eq!(slot.buffer, copy_dst, "the slot is backed by the repair copy's buffer");
+        assert_eq!(
+            slot.buffer, copy_dst,
+            "the slot is backed by the repair copy's buffer"
+        );
         assert_ne!(
-            slot.buffer, plan.value_buffer[&x],
+            slot.buffer,
+            plan.value_buffer[&x],
             "donated storage never backs an output slot:\n{}",
             plan.summary()
         );
@@ -3839,7 +3988,10 @@ mod tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let p = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&x],
             &[("p", "rm")],
         )[0]
@@ -3847,13 +3999,17 @@ mod tests {
         let row0 = vec![IotaExpr::Coord(0)];
         let transpose = vec![IotaExpr::Coord(0), IotaExpr::Coord(1)];
         let v1 = g.op(
-            Box::new(MockViewWithMap { entries: row0.clone() }),
+            Box::new(MockViewWithMap {
+                entries: row0.clone(),
+            }),
             &[&p],
             &[("v1", "row0")],
         )[0]
         .clone();
         let v2 = g.op(
-            Box::new(MockViewWithMap { entries: transpose.clone() }),
+            Box::new(MockViewWithMap {
+                entries: transpose.clone(),
+            }),
             &[&p],
             &[("v2", "t")],
         )[0]
@@ -3861,7 +4017,8 @@ mod tests {
         g.output(&v1, "D");
         g.output(&v2, "E");
         let graph = g.build();
-        let plan = crate::test_support::bufferize_mock(&graph).expect("shared-base views escape together");
+        let plan =
+            crate::test_support::bufferize_mock(&graph).expect("shared-base views escape together");
 
         let slots: Vec<OutputBinding<crate::test_support::MockLayout>> = plan
             .dag
@@ -3872,7 +4029,10 @@ mod tests {
             })
             .expect("the output node");
         assert_eq!(slots.len(), 2);
-        assert_eq!(slots[0].buffer, slots[1].buffer, "ONE escaping buffer backs both");
+        assert_eq!(
+            slots[0].buffer, slots[1].buffer,
+            "ONE escaping buffer backs both"
+        );
         assert_eq!(slots[0].buffer, plan.value_buffer[&p]);
         assert_eq!(plan.buffers[&slots[0].buffer].freed_by, FreedBy::Caller);
         assert!(
@@ -3890,7 +4050,10 @@ mod tests {
         let table = crate::test_support::mock_layout_table(&graph);
         assert_eq!(&slots[0].layout, &table[&v1]);
         assert_eq!(&slots[1].layout, &table[&v2]);
-        assert_ne!(slots[0].layout, slots[1].layout, "distinct views, distinct L");
+        assert_ne!(
+            slots[0].layout, slots[1].layout,
+            "distinct views, distinct L"
+        );
         let _ = (&row0, &transpose);
     }
 
@@ -3911,7 +4074,9 @@ mod tests {
             "rm",
         );
         let v1 = g.op(
-            Box::new(MockViewWithMap { entries: vec![IotaExpr::Coord(0)] }),
+            Box::new(MockViewWithMap {
+                entries: vec![IotaExpr::Coord(0)],
+            }),
             &[&x],
             &[("v1", "row0")],
         )[0]
@@ -3926,7 +4091,8 @@ mod tests {
         .clone();
         g.output(&v1, "E1");
         g.output(&v2, "E2");
-        let plan = crate::test_support::bufferize_mock(&g.build()).expect("one repair serves both views");
+        let plan =
+            crate::test_support::bufferize_mock(&g.build()).expect("one repair serves both views");
 
         let copies: Vec<BufferId> = plan
             .dag
@@ -3936,7 +4102,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(copies.len(), 1, "ONE base-storage copy:\n{}", plan.summary());
+        assert_eq!(
+            copies.len(),
+            1,
+            "ONE base-storage copy:\n{}",
+            plan.summary()
+        );
         let slots: Vec<OutputBinding<crate::test_support::MockLayout>> = plan
             .dag
             .node_weights()
@@ -3973,13 +4144,19 @@ mod tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "A", Access::ReadWrite, "rm");
         let v = g.op(
-            Box::new(MockViewWithMap { entries: entries.clone() }),
+            Box::new(MockViewWithMap {
+                entries: entries.clone(),
+            }),
             &[&x],
             &[("v", "row0")],
         )[0]
         .clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&v],
             &[("r", "rm")],
         )[0]
@@ -4002,7 +4179,11 @@ mod tests {
         let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[], &mock_geometry)
             .expect("assignment runs");
         let bt = crate::buffer_tensor_ir::build_buffer_tensor_ir(
-            &graph, &order, assignment, &analysis, &mock_geometry,
+            &graph,
+            &order,
+            assignment,
+            &analysis,
+            &mock_geometry,
         )
         .expect("construction survives the rejected tie");
         // Lowering takes the rendered layout table directly — there is no
@@ -4020,7 +4201,10 @@ mod tests {
                 _ => None,
             })
             .expect("the base-storage repair copy");
-        assert_ne!(copy_dst, plan.value_buffer[&r], "fresh, not the result's buffer");
+        assert_ne!(
+            copy_dst, plan.value_buffer[&r],
+            "fresh, not the result's buffer"
+        );
         assert_eq!(
             plan.backed_tensor(&copy_dst),
             Some(&x),
@@ -4038,7 +4222,10 @@ mod tests {
         // layout, so a load_plan caller gets the same two answers with no
         // table of its own.
         assert_eq!(&plan.buffers[&copy_dst].layout, &mock_geometry[&x]);
-        assert_eq!(&plan.buffers[&plan.value_buffer[&r]].layout, &mock_geometry[&r]);
+        assert_eq!(
+            &plan.buffers[&plan.value_buffer[&r]].layout,
+            &mock_geometry[&r]
+        );
         let _ = &entries;
     }
 }

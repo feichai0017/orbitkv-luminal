@@ -50,14 +50,24 @@ type FoldedSlot = (String, usize, MockLayout);
 fn folded_slots(
     text: &str,
     prefer: &[&str],
-) -> (BufferIrGraph<MockLayout>, HashMap<luminal::prelude::egraph_serialize::ClassId, MockLayout>, Vec<FoldedSlot>) {
+) -> (
+    BufferIrGraph<MockLayout>,
+    HashMap<luminal::prelude::egraph_serialize::ClassId, MockLayout>,
+    Vec<FoldedSlot>,
+) {
     let (graph, _) = test_runtime::extract_fixture_with_genome(text, prefer);
     let dps = luminal::dps::dps_rewrite(&graph);
     let table = luminal::test_support::mock_layout_table(&dps);
     let plan = luminal::test_support::bufferize_mock(&dps).expect("bufferize");
     let mut found = Vec::new();
     for node in plan.dag.node_weights() {
-        if let BufferNode::Compute { op, operand_info, result_info, .. } = node {
+        if let BufferNode::Compute {
+            op,
+            operand_info,
+            result_info,
+            ..
+        } = node
+        {
             for (slot, info) in operand_info.iter().enumerate() {
                 // The slot carries its OWN value's layout, always.
                 assert_eq!(
@@ -95,7 +105,7 @@ fn transpose_view_consumer_carries_the_views_own_layout() {
         let c = cx.tensor((3usize, 2usize));
         let _ = (x.permute((1, 0)) * c).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -114,9 +124,9 @@ fn transpose_view_consumer_carries_the_views_own_layout() {
         .dag
         .node_weights()
         .find_map(|n| match n {
-            BufferNode::Compute { op, operand_info, .. }
-                if op.label() == label && operand_info.len() > *slot =>
-            {
+            BufferNode::Compute {
+                op, operand_info, ..
+            } if op.label() == label && operand_info.len() > *slot => {
                 Some(plan.buffers[&operand_info[*slot].buffer].layout.clone())
             }
             _ => None,
@@ -146,7 +156,7 @@ fn sliced_transpose_chain_arrives_as_one_layout() {
         let c = cx.tensor((6usize, 2usize));
         let _ = (x.slice((1..3, ..)).permute((1, 0)) * c).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
@@ -176,18 +186,24 @@ fn r10_chained_matmuls_read_through_folded_layouts() {
         let w2 = cx.tensor((3usize, 5usize));
         let _ = x.matmul(w1).matmul(w2).output();
         cx.logical
-            .bound_program(&luminal_reference::ReferenceBindings)
+            .bound_program(&test_runtime::TestRuntimeBindings)
             .expect("recorder clean")
             .text
     };
     let (plan, table, found) = folded_slots(
         &text,
-        &["LayoutTensorOpCublasLt", "LayoutTensorOpIndexMapApplyViewGeneric"],
+        &[
+            "LayoutTensorOpCublasLt",
+            "LayoutTensorOpIndexMapApplyViewGeneric",
+        ],
     );
     println!(
         "r10 chain: {} folded slot(s): {:?}",
         found.len(),
-        found.iter().map(|(l, s, _)| (l.clone(), *s)).collect::<Vec<_>>()
+        found
+            .iter()
+            .map(|(l, s, _)| (l.clone(), *s))
+            .collect::<Vec<_>>()
     );
     assert!(
         !found.is_empty(),

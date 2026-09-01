@@ -53,7 +53,9 @@ fn cublaslt_in_plan(graph: &luminal::layout_ir::ExtractedGraph) -> Vec<(CublasLt
 #[test]
 fn t4_dps_alias_tables() {
     for form in CublasLtForm::ALL {
-        let dps = CublasLtDps { op: CublasLt { form, spec: None } };
+        let dps = CublasLtDps {
+            op: CublasLt { form, spec: None },
+        };
         let aliases = dps.alias_info();
         let dest = form.lit_arity();
         println!("T4 {form:?}: dest at {dest}, aliases {aliases:?}");
@@ -79,45 +81,71 @@ fn t4_dps_alias_tables() {
 #[test]
 fn t6a_bufferize_all_four_forms() {
     let programs: [(&str, CublasLtForm, Box<dyn Fn(&mut Graph)>); 4] = [
-        ("base", CublasLtForm::Base, Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let _ = x.matmul(w).output();
-        })),
-        ("bias", CublasLtForm::Bias, Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let b = cx.tensor(3usize);
-            let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
-        })),
-        ("accumulate", CublasLtForm::Accumulate, Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let c = cx.tensor((4usize, 3usize));
-            let _ = (x.matmul(w) + c).output();
-        })),
-        ("accumulate-bias", CublasLtForm::AccumulateBias, Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let c = cx.tensor((4usize, 3usize));
-            let b = cx.tensor(3usize);
-            let _ = ((x.matmul(w) + c) + b.expand_dim(0, 4usize)).output();
-        })),
+        (
+            "base",
+            CublasLtForm::Base,
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let _ = x.matmul(w).output();
+            }),
+        ),
+        (
+            "bias",
+            CublasLtForm::Bias,
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let b = cx.tensor(3usize);
+                let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
+            }),
+        ),
+        (
+            "accumulate",
+            CublasLtForm::Accumulate,
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let c = cx.tensor((4usize, 3usize));
+                let _ = (x.matmul(w) + c).output();
+            }),
+        ),
+        (
+            "accumulate-bias",
+            CublasLtForm::AccumulateBias,
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let c = cx.tensor((4usize, 3usize));
+                let b = cx.tensor(3usize);
+                let _ = ((x.matmul(w) + c) + b.expand_dim(0, 4usize)).output();
+            }),
+        ),
     ];
     for (name, form, build) in &programs {
         let text = {
             let mut cx = Graph::new();
             build(&mut cx);
-            cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+            cx.logical
+                .bound_program(&test_runtime::TestRuntimeBindings)
+                .expect("recorder clean")
+                .text
         };
         let (graph, _) = test_runtime::extract_fixture_with_genome(
             &text,
             // The CONTRACT is elected by name; the view op is round-10
             // routing infrastructure (sibling result -> boundary value).
-            &[form.constructor_name(), "LayoutTensorOpIndexMapApplyViewGeneric"],
+            &[
+                form.constructor_name(),
+                "LayoutTensorOpIndexMapApplyViewGeneric",
+            ],
         );
         let elected = cublaslt_in_plan(&graph);
-        assert_eq!(elected.len(), 1, "{name}: the {form:?} contract elected by name");
+        assert_eq!(
+            elected.len(),
+            1,
+            "{name}: the {form:?} contract elected by name"
+        );
         assert_eq!(elected[0].0.form, *form);
         assert_eq!(
             elected[0].1.len(),
@@ -183,9 +211,7 @@ fn t6a_bufferize_all_four_forms() {
             .dag
             .node_weights()
             .find_map(|node| match node {
-                luminal::bufferize::BufferNode::BufferOutput { slots } => {
-                    Some(slots[0].clone())
-                }
+                luminal::bufferize::BufferNode::BufferOutput { slots } => Some(slots[0].clone()),
                 _ => None,
             })
             .expect("slot 0");
@@ -210,7 +236,9 @@ fn t6a_bufferize_all_four_forms() {
         let table = luminal::test_support::mock_layout_table(&dps_graph);
         assert_eq!(
             &slot.layout,
-            table.get(&slot.value).expect("slot value has a mock table row"),
+            table
+                .get(&slot.value)
+                .expect("slot value has a mock table row"),
             "{name}: the binding discloses the slot value's own elected layout\n{summary}"
         );
         let backs = plan
@@ -238,16 +266,21 @@ fn t6a_accumulate_intermediate_c_donation_observed() {
         let y = cx.tensor((4usize, 3usize));
         let z = cx.tensor((4usize, 3usize));
         let c = y + z; // intermediate C (program-freed once consumed)
-        // Original boundary-flowing spelling (restored under
-        // escape-and-disclose: the view-produced bound output escapes);
-        // this probe's subject is donation.
+                       // Original boundary-flowing spelling (restored under
+                       // escape-and-disclose: the view-produced bound output escapes);
+                       // this probe's subject is donation.
         let _ = (x.matmul(w) + c).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     let (graph, _) = test_runtime::extract_fixture_with_genome(&text, PIN);
     let elected = cublaslt_in_plan(&graph);
     assert!(
-        elected.iter().any(|(op, _)| op.form == CublasLtForm::Accumulate),
+        elected
+            .iter()
+            .any(|(op, _)| op.form == CublasLtForm::Accumulate),
         "the Accumulate contract elected"
     );
     let plan = luminal::test_support::bufferize_mock(&luminal::dps::dps_rewrite(&graph))
@@ -436,18 +469,32 @@ fn t6b_relu_decorates_symbolic_k() {
     let base_ops = count_op(&s, "LayoutTensorOpCublasLt");
     let relu_value = count_op(&s, "CublasLtEpilogueRelu");
     println!("T6b symbolic-k relu: {base_ops} base-form enode(s), relu-value minted: {relu_value}");
-    assert!(relu_value >= 1, "the relu field rewrite fired on the symbolic-k op");
-    assert!(base_ops >= 2, "base + relu-decorated (same contract, field differs)");
+    assert!(
+        relu_value >= 1,
+        "the relu field rewrite fired on the symbolic-k op"
+    );
+    assert!(
+        base_ops >= 2,
+        "base + relu-decorated (same contract, field differs)"
+    );
 
     let (graph, _) = test_runtime::extract_fixture_with_genome(&fx, PIN);
     let elected = cublaslt_in_plan(&graph);
     assert_eq!(elected.len(), 1);
-    let spec = elected[0].0.spec.as_ref().expect("spec parses with symbolic k");
+    let spec = elected[0]
+        .0
+        .spec
+        .as_ref()
+        .expect("spec parses with symbolic k");
     println!(
         "  elected: ep={:?} m={} n={} k={} ldb={}",
         spec.epilogue, spec.m, spec.n, spec.k, spec.ldb
     );
-    assert_eq!(spec.epilogue, CuEpilogue::Relu, "relu epilogue survives symbolic k");
+    assert_eq!(
+        spec.epilogue,
+        CuEpilogue::Relu,
+        "relu epilogue survives symbolic k"
+    );
     assert!(matches!(spec.k, CuDim::Symbolic(_)));
     assert!(
         spec.ldb == 8 || matches!(spec.ldb, CuDim::Symbolic(_)),
@@ -530,9 +577,15 @@ fn t6c_strided_output_injectivity_probe() {
     // D is read through the sibling's composed view of the creator's
     // authored (strided-lists) pitched layout.
     assert_eq!(sites, 2, "the logical site pair marks");
-    assert!(a >= 1, "A reading mints via the left-major arm (symbolic cols)");
+    assert!(
+        a >= 1,
+        "A reading mints via the left-major arm (symbolic cols)"
+    );
     assert!(b >= 1, "B reading mints");
-    assert!(d >= 1, "the padded D reading mints against the creator facts");
+    assert!(
+        d >= 1,
+        "the padded D reading mints against the creator facts"
+    );
     assert!(ops >= 1, "creator-certified strided output ASSEMBLES");
     println!("  VERDICT: creator-rewrite strided output ASSEMBLES (refusal LIFTED)");
 
@@ -544,7 +597,10 @@ fn t6c_strided_output_injectivity_probe() {
         "  elected: m={} n={} k={} lda={} ldb={} ldd={}",
         spec.m, spec.n, spec.k, spec.lda, spec.ldb, spec.ldd
     );
-    assert!(matches!(spec.m, CuDim::Symbolic(_)), "call m = logical n = symbolic");
+    assert!(
+        matches!(spec.m, CuDim::Symbolic(_)),
+        "call m = logical n = symbolic"
+    );
     assert_eq!(spec.k, 4);
     assert_eq!(spec.ldb, 4, "B = x RM contiguous, literal");
     assert!(

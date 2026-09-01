@@ -27,30 +27,29 @@ pub fn genome_preferring(
     preferences: &[&str],
 ) -> luminal::extractor::Genome {
     let preferences: Vec<String> = preferences.iter().map(|s| s.to_string()).collect();
-    let ordered = |candidates: &[(String, luminal::extractor::ProducerChoice)],
-                   level: usize|
-     -> Vec<usize> {
-        let admitted = level_admits(level);
-        let mut order: Vec<usize> = Vec::new();
-        for preferred in &preferences {
+    let ordered =
+        |candidates: &[(String, luminal::extractor::ProducerChoice)], level: usize| -> Vec<usize> {
+            let admitted = level_admits(level);
+            let mut order: Vec<usize> = Vec::new();
+            for preferred in &preferences {
+                for (i, (name, _)) in candidates.iter().enumerate() {
+                    if name == preferred && admitted(name) && !order.contains(&i) {
+                        order.push(i);
+                    }
+                }
+            }
             for (i, (name, _)) in candidates.iter().enumerate() {
-                if name == preferred && admitted(name) && !order.contains(&i) {
+                if !name.contains("Copy") && admitted(name) && !order.contains(&i) {
                     order.push(i);
                 }
             }
-        }
-        for (i, (name, _)) in candidates.iter().enumerate() {
-            if !name.contains("Copy") && admitted(name) && !order.contains(&i) {
-                order.push(i);
+            for (i, (name, _)) in candidates.iter().enumerate() {
+                if admitted(name) && !order.contains(&i) {
+                    order.push(i);
+                }
             }
-        }
-        for (i, (name, _)) in candidates.iter().enumerate() {
-            if admitted(name) && !order.contains(&i) {
-                order.push(i);
-            }
-        }
-        order
-    };
+            order
+        };
     genome_with_ordering(egraph, matchers, &ordered)
 }
 

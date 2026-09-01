@@ -105,9 +105,13 @@ fn fixture4_sliced_source_refused() {
     let fx = format!(
         "{}{SCHEDULE}\n",
         matmul_2d(
-            "(IntLit 2)", "(IntLit 4)", "(IntLit 3)",
-            "(IntLit 2)", "(IntLit 7)",
-            "(IntLit 7)", "(IntLit 4)",
+            "(IntLit 2)",
+            "(IntLit 4)",
+            "(IntLit 3)",
+            "(IntLit 2)",
+            "(IntLit 7)",
+            "(IntLit 7)",
+            "(IntLit 4)",
         )
     );
     let serialized = test_runtime::serialize_fixture(&fx);
@@ -152,7 +156,10 @@ fn fixture7_m1_degenerate_no_panic() {
         let x = cx.tensor((1usize, 4usize));
         let w = cx.tensor((4usize, 3usize));
         let _out = x.matmul(w).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     // serialize_fixture panics if saturation panics.
     let serialized = test_runtime::serialize_fixture(&text);
@@ -161,9 +168,15 @@ fn fixture7_m1_degenerate_no_panic() {
         .values()
         .filter(|n| n.op == "CublasLtLogicalMatmulSite")
         .count();
-    println!("fixture7 m=1: {} nodes, {sites} site(s)", serialized.nodes.len());
+    println!(
+        "fixture7 m=1: {} nodes, {sites} site(s)",
+        serialized.nodes.len()
+    );
     // ROUND-10 RE-PIN (was 1): original + transpose-sandwich sibling.
-    assert_eq!(sites, 2, "the degenerate matmul carries original + sibling sites");
+    assert_eq!(
+        sites, 2,
+        "the degenerate matmul carries original + sibling sites"
+    );
 
     let (graph, _) = test_runtime::extract_fixture_with_genome(&text, PIN);
     let ops = cublaslt_ops(&graph);
@@ -197,9 +210,13 @@ fn fixture7_extent1_weld_single_canonical_reading() {
     let fx = format!(
         "{}{SCHEDULE}\n",
         matmul_2d(
-            "(IntLit 1)", "(IntLit 3)", "(IntLit 1)",
-            "(IntLit 1)", "(IntLit 1)",
-            "(IntLit 1)", "(IntLit 3)",
+            "(IntLit 1)",
+            "(IntLit 3)",
+            "(IntLit 1)",
+            "(IntLit 1)",
+            "(IntLit 1)",
+            "(IntLit 1)",
+            "(IntLit 3)",
         )
     );
     let serialized = test_runtime::serialize_fixture(&fx);
@@ -218,13 +235,19 @@ fn fixture7_extent1_weld_single_canonical_reading() {
     // The weld can congruence several sibling spellings into the same
     // term; what matters is boundedness and that every elected spec is
     // sound (checked below).
-    assert!(sites >= 2 && sites <= 4, "bounded sites despite the coordinate weld: {sites}");
+    assert!(
+        sites >= 2 && sites <= 4,
+        "bounded sites despite the coordinate weld: {sites}"
+    );
     assert!(a_readings >= 1, "the welded bytes are read at least once");
 
     let (graph, _) = test_runtime::extract_fixture_with_genome(&fx, PIN);
     let ops = cublaslt_ops(&graph);
     assert_eq!(ops.len(), 1, "election picks one reading");
-    let spec = ops[0].spec.as_ref().expect("spec parses and cross-validates");
+    let spec = ops[0]
+        .spec
+        .as_ref()
+        .expect("spec parses and cross-validates");
     println!(
         "  m={} n={} k={} trans_a={} trans_b={}",
         spec.m, spec.n, spec.k, spec.trans_a, spec.trans_b
@@ -243,9 +266,13 @@ fn fixture7_all_ones_corner_observed() {
     let fx = format!(
         "{}{SCHEDULE}\n",
         matmul_2d(
-            "(IntLit 1)", "(IntLit 1)", "(IntLit 1)",
-            "(IntLit 1)", "(IntLit 1)",
-            "(IntLit 1)", "(IntLit 1)",
+            "(IntLit 1)",
+            "(IntLit 1)",
+            "(IntLit 1)",
+            "(IntLit 1)",
+            "(IntLit 1)",
+            "(IntLit 1)",
+            "(IntLit 1)",
         )
     );
     let serialized = test_runtime::serialize_fixture(&fx);

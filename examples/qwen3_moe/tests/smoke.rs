@@ -3,9 +3,9 @@
 //! the anatomy is validated against scalar references in luminal_nn;
 //! these prove the crate's decode loop over the position-slots driver.
 
+use luminal::implementation_search::ImplementationSearchOptions;
 use qwen3_moe::model::Qwen3MoeDims;
 use qwen3_moe::{DecodeStep, Decoder, weights};
-use luminal::implementation_search::ImplementationSearchOptions;
 
 fn smoke_search() -> ImplementationSearchOptions {
     ImplementationSearchOptions {
@@ -21,7 +21,10 @@ fn smoke_search() -> ImplementationSearchOptions {
 /// frontier advances via the PositionSlots driver, bitwise-identical
 /// reruns.
 #[test]
-#[cfg_attr(not(feature = "zoo-proofs"), ignore = "zoo fidelity proof: a full search + decode loop (llama3 measured at 185s). The zoo is not part of the default test path — run explicitly, e.g. `cargo test -p llama3 -- --ignored`.")]
+#[cfg_attr(
+    not(feature = "zoo-proofs"),
+    ignore = "zoo fidelity proof: a full search + decode loop (llama3 measured at 185s). The zoo is not part of the default test path — run explicitly, e.g. `cargo test -p llama3 -- --ignored`."
+)]
 fn tiny_decode_loop_is_deterministic_and_advances_the_cache() {
     let dims = Qwen3MoeDims::tiny();
     let max_seq = 4usize;

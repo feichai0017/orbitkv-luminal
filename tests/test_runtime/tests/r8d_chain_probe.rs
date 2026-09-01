@@ -93,8 +93,15 @@ fn shared_square_weight_both_ways() -> String {
     )
 }
 
-fn class_of_child(s: &EGraph, node: &luminal::prelude::egraph_serialize::Node, i: usize) -> Option<ClassId> {
-    node.children.get(i).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone())
+fn class_of_child(
+    s: &EGraph,
+    node: &luminal::prelude::egraph_serialize::Node,
+    i: usize,
+) -> Option<ClassId> {
+    node.children
+        .get(i)
+        .and_then(|id| s.nodes.get(id))
+        .map(|c| c.eclass.clone())
 }
 
 fn class_has(s: &EGraph, class: &ClassId, op: &str) -> bool {
@@ -104,15 +111,23 @@ fn class_has(s: &EGraph, class: &ClassId, op: &str) -> bool {
 /// (site out class, operation, layout tensor class) for every A reading.
 fn a_readings(s: &EGraph) -> Vec<(ClassId, &'static str, ClassId)> {
     let mut out = Vec::new();
-    for n in s.nodes.values().filter(|n| n.op == "CublasLtOperandADescriptor") {
-        let Some(site_class) = class_of_child(s, n, 0) else { continue };
+    for n in s
+        .nodes
+        .values()
+        .filter(|n| n.op == "CublasLtOperandADescriptor")
+    {
+        let Some(site_class) = class_of_child(s, n, 0) else {
+            continue;
+        };
         let site_out = s
             .nodes
             .values()
             .find(|m| m.eclass == site_class && m.op == "CublasLtLogicalMatmulSite")
             .and_then(|m| class_of_child(s, m, 2));
         let Some(site_out) = site_out else { continue };
-        let Some(lt) = class_of_child(s, n, 1) else { continue };
+        let Some(lt) = class_of_child(s, n, 1) else {
+            continue;
+        };
         let op = match class_of_child(s, n, 2) {
             Some(c) if class_has(s, &c, "CublasLtOperationT") => "T",
             Some(c) if class_has(s, &c, "CublasLtOperationN") => "N",
@@ -188,7 +203,11 @@ fn r8d_shared_square_weight_each_site_reads_only_its_own_map() {
         for (op, lt) in entries {
             by_lt.entry(lt.clone()).or_default().insert(op);
         }
-        assert_eq!(by_lt.len(), 2, "the two readings ride two DISTINCT layout tensors");
+        assert_eq!(
+            by_lt.len(),
+            2,
+            "the two readings ride two DISTINCT layout tensors"
+        );
         for (lt, ops) in &by_lt {
             assert_eq!(
                 ops.len(),
@@ -231,7 +250,10 @@ fn r8d_candidate_count_on_the_shared_weight() {
     // per site, 4 sites, 16 candidates. Bounded sound multiplicity, every
     // candidate audited below; election picks (the strict level-0 genome
     // never prefers the materialize-first column-form frames).
-    assert_eq!(ops, 16, "four candidates per site — the 2x2 frame cross product");
+    assert_eq!(
+        ops, 16,
+        "four candidates per site — the 2x2 frame cross product"
+    );
 
     // PER-CANDIDATE SOUNDNESS: parse EVERY candidate enode; parse_spec's
     // internal cross-checks panic on any operation/descriptor
@@ -241,9 +263,13 @@ fn r8d_candidate_count_on_the_shared_weight() {
         if node.op != "LayoutTensorOpCublasLt" {
             continue;
         }
-        let site = ExtractionSite { egraph: &s, node_id: id, node };
-        let spec = parse_spec(&site, CublasLtForm::Base)
-            .expect("every candidate parses (no silent None)");
+        let site = ExtractionSite {
+            egraph: &s,
+            node_id: id,
+            node,
+        };
+        let spec =
+            parse_spec(&site, CublasLtForm::Base).expect("every candidate parses (no silent None)");
         let (m, n, k) = spec.mnk_lits();
         // The frame pair of THIS shared-weight program: (2,3,3)/(3,2,3).
         let canonical = if m <= n { (m, n, k) } else { (n, m, k) };

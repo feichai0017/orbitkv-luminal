@@ -38,12 +38,15 @@ fn corpus_scripts_all_green() {
     // this gate existed, so the rot went unnoticed. Deletion or
     // rewrite is a ruling.
     const STALE_SCRIPTS: &[&str] = &["foldr_example.egg"];
-    // The corpus assembles against the TESTRUNTIME matcher set (the
-    // superset: built-ins + view + test-only ops) — the assembly the
-    // view-dependent boundary scripts actually run under in the lib
-    // suite, and the shape of the old prototype's corpus runner.
+    // The corpus assembles against THE REFERENCE REGISTRY — not a
+    // superset. Every script here must be expressible in the vocabulary
+    // the reference runtime actually ships; a script that needs a
+    // view/fused/mutating spelling belongs in that runtime's own fixture
+    // tree, gated by that runtime's own corpus. That is a property of
+    // the file's HOME, never of a name filter (`STALE_SCRIPTS` above is
+    // for bit-rot, and is not a vocabulary escape hatch).
     let program_head = luminal::egglog_snippet::assembled_program_for(
-        &luminal_reference::harness::test_runtime_matchers(),
+        &luminal_reference::ops::built_in_matchers(),
     );
     let mut failures = Vec::new();
     for script in &scripts {
@@ -53,8 +56,7 @@ fn corpus_scripts_all_green() {
         }
         let started = std::time::Instant::now();
         eprintln!("[corpus] running {script}");
-        let source = std::fs::read_to_string(format!("{dir}/{script}"))
-            .expect("script readable");
+        let source = std::fs::read_to_string(format!("{dir}/{script}")).expect("script readable");
         let program = format!("{program_head}\n\n{source}");
         let mut egraph = luminal::egglog_snippet::new_egraph();
         if let Err(err) = egraph.parse_and_run_program(Some(script.clone()), &program) {
@@ -84,8 +86,7 @@ fn corpus_scripts_all_green() {
 fn dump_assembled_program() {
     let program = luminal_reference::assembled_program();
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/target/assembled_program.egg");
-    std::fs::create_dir_all(concat!(env!("CARGO_MANIFEST_DIR"), "/target"))
-        .expect("target dir");
+    std::fs::create_dir_all(concat!(env!("CARGO_MANIFEST_DIR"), "/target")).expect("target dir");
     std::fs::write(path, program).expect("dump written");
     eprintln!("[dump] {} lines -> {path}", program.lines().count());
 }

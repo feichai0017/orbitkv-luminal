@@ -128,12 +128,22 @@ pub struct LtDesc {
 impl LtDesc {
     /// A ROW-order descriptor (the operand convention).
     pub fn row(rows: i64, cols: i64, ld: i64) -> Self {
-        Self { rows, cols, ld, order: LtOrder::Row }
+        Self {
+            rows,
+            cols,
+            ld,
+            order: LtOrder::Row,
+        }
     }
 
     /// A COL-order descriptor.
     pub fn col(rows: i64, cols: i64, ld: i64) -> Self {
-        Self { rows, cols, ld, order: LtOrder::Col }
+        Self {
+            rows,
+            cols,
+            ld,
+            order: LtOrder::Col,
+        }
     }
 
     /// How many elements past the base pointer this descriptor
@@ -214,7 +224,10 @@ pub fn validate_ld_bounds(who: &str, desc: &LtDesc, elems: usize) -> Result<()> 
         );
     }
     if desc.ld < 1 {
-        bail!("cuBLASLt {who}: ld {} < 1 — refused before dispatch", desc.ld);
+        bail!(
+            "cuBLASLt {who}: ld {} < 1 — refused before dispatch",
+            desc.ld
+        );
     }
     let needed = desc.reach().ok_or_else(|| {
         anyhow::anyhow!("cuBLASLt {who}: the descriptor's element reach overflows i64 — refused")

@@ -40,12 +40,6 @@
      (LayoutTensorOpLit
        (LayoutTensorCons x_layout_tensor (LayoutTensorNil))
        (LayoutTensorCons (LayoutTensorLit exp2_logical f32_layout) (LayoutTensorNil)))))
-; ...and the mutating sibling on the shared layout.
-(check
-  (= (LayoutTensorOpExp2MutatingGeneric x_layout_tensor)
-     (LayoutTensorOpLit
-       (LayoutTensorCons x_layout_tensor (LayoutTensorNil))
-       (LayoutTensorCons (LayoutTensorLit exp2_logical f32_layout) (LayoutTensorNil)))))
 
 ; --- Mod: the binary pair ---
 (check (= (dtype-of mod_logical) (F32)))

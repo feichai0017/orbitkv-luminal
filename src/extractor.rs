@@ -5,9 +5,9 @@ use egraph_serialize::{ClassId, EGraph, Node, NodeId};
 use petgraph::graph::{DiGraph, NodeIndex};
 
 use crate::layout_ir::{
-    Access, BufferInfo, ExtractedDag, ExtractedEdge, ExtractedGraph, ExtractedNode,
-    ExtractionSite, FreedBy, InputNode, LayoutInfo, LayoutIrOp, LayoutTensorInfo, LogicalInfo,
-    OpInput, OpMatcher, OpNode, OutputNode, OutputSlot,
+    Access, BufferInfo, ExtractedDag, ExtractedEdge, ExtractedGraph, ExtractedNode, ExtractionSite,
+    FreedBy, InputNode, LayoutInfo, LayoutIrOp, LayoutTensorInfo, LogicalInfo, OpInput, OpMatcher,
+    OpNode, OutputNode, OutputSlot,
 };
 use crate::logical_op::{LogicalRender, logical_op_for};
 
@@ -146,7 +146,6 @@ pub fn extract_layout_ir_with_matchers(
     Extractor::new_with_matchers(egraph, None, None, matchers).extract()
 }
 
-
 /// A reusable extraction session: the immutable analysis (class maps, op
 /// specs, the runtime-viability fixpoint) is computed ONCE, and genomes
 /// are swapped in per extraction. The implementation search runs dozens
@@ -229,8 +228,7 @@ impl<'a> ExtractionSession<'a> {
         }
         let mut cycles: Vec<Vec<String>> = Vec::new();
         for scc in petgraph::algo::tarjan_scc(&graph) {
-            let is_cycle = scc.len() > 1
-                || (scc.len() == 1 && graph.contains_edge(scc[0], scc[0]));
+            let is_cycle = scc.len() > 1 || (scc.len() == 1 && graph.contains_edge(scc[0], scc[0]));
             if is_cycle {
                 let mut labels: Vec<String> = scc
                     .iter()
@@ -322,16 +320,12 @@ impl<'a> ExtractionSession<'a> {
         use std::fmt::Write as _;
         let ex = &self.extractor;
         let lit_children = |class: &ClassId| -> Option<(ClassId, ClassId)> {
-            let node_id = ex
-                .class_nodes
-                .get(class)?
-                .iter()
-                .find(|id| {
-                    ex.egraph
-                        .nodes
-                        .get(*id)
-                        .is_some_and(|n| n.op == "LayoutTensorLit")
-                })?;
+            let node_id = ex.class_nodes.get(class)?.iter().find(|id| {
+                ex.egraph
+                    .nodes
+                    .get(*id)
+                    .is_some_and(|n| n.op == "LayoutTensorLit")
+            })?;
             let node = ex.egraph.nodes.get(node_id)?;
             let logical = ex.egraph.nodes.get(node.children.first()?)?.eclass.clone();
             let layout = ex.egraph.nodes.get(node.children.get(1)?)?.eclass.clone();
@@ -397,10 +391,7 @@ impl<'a> ExtractionSession<'a> {
         out
     }
 
-    pub fn extract_with_genome(
-        &mut self,
-        genome: &Genome,
-    ) -> Result<Option<ExtractedGraph>> {
+    pub fn extract_with_genome(&mut self, genome: &Genome) -> Result<Option<ExtractedGraph>> {
         self.extractor.genome = Some(genome.clone());
         self.extractor.memo.clear();
         self.extractor.blocked.clear();
@@ -426,7 +417,6 @@ pub fn extract_layout_ir_with_ops_and_matchers(
     let mut extractor = Extractor::new_with_matchers(egraph, allowed, None, matchers);
     extractor.extract()
 }
-
 
 /// Build the rendered-layout table for one extracted graph, keyed by
 /// VALUE e-class: enumerate every elected value (pure enumeration — core
@@ -456,8 +446,8 @@ pub fn rendered_layout_table<L: Clone>(
 ) -> Result<HashMap<ClassId, L>> {
     let mut table: HashMap<ClassId, L> = HashMap::new();
     let render = |value: &crate::layout_ir::LayoutTensorInfo,
-                      table: &mut HashMap<ClassId, L>,
-                      cache: &mut HashMap<(ClassId, Option<crate::dtype::PlanDtype>), L>|
+                  table: &mut HashMap<ClassId, L>,
+                  cache: &mut HashMap<(ClassId, Option<crate::dtype::PlanDtype>), L>|
      -> Result<()> {
         if table.contains_key(&value.eclass) {
             return Ok(());
@@ -748,8 +738,6 @@ impl<'a> Extractor<'a> {
             &input_buffer_classes,
         );
 
-
-
         Self {
             egraph,
             matchers,
@@ -769,7 +757,6 @@ impl<'a> Extractor<'a> {
             stable_key_cache: Default::default(),
         }
     }
-
 
     /// RUNTIME-VIABILITY FILTER (Austin's ruling, 2026-08-05): restrict
     /// the producer index to ops the runtime can actually realize — a
@@ -819,8 +806,10 @@ impl<'a> Extractor<'a> {
                 break;
             }
         }
-        let op_matched: HashMap<ClassId, bool> =
-            op_matched.into_iter().map(|(k, v)| (k.clone(), v)).collect();
+        let op_matched: HashMap<ClassId, bool> = op_matched
+            .into_iter()
+            .map(|(k, v)| (k.clone(), v))
+            .collect();
         for producers in self.producer_index.values_mut() {
             producers.retain(|producer| {
                 op_matched.get(&producer.op_class).copied().unwrap_or(false)
@@ -832,7 +821,8 @@ impl<'a> Extractor<'a> {
                         .any(|spec| spec.inputs.iter().all(|class| viable.contains(class)))
             });
         }
-        self.producer_index.retain(|_, producers| !producers.is_empty());
+        self.producer_index
+            .retain(|_, producers| !producers.is_empty());
     }
 
     fn extract(&mut self) -> Result<Option<ExtractedGraph>> {
@@ -850,11 +840,15 @@ impl<'a> Extractor<'a> {
                 let mut failing: Vec<usize> = Vec::new();
                 let spine_nodes = self.class_nodes.get(root).cloned().unwrap_or_default();
                 if let Some(list_node) = spine_nodes.iter().find_map(|id| {
-                    self.egraph.nodes.get(id).filter(|n| n.op == "BufferOutputLit")
+                    self.egraph
+                        .nodes
+                        .get(id)
+                        .filter(|n| n.op == "BufferOutputLit")
                 }) {
-                    let mut spine = list_node.children.first().and_then(|c| {
-                        self.egraph.nodes.get(c).map(|n| n.eclass.clone())
-                    });
+                    let mut spine = list_node
+                        .children
+                        .first()
+                        .and_then(|c| self.egraph.nodes.get(c).map(|n| n.eclass.clone()));
                     let mut index = 0usize;
                     while let Some(class) = spine {
                         let Some(cons) = self
@@ -871,17 +865,20 @@ impl<'a> Extractor<'a> {
                         else {
                             break;
                         };
-                        if let Some(element) = cons.children.first().and_then(|c| {
-                            self.egraph.nodes.get(c).map(|n| n.eclass.clone())
-                        }) {
+                        if let Some(element) = cons
+                            .children
+                            .first()
+                            .and_then(|c| self.egraph.nodes.get(c).map(|n| n.eclass.clone()))
+                        {
                             if self.memo.get(&element).cloned().flatten().is_none() {
                                 failing.push(index);
                             }
                         }
                         index += 1;
-                        spine = cons.children.get(1).and_then(|c| {
-                            self.egraph.nodes.get(c).map(|n| n.eclass.clone())
-                        });
+                        spine = cons
+                            .children
+                            .get(1)
+                            .and_then(|c| self.egraph.nodes.get(c).map(|n| n.eclass.clone()));
                     }
                 }
                 bail!(
@@ -1046,8 +1043,7 @@ impl<'a> Extractor<'a> {
                         // nodes, and overflows u64 (wrapped silently in release,
                         // panicked in debug). Saturation stops the panic; the
                         // path-vs-node cost model itself is a recorded follow-up.
-                        heuristic_cost =
-                            heuristic_cost.saturating_add(child_plan.heuristic_cost);
+                        heuristic_cost = heuristic_cost.saturating_add(child_plan.heuristic_cost);
                         child_plans.push(child.clone());
                     }
                     let plan = Plan {
@@ -1219,7 +1215,9 @@ impl<'a> Extractor<'a> {
                 node_id,
                 node,
             });
-            self.op_cache.borrow_mut().insert(node_id.clone(), op.clone());
+            self.op_cache
+                .borrow_mut()
+                .insert(node_id.clone(), op.clone());
             op
         };
 
@@ -1710,7 +1708,6 @@ impl Candidate {
             metadata,
         }
     }
-
 }
 
 struct ClassRenderer<'a> {
@@ -1937,7 +1934,11 @@ impl<'a> ClassRenderer<'a> {
             match logical_op_for(node.op.as_str()) {
                 Some(op) => op.display_label(
                     node,
-                    &mut LogicalRenderCtx { renderer: self, visiting: &mut HashSet::new(), depth: 8 },
+                    &mut LogicalRenderCtx {
+                        renderer: self,
+                        visiting: &mut HashSet::new(),
+                        depth: 8,
+                    },
                 ),
                 None => self.render_node(node_id, 8),
             }
@@ -2031,7 +2032,11 @@ impl<'a> ClassRenderer<'a> {
                 Some(match logical_op_for(node.op.as_str()) {
                     Some(op) => op.readable_expr(
                         node,
-                        &mut LogicalRenderCtx { renderer: self, visiting, depth: depth - 1 },
+                        &mut LogicalRenderCtx {
+                            renderer: self,
+                            visiting,
+                            depth: depth - 1,
+                        },
                     ),
                     None => self.render_node(node_id, 16),
                 })
@@ -2100,8 +2105,7 @@ impl<'a> ClassRenderer<'a> {
         } else if let Some((shape, bits)) = self.left_major_layout_shape_bits(class) {
             details.push(("shape".to_string(), shape));
             details.push(("bits".to_string(), bits));
-        } else if let Some((shape, _strides, bits)) =
-            self.strided_layout_shape_strides_bits(class)
+        } else if let Some((shape, _strides, bits)) = self.strided_layout_shape_strides_bits(class)
         {
             details.push(("shape".to_string(), shape));
             details.push(("bits".to_string(), bits));
@@ -2139,9 +2143,7 @@ impl<'a> ClassRenderer<'a> {
 
     fn contiguous_layout_inline(&self, class: &ClassId) -> Option<String> {
         let (shape, bits) = self.contiguous_layout_shape_bits(class)?;
-        Some(format!(
-            "RightMajorContiguous(shape={shape}, bits={bits})"
-        ))
+        Some(format!("RightMajorContiguous(shape={shape}, bits={bits})"))
     }
 
     fn contiguous_layout_shape_bits(&self, class: &ClassId) -> Option<(String, String)> {
@@ -2203,7 +2205,9 @@ impl<'a> ClassRenderer<'a> {
             self.readable_shape(&shape_class)
                 .unwrap_or_else(|| self.render_class_prefer(&shape_class, 16, Some("ShapeLit"))),
             self.readable_expr_list_display(&strides_class)
-                .unwrap_or_else(|| self.render_class_prefer(&strides_class, 16, Some("IntAffineExprCons"))),
+                .unwrap_or_else(|| {
+                    self.render_class_prefer(&strides_class, 16, Some("IntAffineExprCons"))
+                }),
             self.readable_bit_width(&bits_class),
         ))
     }
@@ -2331,20 +2335,26 @@ impl<'a> ClassRenderer<'a> {
                 // The division family and lattice pair render function-style:
                 // the rounding mode / lattice direction is the constructor's
                 // identity, so it must stay visible.
-                ["IntTruncDiv", "IntTruncRem", "IntCeilDiv", "IntMin", "IntMax"]
-                    .iter()
-                    .zip(["tdiv", "trem", "ceildiv", "min", "max"])
-                    .find_map(|(op, name)| {
-                        let node_id = self.node_with_op(class, op)?;
-                        let node = self.egraph.nodes.get(node_id)?;
-                        let dividend = child_class(self.egraph, node, 0)?;
-                        let divisor = child_class(self.egraph, node, 1)?;
-                        Some(format!(
-                            "{name}({}, {})",
-                            self.readable_expr(&dividend, visiting),
-                            self.readable_expr(&divisor, visiting)
-                        ))
-                    })
+                [
+                    "IntTruncDiv",
+                    "IntTruncRem",
+                    "IntCeilDiv",
+                    "IntMin",
+                    "IntMax",
+                ]
+                .iter()
+                .zip(["tdiv", "trem", "ceildiv", "min", "max"])
+                .find_map(|(op, name)| {
+                    let node_id = self.node_with_op(class, op)?;
+                    let node = self.egraph.nodes.get(node_id)?;
+                    let dividend = child_class(self.egraph, node, 0)?;
+                    let divisor = child_class(self.egraph, node, 1)?;
+                    Some(format!(
+                        "{name}({}, {})",
+                        self.readable_expr(&dividend, visiting),
+                        self.readable_expr(&divisor, visiting)
+                    ))
+                })
             })
             .unwrap_or_else(|| self.render_class_prefer(class, 8, None));
 
@@ -2517,7 +2527,8 @@ impl<'a> ClassRenderer<'a> {
             let node = self.egraph.nodes.get(node_id)?;
             let bits_child = match node.op.as_str() {
                 "RightMajorContiguousElementLayoutLit" | "LeftMajorContiguousElementLayoutLit" => 1,
-                "StridedElementLayoutLit" | "ElementOffsetExpressionLayoutLit"
+                "StridedElementLayoutLit"
+                | "ElementOffsetExpressionLayoutLit"
                 | "BitOffsetExpressionLayoutLit" => 2,
                 _ => continue,
             };
@@ -2565,7 +2576,6 @@ impl<'a> ClassRenderer<'a> {
         None
     }
 }
-
 
 impl<'a> Extractor<'a> {
     fn plan(&self, class: &ClassId) -> Result<&Plan> {
@@ -2672,7 +2682,10 @@ impl<'a> Extractor<'a> {
                 .logical_children(class)
                 .into_iter()
                 .map(|(port, child)| {
-                    (port.to_string(), self.logical_info(&child, visiting, depth - 1))
+                    (
+                        port.to_string(),
+                        self.logical_info(&child, visiting, depth - 1),
+                    )
                 })
                 .collect();
             visiting.remove(class);
@@ -2760,7 +2773,11 @@ impl<'a> Extractor<'a> {
                 continue;
             }
             let access_class = self.egraph.nid_to_cid(node_id);
-            if self.renderer().node_with_op(access_class, "ReadOnly").is_some() {
+            if self
+                .renderer()
+                .node_with_op(access_class, "ReadOnly")
+                .is_some()
+            {
                 return Some(Access::ReadOnly);
             }
             return Some(Access::ReadWrite);
@@ -2783,7 +2800,11 @@ impl<'a> Extractor<'a> {
                 continue;
             }
             let freed_class = self.egraph.nid_to_cid(node_id);
-            if self.renderer().node_with_op(freed_class, "ProgramFrees").is_some() {
+            if self
+                .renderer()
+                .node_with_op(freed_class, "ProgramFrees")
+                .is_some()
+            {
                 return Some(FreedBy::Program);
             }
             return Some(FreedBy::Caller);
@@ -3610,16 +3631,19 @@ pub fn chain_strides(egraph: &EGraph, layout: &ClassId) -> Option<Vec<Option<Cha
             .push(node_id.clone());
     }
     let find = |class: &ClassId, op: &str| -> Option<NodeId> {
-        class_nodes.get(class)?.iter().find(|node_id| {
-            egraph.nodes.get(*node_id).is_some_and(|node| node.op == op)
-        }).cloned()
+        class_nodes
+            .get(class)?
+            .iter()
+            .find(|node_id| egraph.nodes.get(*node_id).is_some_and(|node| node.op == op))
+            .cloned()
     };
     let numeric = |class: &ClassId| -> Option<i64> {
         let lit = find(class, "IntLit")?;
         let value_class = child_class(egraph, egraph.nodes.get(&lit)?, 0)?;
-        class_nodes.get(&value_class)?.iter().find_map(|node_id| {
-            egraph.nodes.get(node_id)?.op.parse::<i64>().ok()
-        })
+        class_nodes
+            .get(&value_class)?
+            .iter()
+            .find_map(|node_id| egraph.nodes.get(node_id)?.op.parse::<i64>().ok())
     };
 
     let strided = find(layout, "StridedElementLayoutLit")?;
@@ -3655,7 +3679,11 @@ pub fn chain_strides(egraph: &EGraph, layout: &ClassId) -> Option<Vec<Option<Cha
             let slot = if numeric(&summand) == Some(0) {
                 // Zero contribution. Provably-1 axis: free parameter.
                 // Otherwise the broadcast stride 0 is determined.
-                if extent == Some(1) { None } else { Some(ChainStride::Zero) }
+                if extent == Some(1) {
+                    None
+                } else {
+                    Some(ChainStride::Zero)
+                }
             } else if find(&summand, "CoordVar").is_some() {
                 Some(ChainStride::Unit)
             } else if let Some(stride) = class_nodes.get(&summand).and_then(|nodes| {

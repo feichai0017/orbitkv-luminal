@@ -59,13 +59,22 @@ fn bytemuck_cast<T>(v: &[T]) -> &[u8] {
 fn bytes_to_typed(bytes: &[u8], dtype: PlanDtype) -> Result<TypedBuffer> {
     Ok(match dtype {
         PlanDtype::F32 => TypedBuffer::F32(
-            bytes.chunks_exact(4).map(|c| f32::from_ne_bytes(c.try_into().unwrap())).collect(),
+            bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+                .collect(),
         ),
         PlanDtype::Int => TypedBuffer::I32(
-            bytes.chunks_exact(4).map(|c| i32::from_ne_bytes(c.try_into().unwrap())).collect(),
+            bytes
+                .chunks_exact(4)
+                .map(|c| i32::from_ne_bytes(c.try_into().unwrap()))
+                .collect(),
         ),
         PlanDtype::Int64 => TypedBuffer::I64(
-            bytes.chunks_exact(8).map(|c| i64::from_ne_bytes(c.try_into().unwrap())).collect(),
+            bytes
+                .chunks_exact(8)
+                .map(|c| i64::from_ne_bytes(c.try_into().unwrap()))
+                .collect(),
         ),
         PlanDtype::Bool | PlanDtype::Bool8 => TypedBuffer::bool8(bytes.to_vec())?,
         other => bail!("cuda-lite CL-2 cannot read back {other:?}"),
@@ -86,8 +95,8 @@ impl KernelCache {
         if let Some((_, func)) = self.modules.get(&key) {
             return Ok(func.clone());
         }
-        let ptx = compile_ptx(source)
-            .map_err(|e| anyhow!("NVRTC failed: {e:?}\nsource:\n{source}"))?;
+        let ptx =
+            compile_ptx(source).map_err(|e| anyhow!("NVRTC failed: {e:?}\nsource:\n{source}"))?;
         let module = self.ctx.load_module(ptx).context("module load")?;
         let func = module.load_function("k").context("entry `k` missing")?;
         self.modules.insert(key, (module, func.clone()));
@@ -101,20 +110,32 @@ impl KernelCache {
 /// standard generated-kernel signature), and return the output bytes.
 /// Used by the Phase-4 synthetic-descriptor device gates to launch
 /// strided-read kernels outside a plan.
-pub fn launch_single(source: &str, inputs: &[&[u8]], out_bytes: usize, n: usize) -> Result<Vec<u8>> {
+pub fn launch_single(
+    source: &str,
+    inputs: &[&[u8]],
+    out_bytes: usize,
+    n: usize,
+) -> Result<Vec<u8>> {
     let ctx = CudaContext::new(0).context("no CUDA device 0")?;
     let stream = ctx.default_stream();
-    let mut cache = KernelCache { ctx: ctx.clone(), modules: HashMap::new() };
+    let mut cache = KernelCache {
+        ctx: ctx.clone(),
+        modules: HashMap::new(),
+    };
     let func = cache.function(source)?;
     let mut device_inputs = Vec::with_capacity(inputs.len());
     for host in inputs {
-        let mut slice = stream.alloc_zeros::<u8>(host.len().max(1)).context("input alloc")?;
+        let mut slice = stream
+            .alloc_zeros::<u8>(host.len().max(1))
+            .context("input alloc")?;
         if !host.is_empty() {
             stream.memcpy_htod(*host, &mut slice).context("H2D")?;
         }
         device_inputs.push(slice);
     }
-    let mut dest = stream.alloc_zeros::<u8>(out_bytes.max(1)).context("dest alloc")?;
+    let mut dest = stream
+        .alloc_zeros::<u8>(out_bytes.max(1))
+        .context("dest alloc")?;
     let n_arg = n as u64;
     let cfg = LaunchConfig {
         grid_dim: (((n as u32).max(1) + 255) / 256, 1, 1),
@@ -175,7 +196,10 @@ pub fn execute_plan(
 
     let ctx = CudaContext::new(0).context("no CUDA device 0")?;
     let stream = ctx.default_stream();
-    let mut cache = KernelCache { ctx: ctx.clone(), modules: HashMap::new() };
+    let mut cache = KernelCache {
+        ctx: ctx.clone(),
+        modules: HashMap::new(),
+    };
 
     // Phase 1: materialize every buffer on device — ALLOCATION BY
     // ASSIGNMENT LOOKUP (corrected contract, 2026-08-31): the buffer
@@ -191,16 +215,24 @@ pub fn execute_plan(
                 buffer.backs
             )
         })?;
-        let numel = buffer.layout.mirror.literal_span_elements().ok_or_else(|| {
-            anyhow!(
-                "buffer {:?} (backing {}) has no literal span — symbolic or \
+        let numel = buffer
+            .layout
+            .mirror
+            .literal_span_elements()
+            .ok_or_else(|| {
+                anyhow!(
+                    "buffer {:?} (backing {}) has no literal span — symbolic or \
                  undisclosed-reach layouts are not executable",
+                    buffer.label,
+                    buffer.backs
+                )
+            })?;
+        let dtype = buffer.layout.dtype.ok_or_else(|| {
+            anyhow!(
+                "buffer {:?} (backing {}) carries no dtype fact",
                 buffer.label,
                 buffer.backs
             )
-        })?;
-        let dtype = buffer.layout.dtype.ok_or_else(|| {
-            anyhow!("buffer {:?} (backing {}) carries no dtype fact", buffer.label, buffer.backs)
         })?;
         let bytes = numel * dtype_bytes(dtype)?;
         let mut slice = stream
@@ -241,8 +273,7 @@ pub fn execute_plan(
                 }
             })
             .collect();
-        crate::binding_check::assert_disjoint(&bound)
-            .context("CONTRACT-1 bind-time check")?;
+        crate::binding_check::assert_disjoint(&bound).context("CONTRACT-1 bind-time check")?;
     }
 
     // Phase 2: toposort — Anti edges are ordinary edges here, so WAR
@@ -285,8 +316,9 @@ pub fn execute_plan(
                     .get(src)
                     .ok_or_else(|| anyhow!("copy src unknown"))?
                     .clone();
-                let dst_slice =
-                    storage.get_mut(dst).ok_or_else(|| anyhow!("copy dst unknown"))?;
+                let dst_slice = storage
+                    .get_mut(dst)
+                    .ok_or_else(|| anyhow!("copy dst unknown"))?;
                 if src_slice.len() != dst_slice.len() {
                     bail!(
                         "copy length mismatch: {} -> {} bytes",
@@ -294,9 +326,18 @@ pub fn execute_plan(
                         dst_slice.len()
                     );
                 }
-                stream.memcpy_dtod(&src_slice, dst_slice).context("D2D copy")?;
+                stream
+                    .memcpy_dtod(&src_slice, dst_slice)
+                    .context("D2D copy")?;
             }
-            BufferNode::Compute { op, reads, writes, operand_info, result_info, .. } => {
+            BufferNode::Compute {
+                op,
+                reads,
+                writes,
+                operand_info,
+                result_info,
+                ..
+            } => {
                 let label = op.label();
                 if label == "BufferAlloc" || label == "BufferFree" {
                     continue; // storage is pre-materialized in CL-2
@@ -310,8 +351,9 @@ pub fn execute_plan(
                 // read their C operand buffer and write fresh D
                 // (C != D pointers, beta = 1.0f — legal, identical
                 // layouts by the marker's rule guard).
-                if let Some(dps) =
-                    op.as_any().downcast_ref::<crate::ops::cublaslt::CublasLtDps>()
+                if let Some(dps) = op
+                    .as_any()
+                    .downcast_ref::<crate::ops::cublaslt::CublasLtDps>()
                 {
                     let mut call = crate::ops::cublaslt::exec::plan_call(&dps.op)
                         .with_context(|| format!("cuBLASLt call planning for {label}"))?;
@@ -357,9 +399,7 @@ pub fn execute_plan(
                         &dest_slot.layout,
                         label,
                     )
-                    .with_context(|| {
-                        format!("cuBLASLt destination frame binding for {label}")
-                    })?;
+                    .with_context(|| format!("cuBLASLt destination frame binding for {label}"))?;
                     let input_count = reads.len().saturating_sub(writes.len());
                     let inputs: Vec<CudaSlice<u8>> = reads[..input_count]
                         .iter()
@@ -376,10 +416,10 @@ pub fn execute_plan(
                     // frame check that stood alongside them was NOT one
                     // of them — see the coherence fence above.
                     let (dest_dims, dest_dtype) = geometry.get(&writes[0]).unwrap().clone();
-                    let dest_bytes =
-                        dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
-                    let mut dest =
-                        stream.alloc_zeros::<u8>(dest_bytes.max(1)).context("dest alloc")?;
+                    let dest_bytes = dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
+                    let mut dest = stream
+                        .alloc_zeros::<u8>(dest_bytes.max(1))
+                        .context("dest alloc")?;
                     crate::ops::cublaslt::device_call::dispatch(
                         &call,
                         &operand_refs,
@@ -418,15 +458,21 @@ pub fn execute_plan(
                 // one sequence share the stream, so phase ordering
                 // (e.g. scatter's init-copy then writes) is free.
                 if writes.len() != 1 {
-                    bail!("{label}: CL-2 handles single-destination ops, got {}", writes.len());
+                    bail!(
+                        "{label}: CL-2 handles single-destination ops, got {}",
+                        writes.len()
+                    );
                 }
                 let input_count = reads.len().saturating_sub(writes.len());
-                let inputs: Vec<CudaSlice<u8>> =
-                    reads[..input_count].iter().map(|id| storage.get(id).unwrap().clone()).collect();
+                let inputs: Vec<CudaSlice<u8>> = reads[..input_count]
+                    .iter()
+                    .map(|id| storage.get(id).unwrap().clone())
+                    .collect();
                 let (dest_dims, dest_dtype) = geometry.get(&writes[0]).unwrap().clone();
-                let dest_bytes =
-                    dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
-                let mut dest = stream.alloc_zeros::<u8>(dest_bytes.max(1)).context("dest alloc")?;
+                let dest_bytes = dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
+                let mut dest = stream
+                    .alloc_zeros::<u8>(dest_bytes.max(1))
+                    .context("dest alloc")?;
 
                 for generated in &launches {
                     let func = cache.function(&generated.source)?;

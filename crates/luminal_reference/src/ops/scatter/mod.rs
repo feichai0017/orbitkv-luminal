@@ -24,7 +24,9 @@
 //! slots first, the variable tail last.
 
 use luminal::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
-use luminal::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
+use luminal::layout_ir::{
+    AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
+};
 
 /// Walk the LayoutTensorCons spine at `child` counting elements — the
 /// shared rank reader for both scatter matchers (same class-resolving walk
@@ -146,7 +148,11 @@ impl BufferTensorIrOp for ScatterFunctionalDps {
 
 impl Bufferizable for ScatterFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: self.dest_index(), result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: self.dest_index(),
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -157,52 +163,6 @@ impl ToDps for ScatterFunctionalDps {
 }
 
 impl LayoutIrOp for ScatterFunctionalDps {}
-
-/// `ScatterMutatingGeneric(init: read+write, src: read, coord0..: read) -> out`
-///
-/// Mutating form: the kernel reads and overwrites ONE storage — init's.
-/// Matched in egglog only when the output layout IS init's layout (the
-/// precondition, discharged at match time). The Must tie is relocatable as
-/// always: a rejected mutation copies init into the tied result's fresh
-/// buffer and mutates there. NOTE: no write-map injectivity gate exists or
-/// can — scatter's writes are data-dependent, and duplicate coordinates
-/// are UB by ruling. No reference kernel exists for this form (the
-/// reference runtime is out-of-place only, ruling 2026-08-05/06).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScatterMutating {
-    pub rank: usize,
-}
-
-impl OpSlotNames for ScatterMutating {
-    fn operand_name(&self, operand: usize) -> String {
-        match operand {
-            0 => "init".to_string(),
-            1 => "src".to_string(),
-            n if n < 2 + self.rank => format!("coord{}", n - 2),
-            _ => format!("in{operand}"),
-        }
-    }
-}
-
-impl BufferTensorIrOp for ScatterMutating {
-    fn label(&self) -> &str {
-        "ScatterMutatingGeneric"
-    }
-}
-
-impl Bufferizable for ScatterMutating {
-    fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
-    }
-}
-
-impl ToDps for ScatterMutating {
-    fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        None // already destination-form: the destination IS operand 0
-    }
-}
-
-impl LayoutIrOp for ScatterMutating {}
 
 // ---------------------------------------------------------------------------
 // Matchers
@@ -234,43 +194,14 @@ impl OpMatcher for ScatterFunctionalMatcher {
         ]
     }
 
-
     fn metadata_slots(&self) -> &'static [(&'static str, usize)] {
         &[("out_layout", 3)]
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ScatterFunctional { rank: coordinate_rank(site, 2) })
-    }
-}
-
-/// Matches `LayoutTensorOpScatterMutatingGeneric` enodes and produces
-/// [`ScatterMutating`] instances. No metadata children: the output layout
-/// IS init's, by the match rule's precondition.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ScatterMutatingMatcher;
-
-impl OpMatcher for ScatterMutatingMatcher {
-    fn egglog_constructor(&self) -> &'static str {
-        "LayoutTensorOpScatterMutatingGeneric"
-    }
-
-    fn snippets(&self) -> Vec<luminal::egglog_snippet::EgglogSnippet> {
-        vec![
-            luminal::egglog_snippet::EgglogSnippet {
-                category: luminal::egglog_snippet::SpliceCategory::LayoutOpConstructors,
-                text: include_str!("match_mutating_constructor.egg"),
-            },
-            luminal::egglog_snippet::EgglogSnippet {
-                category: luminal::egglog_snippet::SpliceCategory::Match,
-                text: include_str!("match_mutating.egg"),
-            },
-        ]
-    }
-
-
-    fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ScatterMutating { rank: coordinate_rank(site, 2) })
+        Box::new(ScatterFunctional {
+            rank: coordinate_rank(site, 2),
+        })
     }
 }
 
@@ -281,8 +212,8 @@ impl OpMatcher for ScatterMutatingMatcher {
 // 2026-08-13: everything about an op lives in the op's folder).
 // ---------------------------------------------------------------------------
 
-use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 use crate::kernels::{coordinate_columns, expect_op};
+use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 
 /// The CHECKED scatter kernel (ruling 2026-08-06): dest starts as a copy
 /// of init, then dest[coords(i)] = src[i] over the src iteration space.

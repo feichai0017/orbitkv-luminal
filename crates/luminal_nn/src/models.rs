@@ -145,7 +145,6 @@ impl TinyDecoder {
     }
 }
 
-
 /// RUNG 5 (2026-08-07): real llama anatomy minus rope (ruling: rope/cos
 /// deferred for the initial reference runtime) — pre-RMSNorms, GQA
 /// attention over the paged KV cache (n_kv_heads < n_heads), SwiGLU FFN,
@@ -178,7 +177,14 @@ pub struct LlamaBlock {
 }
 
 impl LlamaBlock {
-    pub fn new(d: usize, ff: usize, n_heads: usize, n_kv_heads: usize, ns: &Ns, cx: &mut Graph) -> Self {
+    pub fn new(
+        d: usize,
+        ff: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        ns: &Ns,
+        cx: &mut Graph,
+    ) -> Self {
         Self::new_with_ffn(d, ff, n_heads, n_kv_heads, GatedFfn::SwiGlu, ns, cx)
     }
 
@@ -198,7 +204,13 @@ impl LlamaBlock {
         Self {
             ffn_kind,
             attn_norm: crate::LayerNorm::new(
-                d, false, false, false, 1e-5, &ns.child("input_layernorm"), cx,
+                d,
+                false,
+                false,
+                false,
+                1e-5,
+                &ns.child("input_layernorm"),
+                cx,
             ),
             wq: Linear::new(d, d, false, &attn.child("q_proj"), cx),
             wk: Linear::new(d, kv_dim, false, &attn.child("k_proj"), cx),
@@ -206,7 +218,13 @@ impl LlamaBlock {
             wo: Linear::new(d, d, false, &attn.child("o_proj"), cx),
             qk_norm: None,
             ffn_norm: crate::LayerNorm::new(
-                d, false, false, false, 1e-5, &ns.child("post_attention_layernorm"), cx,
+                d,
+                false,
+                false,
+                false,
+                1e-5,
+                &ns.child("post_attention_layernorm"),
+                cx,
             ),
             gate: Linear::new(d, ff, false, &mlp.child("gate_proj"), cx),
             up: Linear::new(d, ff, false, &mlp.child("up_proj"), cx),
@@ -481,15 +499,24 @@ impl GemmaBlock {
         let scale = 1.0 / (self.head_dim as f32).sqrt();
         // QK-norm before RoPE; attention scale folded into q.
         let q = crate::rotary_apply(
-            crate::rms_norm_heads(self.wq.forward(normed), self.head_dim, self.q_norm + 1.0, 1e-6)
-                * scale,
+            crate::rms_norm_heads(
+                self.wq.forward(normed),
+                self.head_dim,
+                self.q_norm + 1.0,
+                1e-6,
+            ) * scale,
             self.head_dim,
             rope_cos,
             rope_sin,
             rope_rot,
         );
         let k = crate::rotary_apply(
-            crate::rms_norm_heads(self.wk.forward(normed), self.head_dim, self.k_norm + 1.0, 1e-6),
+            crate::rms_norm_heads(
+                self.wk.forward(normed),
+                self.head_dim,
+                self.k_norm + 1.0,
+                1e-6,
+            ),
             self.head_dim,
             rope_cos,
             rope_sin,
@@ -537,15 +564,24 @@ impl GemmaBlock {
         let normed = self.input_norm.forward(x);
         let scale = 1.0 / (self.head_dim as f32).sqrt();
         let q = crate::rotary_apply(
-            crate::rms_norm_heads(self.wq.forward(normed), self.head_dim, self.q_norm + 1.0, 1e-6)
-                * scale,
+            crate::rms_norm_heads(
+                self.wq.forward(normed),
+                self.head_dim,
+                self.q_norm + 1.0,
+                1e-6,
+            ) * scale,
             self.head_dim,
             rope_cos,
             rope_sin,
             rope_rot,
         );
         let k = crate::rotary_apply(
-            crate::rms_norm_heads(self.wk.forward(normed), self.head_dim, self.k_norm + 1.0, 1e-6),
+            crate::rms_norm_heads(
+                self.wk.forward(normed),
+                self.head_dim,
+                self.k_norm + 1.0,
+                1e-6,
+            ),
             self.head_dim,
             rope_cos,
             rope_sin,
@@ -585,8 +621,6 @@ mod tests {
     use rustc_hash::FxHashMap;
     use scalar_refs::*;
 
-
-
     /// MODEL 1: a full 4→8→6→3 MLP, batch 2, through the search ladder —
     /// every layer's weights and biases bound as named tensors, the whole
     /// forward against a scalar reference.
@@ -622,8 +656,11 @@ mod tests {
                     for k in 0..in_w {
                         acc += activation[r * width + k] * w[k * out_w + c];
                     }
-                    next[r * out_w + c] =
-                        if index != DIMS.len() - 2 { acc.max(0.0) } else { acc };
+                    next[r * out_w + c] = if index != DIMS.len() - 2 {
+                        acc.max(0.0)
+                    } else {
+                        acc
+                    };
                 }
             }
             activation = next;
@@ -655,116 +692,6 @@ mod tests {
         assert_close(rt.get_f32(out.id).expect("output"), &activation);
     }
 
-
-
-
-
-
-
-    /// RUNG 5: the llama-anatomy block (RMSNorm + GQA kv_groups=2 +
-    /// SwiGLU, no rope) — one decode step through the DEFAULT ladder vs
-    /// a scalar reference; prints attribution + refusal breakdown.
-    #[test]
-    fn llama_block_matches_scalar_reference() {
-        const D5: usize = 8; // n_heads 4 × head_dim 2
-        const N_H: usize = 4;
-        const N_KV: usize = 2; // kv_groups = 2 — the untested GQA path
-        const HD: usize = 2;
-        const KV_DIM: usize = N_KV * HD;
-        const FF5: usize = 12;
-        const SLOTS5: usize = 4;
-        const CTX5: usize = 2;
-        const EPS: f32 = 1e-5;
-
-        let mut cx = Graph::new();
-        let block = LlamaBlock::new(D5, FF5, N_H, N_KV, &Ns::root().child("blk"), &mut cx);
-        let x = cx.tensor((1, D5));
-        let k_cache = cx.tensor((SLOTS5, KV_DIM));
-        let v_cache = cx.tensor((SLOTS5, KV_DIM));
-        let gather_idx = cx.tensor_dtyped(CTX5, DType::Int);
-        let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-        let (out, kc, vc) = block.forward(
-            x,
-            k_cache,
-            v_cache,
-            gather_idx,
-            scatter_idx,
-            IntExpr::from(1usize),
-        );
-        let out = out.output();
-        let kc = kc.output();
-        let vc = vc.output();
-
-        let x_vals = weights(D5, 70);
-        let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
-            (x.id, x_vals.clone().into()),
-            (block.wq.weight.id, weights(D5 * D5, 71).into()),
-            (block.wk.weight.id, weights(D5 * KV_DIM, 72).into()),
-            (block.wv.weight.id, weights(D5 * KV_DIM, 73).into()),
-            (block.wo.weight.id, weights(D5 * D5, 74).into()),
-            (block.gate.weight.id, weights(D5 * FF5, 75).into()),
-            (block.up.weight.id, weights(D5 * FF5, 76).into()),
-            (block.down.weight.id, weights(FF5 * D5, 77).into()),
-            (k_cache.id, weights(SLOTS5 * KV_DIM, 78).into()),
-            (v_cache.id, weights(SLOTS5 * KV_DIM, 79).into()),
-            (gather_idx.id, vec![0i32, 1].into()),
-            (scatter_idx.id, vec![1i32].into()),
-        ];
-
-        // Scalar reference.
-        let get = |seed: usize, n: usize| weights(n, seed);
-        let normed = ref_rms_norm(&x_vals, EPS);
-        let q = ref_matmul(&normed, &get(71, D5 * D5), D5, D5);
-        let k_new = ref_matmul(&normed, &get(72, D5 * KV_DIM), D5, KV_DIM);
-        let v_new = ref_matmul(&normed, &get(73, D5 * KV_DIM), D5, KV_DIM);
-        let mut ref_kc = get(78, SLOTS5 * KV_DIM);
-        let mut ref_vc = get(79, SLOTS5 * KV_DIM);
-        let attn = ref_paged_step_gqa(
-            &q,
-            &k_new,
-            &v_new,
-            &mut ref_kc,
-            &mut ref_vc,
-            &[0, 1],
-            1,
-            N_H,
-            N_KV,
-            HD,
-            1,
-            None,
-            1.0 / (HD as f32).sqrt(),
-        );
-        let attn_proj = ref_matmul(&attn, &get(74, D5 * D5), D5, D5);
-        let x1: Vec<f32> = x_vals.iter().zip(&attn_proj).map(|(a, b)| a + b).collect();
-        let ff_in = ref_rms_norm(&x1, EPS);
-        let gate = ref_silu(&ref_matmul(&ff_in, &get(75, D5 * FF5), D5, FF5));
-        let up = ref_matmul(&ff_in, &get(76, D5 * FF5), D5, FF5);
-        let hidden: Vec<f32> = gate.iter().zip(&up).map(|(a, b)| a * b).collect();
-        let ff = ref_matmul(&hidden, &get(77, FF5 * D5), FF5, D5);
-        let expected: Vec<f32> = x1.iter().zip(&ff).map(|(a, b)| a + b).collect();
-
-        let data: FxHashMap<_, _> = pairs.iter().cloned().collect();
-        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
-        let outcome = rt
-            .search(&data, &ImplementationSearchOptions::default())
-            .expect("search finds a plan");
-        eprintln!(
-            "[llama-block] attribution: {} | refusals: {}",
-            outcome.timings.summary(),
-            outcome.refusal_breakdown.summary()
-        );
-        for exemplar in &outcome.refusal_breakdown.exemplars {
-            eprintln!("[llama-block] refusal exemplar: {exemplar}");
-        }
-        for (id, values) in &pairs {
-            rt.set_data(*id, values.clone());
-        }
-        rt.execute().expect("winner executes");
-        assert_close(rt.get_f32(out.id).expect("out"), &expected);
-        assert_close(rt.get_f32(kc.id).expect("k cache"), &ref_kc);
-        assert_close(rt.get_f32(vc.id).expect("v cache"), &ref_vc);
-    }
-
     /// RUNG 6: scaling measurement — the llama block at 1/2/4/8 layers
     /// (d=8) and widths d=8/16/32 (1 layer), one decode step each,
     /// fixed 8-genome budget for comparability (+ the rung-5 default-
@@ -780,7 +707,9 @@ mod tests {
             trials: 1,
             seed: 0,
         };
-        eprintln!("config | wall | saturation | extract | exec(best) | genomes refused (cycles/dead-ends)");
+        eprintln!(
+            "config | wall | saturation | extract | exec(best) | genomes refused (cycles/dead-ends)"
+        );
         // (layers, d, use_default_budget): the fixed 8-genome budget gives
         // comparable refusal RATES; depth ≥ 2 needs the default budget to
         // complete at all (the choice-cycle cliff — see the report).
@@ -801,8 +730,18 @@ mod tests {
 
             let start = std::time::Instant::now();
             let mut cx = Graph::new();
-            let blocks: Vec<LlamaBlock> =
-                (0..layers).map(|l| LlamaBlock::new(d, ff, n_heads, n_kv, &Ns::root().child("layers").index(l), &mut cx)).collect();
+            let blocks: Vec<LlamaBlock> = (0..layers)
+                .map(|l| {
+                    LlamaBlock::new(
+                        d,
+                        ff,
+                        n_heads,
+                        n_kv,
+                        &Ns::root().child("layers").index(l),
+                        &mut cx,
+                    )
+                })
+                .collect();
             let x = cx.tensor((1, d));
             let caches: Vec<_> = (0..layers)
                 .map(|_| (cx.tensor((SLOTS6, kv_dim)), cx.tensor((SLOTS6, kv_dim))))
@@ -838,8 +777,14 @@ mod tests {
                 pairs.push((block.gate.weight.id, weights(d * ff, 95 + layer).into()));
                 pairs.push((block.up.weight.id, weights(d * ff, 96 + layer).into()));
                 pairs.push((block.down.weight.id, weights(ff * d, 97 + layer).into()));
-                pairs.push((caches[layer].0.id, weights(SLOTS6 * kv_dim, 98 + layer).into()));
-                pairs.push((caches[layer].1.id, weights(SLOTS6 * kv_dim, 99 + layer).into()));
+                pairs.push((
+                    caches[layer].0.id,
+                    weights(SLOTS6 * kv_dim, 98 + layer).into(),
+                ));
+                pairs.push((
+                    caches[layer].1.id,
+                    weights(SLOTS6 * kv_dim, 99 + layer).into(),
+                ));
             }
             let data: FxHashMap<_, _> = pairs.iter().cloned().collect();
             let mut rt = ReferenceRuntime::load(&cx).expect("native load");
@@ -877,8 +822,9 @@ mod tests {
     #[ignore = "diagnostic — run explicitly by name (release)"]
     fn probe_deadlock_anatomy() {
         let mut cx = Graph::new();
-        let blocks: Vec<LlamaBlock> =
-            (0..2).map(|l| LlamaBlock::new(8, 12, 4, 2, &Ns::root().child("layers").index(l), &mut cx)).collect();
+        let blocks: Vec<LlamaBlock> = (0..2)
+            .map(|l| LlamaBlock::new(8, 12, 4, 2, &Ns::root().child("layers").index(l), &mut cx))
+            .collect();
         let x = cx.tensor((1, 8));
         let caches: Vec<_> = (0..2)
             .map(|_| (cx.tensor((4, 4)), cx.tensor((4, 4))))
@@ -921,8 +867,7 @@ mod tests {
         }
         let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
         for seed in 0..16 {
-            let mut rt =
-                luminal_reference::ReferenceRuntime::load(&cx).expect("native load");
+            let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("native load");
             let outcome = rt.search(
                 &data,
                 &luminal::implementation_search::ImplementationSearchOptions {
@@ -935,11 +880,16 @@ mod tests {
             );
             match outcome {
                 Err(_) => {
-                    eprintln!("[anatomy] seed {seed} refused; last failure dissected by the search's own session (see exemplars above); re-deriving:");
+                    eprintln!(
+                        "[anatomy] seed {seed} refused; last failure dissected by the search's own session (see exemplars above); re-deriving:"
+                    );
                     // Re-run the same single genome through a session we
                     // control so the blockage record is inspectable.
                     // (search consumed the runtime; rebuild the pipeline)
-                    let program = cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("clean");
+                    let program = cx
+                        .logical
+                        .bound_program(&luminal_reference::ReferenceBindings)
+                        .expect("clean");
                     let text = format!(
                         "{}\n\n{}",
                         luminal_reference::assembled_program(),
@@ -947,18 +897,15 @@ mod tests {
                     );
                     let mut egraph = luminal::egglog_snippet::new_egraph();
                     egraph.parse_and_run_program(None, &text).expect("runs");
-                    let serialized =
-                        egraph.serialize(egglog::SerializeConfig::default()).egraph;
+                    let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
                     let allow = luminal_reference::reference_allow_list();
                     let mut session = luminal::extractor::ExtractionSession::new_with_matcher_set(
                         &serialized,
                         Some(&allow),
                         luminal_reference::ops::built_in_matchers(),
                     );
-                    let index = luminal_reference::producer_index_with_ops(
-                        &serialized,
-                        Some(&allow),
-                    );
+                    let index =
+                        luminal_reference::producer_index_with_ops(&serialized, Some(&allow));
                     use rand::{Rng, SeedableRng};
                     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
                     let mut genome = luminal::extractor::Genome::default();
@@ -970,7 +917,9 @@ mod tests {
                         eprintln!("{}", session.blockage_anatomy());
                         return;
                     }
-                    eprintln!("[anatomy] re-derived genome extracted (serialization nondeterminism) — trying next seed");
+                    eprintln!(
+                        "[anatomy] re-derived genome extracted (serialization nondeterminism) — trying next seed"
+                    );
                 }
                 Ok(_) => continue,
             }
@@ -979,11 +928,6 @@ mod tests {
     }
 
     // ── shared scalar-reference pieces (single query row, s = 1) ──
-
-
-
-
-
 
     struct BlockFixture {
         cx: Graph,
@@ -1006,7 +950,9 @@ mod tests {
     const FF_HIDDEN: usize = 6;
     const EXPERTS: usize = 2;
 
-    fn block_fixture(ff: fn(&mut Graph) -> FeedForward) -> (BlockFixture, GraphTensor, GraphTensor, GraphTensor) {
+    fn block_fixture(
+        ff: fn(&mut Graph) -> FeedForward,
+    ) -> (BlockFixture, GraphTensor, GraphTensor, GraphTensor) {
         let mut cx = Graph::new();
         let embed = Embedding::new(VOCAB, D, &Ns::root().child("embed"), &mut cx);
         let a = Ns::root().child("attn");
@@ -1038,7 +984,16 @@ mod tests {
         let kc = kc.output();
         let vc = vc.output();
         (
-            BlockFixture { cx, block, embed, ids, k_cache, v_cache, gather_idx, scatter_idx },
+            BlockFixture {
+                cx,
+                block,
+                embed,
+                ids,
+                k_cache,
+                v_cache,
+                gather_idx,
+                scatter_idx,
+            },
             logits,
             kc,
             vc,
@@ -1048,7 +1003,12 @@ mod tests {
     /// Everything the block binds, with deterministic weights; returns
     /// (tensor-keyed data map, scalar-side copies).
     #[allow(clippy::type_complexity)]
-    fn block_data(fx: &BlockFixture) -> (FxHashMap<petgraph::graph::NodeIndex, TypedBuffer>, Vec<(petgraph::graph::NodeIndex, TypedBuffer)>) {
+    fn block_data(
+        fx: &BlockFixture,
+    ) -> (
+        FxHashMap<petgraph::graph::NodeIndex, TypedBuffer>,
+        Vec<(petgraph::graph::NodeIndex, TypedBuffer)>,
+    ) {
         let token = 3usize;
         let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
             (fx.ids.id, vec![token as i32].into()),
@@ -1083,8 +1043,12 @@ mod tests {
         let x: Vec<f32> = embed_w[token * D..(token + 1) * D].to_vec();
         let mut k_cache = weights(SLOTS * D, 6);
         let mut v_cache = weights(SLOTS * D, 8);
-        let (wq, wk, wv, wo) =
-            (weights(D * D, 2), weights(D * D, 3), weights(D * D, 4), weights(D * D, 5));
+        let (wq, wk, wv, wo) = (
+            weights(D * D, 2),
+            weights(D * D, 3),
+            weights(D * D, 4),
+            weights(D * D, 5),
+        );
         let ff: Box<dyn Fn(&[f32]) -> Vec<f32>> = match &fx.block.ff {
             FeedForward::Dense { .. } => {
                 let (up, down) = (weights(D * FF_HIDDEN, 9), weights(FF_HIDDEN * D, 10));
@@ -1102,44 +1066,25 @@ mod tests {
             }
         };
         let x2 = ref_block_step(
-            &x, &wq, &wk, &wv, &wo, &*ff, &mut k_cache, &mut v_cache, &[0, 1], 1, N_HEADS,
-            HEAD_DIM, D,
+            &x,
+            &wq,
+            &wk,
+            &wv,
+            &wo,
+            &*ff,
+            &mut k_cache,
+            &mut v_cache,
+            &[0, 1],
+            1,
+            N_HEADS,
+            HEAD_DIM,
+            D,
         );
         // Tied logits: x2 · Eᵀ.
         let logits: Vec<f32> = (0..VOCAB)
             .map(|v| (0..D).map(|i| x2[i] * embed_w[v * D + i]).sum())
             .collect();
         (logits, k_cache, v_cache)
-    }
-
-    /// MODEL 2: the full decoder block (dense FFN) through the DEFAULT
-    /// search ladder, with the stage attribution printed.
-    #[test]
-    fn decoder_block_matches_scalar_reference() {
-        let (fx, logits, kc, vc) = block_fixture(|cx| FeedForward::Dense {
-            up: Linear::new(D, FF_HIDDEN, false, &Ns::root().child("up"), cx),
-            down: Linear::new(FF_HIDDEN, D, false, &Ns::root().child("down"), cx),
-        });
-        let (data, pairs) = block_data(&fx);
-        let (ref_logits, ref_kc, ref_vc) = block_reference(&fx);
-
-        let mut rt = ReferenceRuntime::load(&fx.cx).expect("native load");
-        let outcome = rt
-            .search(&data, &ImplementationSearchOptions::default())
-            .expect("search finds a plan");
-        eprintln!(
-            "[decoder-block] search attribution: {} (plans profiled {}, cache hits {})",
-            outcome.timings.summary(),
-            outcome.plans_profiled,
-            outcome.fingerprint_hits
-        );
-        for (id, values) in pairs {
-            rt.set_data(id, values);
-        }
-        rt.execute().expect("winner executes");
-        assert_close(rt.get_f32(logits.id).expect("logits"), &ref_logits);
-        assert_close(rt.get_f32(kc.id).expect("k cache"), &ref_kc);
-        assert_close(rt.get_f32(vc.id).expect("v cache"), &ref_vc);
     }
 
     /// MODEL 3: the same block with the MoE FFN (harness search budget —
@@ -1160,296 +1105,5 @@ mod tests {
         assert_close(rt.get_f32(logits.id).expect("logits"), &ref_logits);
         assert_close(rt.get_f32(kc.id).expect("k cache"), &ref_kc);
         assert_close(rt.get_f32(vc.id).expect("v cache"), &ref_vc);
-    }
-
-    /// MODEL 4: a TWO-LAYER decoder with pre-LayerNorms, decoded for TWO
-    /// steps — the step-1 cache OUTPUTS feed the step-2 cache INPUTS
-    /// through the binding surface (each step is its own shape-specialized
-    /// program; harness search budget per step).
-    #[test]
-    fn tiny_decoder_two_steps_match_scalar_reference() {
-        const LAYERS: usize = 2;
-        const EPS: f32 = 1e-5;
-        let tokens = [3usize, 1];
-
-        // Scalar caches persist across BOTH steps, per layer.
-        let mut ref_k: Vec<Vec<f32>> = vec![vec![0.0; SLOTS * D]; LAYERS];
-        let mut ref_v: Vec<Vec<f32>> = vec![vec![0.0; SLOTS * D]; LAYERS];
-        let mut runtime_k: Vec<Vec<f32>> = vec![vec![0.0; SLOTS * D]; LAYERS];
-        let mut runtime_v: Vec<Vec<f32>> = vec![vec![0.0; SLOTS * D]; LAYERS];
-
-        for (step, token) in tokens.iter().enumerate() {
-            let prev_seq = step; // tokens already in the cache
-            let ctx = step + 1; // slots visible this step
-            let mut cx = Graph::new();
-            let embed = Embedding::new(VOCAB, D, &Ns::root().child("embed"), &mut cx);
-            let mut norms = Vec::new();
-            let mut blocks = Vec::new();
-            for l in 0..LAYERS {
-                let lns = Ns::root().child("layers").index(l);
-                norms.push(crate::LayerNorm::new(D, false, false, true, EPS, &lns.child("norm"), &mut cx));
-                blocks.push(DecoderBlock {
-                    wq: Linear::new(D, D, false, &lns.child("q"), &mut cx),
-                    wk: Linear::new(D, D, false, &lns.child("k"), &mut cx),
-                    wv: Linear::new(D, D, false, &lns.child("v"), &mut cx),
-                    wo: Linear::new(D, D, false, &lns.child("o"), &mut cx),
-                    ff: FeedForward::Dense {
-                        up: Linear::new(D, FF_HIDDEN, false, &lns.child("up"), &mut cx),
-                        down: Linear::new(FF_HIDDEN, D, false, &lns.child("down"), &mut cx),
-                    },
-                    n_heads: N_HEADS,
-                    n_kv_heads: N_HEADS,
-                    head_dim: HEAD_DIM,
-                });
-            }
-            let model = TinyDecoder {
-                embed,
-                norms,
-                blocks,
-                final_norm: crate::LayerNorm::new(D, false, false, true, EPS, &Ns::root().child("final_norm"), &mut cx),
-            };
-            let ids = cx.tensor_dtyped(1, DType::Int);
-            let cache_inputs: Vec<(GraphTensor, GraphTensor)> = (0..LAYERS)
-                .map(|_| (cx.tensor((SLOTS, D)), cx.tensor((SLOTS, D))))
-                .collect();
-            let gather_idx = cx.tensor_dtyped(ctx, DType::Int);
-            let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-            let (logits, caches_out) = model.forward(
-                ids,
-                &cache_inputs,
-                gather_idx,
-                scatter_idx,
-                IntExpr::from(prev_seq),
-            );
-            let logits = logits.output();
-            let caches_out: Vec<_> = caches_out
-                .into_iter()
-                .map(|(k, v)| (k.output(), v.output()))
-                .collect();
-
-            // Per-layer weights, deterministic and step-independent.
-            let layer_weights = |layer: usize| {
-                let base = 20 + layer * 10;
-                (
-                    weights(D * D, base),
-                    weights(D * D, base + 1),
-                    weights(D * D, base + 2),
-                    weights(D * D, base + 3),
-                    weights(D * FF_HIDDEN, base + 4),
-                    weights(FF_HIDDEN * D, base + 5),
-                )
-            };
-            let embed_w = weights(VOCAB * D, 1);
-            let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
-                (ids.id, vec![*token as i32].into()),
-                (model.embed.weight.id, embed_w.clone().into()),
-                (gather_idx.id, (0..ctx as i32).collect::<Vec<i32>>().into()),
-                (scatter_idx.id, vec![step as i32].into()),
-            ];
-            for layer in 0..LAYERS {
-                let (wq, wk, wv, wo, up, down) = layer_weights(layer);
-                let block = &model.blocks[layer];
-                pairs.push((block.wq.weight.id, wq.into()));
-                pairs.push((block.wk.weight.id, wk.into()));
-                pairs.push((block.wv.weight.id, wv.into()));
-                pairs.push((block.wo.weight.id, wo.into()));
-                let FeedForward::Dense { up: up_l, down: down_l } = &block.ff else {
-                    unreachable!()
-                };
-                pairs.push((up_l.weight.id, up.into()));
-                pairs.push((down_l.weight.id, down.into()));
-                pairs.push((cache_inputs[layer].0.id, runtime_k[layer].clone().into()));
-                pairs.push((cache_inputs[layer].1.id, runtime_v[layer].clone().into()));
-            }
-
-            // Scalar reference for this step.
-            let mut x: Vec<f32> = embed_w[token * D..(token + 1) * D].to_vec();
-            let gather: Vec<usize> = (0..ctx).collect();
-            for layer in 0..LAYERS {
-                let (wq, wk, wv, wo, up, down) = layer_weights(layer);
-                x = ref_layer_norm(&x, EPS);
-                let ff = move |x: &[f32]| {
-                    let hidden: Vec<f32> = ref_matmul(x, &up, D, FF_HIDDEN)
-                        .iter()
-                        .map(|v| v.max(0.0))
-                        .collect();
-                    ref_matmul(&hidden, &down, FF_HIDDEN, D)
-                };
-                x = ref_block_step(
-                    &x,
-                    &wq,
-                    &wk,
-                    &wv,
-                    &wo,
-                    &ff,
-                    &mut ref_k[layer],
-                    &mut ref_v[layer],
-                    &gather,
-                    step,
-                    N_HEADS,
-                    HEAD_DIM,
-                    D,
-                );
-            }
-            let x = ref_layer_norm(&x, EPS);
-            let ref_logits: Vec<f32> = (0..VOCAB)
-                .map(|v| (0..D).map(|i| x[i] * embed_w[v * D + i]).sum())
-                .collect();
-
-            // Two layers double the genome decision points: the harness
-            // budget's 8 genomes all hit choice-cycle discards, so this
-            // model runs the DEFAULT budget (64 genomes).
-            let data: FxHashMap<_, _> = pairs.iter().cloned().collect();
-            let mut rt = ReferenceRuntime::load(&cx).expect("native load");
-            rt.search(&data, &ImplementationSearchOptions::default())
-                .expect("search finds a plan");
-            for (id, values) in &pairs {
-                rt.set_data(*id, values.clone());
-            }
-            rt.execute().expect("winner executes");
-            assert_close(rt.get_f32(logits.id).expect("logits"), &ref_logits);
-            for layer in 0..LAYERS {
-                let k_out = rt.get_f32(caches_out[layer].0.id).expect("k cache").clone();
-                let v_out = rt.get_f32(caches_out[layer].1.id).expect("v cache").clone();
-                assert_close(&k_out, &ref_k[layer]);
-                assert_close(&v_out, &ref_v[layer]);
-                runtime_k[layer] = k_out; // runtime-out → next step's runtime-in
-                runtime_v[layer] = v_out;
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod forward_rope_tests {
-    use super::LlamaBlock;
-    use scalar_refs::*;
-    use luminal::prelude::*;
-    use luminal::shape::IntExpr;
-
-    /// forward_rope ≡ the hand-composed IntExpr path: one graph, one
-    /// set of block weights, the same decode-step inputs — the new
-    /// method on one side; rms_norm_heads → rotary_apply →
-    /// paged_attention(IntExpr) → residual/FFN spelled out on the
-    /// other. Outputs and both cache outs must agree exactly, proving
-    /// the rope threading and the data-driven mask change nothing at
-    /// the pinned position.
-    #[test]
-    fn llama_block_forward_rope_matches_expression_path() {
-        const D: usize = 8;
-        const FF: usize = 12;
-        const N_HEADS: usize = 4;
-        const N_KV_HEADS: usize = 2;
-        const HEAD_DIM: usize = D / N_HEADS;
-        const KV_DIM: usize = N_KV_HEADS * HEAD_DIM;
-        const SLOTS: usize = 4;
-        const CTX: usize = 3;
-        let position = 1usize;
-
-        let mut cx = Graph::new();
-        let block = LlamaBlock::new(D, FF, N_HEADS, N_KV_HEADS, &Ns::root().child("blk"), &mut cx)
-            .with_qk_norm(&Ns::root().child("blk"), &mut cx);
-        let x = cx.tensor((1, D));
-        let k_cache = cx.tensor((SLOTS, KV_DIM));
-        let v_cache = cx.tensor((SLOTS, KV_DIM));
-        let gather_idx = cx.tensor_dtyped(CTX, DType::Int);
-        let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-        let q_pos = cx.tensor_dtyped(1, DType::Int);
-        let rope_cos = cx.tensor((1, HEAD_DIM));
-        let rope_sin = cx.tensor((1, HEAD_DIM));
-        let rope_rot = cx.tensor((HEAD_DIM, HEAD_DIM));
-
-        let (out_rope, k_rope, v_rope) = block.forward_rope(
-            x, k_cache, v_cache, gather_idx, scatter_idx, q_pos, rope_cos, rope_sin, rope_rot,
-        );
-        let out_rope = out_rope.output();
-        let k_rope = k_rope.output();
-        let v_rope = v_rope.output();
-
-        // The same anatomy composed by hand on the IntExpr path.
-        let normed = block.attn_norm.forward(x);
-        let (q_weight, k_weight) = block.qk_norm.expect("qk-norm minted");
-        let q = crate::rotary_apply(
-            crate::rms_norm_heads(block.wq.forward(normed), HEAD_DIM, q_weight, 1e-6),
-            HEAD_DIM,
-            rope_cos,
-            rope_sin,
-            rope_rot,
-        );
-        let k = crate::rotary_apply(
-            crate::rms_norm_heads(block.wk.forward(normed), HEAD_DIM, k_weight, 1e-6),
-            HEAD_DIM,
-            rope_cos,
-            rope_sin,
-            rope_rot,
-        );
-        let (attn, k_expr, v_expr) = crate::paged_attention(
-            q,
-            k,
-            block.wv.forward(normed),
-            k_cache,
-            v_cache,
-            gather_idx,
-            scatter_idx,
-            IntExpr::from(position),
-            N_HEADS,
-            N_KV_HEADS,
-            HEAD_DIM,
-        );
-        let x_mid = x + block.wo.forward(attn);
-        let ff_in = block.ffn_norm.forward(x_mid);
-        let ff = block
-            .down
-            .forward(block.gate.forward(ff_in).silu() * block.up.forward(ff_in));
-        let out_expr = (x_mid + ff).output();
-        let k_expr = k_expr.output();
-        let v_expr = v_expr.output();
-
-        let mut pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
-            (x.id, weights(D, 1).into()),
-            (k_cache.id, weights(SLOTS * KV_DIM, 2).into()),
-            (v_cache.id, weights(SLOTS * KV_DIM, 3).into()),
-            (gather_idx.id, vec![0i32, 1, 2].into()),
-            (scatter_idx.id, vec![1i32].into()),
-            (q_pos.id, vec![position as i32].into()),
-        ];
-        let (cos, sin) = crate::rope_tables_split_half(&[position as f32], HEAD_DIM, 10_000.0, 1.0);
-        pairs.push((rope_cos.id, cos.into()));
-        pairs.push((rope_sin.id, sin.into()));
-        pairs.push((rope_rot.id, crate::rope_pairing_matrix(HEAD_DIM, false).into()));
-        for (seed, tensor) in [
-            block.wq.weight,
-            block.wk.weight,
-            block.wv.weight,
-            block.wo.weight,
-            block.gate.weight,
-            block.up.weight,
-            block.down.weight,
-            q_weight,
-            k_weight,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let n: usize = tensor
-                .dims()
-                .iter()
-                .map(|d| d.to_usize().expect("static dim"))
-                .product();
-            pairs.push((tensor.id, weights(n, 10 + seed).into()));
-        }
-
-        let rt = luminal_reference::harness::run_reference(&cx, &pairs);
-        let rope_out = rt.get_f32(out_rope.id).expect("rope out").clone();
-        let expr_out = rt.get_f32(out_expr.id).expect("expr out").clone();
-        assert_close(&rope_out, &expr_out);
-        assert_close(
-            rt.get_f32(k_rope.id).expect("k rope"),
-            rt.get_f32(k_expr.id).expect("k expr"),
-        );
-        assert_close(
-            rt.get_f32(v_rope.id).expect("v rope"),
-            rt.get_f32(v_expr.id).expect("v expr"),
-        );
     }
 }

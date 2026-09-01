@@ -5,10 +5,15 @@ edition = "2021"
 
 [dependencies]
 luminal = { path = "../.." }
-luminal_reference = { path = "../../crates/luminal_reference" }
-# Train 3 (op-ownership move): the cuBLASLt marker estate lives in the
-# CUDA-lite crate now (`ops/cublaslt`); this is a CPU-side dependency —
-# CL compiles fully without its `device` feature.
+# `luminal_reference` is ABSENT ENTIRELY — not a dependency, not a
+# dev-dependency. This runtime owns everything it needs outright: its op
+# vocabulary (see lib.rs) and its boundary contract (`bindings.rs`).
+# Anything it turns out to want from another runtime gets REPLICATED here,
+# never borrowed. The one exception is CUDA-lite, and only for the
+# cuBLASLt marker estate — Train 3
+# rehomed it to its executing runtime, and asserting on a fork of it
+# would be asserting on a copy. This is a CPU-side dependency: CL
+# compiles fully without its `device` feature.
 luminal_cuda_lite = { path = "../../crates/luminal_cuda_lite" }
 # Versions track luminal's Cargo.toml exactly — the egglog/egraph-serialize/
 # petgraph types must UNIFY with luminal's so the fixture runners can hand

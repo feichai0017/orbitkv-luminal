@@ -17,7 +17,11 @@ fn bufferize_and_report(name: &str, text: &str, prefer: &[&str]) {
     let dps = luminal::dps::dps_rewrite(&graph);
     for node in dps.dag.node_weights() {
         if let ExtractedNode::LayoutOp(op) = node {
-            let ins: Vec<String> = op.inputs.iter().map(|i| format!("{}={}", i.port, i.value)).collect();
+            let ins: Vec<String> = op
+                .inputs
+                .iter()
+                .map(|i| format!("{}={}", i.port, i.value))
+                .collect();
             println!("[{name}] DPS {}: ins={ins:?}", op.op.label());
         }
     }
@@ -40,12 +44,18 @@ fn matmul_then_elementwise_bufferize() {
         // would fuse into the call instead of standing downstream.
         let y = x.matmul(w) * c;
         let _ = y.output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     bufferize_and_report(
         "mm+add",
         &text,
-        &["LayoutTensorOpCublasLt", "LayoutTensorOpIndexMapApplyViewGeneric"],
+        &[
+            "LayoutTensorOpCublasLt",
+            "LayoutTensorOpIndexMapApplyViewGeneric",
+        ],
     );
 }
 
@@ -61,11 +71,17 @@ fn chained_matmuls_bufferize() {
         // output escapes, so no dodge is needed). The probe's subject is
         // the INTERIOR sibling view feeding the second call.
         let _ = x.matmul(w1).matmul(w2).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     bufferize_and_report(
         "mm.mm",
         &text,
-        &["LayoutTensorOpCublasLt", "LayoutTensorOpIndexMapApplyViewGeneric"],
+        &[
+            "LayoutTensorOpCublasLt",
+            "LayoutTensorOpIndexMapApplyViewGeneric",
+        ],
     );
 }

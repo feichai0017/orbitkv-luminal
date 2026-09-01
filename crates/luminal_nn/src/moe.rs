@@ -133,7 +133,9 @@ mod tests {
             let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let exps: Vec<f32> = logits.iter().map(|l| (l - max).exp()).collect();
             let denom: f32 = exps.iter().sum();
-            let best = (0..E).max_by(|a, b| logits[*a].partial_cmp(&logits[*b]).unwrap()).unwrap();
+            let best = (0..E)
+                .max_by(|a, b| logits[*a].partial_cmp(&logits[*b]).unwrap())
+                .unwrap();
             let weight = exps[best] / denom;
             let w = &expert_vals[best * IN * OUT..(best + 1) * IN * OUT];
             for o in 0..OUT {
@@ -153,7 +155,6 @@ mod tests {
         assert_close(rt.get_f32(out.id).expect("output"), &expected);
     }
 }
-
 
 /// The full-fidelity top-k mixture (Qwen3-MoE form, ruling 2026-08-12):
 /// scores = softmax over ALL experts FIRST, then top-k selection, then
@@ -189,7 +190,10 @@ impl MoETopK {
     ) -> Self {
         Self {
             router: Linear::new_permuted(hidden, experts, false, &ns.child("gate"), cx),
-            gate_up: cx.named_tensor(ns.leaf("gate_up_weights"), (experts, 2 * intermediate, hidden)),
+            gate_up: cx.named_tensor(
+                ns.leaf("gate_up_weights"),
+                (experts, 2 * intermediate, hidden),
+            ),
             down: cx.named_tensor(ns.leaf("down_weights"), (experts, hidden, intermediate)),
             experts,
             top_k,
@@ -286,8 +290,8 @@ impl MoETopK {
 #[cfg(test)]
 mod topk_tests {
     use super::MoETopK;
-    use scalar_refs::*;
     use luminal::prelude::*;
+    use scalar_refs::*;
 
     /// The full Qwen3-MoE chain against a scalar reference: softmax over
     /// ALL experts first, top-k by stable ranking, renormalized picked
@@ -439,7 +443,10 @@ mod topk_tests {
         }
 
         // Stage the SLICES of the same value streams per expert.
-        let mut pairs: Vec<(petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer)> = vec![
+        let mut pairs: Vec<(
+            petgraph::graph::NodeIndex,
+            luminal::buffer_tensor_ir::TypedBuffer,
+        )> = vec![
             (x.id, x_vals.into()),
             (moe.router.weight.id, router_vals.into()),
         ];
@@ -447,7 +454,10 @@ mod topk_tests {
             let fused = &gate_up_vals[e * 2 * I * H..(e + 1) * 2 * I * H];
             pairs.push((gate.id, fused[..I * H].to_vec().into()));
             pairs.push((up.id, fused[I * H..].to_vec().into()));
-            pairs.push((down.id, down_vals[e * H * I..(e + 1) * H * I].to_vec().into()));
+            pairs.push((
+                down.id,
+                down_vals[e * H * I..(e + 1) * H * I].to_vec().into(),
+            ));
         }
         let rt = luminal_reference::harness::run_reference(&cx, &pairs);
         assert_close(rt.get_f32(out.id).expect("moe out"), &expected);

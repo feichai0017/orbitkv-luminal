@@ -334,7 +334,10 @@ fn paged_attention_core(
     let mut mask = row_vals.lt(col_vals).cast(DType::F32) * -1e9;
     if let Some(window) = window {
         // masked where col < row − (window − 1)
-        let outside = col_vals.lt(row_vals - (window as f32 - 1.0)).cast(DType::F32) * -1e9;
+        let outside = col_vals
+            .lt(row_vals - (window as f32 - 1.0))
+            .cast(DType::F32)
+            * -1e9;
         mask = mask + outside;
     }
 
@@ -406,10 +409,18 @@ pub fn rope_pairing_matrix(head_dim: usize, interleaved: bool) -> Vec<f32> {
     for column in 0..head_dim {
         // rot(x)[column] = ±x[source]  ⇒  R[source, column] = ±1
         let (source, sign) = if interleaved {
-            if column % 2 == 0 { (column + 1, -1.0) } else { (column - 1, 1.0) }
+            if column % 2 == 0 {
+                (column + 1, -1.0)
+            } else {
+                (column - 1, 1.0)
+            }
         } else {
             let half = head_dim / 2;
-            if column < half { (column + half, -1.0) } else { (column - half, 1.0) }
+            if column < half {
+                (column + half, -1.0)
+            } else {
+                (column - half, 1.0)
+            }
         };
         rot[source * head_dim + column] = sign;
     }
@@ -545,7 +556,12 @@ pub fn rms_norm_heads(
     let inv = ((heads * heads).mean(2) + epsilon).sqrt().reciprocal(); // (s, n_heads)
     let scaled = heads
         * inv.view().unsqueeze(2).expand(dims.clone()).finish()
-        * weight.view().unsqueeze(0).unsqueeze(0).expand(dims).finish();
+        * weight
+            .view()
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .expand(dims)
+            .finish();
     scaled.merge_dims(1, 2)
 }
 
@@ -852,7 +868,10 @@ mod tests {
             ],
         );
         assert_close(rt.get_f32(attn_pos.id).expect("positional attn"), &attn_ref);
-        assert_close(rt.get_f32(attn_expr.id).expect("expression attn"), &attn_ref);
+        assert_close(
+            rt.get_f32(attn_expr.id).expect("expression attn"),
+            &attn_ref,
+        );
         assert_close(rt.get_f32(k_pos_out.id).expect("k cache"), &k_cache_ref);
         assert_close(rt.get_f32(v_pos_out.id).expect("v cache"), &v_cache_ref);
     }

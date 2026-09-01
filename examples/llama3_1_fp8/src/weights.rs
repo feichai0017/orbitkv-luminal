@@ -21,8 +21,7 @@ pub fn load_safetensors_weights(
     model_dir: &Path,
 ) -> Result<Vec<(NodeIndex, TypedBuffer)>, Box<dyn Error>> {
     let path = model_dir.join("model_combined_fp8_unfused_v1.safetensors");
-    let file = std::fs::File::open(&path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let tensors = SafeTensors::deserialize(&mmap)?;
 
@@ -63,10 +62,7 @@ pub fn load_safetensors_weights(
             }
             DType::F32 => tensor_to_f32(&view).into(),
             other => {
-                return Err(format!(
-                    "'{label}': no staging rule for input dtype {other:?}"
-                )
-                .into());
+                return Err(format!("'{label}': no staging rule for input dtype {other:?}").into());
             }
         };
         pairs.push((spec.id, payload));
@@ -83,9 +79,7 @@ pub fn random_weights(cx: &Graph) -> Vec<(NodeIndex, TypedBuffer)> {
     cx.logical
         .input_specs()
         .into_iter()
-        .filter(|spec| {
-            !spec.label.starts_with("arg.") && !spec.label.starts_with("kv_cache.")
-        })
+        .filter(|spec| !spec.label.starts_with("arg.") && !spec.label.starts_with("kv_cache."))
         .enumerate()
         .map(|(seed, spec)| {
             let n: usize = spec

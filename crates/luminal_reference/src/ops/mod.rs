@@ -18,30 +18,27 @@
 // The instance re-exports are the op-authoring surface: since the extractor
 // went registry-driven it constructs instances only through matchers, so the
 // non-test build no longer names these types — their remaining consumers are
-// tests and the upcoming reference-backend/DPS work (same situation as the
-// `#![allow(dead_code)]` note in `layout_ir.rs`).
+// tests and the upcoming reference-backend/DPS work.
 #![allow(unused_imports)]
 
-// Kernel-bearing op modules are visible to the rest of `crate::reference`
-// (not the whole crate): the kernel registry's table rows point at
+// Kernel-bearing op modules are visible to the rest of this crate: the
+// kernel registry's table rows point at
 // `<op_module>::kernel` (op-folder ruling 2026-08-13).
 pub(crate) mod add;
 pub(crate) mod cast;
 pub(crate) mod constant;
 pub(crate) mod div;
-pub(crate) mod trunc_div;
-pub(crate) mod trunc_rem;
 pub(crate) mod exp;
 pub(crate) mod exp2;
 pub(crate) mod gather;
 pub(crate) mod index_map_apply_materialize;
-mod index_map_apply_view;
 pub(crate) mod iota;
 pub(crate) mod less_than;
 pub(crate) mod log2;
-pub(crate) mod materialize_layout_copy;
 pub(crate) mod modulo;
 pub(crate) mod mul;
+pub(crate) mod trunc_div;
+pub(crate) mod trunc_rem;
 // (poison moved to core `luminal::poison` in Step B; re-exported below.)
 pub(crate) mod recip;
 pub(crate) mod reduce_max;
@@ -59,28 +56,26 @@ pub(crate) mod sqrt;
 // Instance structs deliberately do NOT derive `Default`: an instance is
 // created by its matcher's `extract` (or derived via `to_dps` / synthesized
 // by the DPS pass, for Poison) — a hygiene convention, not a privacy fence.
-pub use add::{AddFunctional, AddMutating, AddMutatingInputAliasSafe};
+pub use add::AddFunctional;
 pub use cast::Cast;
 pub use constant::Constant;
-pub use div::{DivFunctional, DivMutating};
-pub use exp::{ExpFunctional, ExpMutating};
-pub use exp2::{Exp2Functional, Exp2Mutating};
+pub use div::DivFunctional;
+pub use exp::ExpFunctional;
+pub use exp2::Exp2Functional;
 pub use gather::Gather;
 pub use index_map_apply_materialize::IndexMapApplyMaterialize;
-pub use index_map_apply_view::IndexMapApplyView;
 pub use iota::Iota;
 pub use less_than::LessThan;
-pub use log2::{Log2Functional, Log2Mutating};
-pub use modulo::{ModFunctional, ModMutating};
-pub use materialize_layout_copy::MaterializeLayoutCopy;
-pub use mul::{MulFunctional, MulMutating};
+pub use log2::Log2Functional;
 pub use luminal::poison::Poison;
-pub use recip::{RecipFunctional, RecipMutating};
+pub use modulo::ModFunctional;
+pub use mul::MulFunctional;
+pub use recip::RecipFunctional;
 pub use reduce_max::ReduceMax;
 pub use reduce_sum::ReduceSum;
-pub use scatter::{ScatterFunctional, ScatterMutating};
-pub use sin::{SinFunctional, SinMutating};
-pub use sqrt::{SqrtFunctional, SqrtMutating};
+pub use scatter::ScatterFunctional;
+pub use sin::SinFunctional;
+pub use sqrt::SqrtFunctional;
 
 // DPS forms, re-exported for the reference runtime's kernel registry
 // (reference::kernels downcasts plan ops to these concrete types —
@@ -96,7 +91,6 @@ pub use index_map_apply_materialize::IndexMapApplyMaterializeDps;
 pub use iota::{IotaDps, IotaExpr};
 pub use less_than::LessThanDps;
 pub use log2::Log2FunctionalDps;
-pub use materialize_layout_copy::MaterializeLayoutCopyDps;
 pub use modulo::ModFunctionalDps;
 pub use mul::MulFunctionalDps;
 pub use recip::RecipFunctionalDps;
@@ -106,73 +100,172 @@ pub use scatter::ScatterFunctionalDps;
 pub use sin::SinFunctionalDps;
 pub use sqrt::SqrtFunctionalDps;
 
-pub use add::{AddFunctionalMatcher, AddMutatingInputAliasSafeMatcher, AddMutatingMatcher};
+pub use add::AddFunctionalMatcher;
 pub use cast::CastMatcher;
 pub use constant::ConstantMatcher;
-pub use div::{DivFunctionalMatcher, DivMutatingMatcher};
-pub use trunc_div::{TruncDivFunctional, TruncDivFunctionalDps, TruncDivFunctionalMatcher};
-pub use trunc_rem::{TruncRemFunctional, TruncRemFunctionalDps, TruncRemFunctionalMatcher};
-pub use exp::{ExpFunctionalMatcher, ExpMutatingMatcher};
-pub use exp2::{Exp2FunctionalMatcher, Exp2MutatingMatcher};
+pub use div::DivFunctionalMatcher;
+pub use exp::ExpFunctionalMatcher;
+pub use exp2::Exp2FunctionalMatcher;
 pub use gather::GatherMatcher;
 pub use index_map_apply_materialize::IndexMapApplyMaterializeMatcher;
-pub use index_map_apply_view::IndexMapApplyViewMatcher;
 pub use iota::IotaMatcher;
 pub use less_than::LessThanMatcher;
-pub use log2::{Log2FunctionalMatcher, Log2MutatingMatcher};
-pub use modulo::{ModFunctionalMatcher, ModMutatingMatcher};
-pub use materialize_layout_copy::MaterializeLayoutCopyMatcher;
-pub use mul::{MulFunctionalMatcher, MulMutatingMatcher};
-pub use recip::{RecipFunctionalMatcher, RecipMutatingMatcher};
+pub use log2::Log2FunctionalMatcher;
+pub use modulo::ModFunctionalMatcher;
+pub use mul::MulFunctionalMatcher;
+pub use recip::RecipFunctionalMatcher;
 pub use reduce_max::ReduceMaxMatcher;
 pub use reduce_sum::ReduceSumMatcher;
-pub use scatter::{ScatterFunctionalMatcher, ScatterMutatingMatcher};
-pub use sin::{SinFunctionalMatcher, SinMutatingMatcher};
-pub use sqrt::{SqrtFunctionalMatcher, SqrtMutatingMatcher};
+pub use scatter::ScatterFunctionalMatcher;
+pub use sin::SinFunctionalMatcher;
+pub use sqrt::SqrtFunctionalMatcher;
+pub use trunc_div::{TruncDivFunctional, TruncDivFunctionalDps, TruncDivFunctionalMatcher};
+pub use trunc_rem::{TruncRemFunctional, TruncRemFunctionalDps, TruncRemFunctionalMatcher};
 
-/// THE registration list: every built-in matcher, one line per registered
-/// implementation. Adding an op = writing its module (instances + traits +
-/// matcher, all in one file) and adding its line here; nothing else in the
-/// tree changes. The extractor builds its constructor-name registry from this
-/// list — there is no dispatch table anywhere else. (Poison has no matcher:
-/// it is synthesized by the DPS pass, never extracted from the e-graph.)
+/// The matcher half of [`reference_ops`] — what the extractor builds its
+/// constructor-name registry from. Not a list in its own right: every
+/// entry comes from a row that also carries the op's kernel.
 pub fn built_in_matchers() -> Vec<Box<dyn luminal::layout_ir::OpMatcher>> {
-    vec![
-        Box::new(MaterializeLayoutCopyMatcher),
-        Box::new(SqrtFunctionalMatcher),
-        Box::new(ExpFunctionalMatcher),
-        Box::new(AddFunctionalMatcher),
-        Box::new(MulFunctionalMatcher),
-        Box::new(DivFunctionalMatcher),
-        Box::new(TruncDivFunctionalMatcher),
-        Box::new(TruncRemFunctionalMatcher),
-        Box::new(SqrtMutatingMatcher),
-        Box::new(ExpMutatingMatcher),
-        Box::new(AddMutatingMatcher),
-        Box::new(AddMutatingInputAliasSafeMatcher),
-        Box::new(MulMutatingMatcher),
-        Box::new(DivMutatingMatcher),
-        Box::new(ReduceSumMatcher),
-        Box::new(ReduceMaxMatcher),
-        Box::new(IotaMatcher),
-        Box::new(GatherMatcher),
-        Box::new(ConstantMatcher),
-        Box::new(ScatterFunctionalMatcher),
-        Box::new(ScatterMutatingMatcher),
-        Box::new(Exp2FunctionalMatcher),
-        Box::new(Exp2MutatingMatcher),
-        Box::new(Log2FunctionalMatcher),
-        Box::new(Log2MutatingMatcher),
-        Box::new(SinFunctionalMatcher),
-        Box::new(SinMutatingMatcher),
-        Box::new(RecipFunctionalMatcher),
-        Box::new(RecipMutatingMatcher),
-        Box::new(ModFunctionalMatcher),
-        Box::new(ModMutatingMatcher),
-        Box::new(LessThanMatcher),
-        Box::new(CastMatcher),
-        Box::new(IndexMapApplyMaterializeMatcher),
-    ]
+    reference_ops().iter().map(|op| (op.matcher)()).collect()
+}
+
+/// ONE ROW PER OP: how the e-graph produces it, and how the executor runs
+/// it, in a single value that cannot be half-written.
+///
+/// This pairing is the whole point. The matcher list and the kernel table
+/// used to be two independent `vec![…]`s, and "every registered op is
+/// executable" was a property you had to *check* — the whole Mutating
+/// family sat registered-but-kernel-less for months, minting e-nodes on
+/// every saturation that selection then discarded. A row here carries
+/// both halves, so that state is no longer expressible: you cannot
+/// register an op without writing its kernel, and a kernel with no
+/// matcher never reaches the executor because dispatch only ever walks
+/// this table.
+pub struct ReferenceOp {
+    /// Builds the matcher. A fn pointer, not a value, because
+    /// `Box<dyn OpMatcher>` is not `Clone` and callers want owned lists.
+    pub matcher: fn() -> Box<dyn luminal::layout_ir::OpMatcher>,
+    /// The executable form: the DPS type this op lowers to, its IR label,
+    /// and the kernel body from the op's own folder.
+    pub kernel: crate::kernels::ReferenceKernel,
+}
+
+/// THE REGISTRATION LIST: every built-in op, matcher and kernel together.
+/// Adding an op = writing its module (instances + traits + matcher +
+/// kernel, all in one folder) and adding its row here; nothing else in
+/// the tree changes.
+///
+/// Deliberately hand-written and verbose, like the op modules themselves:
+/// no macro, each row spelling out its own matcher, DPS type, label and
+/// kernel. (Poison has no row — it is synthesized by the DPS pass, never
+/// extracted and never dispatched. BufferAlloc/BufferFree have no row
+/// either: they are bufferizer-minted plan infrastructure, not ops, and
+/// live in the kernel table's infrastructure section.)
+pub fn reference_ops() -> &'static [ReferenceOp] {
+    use crate::kernels::entry;
+    static OPS: std::sync::OnceLock<Vec<ReferenceOp>> = std::sync::OnceLock::new();
+    OPS.get_or_init(|| {
+        vec![
+            // ── elementwise binary ──
+            ReferenceOp {
+                matcher: || Box::new(AddFunctionalMatcher),
+                kernel: entry::<AddFunctionalDps>("AddFunctionalGeneric", add::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(MulFunctionalMatcher),
+                kernel: entry::<MulFunctionalDps>("MulFunctionalGeneric", mul::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(DivFunctionalMatcher),
+                kernel: entry::<DivFunctionalDps>("DivFunctionalGeneric", div::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(TruncDivFunctionalMatcher),
+                kernel: entry::<TruncDivFunctionalDps>(
+                    "TruncDivFunctionalGeneric",
+                    trunc_div::kernel,
+                ),
+            },
+            ReferenceOp {
+                matcher: || Box::new(TruncRemFunctionalMatcher),
+                kernel: entry::<TruncRemFunctionalDps>(
+                    "TruncRemFunctionalGeneric",
+                    trunc_rem::kernel,
+                ),
+            },
+            ReferenceOp {
+                matcher: || Box::new(ModFunctionalMatcher),
+                kernel: entry::<ModFunctionalDps>("ModFunctionalGeneric", modulo::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(LessThanMatcher),
+                kernel: entry::<LessThanDps>("LessThanGeneric", less_than::kernel),
+            },
+            // ── elementwise unary ──
+            ReferenceOp {
+                matcher: || Box::new(SqrtFunctionalMatcher),
+                kernel: entry::<SqrtFunctionalDps>("SqrtFunctionalGeneric", sqrt::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(ExpFunctionalMatcher),
+                kernel: entry::<ExpFunctionalDps>("ExpFunctionalGeneric", exp::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(Exp2FunctionalMatcher),
+                kernel: entry::<Exp2FunctionalDps>("Exp2FunctionalGeneric", exp2::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(Log2FunctionalMatcher),
+                kernel: entry::<Log2FunctionalDps>("Log2FunctionalGeneric", log2::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(SinFunctionalMatcher),
+                kernel: entry::<SinFunctionalDps>("SinFunctionalGeneric", sin::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(RecipFunctionalMatcher),
+                kernel: entry::<RecipFunctionalDps>("RecipFunctionalGeneric", recip::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(CastMatcher),
+                kernel: entry::<CastDps>("CastGeneric", cast::kernel),
+            },
+            // ── sources ──
+            ReferenceOp {
+                matcher: || Box::new(ConstantMatcher),
+                kernel: entry::<ConstantDps>("ConstantGeneric", constant::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(IotaMatcher),
+                kernel: entry::<IotaDps>("IotaGeneric", iota::kernel),
+            },
+            // ── reductions ──
+            ReferenceOp {
+                matcher: || Box::new(ReduceSumMatcher),
+                kernel: entry::<ReduceSumDps>("ReduceSumGeneric", reduce_sum::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(ReduceMaxMatcher),
+                kernel: entry::<ReduceMaxDps>("ReduceMaxGeneric", reduce_max::kernel),
+            },
+            // ── data movement ──
+            ReferenceOp {
+                matcher: || Box::new(GatherMatcher),
+                kernel: entry::<GatherDps>("GatherGeneric", gather::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(ScatterFunctionalMatcher),
+                kernel: entry::<ScatterFunctionalDps>("ScatterFunctionalGeneric", scatter::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(IndexMapApplyMaterializeMatcher),
+                kernel: entry::<IndexMapApplyMaterializeDps>(
+                    "IndexMapApplyMaterialize",
+                    index_map_apply_materialize::kernel,
+                ),
+            },
+        ]
+    })
 }
 
 // =============================================================================
@@ -205,40 +298,38 @@ mod registry_contract {
 
     /// RANK 9: NO built-in declares the unconditional sharing permit — ops
     /// whose in-place safety depends on preconditions get matched with those
-    /// preconditions in egglog (the Mutating tier) instead of asserting a
-    /// blanket permit the engine would have to trust.
+    /// preconditions in egglog instead of asserting a blanket permit the
+    /// engine would have to trust.
+    ///
+    /// The `Sharing::May` half of this pin moved with the only op that
+    /// declares one: `AddMutatingInputAliasSafe` now lives in the
+    /// TestRuntime, and `permit_is_declared_and_directional` there is the
+    /// positive case. What stays here is the claim about THIS registry —
+    /// that nothing in it declares a permit at all.
     #[test]
     fn builtin_ops_declare_no_unconditional_permits() {
-        use luminal::test_support::test_ops::AddMulFused;
-        use super::{AddFunctional, AddMutating, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MaterializeLayoutCopy, MulFunctional, ReduceMax, ReduceSum, SqrtFunctional, SqrtMutating};
+        use super::{
+            AddFunctional, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MulFunctional,
+            ReduceMax, ReduceSum, SqrtFunctional,
+        };
         let ops: Vec<Box<dyn LayoutIrOp>> = vec![
             Box::new(SqrtFunctional),
             Box::new(ExpFunctional),
             Box::new(AddFunctional),
             Box::new(MulFunctional),
             Box::new(DivFunctional),
-            Box::new(SqrtMutating),
-            Box::new(AddMutating),
-            Box::new(AddMulFused),
-            Box::new(MaterializeLayoutCopy),
             Box::new(ReduceSum { axis: 0 }),
             Box::new(ReduceMax { axis: 0 }),
             Box::new(IndexMapApplyMaterialize { entries: None }),
         ];
         for op in &ops {
             assert!(
-                op.alias_info().iter().all(|info| info.sharing == Sharing::Must),
+                op.alias_info()
+                    .iter()
+                    .all(|info| info.sharing == Sharing::Must),
                 "{}",
                 op.label()
             );
         }
-
-        // The ONE deliberate May declarer: its egglog match requires all
-        // layouts equal, discharging the permit's precondition at match time.
-        // rhs may share the mutated storage; the reverse direction (reading
-        // the mutated operand against... nothing ties operand 1) is no permit.
-        let alias_safe = super::AddMutatingInputAliasSafe;
-        assert!(permits_sharing(&alias_safe, 1, 0));
-        assert!(!permits_sharing(&alias_safe, 0, 1));
     }
 }

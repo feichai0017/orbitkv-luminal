@@ -13,8 +13,8 @@
 //! interface, not reachable through egg scripts.
 use luminal::bufferize::{BufferId, BufferNode};
 use luminal::layout_ir::Access;
-use luminal::test_support::{EmptyOp, MockOp, MockView, TestGraph};
 use luminal::prelude::petgraph;
+use luminal::test_support::{EmptyOp, MockOp, MockView, TestGraph};
 use petgraph::algo::has_path_connecting;
 use petgraph::graph::NodeIndex;
 
@@ -25,15 +25,17 @@ fn compute_nodes<'a>(
     plan.dag
         .node_indices()
         .filter_map(|i| match &plan.dag[i] {
-            BufferNode::Compute { op, reads, writes, .. } if op.label() == label => {
-                Some((i, reads, writes))
-            }
+            BufferNode::Compute {
+                op, reads, writes, ..
+            } if op.label() == label => Some((i, reads, writes)),
             _ => None,
         })
         .collect()
 }
 
-fn copies(plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>) -> Vec<(BufferId, BufferId)> {
+fn copies(
+    plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
+) -> Vec<(BufferId, BufferId)> {
     plan.dag
         .node_weights()
         .filter_map(|n| match n {
@@ -54,7 +56,11 @@ fn a_view_reader_extends_parent_lifetime_single_free() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let y = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&x, &p],
             &[("y", "rm")],
         )
@@ -65,7 +71,11 @@ fn a_view_reader_extends_parent_lifetime_single_free() {
     let q = g.op(Box::new(EmptyOp), &[], &[("q", "rm")]).remove(0);
     let z = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&v, &q],
             &[("z", "rm")],
         )
@@ -78,19 +88,31 @@ fn a_view_reader_extends_parent_lifetime_single_free() {
     // into the bound output, so not even a delivery copy).
     assert_eq!(copies(&plan), vec![], "no copies expected");
     // No view node survives.
-    assert!(compute_nodes(&plan, "MockView").is_empty(), "view must fold");
+    assert!(
+        compute_nodes(&plan, "MockView").is_empty(),
+        "view must fold"
+    );
 
     // Identify the parent buffer: the one the writer MockOp writes and the
     // consumer MockOp reads (through the folded view).
     let mocks = compute_nodes(&plan, "MockOp");
     assert_eq!(mocks.len(), 2);
     let (writer, consumer) = {
-        let w = mocks.iter().find(|(_, _, w)| matches!(w[0], BufferId::Allocated(_))).expect("writer into System buffer");
-        let c = mocks.iter().find(|(_, _, w)| matches!(w[0], BufferId::Boundary(_))).expect("consumer into bound output (seeded)");
+        let w = mocks
+            .iter()
+            .find(|(_, _, w)| matches!(w[0], BufferId::Allocated(_)))
+            .expect("writer into System buffer");
+        let c = mocks
+            .iter()
+            .find(|(_, _, w)| matches!(w[0], BufferId::Boundary(_)))
+            .expect("consumer into bound output (seeded)");
         (w.clone(), c.clone())
     };
     let parent = writer.2[0].clone();
-    assert_eq!(consumer.1[0], parent, "consumer reads the parent buffer through the alias");
+    assert_eq!(
+        consumer.1[0], parent,
+        "consumer reads the parent buffer through the alias"
+    );
 
     // Exactly one alloc and one free of the parent buffer.
     let allocs = compute_nodes(&plan, "BufferAlloc");
@@ -98,7 +120,11 @@ fn a_view_reader_extends_parent_lifetime_single_free() {
     let parent_allocs: Vec<_> = allocs.iter().filter(|(_, _, w)| w[0] == parent).collect();
     let parent_frees: Vec<_> = frees.iter().filter(|(_, r, _)| r[0] == parent).collect();
     assert_eq!(parent_allocs.len(), 1, "one alloc for the parent");
-    assert_eq!(parent_frees.len(), 1, "one free for the parent (no alias double-free)");
+    assert_eq!(
+        parent_frees.len(),
+        1,
+        "one free for the parent (no alias double-free)"
+    );
 
     // Lifetime extension: the free is path-ordered AFTER the view reader.
     let free = parent_frees[0].0;
@@ -117,17 +143,29 @@ fn e_view_of_view_chain_folds_to_grandparent() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let y = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&x, &p],
             &[("y", "rm")],
         )
         .remove(0);
-    let v1 = g.op(Box::new(MockView), &[&y], &[("v1", "view1")]).remove(0);
-    let v2 = g.op(Box::new(MockView), &[&v1], &[("v2", "view2")]).remove(0);
+    let v1 = g
+        .op(Box::new(MockView), &[&y], &[("v1", "view1")])
+        .remove(0);
+    let v2 = g
+        .op(Box::new(MockView), &[&v1], &[("v2", "view2")])
+        .remove(0);
     let q = g.op(Box::new(EmptyOp), &[], &[("q", "rm")]).remove(0);
     let z = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&v2, &q],
             &[("z", "rm")],
         )
@@ -138,9 +176,18 @@ fn e_view_of_view_chain_folds_to_grandparent() {
     assert_eq!(copies(&plan), vec![], "no copies through a two-view chain");
     assert!(compute_nodes(&plan, "MockView").is_empty());
     let mocks = compute_nodes(&plan, "MockOp");
-    let writer = mocks.iter().find(|(_, _, w)| matches!(w[0], BufferId::Allocated(_))).unwrap();
-    let consumer = mocks.iter().find(|(_, _, w)| matches!(w[0], BufferId::Boundary(_))).unwrap();
-    assert_eq!(consumer.1[0], writer.2[0], "consumer reads the grandparent buffer");
+    let writer = mocks
+        .iter()
+        .find(|(_, _, w)| matches!(w[0], BufferId::Allocated(_)))
+        .unwrap();
+    let consumer = mocks
+        .iter()
+        .find(|(_, _, w)| matches!(w[0], BufferId::Boundary(_)))
+        .unwrap();
+    assert_eq!(
+        consumer.1[0], writer.2[0],
+        "consumer reads the grandparent buffer"
+    );
 }
 
 /// (c): an in-place accumulator offered a VIEW OF READ-ONLY pinned storage
@@ -155,7 +202,11 @@ fn c_view_of_readonly_input_vetoes_inplace_writer() {
     // accumulator: reads operand 0 and writes result 0 into the same storage
     let z = g
         .op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&v],
             &[("z", "rm")],
         )
@@ -182,7 +233,9 @@ fn c_view_of_readonly_input_vetoes_inplace_writer() {
                     op.label()
                 );
             }
-            BufferNode::BufferCopy { dst, .. } => assert_ne!(dst, &x_buf, "copy into read-only buffer"),
+            BufferNode::BufferCopy { dst, .. } => {
+                assert_ne!(dst, &x_buf, "copy into read-only buffer")
+            }
             _ => {}
         }
     }
@@ -207,7 +260,11 @@ fn d_unordered_view_reader_blocks_inplace_writer() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let y = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&x, &p],
             &[("y", "rm")],
         )
@@ -216,7 +273,11 @@ fn d_unordered_view_reader_blocks_inplace_writer() {
     // reader through the view: plain consumer, fresh result storage
     let r = g
         .op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
             &[&v],
             &[("r", "rm")],
         )
@@ -225,14 +286,19 @@ fn d_unordered_view_reader_blocks_inplace_writer() {
     // unordered against the view reader (no dataflow path either way).
     let w2 = g
         .op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&y],
             &[("w2", "rm")],
         )
         .remove(0);
     g.output(&r, "out_r");
     g.output(&w2, "out_w");
-    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize must still certify");
+    let plan =
+        luminal::test_support::bufferize_mock(&g.build()).expect("bufferize must still certify");
     println!("{}", plan.summary());
 
     // The accumulator's in-place bid was rejected: its overwrite happens in a
@@ -245,15 +311,21 @@ fn d_unordered_view_reader_blocks_inplace_writer() {
             matches!(src, BufferId::Allocated(_)) && matches!(dst, BufferId::Allocated(_))
         })
         .collect();
-    assert_eq!(repairs.len(), 1, "one repair copy for the rejected accumulator");
+    assert_eq!(
+        repairs.len(),
+        1,
+        "one repair copy for the rejected accumulator"
+    );
     // No compute writes the parent buffer twice: the parent has exactly one
     // writing compute (the original writer).
     let parent = repairs[0].0.clone();
     let writers: Vec<_> = plan
         .dag
         .node_weights()
-        .filter(|n| matches!(n, BufferNode::Compute { op, writes, .. }
-            if op.label() == "MockOp" && writes.contains(&parent)))
+        .filter(|n| {
+            matches!(n, BufferNode::Compute { op, writes, .. }
+            if op.label() == "MockOp" && writes.contains(&parent))
+        })
         .collect();
     assert_eq!(writers.len(), 1, "the shared buffer keeps a single writer");
 }
@@ -271,7 +343,11 @@ fn c_view_bound_to_output_escapes_the_chain_residence() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let y = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&x, &p],
             &[("y", "rm")],
         )
@@ -283,7 +359,12 @@ fn c_view_bound_to_output_escapes_the_chain_residence() {
     let plan = luminal::test_support::bufferize_mock(&graph).expect("the view output escapes");
     println!("{}", plan.summary());
     let cps = copies(&plan);
-    assert_eq!(cps.len(), 0, "zero copies — the residence is handed over:\n{}", plan.summary());
+    assert_eq!(
+        cps.len(),
+        0,
+        "zero copies — the residence is handed over:\n{}",
+        plan.summary()
+    );
     let slot = plan
         .dag
         .node_weights()
@@ -292,7 +373,10 @@ fn c_view_bound_to_output_escapes_the_chain_residence() {
             _ => None,
         })
         .expect("one output slot");
-    assert_eq!(slot.buffer, plan.value_buffer[&y], "backed by the chain's residence");
+    assert_eq!(
+        slot.buffer, plan.value_buffer[&y],
+        "backed by the chain's residence"
+    );
     assert!(matches!(slot.buffer, BufferId::Allocated(_)));
     assert_eq!(
         plan.buffers[&slot.buffer].freed_by,
@@ -304,8 +388,14 @@ fn c_view_bound_to_output_escapes_the_chain_residence() {
     // delivery description an externally loaded plan would otherwise
     // have no way to obtain. (Presence is total now; identity is the
     // fact worth pinning.)
-    assert_eq!(&slot.layout, &table[&v], "the view's own layout rides the binding");
-    assert_ne!(table[&v], table[&y], "…a different function from the residence's");
+    assert_eq!(
+        &slot.layout, &table[&v],
+        "the view's own layout rides the binding"
+    );
+    assert_ne!(
+        table[&v], table[&y],
+        "…a different function from the residence's"
+    );
 }
 
 /// (g): POISON THROUGH A VIEW. A view's operand is not READ (the poison door
@@ -329,7 +419,11 @@ fn g_view_of_poison_read_panics_not_bails() {
         let q = g.op(Box::new(EmptyOp), &[], &[("q", "rm")]).remove(0);
         let z = g
             .op(
-                Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+                Box::new(MockOp {
+                    reads: vec![true, false],
+                    in_place_operand: Some(1),
+                    not_conflicting: false,
+                }),
                 &[&v, &q],
                 &[("z", "rm")],
             )
@@ -337,10 +431,15 @@ fn g_view_of_poison_read_panics_not_bails() {
         g.output(&z, "out");
         g.build()
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| luminal::test_support::bufferize_mock(&graph)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        luminal::test_support::bufferize_mock(&graph)
+    }));
     match result {
         Ok(Ok(plan)) => {
-            panic!("LAUNDERED: read-of-undefined-through-view certified.\n{}", plan.summary());
+            panic!(
+                "LAUNDERED: read-of-undefined-through-view certified.\n{}",
+                plan.summary()
+            );
         }
         Ok(Err(e)) => {
             println!("REJECTED loudly (door closed): {e:#}");

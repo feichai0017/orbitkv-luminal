@@ -53,8 +53,14 @@ fn layout_classes(s: &EGraph) -> BTreeMap<ClassId, BTreeSet<String>> {
 fn pitch_factors(s: &EGraph, class: &ClassId) -> (BTreeSet<ClassId>, BTreeSet<i64>) {
     let mut classes = BTreeSet::new();
     let mut lits = BTreeSet::new();
-    for layout in s.nodes.values().filter(|n| n.eclass == *class && n.op == "StridedElementLayoutLit") {
-        let Some(chain) = layout.children.get(1).and_then(|id| s.nodes.get(id)) else { continue };
+    for layout in s
+        .nodes
+        .values()
+        .filter(|n| n.eclass == *class && n.op == "StridedElementLayoutLit")
+    {
+        let Some(chain) = layout.children.get(1).and_then(|id| s.nodes.get(id)) else {
+            continue;
+        };
         let chain_class = chain.eclass.clone();
         for cons in s
             .nodes
@@ -83,7 +89,11 @@ fn pitch_factors(s: &EGraph, class: &ClassId) -> (BTreeSet<ClassId>, BTreeSet<i6
                     }
                     if let Some(f) = mul.children.get(child).and_then(|id| s.nodes.get(id)) {
                         classes.insert(f.eclass.clone());
-                        for lit in s.nodes.values().filter(|n| n.eclass == f.eclass && n.op == "IntLit") {
+                        for lit in s
+                            .nodes
+                            .values()
+                            .filter(|n| n.eclass == f.eclass && n.op == "IntLit")
+                        {
                             if let Some(v) = lit
                                 .children
                                 .first()
@@ -129,7 +139,10 @@ fn e1a_right_major_contiguous_live_recorder() {
         let x = cx.tensor((2usize, 4usize));
         let w = cx.tensor((4usize, 3usize));
         let _ = x.matmul(w).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     let s = test_runtime::serialize_fixture(&text);
     let (with_strided, without) = report("RM-live", &s);
@@ -212,7 +225,10 @@ fn e1c_pitch_is_canonical_per_layout_class() {
         let w = cx.tensor((8usize, 3usize));
         let b = cx.tensor(3usize);
         let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).relu().output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     // The rt4 shape: ONE logical tensor, THREE layouts (contiguous +
     // pitch 8 + pitch 16). Round-3's rt4 reported three distinct layout
@@ -363,7 +379,9 @@ fn e1_orientation_lives_in_the_operation_not_the_layout() {
                         unit += 1;
                     }
                 }
-                let Some(tail) = cons.children.get(1).and_then(|id| s.nodes.get(id)) else { break };
+                let Some(tail) = cons.children.get(1).and_then(|id| s.nodes.get(id)) else {
+                    break;
+                };
                 cur = tail.eclass.clone();
                 if total > 4 {
                     break;

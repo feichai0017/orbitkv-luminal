@@ -1,0 +1,4 @@
+; Functional scatter : variable-arity — init and src first (fixed
+; slots), then one coordinate layout tensor per init axis; one fresh
+; written output.
+(constructor LayoutTensorOpScatterFunctionalGeneric (LayoutTensor LayoutTensor LayoutTensorList Layout) LayoutTensorOp)

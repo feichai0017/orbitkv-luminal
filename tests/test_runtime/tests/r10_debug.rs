@@ -16,12 +16,24 @@ const PIN: &[&str] = &[
     "LayoutTensorOpIndexMapApplyViewGeneric",
 ];
 
-fn class_of_child(s: &EGraph, node: &luminal::prelude::egraph_serialize::Node, i: usize) -> Option<ClassId> {
-    node.children.get(i).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone())
+fn class_of_child(
+    s: &EGraph,
+    node: &luminal::prelude::egraph_serialize::Node,
+    i: usize,
+) -> Option<ClassId> {
+    node.children
+        .get(i)
+        .and_then(|id| s.nodes.get(id))
+        .map(|c| c.eclass.clone())
 }
 
 fn ops_in(s: &EGraph, class: &ClassId) -> Vec<String> {
-    let mut v: Vec<String> = s.nodes.values().filter(|n| &n.eclass == class).map(|n| n.op.clone()).collect();
+    let mut v: Vec<String> = s
+        .nodes
+        .values()
+        .filter(|n| &n.eclass == class)
+        .map(|n| n.op.clone())
+        .collect();
     v.sort();
     v.dedup();
     v
@@ -34,7 +46,10 @@ fn r10_debug_fixture1() {
         let x = cx.tensor((2usize, 4usize));
         let w = cx.tensor((4usize, 3usize));
         let _out = x.matmul(w).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     let s = test_runtime::serialize_fixture(&text);
     println!("nodes: {}", s.nodes.len());
@@ -51,11 +66,25 @@ fn r10_debug_fixture1() {
     }
     for n in s.nodes.values() {
         if n.op == "CublasLtOperandADescriptor" || n.op == "CublasLtOperandBDescriptor" {
-            let op = class_of_child(&s, n, 2).map(|c| ops_in(&s, &c)).unwrap_or_default();
-            println!("{} class {} site={:?} lt={:?} op={op:?}", n.op, n.eclass, class_of_child(&s, n, 0), class_of_child(&s, n, 1));
+            let op = class_of_child(&s, n, 2)
+                .map(|c| ops_in(&s, &c))
+                .unwrap_or_default();
+            println!(
+                "{} class {} site={:?} lt={:?} op={op:?}",
+                n.op,
+                n.eclass,
+                class_of_child(&s, n, 0),
+                class_of_child(&s, n, 1)
+            );
         }
         if n.op == "CublasLtOutputDDescriptor" {
-            println!("{} class {} site={:?} lt={:?}", n.op, n.eclass, class_of_child(&s, n, 0), class_of_child(&s, n, 1));
+            println!(
+                "{} class {} site={:?} lt={:?}",
+                n.op,
+                n.eclass,
+                class_of_child(&s, n, 0),
+                class_of_child(&s, n, 1)
+            );
         }
     }
     for n in s.nodes.values() {
@@ -76,7 +105,10 @@ fn r10_debug_fixture1() {
                 })
                 .and_then(|m| class_of_child(&s, m, 0));
             let op_spellings = ops_in(&s, &n.eclass);
-            println!("OPLIT class {} out_head={:?} spellings={:?}", n.eclass, out_head, op_spellings);
+            println!(
+                "OPLIT class {} out_head={:?} spellings={:?}",
+                n.eclass, out_head, op_spellings
+            );
         }
     }
     // The boundary lt (out, RM): which class is it, and does the
@@ -117,7 +149,10 @@ fn r10_debug_c6() {
         let w = cx.tensor((8usize, 3usize));
         let c = cx.tensor((4usize, 3usize));
         let _ = ((x.matmul(w) * 2.0) + c).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     // PIN-preferring genome: does it reach the boundary?
     let r = std::panic::catch_unwind(|| test_runtime::extract_fixture_with_genome(&text, PIN));
@@ -125,7 +160,10 @@ fn r10_debug_c6() {
     // Plain deterministic min-cost extraction:
     let s = test_runtime::serialize_fixture(&text);
     let graph = luminal::extractor::extract_layout_ir_with_matchers(&s, test_runtime::matchers());
-    println!("plain extraction: {:?}", graph.as_ref().map(|g| g.is_some()));
+    println!(
+        "plain extraction: {:?}",
+        graph.as_ref().map(|g| g.is_some())
+    );
     // Walk the genome choices from the boundary lt: which class dies?
     let index = luminal::extractor::producer_index_with_matchers(&s, test_runtime::matchers());
     let genome = test_runtime::genome_preferring(&s, PIN);
@@ -135,14 +173,38 @@ fn r10_debug_c6() {
             if n.eclass == *op_class && n.op == "LayoutTensorOpLit" {
                 // walk the cons spine of child 0
                 let mut items = Vec::new();
-                let mut cur = n.children.first().and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone());
+                let mut cur = n
+                    .children
+                    .first()
+                    .and_then(|id| s.nodes.get(id))
+                    .map(|c| c.eclass.clone());
                 let mut guard = 0;
                 while let Some(list) = cur {
-                    guard += 1; if guard > 16 { break; }
-                    if s.nodes.values().any(|m| m.eclass == list && m.op == "LayoutTensorNil") { break; }
-                    let Some(cons) = s.nodes.values().find(|m| m.eclass == list && m.op == "LayoutTensorCons") else { break };
-                    if let Some(h) = cons.children.first().and_then(|id| s.nodes.get(id)) { items.push(h.eclass.clone()); }
-                    cur = cons.children.get(1).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone());
+                    guard += 1;
+                    if guard > 16 {
+                        break;
+                    }
+                    if s.nodes
+                        .values()
+                        .any(|m| m.eclass == list && m.op == "LayoutTensorNil")
+                    {
+                        break;
+                    }
+                    let Some(cons) = s
+                        .nodes
+                        .values()
+                        .find(|m| m.eclass == list && m.op == "LayoutTensorCons")
+                    else {
+                        break;
+                    };
+                    if let Some(h) = cons.children.first().and_then(|id| s.nodes.get(id)) {
+                        items.push(h.eclass.clone());
+                    }
+                    cur = cons
+                        .children
+                        .get(1)
+                        .and_then(|id| s.nodes.get(id))
+                        .map(|c| c.eclass.clone());
                 }
                 lists.push(items);
             }
@@ -151,13 +213,18 @@ fn r10_debug_c6() {
     }
     fn walk(
         s: &EGraph,
-        index: &std::collections::BTreeMap<ClassId, Vec<(String, luminal::extractor::ProducerChoice)>>,
+        index: &std::collections::BTreeMap<
+            ClassId,
+            Vec<(String, luminal::extractor::ProducerChoice)>,
+        >,
         genome: &luminal::extractor::Genome,
         class: &ClassId,
         path: &mut Vec<ClassId>,
         terminals: &std::collections::BTreeSet<ClassId>,
     ) {
-        if terminals.contains(class) { return; }
+        if terminals.contains(class) {
+            return;
+        }
         if path.contains(class) {
             println!("CYCLE at {class}: path={path:?}");
             return;
@@ -165,14 +232,25 @@ fn r10_debug_c6() {
         // describe the class
         for n in s.nodes.values() {
             if n.eclass == *class && n.op == "LayoutTensorLit" {
-                let lg = n.children.first().and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone());
-                let ly = n.children.get(1).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone());
+                let lg = n
+                    .children
+                    .first()
+                    .and_then(|id| s.nodes.get(id))
+                    .map(|c| c.eclass.clone());
+                let ly = n
+                    .children
+                    .get(1)
+                    .and_then(|id| s.nodes.get(id))
+                    .map(|c| c.eclass.clone());
                 println!("  lt {class}: logical={lg:?} layout={ly:?}");
                 break;
             }
         }
         let Some(cands) = index.get(class) else {
-            println!("DEAD END: class {class} has NO viable producers (path tail {:?})", path.last());
+            println!(
+                "DEAD END: class {class} has NO viable producers (path tail {:?})",
+                path.last()
+            );
             return;
         };
         let Some(choice) = genome.choices.get(class) else {
@@ -180,10 +258,17 @@ fn r10_debug_c6() {
             return;
         };
         let Some((_, chosen)) = cands.iter().find(|(_, c)| c.enode == choice.enode) else {
-            println!("CHOICE NOT IN VIABLE CANDIDATES for {class}: {:?}", choice.enode);
+            println!(
+                "CHOICE NOT IN VIABLE CANDIDATES for {class}: {:?}",
+                choice.enode
+            );
             return;
         };
-        let op_class = s.nodes.get(&chosen.enode).map(|n| n.eclass.clone()).unwrap();
+        let op_class = s
+            .nodes
+            .get(&chosen.enode)
+            .map(|n| n.eclass.clone())
+            .unwrap();
         let op_name = s.nodes.get(&chosen.enode).map(|n| n.op.clone()).unwrap();
         println!("  class {class} chosen {op_name}");
         path.push(class.clone());
@@ -212,7 +297,10 @@ fn r10_debug_c6() {
         for n in s.nodes.values() {
             if n.eclass == *lt_class && n.op == "LayoutTensorLit" {
                 if let Some(lg) = n.children.first().and_then(|id| s.nodes.get(id)) {
-                    if s.nodes.values().any(|m| m.eclass == lg.eclass && m.op == "LogicalTensorInputLit") {
+                    if s.nodes
+                        .values()
+                        .any(|m| m.eclass == lg.eclass && m.op == "LogicalTensorInputLit")
+                    {
                         terminals.insert(lt_class.clone());
                     }
                 }
@@ -220,7 +308,9 @@ fn r10_debug_c6() {
         }
     }
     for lt in &boundary_lts {
-        if terminals.contains(lt) { continue; }
+        if terminals.contains(lt) {
+            continue;
+        }
         println!("=== walking boundary lt {lt} ===");
         let mut path = Vec::new();
         walk(&s, &index, &genome, lt, &mut path, &terminals);
@@ -236,19 +326,38 @@ fn r10_debug_a4() {
         let w2 = cx.tensor((4usize, 4usize));
         let y = x.matmul(w1);
         let _ = y.matmul(w2).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     let (graph, _) = test_runtime::extract_fixture_with_genome(&text, PIN);
     for node in graph.dag.node_weights() {
         if let ExtractedNode::LayoutOp(op) = node {
-            let ins: Vec<String> = op.inputs.iter().map(|i| format!("{}={}", i.port, i.value)).collect();
-            let outs: Vec<String> = op.outputs.iter().map(|o| format!("{} (logical {})", o.eclass, o.logical.eclass)).collect();
+            let ins: Vec<String> = op
+                .inputs
+                .iter()
+                .map(|i| format!("{}={}", i.port, i.value))
+                .collect();
+            let outs: Vec<String> = op
+                .outputs
+                .iter()
+                .map(|o| format!("{} (logical {})", o.eclass, o.logical.eclass))
+                .collect();
             println!("PLAN {}: ins={ins:?} outs={outs:?}", op.op.label());
             if let Some(c) = (&*op.op).as_any().downcast_ref::<CublasLt>() {
                 if let Some(spec) = &c.spec {
-                    println!("   spec m={} n={} k={} ta={} tb={} logical_a={} logical_b={} site_out={}",
-                        spec.m, spec.n, spec.k, spec.trans_a, spec.trans_b,
-                        spec.logical_a, spec.logical_b, spec.logical_site_out);
+                    println!(
+                        "   spec m={} n={} k={} ta={} tb={} logical_a={} logical_b={} site_out={}",
+                        spec.m,
+                        spec.n,
+                        spec.k,
+                        spec.trans_a,
+                        spec.trans_b,
+                        spec.logical_a,
+                        spec.logical_b,
+                        spec.logical_site_out
+                    );
                 }
             }
         }
@@ -264,7 +373,10 @@ fn r10_debug_g2_mincost() {
         let y = x.matmul(w);
         let _ = y.output();
         let _ = (y * 2.0).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     let graph = test_runtime::extract_fixture(&text);
     let labels: Vec<String> = graph
@@ -284,7 +396,8 @@ fn r10_debug_p1() {
     let fx_text = {
         // Fx::default() equivalent: hand 2D A[m,k],B[k,n] matmul x[2,4] w[4,3]
         let sched = "(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))";
-        let base = format!(r#"(let a_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 4) (IntExprNil)))))
+        let base = format!(
+            r#"(let a_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 4) (IntExprNil)))))
 (let b_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprCons (IntLit 3) (IntExprNil)))))
 (let prod_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprCons (IntLit 4) (IntExprNil))))))
 (let out_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
@@ -320,17 +433,28 @@ fn r10_debug_p1() {
 (let bad_desc_d (CublasLtOutputDDescriptor bad_site out_lt))
 (let bad_op (LayoutTensorOpCublasLt bad_site bad_desc_a bad_desc_b bad_desc_d (CublasLtEpilogueDefault)))
 {sched}
-"#);
+"#
+        );
         base
     };
     let s = test_runtime::serialize_fixture(&fx_text);
     for (id, n) in s.nodes.iter() {
         if n.op == "LayoutTensorOpCublasLt" {
-            let kids: Vec<String> = n.children.iter().filter_map(|c| s.nodes.get(c)).map(|c| c.eclass.to_string()).collect();
+            let kids: Vec<String> = n
+                .children
+                .iter()
+                .filter_map(|c| s.nodes.get(c))
+                .map(|c| c.eclass.to_string())
+                .collect();
             println!("op enode {id} class {}: kids={kids:?}", n.eclass);
         }
         if n.op == "CublasLtOperandADescriptor" {
-            let kids: Vec<String> = n.children.iter().filter_map(|c| s.nodes.get(c)).map(|c| c.eclass.to_string()).collect();
+            let kids: Vec<String> = n
+                .children
+                .iter()
+                .filter_map(|c| s.nodes.get(c))
+                .map(|c| c.eclass.to_string())
+                .collect();
             println!("descA enode class {}: kids={kids:?}", n.eclass);
         }
     }
@@ -339,7 +463,8 @@ fn r10_debug_p1() {
 #[test]
 fn r10_debug_rc3() {
     let sched = "(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))";
-    let fx = format!(r#"(let a_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 4) (IntExprNil)))))
+    let fx = format!(
+        r#"(let a_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 4) (IntExprNil)))))
 (let b_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprCons (IntLit 3) (IntExprNil)))))
 (let prod_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprCons (IntLit 4) (IntExprNil))))))
 (let out_shape (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
@@ -374,30 +499,56 @@ fn r10_debug_rc3() {
 (let o_bt (BufferTensorLit out_lt0 o_buf))
 (let output (BufferOutputLit (BufferTensorCons o_bt (BufferTensorNil))))
 {sched}
-"#);
+"#
+    );
     let s = test_runtime::serialize_fixture(&fx);
     // find inner_out: the logical that is an apply of out_logical
-    let out_class = s.nodes.values().find(|n| n.op == "LogicalReduceSum").map(|n| n.eclass.clone()).unwrap();
+    let out_class = s
+        .nodes
+        .values()
+        .find(|n| n.op == "LogicalReduceSum")
+        .map(|n| n.eclass.clone())
+        .unwrap();
     // out class contains the reduce; inner_out = class containing apply(out,...)
     for n in s.nodes.values() {
         if n.op == "LogicalIndexMapApply" {
-            let parent = n.children.first().and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone());
+            let parent = n
+                .children
+                .first()
+                .and_then(|id| s.nodes.get(id))
+                .map(|c| c.eclass.clone());
             if parent.as_ref() == Some(&out_class) && n.eclass != out_class {
                 println!("inner_out class {} (apply of out)", n.eclass);
                 let inner = n.eclass.clone();
                 // its layout tensors:
                 for m in s.nodes.values() {
                     if m.op == "LayoutTensorLit" {
-                        let lg = m.children.first().and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone());
+                        let lg = m
+                            .children
+                            .first()
+                            .and_then(|id| s.nodes.get(id))
+                            .map(|c| c.eclass.clone());
                         if lg.as_ref() == Some(&inner) {
-                            let ly = m.children.get(1).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone()).unwrap();
+                            let ly = m
+                                .children
+                                .get(1)
+                                .and_then(|id| s.nodes.get(id))
+                                .map(|c| c.eclass.clone())
+                                .unwrap();
                             let ops = ops_in(&s, &ly);
                             // injectivity?
                             let inj = s.nodes.values().any(|f| {
                                 f.op == "injectivity-of"
-                                    && f.children.first().and_then(|id| s.nodes.get(id)).map(|c| c.eclass == m.eclass).unwrap_or(false)
+                                    && f.children
+                                        .first()
+                                        .and_then(|id| s.nodes.get(id))
+                                        .map(|c| c.eclass == m.eclass)
+                                        .unwrap_or(false)
                             });
-                            println!("  lt class {} layout {} inj-fact={} spellings={:?}", m.eclass, ly, inj, ops);
+                            println!(
+                                "  lt class {} layout {} inj-fact={} spellings={:?}",
+                                m.eclass, ly, inj, ops
+                            );
                         }
                     }
                 }
@@ -406,11 +557,19 @@ fn r10_debug_rc3() {
     }
     for n in s.nodes.values() {
         if n.op == "CublasLtOutputDDescriptor" {
-            let lt = n.children.get(1).and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone());
+            let lt = n
+                .children
+                .get(1)
+                .and_then(|id| s.nodes.get(id))
+                .map(|c| c.eclass.clone());
             println!("D reading lt={lt:?}");
         }
     }
-    let d = s.nodes.values().filter(|n| n.op == "CublasLtOutputDDescriptor").count();
+    let d = s
+        .nodes
+        .values()
+        .filter(|n| n.op == "CublasLtOutputDDescriptor")
+        .count();
     println!("D readings: {d}");
 }
 
@@ -421,16 +580,26 @@ fn r10_debug_bufferize() {
         let x = cx.tensor((4usize, 8usize));
         let w = cx.tensor((8usize, 3usize));
         let _ = x.matmul(w).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     let (graph, _) = test_runtime::extract_fixture_with_genome(
         &text,
-        &["LayoutTensorOpCublasLt", "LayoutTensorOpIndexMapApplyViewGeneric"],
+        &[
+            "LayoutTensorOpCublasLt",
+            "LayoutTensorOpIndexMapApplyViewGeneric",
+        ],
     );
     let dps = luminal::dps::dps_rewrite(&graph);
     for node in dps.dag.node_weights() {
         if let ExtractedNode::LayoutOp(op) = node {
-            let ins: Vec<String> = op.inputs.iter().map(|i| format!("{}={}", i.port, i.value)).collect();
+            let ins: Vec<String> = op
+                .inputs
+                .iter()
+                .map(|i| format!("{}={}", i.port, i.value))
+                .collect();
             println!("DPS {}: ins={ins:?}", op.op.label());
         }
     }

@@ -60,10 +60,7 @@ impl GraphTensor {
     /// frontend method keeps parallel dims arithmetic). `None`
     /// (poisoned/unrecorded) keeps the current id and dims so reads
     /// stay panic-free; the graph fails at load with the poison reason.
-    pub(crate) fn with_logical(
-        mut self,
-        value: Option<crate::graph::ValueId>,
-    ) -> Self {
+    pub(crate) fn with_logical(mut self, value: Option<crate::graph::ValueId>) -> Self {
         if let Some(id) = value {
             self.id = id;
             self.dims = self

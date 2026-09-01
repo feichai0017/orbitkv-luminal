@@ -68,7 +68,11 @@ impl BufferTensorIrOp for Log2FunctionalDps {
 
 impl Bufferizable for Log2FunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 1,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -81,10 +85,7 @@ impl ToDps for Log2FunctionalDps {
 impl LayoutIrOp for Log2FunctionalDps {}
 
 /// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    _op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(_op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     unary(ctx, "log2f(a[i])")
 }
 

@@ -75,7 +75,11 @@ impl BufferTensorIrOp for ReduceMaxDps {
 
 impl Bufferizable for ReduceMaxDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 1,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -88,10 +92,7 @@ impl ToDps for ReduceMaxDps {
 impl LayoutIrOp for ReduceMaxDps {}
 
 /// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     let Some(r) = op.as_any().downcast_ref::<ReduceMaxDps>() else {
         bail!("reduce_max codegen reached with a non-ReduceMax op");
     };
@@ -130,6 +131,8 @@ impl OpMatcher for ReduceMaxMatcher {
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ReduceMax { axis: site.child_i64(1) })
+        Box::new(ReduceMax {
+            axis: site.child_i64(1),
+        })
     }
 }

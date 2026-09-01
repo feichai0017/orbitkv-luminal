@@ -8,7 +8,9 @@ use luminal_nn::FeedForward;
 use mini_gemma4_moe::MiniGemma4Moe;
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {
-    (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
+    (0..n)
+        .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
+        .collect()
 }
 
 fn main() {
@@ -23,11 +25,12 @@ fn main() {
     let gather_idx = cx.tensor_dtyped(2, DType::Int);
     let scatter_idx = cx.tensor_dtyped(1, DType::Int);
     let caches = vec![(k_cache, v_cache)];
-    let (logits, _) =
-        model.forward(ids, &caches, gather_idx, scatter_idx, IntExpr::from(1usize));
+    let (logits, _) = model.forward(ids, &caches, gather_idx, scatter_idx, IntExpr::from(1usize));
     let logits = logits.output();
     let block = &model.blocks[0];
-    let FeedForward::Moe(moe) = &block.ff else { unreachable!() };
+    let FeedForward::Moe(moe) = &block.ff else {
+        unreachable!()
+    };
     let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![
         (ids.id, vec![2i32].into()),
         (model.embed.weight.id, weights(VOCAB * D, 1).into()),
@@ -95,7 +98,8 @@ fn measure_plan(
         let mut vars: Vec<_> = cx.dyn_map.iter().collect();
         vars.sort();
         for (var, value) in vars {
-            rt.bind_dyn_range(*var, *value as u64, *value as u64).expect("dyn pin binds");
+            rt.bind_dyn_range(*var, *value as u64, *value as u64)
+                .expect("dyn pin binds");
         }
         let data = pairs.iter().cloned().collect();
         let t = std::time::Instant::now();
@@ -155,4 +159,3 @@ fn measure_plan(
         println!("LADDER PANICKED: {msg}");
     }
 }
-

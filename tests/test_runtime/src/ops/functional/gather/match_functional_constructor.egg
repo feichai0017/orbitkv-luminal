@@ -1,0 +1,3 @@
+; Generic Gather : variable-arity — data plus one coordinate layout
+; tensor per data axis (the list), writing one fresh output.
+(constructor LayoutTensorOpGatherGeneric (LayoutTensor LayoutTensorList Layout) LayoutTensorOp)

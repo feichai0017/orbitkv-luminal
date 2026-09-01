@@ -10,7 +10,10 @@ fn r11_squares_saturate_bounded() {
         let x = cx.tensor((4usize, 4usize));
         let w = cx.tensor((4usize, 4usize));
         let _ = x.matmul(w).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     let s3 = test_runtime::serialize_fixture(&a3);
     println!("a3 (x[4,4] @ w[4,4]) saturates: {} nodes", s3.nodes.len());
@@ -19,13 +22,27 @@ fn r11_squares_saturate_bounded() {
         let mut cx = Graph::new();
         let x = cx.tensor((4usize, 4usize));
         let _ = x.matmul(x.permute((1usize, 0usize))).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     let s6 = test_runtime::serialize_fixture(&a6b);
-    println!("a6b (x @ x^T, self-sibling) saturates: {} nodes", s6.nodes.len());
+    println!(
+        "a6b (x @ x^T, self-sibling) saturates: {} nodes",
+        s6.nodes.len()
+    );
 
     // Bounded: same order as the plain rectangular fixture (5,098) —
     // the squares mint no extra generations.
-    assert!(s3.nodes.len() < 20_000, "a3 bounded, got {}", s3.nodes.len());
-    assert!(s6.nodes.len() < 20_000, "a6b bounded, got {}", s6.nodes.len());
+    assert!(
+        s3.nodes.len() < 20_000,
+        "a3 bounded, got {}",
+        s3.nodes.len()
+    );
+    assert!(
+        s6.nodes.len() < 20_000,
+        "a6b bounded, got {}",
+        s6.nodes.len()
+    );
 }

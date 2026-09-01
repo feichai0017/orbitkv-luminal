@@ -1,0 +1,18 @@
+; Layout Tensor Op Constant Generic — the zero-input scalar source, the
+; same shape as Iota's match: no operands, one written output, gated on
+; the destination's injectivity (trivial for rank 0 — one element).
+(rule
+  (
+    (= ?out_logical (LogicalConstant ?constant_value))
+    (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    (= (injectivity-of ?out_layout_tensor) (Injective))
+  )
+  (
+    (let ?layout_tensor_op
+      (LayoutTensorOpLit
+        (LayoutTensorNil)
+        (LayoutTensorCons ?out_layout_tensor (LayoutTensorNil))))
+    (union ?layout_tensor_op
+      (LayoutTensorOpConstantGeneric ?constant_value ?out_layout))
+  )
+)

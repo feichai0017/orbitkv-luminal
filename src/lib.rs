@@ -1,9 +1,14 @@
+// `Symbol` is an immutable interned identity. Its storage uses interior
+// mutability, which makes Clippy reject every map keyed by the public symbol
+// type even though the key's hash and ordering never change.
+#![allow(clippy::mutable_key_type)]
+
 pub mod dtype;
 pub mod egglog_utils;
 pub mod frontend;
 pub mod graph;
-pub mod runtime_binding;
 pub mod mask_events;
+pub mod runtime_binding;
 pub mod shape;
 
 // The logical-SSA layout compiler (the egglog_layout_trial graft, M0: vendored
@@ -13,20 +18,20 @@ pub mod shape;
 pub mod buffer_tensor_ir;
 pub mod bufferize;
 pub mod dps;
-pub mod poison;
 pub mod egglog_snippet;
-pub mod index_expr;
-pub mod subst_primitive;
 pub mod extractor;
+pub mod index_expr;
 pub mod layout_ir;
+pub mod poison;
+pub mod subst_primitive;
 // Convenience mirrors of the five egglog Layout constructors + SpanExpr +
 // render_layout, for runtimes to pull from one place. THE BUFFERIZER NEVER
 // CALLS ANY OF THIS — the planner stays generic over an opaque layout type,
 // and backends may ignore this module entirely (Austin's fold-into-core
 // amendment, resident-geometry cleanup 2026-08-31).
+pub mod implementation_search;
 pub mod layouts;
 pub mod logical_op;
-pub mod implementation_search;
 pub mod test_support;
 pub mod visualization;
 

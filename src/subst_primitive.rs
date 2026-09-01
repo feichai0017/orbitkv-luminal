@@ -369,13 +369,12 @@ impl Walk<'_> {
                     // row is never force-retired (independent live material
                     // keeps its flag; an already-subsumed original merges
                     // sticky either way).
-                    let copy = if node.subsumed
-                        && !state.contains(&name, RawValues(args.clone()))?
-                    {
-                        state.add_subsumed(&name, RawValues(args))?
-                    } else {
-                        state.add(&name, RawValues(args))?
-                    };
+                    let copy =
+                        if node.subsumed && !state.contains(&name, RawValues(args.clone()))? {
+                            state.add_subsumed(&name, RawValues(args))?
+                        } else {
+                            state.add(&name, RawValues(args))?
+                        };
                     match self.images.get(eclass) {
                         // The first e-node copied names the class; the rest are
                         // further ways to say the same one.

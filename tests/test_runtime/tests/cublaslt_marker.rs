@@ -41,7 +41,11 @@ fn pinned_cublaslt_ops(text: &str) -> Vec<(CublasLt, Vec<String>)> {
                     .downcast_ref::<CublasLt>()
                     .expect("CublasLt instance downcasts")
                     .clone();
-                let inputs = op.inputs.iter().map(|input| input.value.to_string()).collect();
+                let inputs = op
+                    .inputs
+                    .iter()
+                    .map(|input| input.value.to_string())
+                    .collect();
                 Some((concrete, inputs))
             }
             _ => None,
@@ -64,7 +68,10 @@ fn record_plain_2d() -> String {
     let x = cx.tensor((2usize, 4usize));
     let w = cx.tensor((4usize, 3usize));
     let _out = x.matmul(w).output();
-    cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+    cx.logical
+        .bound_program(&test_runtime::TestRuntimeBindings)
+        .expect("recorder clean")
+        .text
 }
 
 #[test]
@@ -112,7 +119,10 @@ fn fixture1_plain_2d_amk_bkn_spec_field_by_field() {
         spec.d_buffer.is_some(),
         "D grounded THROUGH the transpose view in the caller's out buffer"
     );
-    assert_ne!(spec.desc_a_buffer, spec.desc_b_buffer, "distinct operand buffers");
+    assert_ne!(
+        spec.desc_a_buffer, spec.desc_b_buffer,
+        "distinct operand buffers"
+    );
     assert_ne!(spec.d_buffer, spec.desc_a_buffer);
     assert_ne!(spec.d_buffer, spec.desc_b_buffer);
 }
@@ -129,7 +139,10 @@ fn record_amk_bnk() -> String {
     let x = cx.tensor((2usize, 4usize));
     let w = cx.tensor((3usize, 4usize)); // stored [n, k]
     let _out = x.matmul(w.permute((1usize, 0usize))).output();
-    cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+    cx.logical
+        .bound_program(&test_runtime::TestRuntimeBindings)
+        .expect("recorder clean")
+        .text
 }
 
 #[test]
@@ -147,8 +160,14 @@ fn fixture2_amk_bnk_live_recorder_mints() {
     assert_eq!(spec.m, 3);
     assert_eq!(spec.n, 2);
     assert_eq!(spec.k, 4);
-    assert!(spec.trans_a, "folded-permute A[m,k],B[n,k] form: trans_a = T");
-    assert!(!spec.trans_b, "folded-permute A[m,k],B[n,k] form: trans_b = N");
+    assert!(
+        spec.trans_a,
+        "folded-permute A[m,k],B[n,k] form: trans_a = T"
+    );
+    assert!(
+        !spec.trans_b,
+        "folded-permute A[m,k],B[n,k] form: trans_b = N"
+    );
     assert_eq!(spec.lda, 4, "A = w' COL view, ld = w' storage cols = k");
     assert_eq!(spec.ldb, 4);
     assert_eq!(spec.ldd, 3);
@@ -179,7 +198,10 @@ fn fixture2b_square_amk_bnk_single_reading() {
         let x = cx.tensor((2usize, 4usize));
         let w = cx.tensor((4usize, 4usize));
         let _out = x.matmul(w.permute((1usize, 0usize))).output();
-        cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+        cx.logical
+            .bound_program(&test_runtime::TestRuntimeBindings)
+            .expect("recorder clean")
+            .text
     };
     let serialized = test_runtime::serialize_fixture(&text);
     let a_readings = serialized
@@ -212,7 +234,10 @@ fn fixture2b_square_amk_bnk_single_reading() {
     // The elected op is the SIBLING site's; its A operand is the stored w
     // read through the re-indexed map, whose composed layout has the unit
     // stride on k — still T, still read from the layout, never the map.
-    assert!(spec.trans_a, "square folded-permute form reads T from the composed layout");
+    assert!(
+        spec.trans_a,
+        "square folded-permute form reads T from the composed layout"
+    );
     assert_eq!(spec.mnk_lits(), (4, 2, 4));
 }
 
@@ -228,7 +253,10 @@ fn record_two_same_shape_matmuls() -> String {
     let wk = cx.tensor((4usize, 3usize));
     let _q = x.matmul(wq).output();
     let _k = x.matmul(wk).output();
-    cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+    cx.logical
+        .bound_program(&test_runtime::TestRuntimeBindings)
+        .expect("recorder clean")
+        .text
 }
 
 #[test]
@@ -246,7 +274,10 @@ fn fixture3_two_same_shape_matmuls_two_distinct_ops() {
     );
     // ROUND-10 RE-PIN (was 2): every matmul now carries TWO sites — the
     // recorder's and the transpose-sandwich sibling the rewrite mints.
-    assert_eq!(sites, 4, "two matmuls, two marker sites each (original + sibling)");
+    assert_eq!(
+        sites, 4,
+        "two matmuls, two marker sites each (original + sibling)"
+    );
 
     let ops = pinned_cublaslt_ops(&text);
     assert_eq!(ops.len(), 2, "two DISTINCT cublaslt ops in one plan");
@@ -262,8 +293,14 @@ fn fixture3_two_same_shape_matmuls_two_distinct_ops() {
     // and whose b operand is the shared x — the shared/distinct pattern
     // swaps namespaces accordingly (the swap now lives in the logical
     // rewrite, not the descriptor wiring).
-    assert_ne!(s0.logical_a, s1.logical_a, "distinct weights (sibling a role)");
-    assert_eq!(s0.logical_b, s1.logical_b, "both matmuls share x (sibling b role)");
+    assert_ne!(
+        s0.logical_a, s1.logical_a,
+        "distinct weights (sibling a role)"
+    );
+    assert_eq!(
+        s0.logical_b, s1.logical_b,
+        "both matmuls share x (sibling b role)"
+    );
     assert_ne!(s0.logical_out, s1.logical_out, "distinct outputs");
     assert_ne!(in0, in1, "distinct Lit input lists");
 }

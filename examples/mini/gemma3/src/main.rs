@@ -8,12 +8,14 @@
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use luminal_reference::ReferenceRuntime;
 use luminal_nn::{rope_pairing_matrix, rope_tables_split_half};
+use luminal_reference::ReferenceRuntime;
 use mini_gemma3::MiniGemma3;
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {
-    (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
+    (0..n)
+        .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
+        .collect()
 }
 
 fn main() {
@@ -57,7 +59,10 @@ fn main() {
         (gather_idx.id, vec![0i32, 1].into()),
         (scatter_idx.id, vec![1i32].into()),
         (rope_rot.id, rope_pairing_matrix(HD, false).into()),
-        (model.final_norm.weight.expect("weighted").id, weights(D, 660).into()),
+        (
+            model.final_norm.weight.expect("weighted").id,
+            weights(D, 660).into(),
+        ),
     ];
     for (layer, block) in model.blocks.iter().enumerate() {
         let (cos_table, sin_table) =
@@ -74,14 +79,32 @@ fn main() {
         pairs.push((block.gate.weight.id, weights(D * FF, seed(4)).into()));
         pairs.push((block.up.weight.id, weights(D * FF, seed(5)).into()));
         pairs.push((block.down.weight.id, weights(FF * D, seed(6)).into()));
-        pairs.push((block.input_norm.weight.expect("weighted").id, weights(D, seed(7)).into()));
-        pairs.push((block.post_attn_norm.weight.expect("weighted").id, weights(D, seed(8)).into()));
-        pairs.push((block.pre_ff_norm.weight.expect("weighted").id, weights(D, seed(9)).into()));
-        pairs.push((block.post_ff_norm.weight.expect("weighted").id, weights(D, seed(10)).into()));
+        pairs.push((
+            block.input_norm.weight.expect("weighted").id,
+            weights(D, seed(7)).into(),
+        ));
+        pairs.push((
+            block.post_attn_norm.weight.expect("weighted").id,
+            weights(D, seed(8)).into(),
+        ));
+        pairs.push((
+            block.pre_ff_norm.weight.expect("weighted").id,
+            weights(D, seed(9)).into(),
+        ));
+        pairs.push((
+            block.post_ff_norm.weight.expect("weighted").id,
+            weights(D, seed(10)).into(),
+        ));
         pairs.push((block.q_norm.id, weights(HD, seed(11)).into()));
         pairs.push((block.k_norm.id, weights(HD, seed(12)).into()));
-        pairs.push((caches[layer].0.id, weights(SLOTS * KV_DIM, 300 + layer).into()));
-        pairs.push((caches[layer].1.id, weights(SLOTS * KV_DIM, 320 + layer).into()));
+        pairs.push((
+            caches[layer].0.id,
+            weights(SLOTS * KV_DIM, 300 + layer).into(),
+        ));
+        pairs.push((
+            caches[layer].1.id,
+            weights(SLOTS * KV_DIM, 320 + layer).into(),
+        ));
     }
     let data = pairs.iter().cloned().collect();
     let mut rt = ReferenceRuntime::load(&cx).expect("native load");

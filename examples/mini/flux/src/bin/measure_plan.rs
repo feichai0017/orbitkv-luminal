@@ -9,7 +9,9 @@ use luminal_nn::rope_pairing_matrix;
 use mini_flux::{mini_dit_rope_tables, MiniDit};
 
 fn weights(n: usize, seed: usize) -> Vec<f32> {
-    (0..n).map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6).collect()
+    (0..n)
+        .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
+        .collect()
 }
 
 fn main() {
@@ -38,7 +40,9 @@ fn main() {
     let rope_rot = cx.tensor((HD, HD));
     let joint_base = cx.tensor((S, D));
     let velocity = model
-        .forward(latent, text, t, guidance, rope_cos, rope_sin, rope_rot, joint_base)
+        .forward(
+            latent, text, t, guidance, rope_cos, rope_sin, rope_rot, joint_base,
+        )
         .output();
 
     let (cos_table, sin_table) = mini_dit_rope_tables(S_TXT, GRID, GRID);
@@ -78,7 +82,10 @@ fn main() {
         (model.ff_out.weight.id, weights(MLP * D, 524).into()),
         (model.ctx_ff_in.weight.id, weights(D * 2 * MLP, 525).into()),
         (model.ctx_ff_out.weight.id, weights(MLP * D, 526).into()),
-        (model.single_proj.weight.id, weights(D * (3 * D + 2 * MLP), 527).into()),
+        (
+            model.single_proj.weight.id,
+            weights(D * (3 * D + 2 * MLP), 527).into(),
+        ),
         (model.single_out_attn.weight.id, weights(D * D, 531).into()),
         (model.single_out_mlp.weight.id, weights(MLP * D, 532).into()),
         (model.single_qnorm.id, weights(HD, 529).into()),
@@ -137,7 +144,8 @@ fn measure_plan(
         let mut vars: Vec<_> = cx.dyn_map.iter().collect();
         vars.sort();
         for (var, value) in vars {
-            rt.bind_dyn_range(*var, *value as u64, *value as u64).expect("dyn pin binds");
+            rt.bind_dyn_range(*var, *value as u64, *value as u64)
+                .expect("dyn pin binds");
         }
         let data = pairs.iter().cloned().collect();
         let t = std::time::Instant::now();
@@ -197,4 +205,3 @@ fn measure_plan(
         println!("LADDER PANICKED: {msg}");
     }
 }
-

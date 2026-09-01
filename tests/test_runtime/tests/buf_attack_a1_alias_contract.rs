@@ -26,7 +26,9 @@ use luminal::prelude::petgraph;
 use luminal::test_support::{EmptyOp, MockOp, MockView, TestGraph};
 use petgraph::visit::EdgeRef;
 
-fn copies(plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>) -> Vec<(BufferId, BufferId)> {
+fn copies(
+    plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
+) -> Vec<(BufferId, BufferId)> {
     plan.dag
         .node_weights()
         .filter_map(|n| match n {
@@ -61,7 +63,11 @@ fn a1_cohabiting_input_refuses_seed_without_permit() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let r = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: false,
+            }),
             &[&x, &p],
             &[("r", "rm")],
         )
@@ -77,7 +83,10 @@ fn a1_cohabiting_input_refuses_seed_without_permit() {
     );
     let cps = copies(&plan);
     assert_eq!(cps.len(), 1, "one delivery copy:\n{}", plan.summary());
-    assert_eq!(cps[0].1, plan.value_buffer[&x], "copy lands in the shared bound buffer");
+    assert_eq!(
+        cps[0].1, plan.value_buffer[&x],
+        "copy lands in the shared bound buffer"
+    );
 }
 
 /// ATTACK 1, arm B (the P-E exposure, executed): same program, op now grants
@@ -96,7 +105,11 @@ fn a1_cohabiting_input_admitted_with_trusted_permit_writes_bound_in_kernel() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let r = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: true }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: true,
+            }),
             &[&x, &p],
             &[("r", "rm")],
         )
@@ -112,10 +125,16 @@ fn a1_cohabiting_input_admitted_with_trusted_permit_writes_bound_in_kernel() {
     );
     assert_eq!(copies(&plan), vec![], "zero copies");
     // The one compute both reads and writes the SAME bound buffer.
-    let rw = plan.dag.node_weights().any(|n| matches!(n, BufferNode::Compute { reads, writes, .. }
+    let rw = plan.dag.node_weights().any(|n| {
+        matches!(n, BufferNode::Compute { reads, writes, .. }
         if !writes.is_empty() && !reads.is_empty() && reads[0] == writes[0]
-            && matches!(writes[0], BufferId::Boundary(_))));
-    assert!(rw, "in-kernel read+write of the bound buffer:\n{}", plan.summary());
+            && matches!(writes[0], BufferId::Boundary(_)))
+    });
+    assert!(
+        rw,
+        "in-kernel read+write of the bound buffer:\n{}",
+        plan.summary()
+    );
 }
 
 /// ATTACK 1, arm C (laundering blocked): the cohabiting input is ReadOnly.
@@ -129,7 +148,11 @@ fn a1_readonly_cohabitant_rejects_program_even_with_permit() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let r = g
         .op(
-            Box::new(MockOp { reads: vec![true, false], in_place_operand: Some(1), not_conflicting: true }),
+            Box::new(MockOp {
+                reads: vec![true, false],
+                in_place_operand: Some(1),
+                not_conflicting: true,
+            }),
             &[&x, &p],
             &[("r", "rm")],
         )
@@ -153,7 +176,11 @@ fn a1_value_plus_view_to_two_outputs_direct_slot_first() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let y = g
         .op(
-            Box::new(MockOp { reads: vec![false], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![false],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&p],
             &[("y", "rm")],
         )
@@ -166,13 +193,23 @@ fn a1_value_plus_view_to_two_outputs_direct_slot_first() {
     let plan = luminal::test_support::bufferize_mock(&graph).expect("bufferize");
     println!("{}", plan.summary());
 
-    assert!(matches!(plan.value_buffer[&y], BufferId::Boundary(_)), "y seeded into D");
     assert!(
-        plan.buffers.keys().all(|b| matches!(b, BufferId::Boundary(_))),
+        matches!(plan.value_buffer[&y], BufferId::Boundary(_)),
+        "y seeded into D"
+    );
+    assert!(
+        plan.buffers
+            .keys()
+            .all(|b| matches!(b, BufferId::Boundary(_))),
         "zero Allocated buffers:\n{}",
         plan.summary()
     );
-    assert_eq!(copies(&plan).len(), 0, "zero copies — both slots ride D:\n{}", plan.summary());
+    assert_eq!(
+        copies(&plan).len(),
+        0,
+        "zero copies — both slots ride D:\n{}",
+        plan.summary()
+    );
     let slots: Vec<_> = plan
         .dag
         .node_weights()
@@ -181,15 +218,27 @@ fn a1_value_plus_view_to_two_outputs_direct_slot_first() {
             _ => None,
         })
         .expect("the output node");
-    assert_eq!(slots[0].buffer, plan.value_buffer[&y], "the direct slot is D");
-    assert_eq!(slots[1].buffer, plan.value_buffer[&y], "the view slot is backed by D too");
+    assert_eq!(
+        slots[0].buffer, plan.value_buffer[&y],
+        "the direct slot is D"
+    );
+    assert_eq!(
+        slots[1].buffer, plan.value_buffer[&y],
+        "the view slot is backed by D too"
+    );
     // OPTION B: the layout is TOTAL on every binding — "disclosed" is no
     // longer a presence question. The distinction is WHICH layout: the
     // dense slot carries y's own, the view slot carries the view's, and
     // the two are different functions over the SAME buffer.
     assert_eq!(&slots[0].layout, &table[&y], "dense slot: y's own layout");
-    assert_eq!(&slots[1].layout, &table[&v], "view slot: the view's own layout");
-    assert_ne!(slots[0].layout, slots[1].layout, "one buffer, two deliveries");
+    assert_eq!(
+        &slots[1].layout, &table[&v],
+        "view slot: the view's own layout"
+    );
+    assert_ne!(
+        slots[0].layout, slots[1].layout,
+        "one buffer, two deliveries"
+    );
 }
 
 /// ATTACK 2, arm B: same program, slot order flipped (view slot is slot 0).
@@ -204,7 +253,11 @@ fn a1_value_plus_view_to_two_outputs_view_slot_first() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let y = g
         .op(
-            Box::new(MockOp { reads: vec![false], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![false],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&p],
             &[("y", "rm")],
         )
@@ -217,9 +270,14 @@ fn a1_value_plus_view_to_two_outputs_view_slot_first() {
     let plan = luminal::test_support::bufferize_mock(&graph).expect("bufferize");
     println!("{}", plan.summary());
 
-    assert!(matches!(plan.value_buffer[&y], BufferId::Boundary(_)), "y seeded into E");
     assert!(
-        plan.buffers.keys().all(|b| matches!(b, BufferId::Boundary(_))),
+        matches!(plan.value_buffer[&y], BufferId::Boundary(_)),
+        "y seeded into E"
+    );
+    assert!(
+        plan.buffers
+            .keys()
+            .all(|b| matches!(b, BufferId::Boundary(_))),
         "zero Allocated buffers:\n{}",
         plan.summary()
     );
@@ -232,9 +290,18 @@ fn a1_value_plus_view_to_two_outputs_view_slot_first() {
             _ => None,
         })
         .expect("the output node");
-    assert_eq!(slots[0].buffer, plan.value_buffer[&y], "the view slot rides y's residence");
-    assert_eq!(&slots[0].layout, &table[&v], "…carrying the VIEW's own layout");
-    assert_eq!(slots[1].buffer, plan.value_buffer[&y], "the direct slot is the residence");
+    assert_eq!(
+        slots[0].buffer, plan.value_buffer[&y],
+        "the view slot rides y's residence"
+    );
+    assert_eq!(
+        &slots[0].layout, &table[&v],
+        "…carrying the VIEW's own layout"
+    );
+    assert_eq!(
+        slots[1].buffer, plan.value_buffer[&y],
+        "the direct slot is the residence"
+    );
 }
 
 /// ATTACK 3: an unordered reader of the cohabiting bound buffer. The chain's
@@ -251,7 +318,11 @@ fn a1_unordered_reader_of_cohabited_buffer_hazard_gone_under_escape() {
     // unordered reader of x, output elsewhere: keeps D's old bytes live
     let s = g
         .op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: None, not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: None,
+                not_conflicting: false,
+            }),
             &[&x],
             &[("s", "rm")],
         )
@@ -260,7 +331,11 @@ fn a1_unordered_reader_of_cohabited_buffer_hazard_gone_under_escape() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let y = g
         .op(
-            Box::new(MockOp { reads: vec![false], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![false],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&p],
             &[("y", "rm")],
         )
@@ -286,7 +361,10 @@ fn a1_unordered_reader_of_cohabited_buffer_hazard_gone_under_escape() {
             _ => None,
         })
         .expect("slot 0");
-    assert_eq!(slot.buffer, plan.value_buffer[&y], "slot D's declared buffer is unused");
+    assert_eq!(
+        slot.buffer, plan.value_buffer[&y],
+        "slot D's declared buffer is unused"
+    );
     assert_eq!(
         plan.buffers[&slot.buffer].freed_by,
         luminal::layout_ir::FreedBy::Caller,
@@ -297,9 +375,23 @@ fn a1_unordered_reader_of_cohabited_buffer_hazard_gone_under_escape() {
         .into_iter()
         .filter(|(_, dst)| *dst == plan.value_buffer[&x])
         .collect();
-    assert!(into_x.is_empty(), "nothing writes the input buffer anymore:\n{}", plan.summary());
-    assert_eq!(copies(&plan).len(), 1, "one dense delivery (s -> E) remains:\n{}", plan.summary());
-    assert_eq!(war_antis(&plan), 0, "no hazard left to WAR-order:\n{}", plan.summary());
+    assert!(
+        into_x.is_empty(),
+        "nothing writes the input buffer anymore:\n{}",
+        plan.summary()
+    );
+    assert_eq!(
+        copies(&plan).len(),
+        1,
+        "one dense delivery (s -> E) remains:\n{}",
+        plan.summary()
+    );
+    assert_eq!(
+        war_antis(&plan),
+        0,
+        "no hazard left to WAR-order:\n{}",
+        plan.summary()
+    );
 }
 
 /// ATTACK 4: a mutating consumer reaching a bound-output value THROUGH a
@@ -320,7 +412,11 @@ fn a1_mutating_consumer_through_view_of_bound_value_vetoed_and_repaired() {
     let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")]).remove(0);
     let y = g
         .op(
-            Box::new(MockOp { reads: vec![false], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![false],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&p],
             &[("y", "rm")],
         )
@@ -329,7 +425,11 @@ fn a1_mutating_consumer_through_view_of_bound_value_vetoed_and_repaired() {
     // accumulator: reads v, wants to write v's storage in place
     let r = g
         .op(
-            Box::new(MockOp { reads: vec![true], in_place_operand: Some(0), not_conflicting: false }),
+            Box::new(MockOp {
+                reads: vec![true],
+                in_place_operand: Some(0),
+                not_conflicting: false,
+            }),
             &[&v],
             &[("r", "rm")],
         )
@@ -343,14 +443,26 @@ fn a1_mutating_consumer_through_view_of_bound_value_vetoed_and_repaired() {
 
     // y seeded into D; the accumulator must NOT write D.
     let d = plan.value_buffer[&y].clone();
-    assert!(matches!(d, BufferId::Boundary(_)), "y seeds into D:\n{}", plan.summary());
-    assert_ne!(plan.value_buffer[&r], d, "accumulator relocated off the bound buffer");
+    assert!(
+        matches!(d, BufferId::Boundary(_)),
+        "y seeds into D:\n{}",
+        plan.summary()
+    );
+    assert_ne!(
+        plan.value_buffer[&r], d,
+        "accumulator relocated off the bound buffer"
+    );
     let writers_of_d = plan
         .dag
         .node_weights()
         .filter(|n| matches!(n, BufferNode::Compute { writes, .. } if writes.contains(&d)))
         .count();
-    assert_eq!(writers_of_d, 1, "exactly one writer of the bound buffer:\n{}", plan.summary());
+    assert_eq!(
+        writers_of_d,
+        1,
+        "exactly one writer of the bound buffer:\n{}",
+        plan.summary()
+    );
     // The repair copied D's bytes into a FRESH single-writer buffer the
     // consumer re-roots onto — never the accumulator's own result buffer.
     let repair = copies(&plan)
@@ -359,7 +471,8 @@ fn a1_mutating_consumer_through_view_of_bound_value_vetoed_and_repaired() {
         .expect("repair copy reads the bound buffer");
     assert!(matches!(repair.1, BufferId::Allocated(_)));
     assert_ne!(
-        repair.1, plan.value_buffer[&r],
+        repair.1,
+        plan.value_buffer[&r],
         "fresh repair destination, not the tied result's buffer:\n{}",
         plan.summary()
     );
@@ -375,9 +488,15 @@ fn a1_mutating_consumer_through_view_of_bound_value_vetoed_and_repaired() {
             _ => None,
         })
         .expect("the accumulator survives lowering");
-    assert_eq!(consumer_operand.buffer, repair.1, "the consumer reads the re-rooted view");
+    assert_eq!(
+        consumer_operand.buffer, repair.1,
+        "the consumer reads the re-rooted view"
+    );
     // …through the VIEW's own layout, unchanged by the re-root (the
     // layout addresses the residence's bytes, and the copy is
     // byte-identical).
-    assert_eq!(&consumer_operand.layout, &table[&v], "the view's own layout, unchanged");
+    assert_eq!(
+        &consumer_operand.layout, &table[&v],
+        "the view's own layout, unchanged"
+    );
 }

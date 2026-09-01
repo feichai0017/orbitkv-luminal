@@ -96,7 +96,10 @@ fn elected_ops(graph: &ExtractedGraph) -> Vec<Elected> {
                     .iter()
                     .map(|i| (i.port.clone(), i.value.clone()))
                     .collect();
-                let out = op.outputs.first().expect("a cublaslt op produces one value");
+                let out = op
+                    .outputs
+                    .first()
+                    .expect("a cublaslt op produces one value");
                 Some(Elected {
                     label: op.op.label().to_string(),
                     op: concrete,
@@ -176,36 +179,40 @@ fn genome_flavored(
     // subtree reaches input terminals (the round-11 transpose-view
     // re-description 2-cycles defeat a walk-blind pick) and leaves input
     // terminals to the extractor's Input plan.
-    let ordered = |candidates: &[(String, luminal::extractor::ProducerChoice)],
-                   level: usize|
-     -> Vec<usize> {
-        let admitted = test_runtime::level_admits(level);
-        let mut order: Vec<usize> = Vec::new();
-        let mut push_where = |order: &mut Vec<usize>,
-                              pred: &dyn Fn(&str, &luminal::extractor::ProducerChoice) -> bool| {
-            for (i, (name, choice)) in candidates.iter().enumerate() {
-                if admitted(name) && pred(name, choice) && !order.contains(&i) {
-                    order.push(i);
+    let ordered =
+        |candidates: &[(String, luminal::extractor::ProducerChoice)], level: usize| -> Vec<usize> {
+            let admitted = test_runtime::level_admits(level);
+            let mut order: Vec<usize> = Vec::new();
+            let mut push_where =
+                |order: &mut Vec<usize>,
+                 pred: &dyn Fn(&str, &luminal::extractor::ProducerChoice) -> bool| {
+                    for (i, (name, choice)) in candidates.iter().enumerate() {
+                        if admitted(name) && pred(name, choice) && !order.contains(&i) {
+                            order.push(i);
+                        }
+                    }
+                };
+            push_where(&mut order, &|name, choice| {
+                if name != want_name {
+                    return false;
                 }
-            }
+                let Some(node) = egraph.nodes.get(&choice.enode) else {
+                    return false;
+                };
+                let relu_real = child_class(node, ep_slot)
+                    .is_some_and(|c| class_has(&c, "CublasLtEpilogueRelu"));
+                relu_real == want_relu
+            });
+            push_where(&mut order, &|name, _| {
+                name.starts_with("LayoutTensorOpCublasLt")
+            });
+            push_where(&mut order, &|name, _| {
+                name == "LayoutTensorOpIndexMapApplyViewGeneric"
+            });
+            push_where(&mut order, &|name, _| !name.contains("Copy"));
+            push_where(&mut order, &|_, _| true);
+            order
         };
-        push_where(&mut order, &|name, choice| {
-            if name != want_name {
-                return false;
-            }
-            let Some(node) = egraph.nodes.get(&choice.enode) else {
-                return false;
-            };
-            let relu_real =
-                child_class(node, ep_slot).is_some_and(|c| class_has(&c, "CublasLtEpilogueRelu"));
-            relu_real == want_relu
-        });
-        push_where(&mut order, &|name, _| name.starts_with("LayoutTensorOpCublasLt"));
-        push_where(&mut order, &|name, _| name == "LayoutTensorOpIndexMapApplyViewGeneric");
-        push_where(&mut order, &|name, _| !name.contains("Copy"));
-        push_where(&mut order, &|_, _| true);
-        order
-    };
     test_runtime::genome_with_ordering(egraph, &ordered)
 }
 
@@ -346,7 +353,10 @@ fn logical_dims(s: &EGraph, logical: &ClassId) -> Option<Vec<Option<i64>>> {
     let mut list = s.nodes.get(shape_lit.children.first()?)?.eclass.clone();
     let mut dims = Vec::new();
     loop {
-        if s.nodes.values().any(|n| n.eclass == list && n.op == "IntExprNil") {
+        if s.nodes
+            .values()
+            .any(|n| n.eclass == list && n.op == "IntExprNil")
+        {
             break;
         }
         let cons = s
@@ -412,8 +422,7 @@ fn assert_geometry_matches_logical(s: &EGraph, spec: &LtMatmulSpec, what: &str) 
     }
     // a stores a PERMUTATION of (m, k): its extent multiset must be
     // exactly {m, k} (this is what pins k against a foreign extent).
-    if let (Some(a0), Some(a1), Some(m), Some(k)) =
-        (a[0], a[1], spec.m.literal(), spec.k.literal())
+    if let (Some(a0), Some(a1), Some(m), Some(k)) = (a[0], a[1], spec.m.literal(), spec.k.literal())
     {
         let mut got = [a0, a1];
         let mut want = [m, k];
@@ -636,7 +645,10 @@ fn lit(v: i64) -> String {
 fn record(build: impl FnOnce(&mut Graph)) -> String {
     let mut cx = Graph::new();
     build(&mut cx);
-    cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean").text
+    cx.logical
+        .bound_program(&test_runtime::TestRuntimeBindings)
+        .expect("recorder clean")
+        .text
 }
 
 /// A/B/D reading census plus op-candidate count — the structural refusal
@@ -705,7 +717,10 @@ fn attack_a1_square_weight_amk_bkn() {
     // per-candidate-consistent multiplicity (each reading names its own
     // layout tensor); the strict level-0 election never prefers the
     // materialize-first frames.
-    assert_eq!(a, 4, "two A readings per site — storage frame + column-form frame");
+    assert_eq!(
+        a, 4,
+        "two A readings per site — storage frame + column-form frame"
+    );
     let mut a_ops = operations_of(&s, "CublasLtOperandADescriptor");
     a_ops.sort_unstable();
     assert_eq!(
@@ -787,7 +802,10 @@ fn attack_a2b_amk_bnk_with_relu_and_bias() {
             .output();
     });
     let (ops, labels) = flavored_cublaslt(&text, false, true, true);
-    let lt: Vec<_> = ops.iter().filter(|o| o.label.starts_with("CublasLt")).collect();
+    let lt: Vec<_> = ops
+        .iter()
+        .filter(|o| o.label.starts_with("CublasLt"))
+        .collect();
     println!("a2b A[m,k],B[n,k]+bias+relu: labels={labels:?}");
     assert_eq!(lt.len(), 1);
     let spec = lt[0].spec();
@@ -819,7 +837,10 @@ fn attack_a3_all_square_amk_bkn() {
     // transpose-sandwich sibling; sibling readings are additional SOUND
     // candidates in the swapped frame (per-candidate soundness is checked
     // by assert_candidates_sound / the frame-pair geometry oracle).
-    assert_eq!(sites, 2, "total shape unification still yields ONE site per frame");
+    assert_eq!(
+        sites, 2,
+        "total shape unification still yields ONE site per frame"
+    );
     // ROUND-11 RE-PIN: canonicalization + the canonical-form sandwich give
     // every site operand TWO readable layout tensors — its storage frame
     // and the collapse-derived column-form frame ((x^T)^T re-described
@@ -833,10 +854,18 @@ fn attack_a3_all_square_amk_bkn() {
     assert_eq!(b, 4);
     let mut a_ops = operations_of(&s, "CublasLtOperandADescriptor");
     a_ops.sort_unstable();
-    assert_eq!(a_ops, vec![false, false, true, true], "N + T per site (two frames)");
+    assert_eq!(
+        a_ops,
+        vec![false, false, true, true],
+        "N + T per site (two frames)"
+    );
     let mut b_ops = operations_of(&s, "CublasLtOperandBDescriptor");
     b_ops.sort_unstable();
-    assert_eq!(b_ops, vec![false, false, true, true], "N + T per site (two frames)");
+    assert_eq!(
+        b_ops,
+        vec![false, false, true, true],
+        "N + T per site (two frames)"
+    );
     assert_candidates_sound(&s, "a3");
 
     let elected = pinned_cublaslt(&text);
@@ -844,7 +873,10 @@ fn attack_a3_all_square_amk_bkn() {
     let spec = elected[0].spec();
     assert_eq!(spec.mnk_lits(), (4, 4, 4));
     assert!(!spec.trans_a && !spec.trans_b);
-    assert_eq!((spec.lda.literal(), spec.ldb.literal(), spec.ldd.literal()), (Some(4), Some(4), Some(4)));
+    assert_eq!(
+        (spec.lda.literal(), spec.ldb.literal(), spec.ldd.literal()),
+        (Some(4), Some(4), Some(4))
+    );
     // Distinct identities despite identical geometry.
     assert_ne!(spec.logical_a, spec.logical_b);
     assert_ne!(spec.logical_a, spec.logical_out);
@@ -889,7 +921,9 @@ fn attack_a4_chained_square_matmuls() {
     // consumer by that relation instead of class identity.
     let out_logicals: BTreeSet<ClassId> = elected.iter().map(|e| e.out_logical.clone()).collect();
     let is_view_parent_of_out = |input_lt: &ClassId| -> bool {
-        let Some(input_logical) = logical_of_lt(&s, input_lt) else { return false };
+        let Some(input_logical) = logical_of_lt(&s, input_lt) else {
+            return false;
+        };
         // some elected out_logical is an APPLY of input_logical
         s.nodes.values().any(|n| {
             n.op == "LogicalIndexMapApply"
@@ -918,7 +952,10 @@ fn attack_a4_chained_square_matmuls() {
         .iter()
         .filter(|e| e.inputs.iter().any(|(_, v)| is_chained_input(v)))
         .count();
-    assert_eq!(chained, 1, "exactly one kernel reads the other's (viewed) output");
+    assert_eq!(
+        chained, 1,
+        "exactly one kernel reads the other's (viewed) output"
+    );
     let consumer = elected
         .iter()
         .find(|e| e.inputs.iter().any(|(_, v)| is_chained_input(v)))
@@ -968,7 +1005,10 @@ fn attack_a5_chained_mixed_amk_bkn_amk_bnk() {
     // layout tensor); the strict level-0 election never prefers the
     // materialize-first frames.
     // A readings = 8: two frames per site's a operand, four sites.
-    assert_eq!(a, 8, "two A readings per site (storage + column-form frames)");
+    assert_eq!(
+        a, 8,
+        "two A readings per site (storage + column-form frames)"
+    );
     let mut sorted = a_ops.clone();
     sorted.sort_unstable();
     assert_eq!(
@@ -989,7 +1029,10 @@ fn attack_a5_chained_mixed_amk_bkn_amk_bnk() {
     // in one frame and T in the other); the elected plan is one sound
     // member of the candidate set, not the oracle.
     let trans: BTreeSet<bool> = elected.iter().map(|e| e.spec().trans_a).collect();
-    assert!(!trans.is_empty(), "kernels elected; per-candidate soundness asserted above");
+    assert!(
+        !trans.is_empty(),
+        "kernels elected; per-candidate soundness asserted above"
+    );
 }
 
 /// a6: x @ x — the SAME tensor in both operand roles. The site's a and b
@@ -1016,7 +1059,10 @@ fn attack_a6_x_matmul_x() {
     assert_eq!(elected.len(), 1);
     let e = &elected[0];
     let spec = e.spec();
-    assert_eq!(spec.logical_a, spec.logical_b, "one logical tensor in both roles");
+    assert_eq!(
+        spec.logical_a, spec.logical_b,
+        "one logical tensor in both roles"
+    );
     assert_eq!(spec.mnk_lits(), (4, 4, 4));
     assert!(!spec.trans_a && !spec.trans_b);
     assert_eq!(
@@ -1064,7 +1110,11 @@ fn attack_a6b_x_matmul_x_transposed() {
     a_sorted.sort_unstable();
     let mut b_sorted = b_ops.clone();
     b_sorted.sort_unstable();
-    assert_eq!(a_sorted, vec![false, true], "role A reads T in the storage frame");
+    assert_eq!(
+        a_sorted,
+        vec![false, true],
+        "role A reads T in the storage frame"
+    );
     assert_eq!(
         b_sorted,
         vec![false, true],
@@ -1085,7 +1135,10 @@ fn attack_a6b_x_matmul_x_transposed() {
     // layout letters at the logical stratum), so the two roles carry
     // DISTINCT logical values (x and view(x)) and distinct layout
     // tensors, linked by the view relation asserted here.
-    assert_ne!(spec.logical_a, spec.logical_b, "roles carry x and its transpose view");
+    assert_ne!(
+        spec.logical_a, spec.logical_b,
+        "roles carry x and its transpose view"
+    );
     assert!(
         s.nodes.values().any(|n| {
             n.op == "LogicalIndexMapApply"
@@ -1397,7 +1450,10 @@ fn attack_a11_all_ones_decorated_stress() {
     // canonical match and the sandwich doubles each — 8 (welded) sites,
     // every one describing the same 1x1x1 call (the one-geometry oracle
     // below is the soundness gate).
-    assert_eq!(sites, 8, "the fully welded corner multiplies the site census");
+    assert_eq!(
+        sites, 8,
+        "the fully welded corner multiplies the site census"
+    );
     let n_specs = assert_candidates_sound(&s, "a11");
     println!("  {n_specs} candidate spec(s), all sound");
     assert_eq!(
@@ -1469,7 +1525,9 @@ fn attack_b1_wrong_axis_bias_square_out() {
     let bias_ops = count_op(&s, "LayoutTensorOpCublasLtBias");
     let base_ops = count_op(&s, "LayoutTensorOpCublasLt");
     let acc_ops = count_op(&s, "LayoutTensorOpCublasLtAccumulate");
-    println!("b1 WRONG-axis bias, square out: base={base_ops} bias={bias_ops} accumulate={acc_ops}");
+    println!(
+        "b1 WRONG-axis bias, square out: base={base_ops} bias={bias_ops} accumulate={acc_ops}"
+    );
     assert_eq!(
         bias_ops, 0,
         "a per-ROW bias must NEVER reach the Bias contract (the epilogue is per-column)"
@@ -1601,7 +1659,10 @@ fn attack_c1_c_equals_a() {
     );
     let c_logical = logical_of_lt(&s, &e.inputs[2].1).expect("c logical");
     let b_logical = logical_of_lt(&s, &e.inputs[1].1).expect("b logical");
-    assert_eq!(c_logical, b_logical, "one logical value (the transpose view of x)");
+    assert_eq!(
+        c_logical, b_logical,
+        "one logical value (the transpose view of x)"
+    );
     assert!(
         s.nodes.values().any(|n| {
             n.op == "LogicalIndexMapApply"
@@ -1692,7 +1753,8 @@ fn attack_c2_self_add_mm_plus_mm() {
         "the decorated D is off the site out"
     );
     assert_eq!(
-        spec.logical_site_out, base.spec().logical_out,
+        spec.logical_site_out,
+        base.spec().logical_out,
         "both kernels sit on the SAME site — the fold duplicated the GEMM"
     );
     assert_eq!(spec.ldc, spec.ldd, "C rides the D layout");
@@ -1812,7 +1874,11 @@ fn attack_c5_bias_then_c_plain() {
         let e = lt[0];
         let spec = e.spec();
         assert_eq!(e.label, "CublasLtAccumulateBias", "{name}");
-        assert_eq!(spec.epilogue, CuEpilogue::Bias, "{name}: no activation asked");
+        assert_eq!(
+            spec.epilogue,
+            CuEpilogue::Bias,
+            "{name}: no activation asked"
+        );
         assert_eq!(e.arity(), 4, "{name}");
         assert_eq!(
             e.inputs.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
@@ -1976,7 +2042,11 @@ fn attack_d2_double_relu() {
         .filter(|e| e.label.starts_with("CublasLt"))
         .collect();
     println!("  labels={labels:?}");
-    assert_eq!(lt.len(), 1, "ONE fused kernel — the epilogue is a single flag");
+    assert_eq!(
+        lt.len(),
+        1,
+        "ONE fused kernel — the epilogue is a single flag"
+    );
     assert_eq!(lt[0].spec().epilogue, CuEpilogue::Relu);
     let residual = labels.iter().filter(|l| !l.starts_with("CublasLt")).count();
     assert!(
@@ -2004,7 +2074,10 @@ fn attack_d3_mm_plus_mm_two_sites() {
     assert_eq!(sites, 4, "two matmuls, two site pairs");
     // ROUND-11 RE-PIN (was 2): the fold still fires once per matmul, and
     // each folds over the 2 A x 2 B frame cross product of its site.
-    assert_eq!(acc, 8, "the add folds into EITHER matmul — 4 frame combos each");
+    assert_eq!(
+        acc, 8,
+        "the add folds into EITHER matmul — 4 frame combos each"
+    );
     assert_candidates_sound(&s, "d3");
     assert_one_lit_per_op_class(&s, "d3");
 
@@ -2012,8 +2085,14 @@ fn attack_d3_mm_plus_mm_two_sites() {
     // own a or b.
     for spec in specs_of_every_enode(&s, CublasLtForm::Accumulate) {
         let c = spec.c_tensor.clone().expect("accumulate carries C");
-        assert_ne!(c, spec.desc_a_layout_tensor, "C is not the op's own b operand");
-        assert_ne!(c, spec.desc_b_layout_tensor, "C is not the op's own a operand");
+        assert_ne!(
+            c, spec.desc_a_layout_tensor,
+            "C is not the op's own b operand"
+        );
+        assert_ne!(
+            c, spec.desc_b_layout_tensor,
+            "C is not the op's own a operand"
+        );
     }
 
     let (elected, labels) = flavored_cublaslt(&text, true, false, false);
@@ -2231,8 +2310,7 @@ fn attack_e3_four_inlined_relu_copies_agree() {
         );
         assert_candidates_sound(&s, name);
 
-        let (elected, labels) =
-            flavored_cublaslt(&text, form.has_c(), form.has_bias(), true);
+        let (elected, labels) = flavored_cublaslt(&text, form.has_c(), form.has_bias(), true);
         let lt: Vec<_> = elected
             .iter()
             .filter(|e| e.label.starts_with("CublasLt"))
@@ -2252,10 +2330,14 @@ fn attack_e3_four_inlined_relu_copies_agree() {
 fn sym(name: &str, lo: Option<i64>, hi: Option<i64>) -> String {
     let mut out = format!("(let {name}_var (IntVar \"{name}\"))\n");
     if let Some(lo) = lo {
-        out.push_str(&format!("(set (lower-bound-of {name}_var) (bigint {lo}))\n"));
+        out.push_str(&format!(
+            "(set (lower-bound-of {name}_var) (bigint {lo}))\n"
+        ));
     }
     if let Some(hi) = hi {
-        out.push_str(&format!("(set (upper-bound-of {name}_var) (bigint {hi}))\n"));
+        out.push_str(&format!(
+            "(set (upper-bound-of {name}_var) (bigint {hi}))\n"
+        ));
     }
     out
 }
@@ -2308,8 +2390,14 @@ fn attack_s1_amk_bnk_symbolic_1_64_refused() {
     let elected = pinned_cublaslt(&text);
     assert_eq!(elected.len(), 1);
     let spec = elected[0].spec();
-    println!("  m={} n={} k={} lda={} ldb={} ldd={}", spec.m, spec.n, spec.k, spec.lda, spec.ldb, spec.ldd);
-    assert!(matches!(spec.m, CuDim::Symbolic(_)), "call m = logical n = symbolic");
+    println!(
+        "  m={} n={} k={} lda={} ldb={} ldd={}",
+        spec.m, spec.n, spec.k, spec.lda, spec.ldb, spec.ldd
+    );
+    assert!(
+        matches!(spec.m, CuDim::Symbolic(_)),
+        "call m = logical n = symbolic"
+    );
     assert_eq!(spec.n, 2);
     assert_eq!(spec.k, 4);
     assert!(spec.trans_a);
@@ -2383,7 +2471,10 @@ fn attack_s3_amk_bnk_symbolic_k_1_64_literal_n() {
     let elected = pinned_cublaslt(&text);
     assert_eq!(elected.len(), 1);
     let spec = elected[0].spec();
-    println!("  m={} n={} k={} lda={} ldb={} ldd={}", spec.m, spec.n, spec.k, spec.lda, spec.ldb, spec.ldd);
+    println!(
+        "  m={} n={} k={} lda={} ldb={} ldd={}",
+        spec.m, spec.n, spec.k, spec.lda, spec.ldb, spec.ldd
+    );
     assert_eq!(spec.m, 3, "call m = logical n = literal");
     assert_eq!(spec.n, 2);
     assert!(matches!(spec.k, CuDim::Symbolic(_)));
@@ -2424,7 +2515,10 @@ fn attack_s4_amk_bnk_no_bounds_refused() {
     let (sites, a, b, d, ops) = census(&s);
     println!("s4 A[m,k],B[n,k] unbounded k: sites={sites} a={a} b={b} d={d} ops={ops}");
     // ROUND-10 RE-PIN: original + transpose-sandwich sibling site.
-    assert_eq!(sites, 2, "the SITE rules carry no bounds guard — the site marks");
+    assert_eq!(
+        sites, 2,
+        "the SITE rules carry no bounds guard — the site marks"
+    );
     assert_eq!(a, 0, "no A reading term is minted (structural refusal)");
     assert_eq!(b, 0, "no B reading term is minted");
     // ROUND-10 RE-PIN (was 1): one D reading per site of the pair.
@@ -2461,7 +2555,10 @@ fn attack_s5_amk_bkn_no_bounds_site_but_no_op() {
     assert_eq!(sites, 2);
     assert_eq!(a, 0);
     assert_eq!(b, 0);
-    assert_eq!(ops, 0, "NO spec-less op can be elected because NO op exists");
+    assert_eq!(
+        ops, 0,
+        "NO spec-less op can be elected because NO op exists"
+    );
 
     // And the decomposed route still reaches the boundary.
     let extraction = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -2651,12 +2748,16 @@ fn attack_s8_symbolic_bucket_request_refused() {
     println!("s8 control (certified pitch 8): B readings={b_good} ops={ops_good}");
     // ROUND-10: 3 = sibling contiguous (N) + sibling padded (N, ldb=8)
     // + the original site's w reading (T).
-    assert!(b_good >= 3, "contiguous AND padded readings coexist (plus the original site's)");
+    assert!(
+        b_good >= 3,
+        "contiguous AND padded readings coexist (plus the original site's)"
+    );
     assert_candidates_sound(&s_good, "s8-good");
 
     // THE SURVIVING PERIMETER: the same layout WITHOUT the injectivity
     // fact is refused by the reading arms.
-    let uncertified = base("(let x_lt_pad8_layout (StridedElementLayoutLit a_shape
+    let uncertified = base(
+        "(let x_lt_pad8_layout (StridedElementLayoutLit a_shape
   (IntAffineExprCons (IntMul (CoordVar a_shape 1) (IntLit 8))
     (IntAffineExprCons (CoordVar a_shape 0) (IntAffineExprNil)))
   (bits-of (F32))))
@@ -2664,7 +2765,8 @@ fn attack_s8_symbolic_bucket_request_refused() {
 (strided-lists x_lt_pad8_layout a_shape
   (IntExprCons (IntLit 2) (IntExprCons s_var (IntExprNil)))
   (IntExprCons (IntLit 8) (IntExprCons (IntLit 1) (IntExprNil)))
-  (bits-of (F32)))");
+  (bits-of (F32)))",
+    );
     let s_unc = test_runtime::serialize_fixture(&uncertified);
     let (_, _, b_unc, _, _) = census(&s_unc);
     println!("s8 uncertified pitch 8: B readings={b_unc}");
@@ -2672,7 +2774,10 @@ fn attack_s8_symbolic_bucket_request_refused() {
     // PADDED reading is still absent — the injectivity perimeter holds
     // (the pitched layout and every view composed FROM it stay refused;
     // the added readings ride certified contiguous frame layouts).
-    assert_eq!(b_unc, 4, "no injectivity fact, no padded reading — arms stay fail-closed");
+    assert_eq!(
+        b_unc, 4,
+        "no injectivity fact, no padded reading — arms stay fail-closed"
+    );
     assert_candidates_sound(&s_unc, "s8-unc");
 
     // THE LOST PERIMETER, pinned: an UNDER-SIZED pitch (4 < upper(cols) = 8)
@@ -2694,7 +2799,10 @@ fn attack_s8_symbolic_bucket_request_refused() {
          — admitted; the clamp left with the creator"
     );
     // ROUND-11 RE-PIN (was 3): + the column-form frame readings.
-    assert_eq!(b_false, 5, "a false certificate is trusted: the recorded cost of E2/E3");
+    assert_eq!(
+        b_false, 5,
+        "a false certificate is trusted: the recorded cost of E2/E3"
+    );
 }
 
 /// s9 (charter §2, the other half): a HAND-ASSERTED injective strided
@@ -2709,7 +2817,11 @@ fn attack_s8_symbolic_bucket_request_refused() {
 #[test]
 fn attack_s9_handasserted_symbolic_pitch_admitted() {
     let fx = Fx {
-        prelude: format!("{}{}", sym("s", Some(2), Some(8)), sym("p", Some(8), Some(8))),
+        prelude: format!(
+            "{}{}",
+            sym("s", Some(2), Some(8)),
+            sym("p", Some(8), Some(8))
+        ),
         m: lit(2),
         n: lit(3),
         k: "s_var".into(),
@@ -2728,8 +2840,13 @@ fn attack_s9_handasserted_symbolic_pitch_admitted() {
     let text = fx.text();
     let s = test_runtime::serialize_fixture(&text);
     let (sites, a, b, d, ops) = census(&s);
-    println!("s9 hand-asserted injective symbolic pitch: sites={sites} a={a} b={b} d={d} ops={ops}");
-    assert!(b >= 1, "the static arm ADMITS a symbolic pitch under injectivity");
+    println!(
+        "s9 hand-asserted injective symbolic pitch: sites={sites} a={a} b={b} d={d} ops={ops}"
+    );
+    assert!(
+        b >= 1,
+        "the static arm ADMITS a symbolic pitch under injectivity"
+    );
     assert!(ops >= 1);
     assert_candidates_sound(&s, "s9");
 
@@ -2741,9 +2858,9 @@ fn attack_s9_handasserted_symbolic_pitch_admitted() {
     // the elected spec is only required to parse with a usable ld.
     let specs = all_candidate_specs(&s);
     let pitch_carried = specs.iter().any(|sp| {
-        [&sp.lda, &sp.ldb].iter().any(|ld| {
-            **ld == 8i64 || matches!(ld, CuDim::Symbolic(_))
-        })
+        [&sp.lda, &sp.ldb]
+            .iter()
+            .any(|ld| **ld == 8i64 || matches!(ld, CuDim::Symbolic(_)))
     });
     assert!(
         pitch_carried,
@@ -2752,7 +2869,10 @@ fn attack_s9_handasserted_symbolic_pitch_admitted() {
     let elected = pinned_cublaslt(&text);
     assert_eq!(elected.len(), 1);
     let spec = elected[0].spec();
-    println!("  elected ldb = {} (one sound frame of the candidate set)", spec.ldb);
+    println!(
+        "  elected ldb = {} (one sound frame of the candidate set)",
+        spec.ldb
+    );
     assert!(
         spec.ldb.literal().is_some() || matches!(spec.ldb, CuDim::Symbolic(_)),
         "the elected reading's ldb is usable (literal or class handle), got {}",
@@ -2845,12 +2965,17 @@ fn attack_p1_form_layout_mismatch_panics_loudly() {
                         .and_then(|id| s.nodes.get(id))
                         .map(|c| c.eclass == buffer.eclass)
                         .unwrap_or(false)
-                    && s.nodes.values().any(|r| r.eclass == m.eclass && r.op == "ReadWrite")
+                    && s.nodes
+                        .values()
+                        .any(|r| r.eclass == m.eclass && r.op == "ReadWrite")
             });
             if !rw {
                 return None;
             }
-            n.children.first().and_then(|id| s.nodes.get(id)).map(|c| c.eclass.clone())
+            n.children
+                .first()
+                .and_then(|id| s.nodes.get(id))
+                .map(|c| c.eclass.clone())
         })
         .expect("the boundary out lt exists");
     let bad: Vec<_> = s
@@ -2887,7 +3012,11 @@ fn attack_p1_form_layout_mismatch_panics_loudly() {
     // combines with now include the column-form frame readings, widening
     // the cross product to 6. The tripwire obligation is unchanged and
     // STRONGER: every combo must die loudly in parse (the loop below).
-    assert_eq!(bad.len(), 6, "the hand-built descriptor pollinates 6 combos");
+    assert_eq!(
+        bad.len(),
+        6,
+        "the hand-built descriptor pollinates 6 combos"
+    );
     for (id, node) in &bad {
         let msg = panic_message(|| {
             let site = ExtractionSite {
@@ -3081,7 +3210,10 @@ fn attack_p3_no_legal_program_reaches_a_panic() {
         assert_one_lit_per_op_class(&s, name);
         println!("p3 {name}: {n} candidate spec(s), all parse");
     }
-    println!("p3: {total} candidate specs parsed across {} programs, zero panics", programs.len());
+    println!(
+        "p3: {total} candidate specs parsed across {} programs, zero panics",
+        programs.len()
+    );
     assert!(total >= programs.len(), "every program produced candidates");
 }
 
@@ -3127,10 +3259,9 @@ fn attack_o1_the_oracles_discriminate() {
     short.lda = CuDim::Literal(1);
     let msg = panic_message(|| assert_ld_clamps(&short, "o1-short"));
     println!("o1 lda=1: {msg:?}");
-    assert!(
-        msg.expect("the clamp REJECTS an uncallable ld")
-            .contains("UNCALLABLE"),
-    );
+    assert!(msg
+        .expect("the clamp REJECTS an uncallable ld")
+        .contains("UNCALLABLE"),);
 
     // Coverage: how many candidates across a spread of fixtures were really
     // compared by the oracle (as opposed to skipped for symbolic extents)?
@@ -3142,17 +3273,25 @@ fn attack_o1_the_oracles_discriminate() {
             let _ = x.matmul(w.permute((1usize, 0usize))).output();
         }),
         Fx {
-            m: lit(1), n: lit(1), k: lit(4),
-            a_rows: lit(1), a_cols: lit(4),
-            b_rows: lit(1), b_cols: lit(4),
+            m: lit(1),
+            n: lit(1),
+            k: lit(4),
+            a_rows: lit(1),
+            a_cols: lit(4),
+            b_rows: lit(1),
+            b_cols: lit(4),
             ..Default::default()
-        }.bnk().text(),
+        }
+        .bnk()
+        .text(),
         record(|cx| {
             let x = cx.tensor((4usize, 8usize));
             let w = cx.tensor((8usize, 3usize));
             let c = cx.tensor((4usize, 3usize));
             let b = cx.tensor(3usize);
-            let _ = ((x.matmul(w) + c) + b.expand_dim(0, 4usize)).relu().output();
+            let _ = ((x.matmul(w) + c) + b.expand_dim(0, 4usize))
+                .relu()
+                .output();
         }),
     ];
     let mut compared = 0usize;
@@ -3243,7 +3382,10 @@ fn attack_f1_dual_readings_are_legal_multiplicity() {
     // chains over the same out (b = w directly, and b = the transpose
     // view of w), each with its sandwich sibling — 4 sites. Operand
     // frames double the readings; assembly takes the cross products.
-    assert_eq!(sites, 4, "two canonical chains (stored w / viewed w) x site pair");
+    assert_eq!(
+        sites, 4,
+        "two canonical chains (stored w / viewed w) x site pair"
+    );
     assert_eq!(a, 8, "two frames per site's a operand");
     assert_eq!(ops, 20, "the frame cross products across the four sites");
     let classes = assert_one_lit_per_op_class(&s, "f1");
@@ -3344,7 +3486,10 @@ fn attack_g1_x16_same_geometry() {
     let (sites, a, b, d, ops) = census(&s16);
     println!("  sites={sites} a={a} b={b} d={d} ops={ops}");
     // ROUND-10 RE-PIN: original + transpose-sandwich sibling site per matmul.
-    assert_eq!(sites, 32, "16 distinct site PAIRS — identical geometry welds nothing");
+    assert_eq!(
+        sites, 32,
+        "16 distinct site PAIRS — identical geometry welds nothing"
+    );
     // ROUND-11 RE-PIN (was 32): the 2 A x 2 B frame cross product per
     // site — 16 matmuls x 2 sites x 4 = 128. Still linear in the block
     // count (the node-growth bound below is unchanged).
@@ -3365,7 +3510,11 @@ fn attack_g1_x16_same_geometry() {
     for e in &elected {
         let (m, n, k) = e.spec().mnk_lits();
         let canonical = if m <= n { (m, n, k) } else { (n, m, k) };
-        assert_eq!(canonical, (3, 4, 8), "every kernel is one sandwich frame of the call");
+        assert_eq!(
+            canonical,
+            (3, 4, 8),
+            "every kernel is one sandwich frame of the call"
+        );
         assert_eq!(e.arity(), 2);
     }
 }
@@ -3411,7 +3560,11 @@ fn attack_g2_cse_same_matmul_twice() {
     for e in &elected {
         let (m, n, k) = e.spec().mnk_lits();
         let canonical = if m <= n { (m, n, k) } else { (n, m, k) };
-        assert_eq!(canonical, (3, 4, 8), "every kernel is one sandwich frame of the call");
+        assert_eq!(
+            canonical,
+            (3, 4, 8),
+            "every kernel is one sandwich frame of the call"
+        );
         assert_eq!(e.arity(), 2);
     }
 }
@@ -3423,49 +3576,72 @@ fn attack_g2_cse_same_matmul_twice() {
 #[test]
 fn attack_h1_one_lit_per_op_class() {
     let cases: Vec<(&str, String)> = vec![
-        ("plain", record(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let _ = x.matmul(w).output();
-        })),
-        ("bias", record(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let b = cx.tensor(3usize);
-            let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
-        })),
-        ("accumulate", record(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let c = cx.tensor((4usize, 3usize));
-            let _ = (x.matmul(w) + c).output();
-        })),
-        ("full-stack-relu", record(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let c = cx.tensor((4usize, 3usize));
-            let b = cx.tensor(3usize);
-            let _ = ((x.matmul(w) + c) + b.expand_dim(0, 4usize)).relu().output();
-        })),
-        ("mm-plus-mm", record(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w1 = cx.tensor((8usize, 3usize));
-            let w2 = cx.tensor((8usize, 3usize));
-            let _ = (x.matmul(w1) + x.matmul(w2)).output();
-        })),
-        ("diamond", record(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let b = cx.tensor(3usize);
-            let mm = x.matmul(w);
-            let _ = mm.output();
-            let _ = (mm + b.expand_dim(0, 4usize)).output();
-        })),
-        ("c-equals-a", record(|cx| {
-            let x = cx.tensor((4usize, 4usize));
-            let w = cx.tensor((4usize, 4usize));
-            let _ = (x.matmul(w) + x).output();
-        })),
+        (
+            "plain",
+            record(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let _ = x.matmul(w).output();
+            }),
+        ),
+        (
+            "bias",
+            record(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let b = cx.tensor(3usize);
+                let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
+            }),
+        ),
+        (
+            "accumulate",
+            record(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let c = cx.tensor((4usize, 3usize));
+                let _ = (x.matmul(w) + c).output();
+            }),
+        ),
+        (
+            "full-stack-relu",
+            record(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let c = cx.tensor((4usize, 3usize));
+                let b = cx.tensor(3usize);
+                let _ = ((x.matmul(w) + c) + b.expand_dim(0, 4usize))
+                    .relu()
+                    .output();
+            }),
+        ),
+        (
+            "mm-plus-mm",
+            record(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w1 = cx.tensor((8usize, 3usize));
+                let w2 = cx.tensor((8usize, 3usize));
+                let _ = (x.matmul(w1) + x.matmul(w2)).output();
+            }),
+        ),
+        (
+            "diamond",
+            record(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let b = cx.tensor(3usize);
+                let mm = x.matmul(w);
+                let _ = mm.output();
+                let _ = (mm + b.expand_dim(0, 4usize)).output();
+            }),
+        ),
+        (
+            "c-equals-a",
+            record(|cx| {
+                let x = cx.tensor((4usize, 4usize));
+                let w = cx.tensor((4usize, 4usize));
+                let _ = (x.matmul(w) + x).output();
+            }),
+        ),
     ];
     for (name, text) in &cases {
         let s = test_runtime::serialize_fixture(text);
@@ -3487,38 +3663,51 @@ fn attack_h1_one_lit_per_op_class() {
 #[test]
 fn attack_u1_lit_slot_contents_pinned() {
     let cases: [(&str, CublasLtForm, Box<dyn Fn(&mut Graph)>); 4] = [
-        ("base", CublasLtForm::Base, Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let _ = x.matmul(w).output();
-        })),
-        ("bias", CublasLtForm::Bias, Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let b = cx.tensor(3usize);
-            let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
-        })),
-        ("accumulate", CublasLtForm::Accumulate, Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let c = cx.tensor((4usize, 3usize));
-            let _ = (x.matmul(w) + c).output();
-        })),
-        ("accumulate-bias", CublasLtForm::AccumulateBias, Box::new(|cx: &mut Graph| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let c = cx.tensor((4usize, 3usize));
-            let b = cx.tensor(3usize);
-            let _ = ((x.matmul(w) + c) + b.expand_dim(0, 4usize)).output();
-        })),
+        (
+            "base",
+            CublasLtForm::Base,
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let _ = x.matmul(w).output();
+            }),
+        ),
+        (
+            "bias",
+            CublasLtForm::Bias,
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let b = cx.tensor(3usize);
+                let _ = (x.matmul(w) + b.expand_dim(0, 4usize)).output();
+            }),
+        ),
+        (
+            "accumulate",
+            CublasLtForm::Accumulate,
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let c = cx.tensor((4usize, 3usize));
+                let _ = (x.matmul(w) + c).output();
+            }),
+        ),
+        (
+            "accumulate-bias",
+            CublasLtForm::AccumulateBias,
+            Box::new(|cx: &mut Graph| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let c = cx.tensor((4usize, 3usize));
+                let b = cx.tensor(3usize);
+                let _ = ((x.matmul(w) + c) + b.expand_dim(0, 4usize)).output();
+            }),
+        ),
     ];
     for (name, form, build) in &cases {
         let text = record(|cx| build(cx));
         let (elected, _) = flavored_cublaslt(&text, form.has_c(), form.has_bias(), false);
-        let lt: Vec<_> = elected
-            .iter()
-            .filter(|e| e.op.form == *form)
-            .collect();
+        let lt: Vec<_> = elected.iter().filter(|e| e.op.form == *form).collect();
         assert_eq!(lt.len(), 1, "{name}: the {form:?} contract elected");
         let e = lt[0];
         let spec = e.spec();
@@ -3574,8 +3763,10 @@ fn attack_u2_layout_tensor_field_naming_is_inverted() {
     let elected = pinned_cublaslt(&text);
     assert_eq!(elected.len(), 1);
     let spec = elected[0].spec();
-    let a_lt_logical = logical_of_lt(&s, &spec.desc_a_layout_tensor).expect("desc_a_layout_tensor logical");
-    let b_lt_logical = logical_of_lt(&s, &spec.desc_b_layout_tensor).expect("desc_b_layout_tensor logical");
+    let a_lt_logical =
+        logical_of_lt(&s, &spec.desc_a_layout_tensor).expect("desc_a_layout_tensor logical");
+    let b_lt_logical =
+        logical_of_lt(&s, &spec.desc_b_layout_tensor).expect("desc_b_layout_tensor logical");
     println!(
         "u2: logical(desc_a_layout_tensor)==logical_b? {} ; logical(desc_b_layout_tensor)==logical_a? {}",
         a_lt_logical == spec.logical_b,
@@ -3589,7 +3780,10 @@ fn attack_u2_layout_tensor_field_naming_is_inverted() {
         b_lt_logical, spec.logical_b,
         "spec.desc_b_layout_tensor holds the SITE's b (unswapped, R10)"
     );
-    assert_ne!(spec.logical_a, spec.logical_b, "the two are genuinely distinct here");
+    assert_ne!(
+        spec.logical_a, spec.logical_b,
+        "the two are genuinely distinct here"
+    );
     // The geometry cross-check that makes it observable: lda comes from our
     // b's storage cols (3), ldb from our a's storage cols (4).
     assert_eq!(spec.lda, 3);
@@ -3624,7 +3818,9 @@ fn attack_u3_bufferize_duplicate_operand_accumulate() {
     .expect("genome extraction reaches the boundary");
     let elected = elected_ops(&graph);
     assert!(
-        elected.iter().any(|e| e.op.form == CublasLtForm::Accumulate),
+        elected
+            .iter()
+            .any(|e| e.op.form == CublasLtForm::Accumulate),
         "the Accumulate contract elected"
     );
 
@@ -3667,11 +3863,9 @@ fn attack_u3_bufferize_duplicate_operand_accumulate() {
         .dag
         .node_weights()
         .find_map(|node| match node {
-            luminal::bufferize::BufferNode::Compute { op, reads, writes, .. }
-                if op.label().starts_with("CublasLt") =>
-            {
-                Some((reads.clone(), writes.clone()))
-            }
+            luminal::bufferize::BufferNode::Compute {
+                op, reads, writes, ..
+            } if op.label().starts_with("CublasLt") => Some((reads.clone(), writes.clone())),
             _ => None,
         })
         .expect("the kernel is in the buffer plan");
@@ -3680,7 +3874,10 @@ fn attack_u3_bufferize_duplicate_operand_accumulate() {
     assert_eq!(reads.len(), 4, "a, b, c, dest");
     // ROUND-10 RE-PIN: x sits in the B role on the sibling site and C is
     // its transpose VIEW — so it is slots 1 and 2 that share x's buffer.
-    assert_eq!(reads[1], reads[2], "b and c share one buffer (x, viewed twice)");
+    assert_eq!(
+        reads[1], reads[2],
+        "b and c share one buffer (x, viewed twice)"
+    );
     assert_ne!(
         reads[2], writes[0],
         "the May permit did NOT donate a read-only caller input into D"
@@ -3716,7 +3913,10 @@ fn attack_u6_c_layout_mismatch_panics_loudly() {
         .iter()
         .filter(|(_, n)| n.op == "LayoutTensorOpCublasLtAccumulate")
         .collect();
-    println!("u6: {} Accumulate enode(s) (the program has no add — all hand-built)", accs.len());
+    println!(
+        "u6: {} Accumulate enode(s) (the program has no add — all hand-built)",
+        accs.len()
+    );
     assert_eq!(accs.len(), 1, "only the hand-built term exists");
     let (id, node) = accs[0];
     let msg = panic_message(|| {
@@ -3796,36 +3996,73 @@ fn attack_u4_accumulate_diamond_claimed_outputs() {
 #[test]
 fn attack_u5_no_spec_less_op_can_be_elected() {
     let cases: Vec<(&str, String, bool, bool, bool)> = vec![
-        ("base", record(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let _ = x.matmul(w).output();
-        }), false, false, false),
-        ("relu", record(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let _ = x.matmul(w).relu().output();
-        }), false, false, true),
-        ("accumulate-relu", record(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let c = cx.tensor((4usize, 3usize));
-            let _ = (x.matmul(w) + c).relu().output();
-        }), true, false, true),
-        ("full-stack", record(|cx| {
-            let x = cx.tensor((4usize, 8usize));
-            let w = cx.tensor((8usize, 3usize));
-            let c = cx.tensor((4usize, 3usize));
-            let b = cx.tensor(3usize);
-            let _ = ((x.matmul(w) + c) + b.expand_dim(0, 4usize)).relu().output();
-        }), true, true, true),
-        ("symbolic-k", Fx {
-            prelude: sym("s", Some(2), Some(64)),
-            m: lit(2), n: lit(3), k: "s_var".into(),
-            a_rows: lit(2), a_cols: "s_var".into(),
-            b_rows: "s_var".into(), b_cols: lit(3),
-            ..Default::default()
-        }.text(), false, false, false),
+        (
+            "base",
+            record(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let _ = x.matmul(w).output();
+            }),
+            false,
+            false,
+            false,
+        ),
+        (
+            "relu",
+            record(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let _ = x.matmul(w).relu().output();
+            }),
+            false,
+            false,
+            true,
+        ),
+        (
+            "accumulate-relu",
+            record(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let c = cx.tensor((4usize, 3usize));
+                let _ = (x.matmul(w) + c).relu().output();
+            }),
+            true,
+            false,
+            true,
+        ),
+        (
+            "full-stack",
+            record(|cx| {
+                let x = cx.tensor((4usize, 8usize));
+                let w = cx.tensor((8usize, 3usize));
+                let c = cx.tensor((4usize, 3usize));
+                let b = cx.tensor(3usize);
+                let _ = ((x.matmul(w) + c) + b.expand_dim(0, 4usize))
+                    .relu()
+                    .output();
+            }),
+            true,
+            true,
+            true,
+        ),
+        (
+            "symbolic-k",
+            Fx {
+                prelude: sym("s", Some(2), Some(64)),
+                m: lit(2),
+                n: lit(3),
+                k: "s_var".into(),
+                a_rows: lit(2),
+                a_cols: "s_var".into(),
+                b_rows: "s_var".into(),
+                b_cols: lit(3),
+                ..Default::default()
+            }
+            .text(),
+            false,
+            false,
+            false,
+        ),
     ];
     let mut checked = 0usize;
     for (name, text, c, bias, relu) in &cases {

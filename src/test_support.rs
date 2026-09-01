@@ -8,7 +8,6 @@
 //! must-share ties, may-share permits, accumulators), which by design have no
 //! egglog surface.
 
-
 pub mod test_ops {
     //! TEST FIXTURE (seed of the future TestRuntime, ruling 2026-08-13):
     //! the reference runtime implements ONLY non-mutating spellings of the
@@ -17,8 +16,8 @@ pub mod test_ops {
     //! home is a small TestRuntime with simple view/mutation/multi-output
     //! implementations — recorded in the queue, not built yet.
 
-    use crate::layout_ir::{AliasInfo, Bufferizable, LayoutIrOp, Sharing, ToDps};
     use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
+    use crate::layout_ir::{AliasInfo, Bufferizable, LayoutIrOp, Sharing, ToDps};
 
     /// `AddMulFusedGeneric(lhs, rhs) -> (add_out, mul_out)`
     ///
@@ -98,8 +97,16 @@ pub mod test_ops {
     impl Bufferizable for AddMulFusedDps {
         fn alias_info(&self) -> Vec<AliasInfo> {
             vec![
-                AliasInfo { operand: 2, result: 0, sharing: Sharing::Must },
-                AliasInfo { operand: 3, result: 1, sharing: Sharing::Must },
+                AliasInfo {
+                    operand: 2,
+                    result: 0,
+                    sharing: Sharing::Must,
+                },
+                AliasInfo {
+                    operand: 3,
+                    result: 1,
+                    sharing: Sharing::Must,
+                },
             ]
         }
     }
@@ -124,10 +131,9 @@ use petgraph::graph::NodeIndex;
 
 use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 use crate::layout_ir::{
-    AliasInfo, BufferInfo, Bufferizable, ExtractedDag, ExtractedEdge,
-    Access, ExtractedGraph, ExtractedNode, FreedBy, InputNode, LayoutInfo, LayoutIrOp,
-    LayoutTensorInfo,
-    LogicalInfo, OpInput, OpNode, OutputNode, OutputSlot, Sharing,
+    Access, AliasInfo, BufferInfo, Bufferizable, ExtractedDag, ExtractedEdge, ExtractedGraph,
+    ExtractedNode, FreedBy, InputNode, LayoutInfo, LayoutIrOp, LayoutTensorInfo, LogicalInfo,
+    OpInput, OpNode, OutputNode, OutputSlot, Sharing,
 };
 
 // =============================================================================
@@ -225,10 +231,18 @@ impl Bufferizable for MockOp {
     fn alias_info(&self) -> Vec<AliasInfo> {
         let mut info = Vec::new();
         if let Some(operand) = self.in_place_operand {
-            info.push(AliasInfo { operand, result: 0, sharing: Sharing::Must });
+            info.push(AliasInfo {
+                operand,
+                result: 0,
+                sharing: Sharing::Must,
+            });
             if self.not_conflicting {
                 for read in 0..self.reads.len() {
-                    info.push(AliasInfo { operand: read, result: 0, sharing: Sharing::May });
+                    info.push(AliasInfo {
+                        operand: read,
+                        result: 0,
+                        sharing: Sharing::May,
+                    });
                 }
             }
         }
@@ -272,7 +286,11 @@ impl BufferTensorIrOp for MockView {
 
 impl Bufferizable for MockView {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 0,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -313,7 +331,11 @@ impl BufferTensorIrOp for MockViewWithMap {
 
 impl Bufferizable for MockViewWithMap {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 0,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -472,8 +494,10 @@ impl TestGraph {
             .iter()
             .map(|(name, layout)| self.value_info(name, layout))
             .collect();
-        let result_classes: Vec<ClassId> =
-            output_infos.iter().map(|info| info.eclass.clone()).collect();
+        let result_classes: Vec<ClassId> = output_infos
+            .iter()
+            .map(|info| info.eclass.clone())
+            .collect();
         let op_inputs: Vec<OpInput> = inputs
             .iter()
             .enumerate()
@@ -574,10 +598,11 @@ mod harness_tests {
     use luminal::bufferize;
     use luminal::layout_ir::Access;
     use luminal::test_support::*;
-    use luminal_reference::harness::{
-        extract_fixture, extract_fixture_on_test_runtime, extract_fixture_with_ops,
-        serialize_fixture, try_extract_fixture_with_ops,
-    };
+    // Narrowed by the runtime split (PR #425): the fixtures that needed a
+    // view/mutating vocabulary — and the entry points that reached for it —
+    // moved to the test runtime's own crate. What core still asserts here
+    // runs on the reference registry alone.
+    use luminal_reference::harness::{extract_fixture, serialize_fixture};
 
     /// The builder produces a graph the real pipeline accepts end to end.
     #[test]
@@ -628,7 +653,12 @@ mod harness_tests {
             .collect();
         // 1 WAR (Exp's read before the copy overwriting x's buffer) + 2
         // lifetime (each fresh buffer's src-reading copy before its free).
-        assert_eq!(anti.len(), 3, "expected 1 WAR + 2 lifetime antis:\n{}", plan.summary());
+        assert_eq!(
+            anti.len(),
+            3,
+            "expected 1 WAR + 2 lifetime antis:\n{}",
+            plan.summary()
+        );
         let war: Vec<_> = anti
             .iter()
             .filter(|e| {
@@ -636,14 +666,22 @@ mod harness_tests {
                     if writes.is_empty())
             })
             .collect();
-        assert_eq!(war.len(), 1, "expected exactly one WAR anti:\n{}", plan.summary());
+        assert_eq!(
+            war.len(),
+            1,
+            "expected exactly one WAR anti:\n{}",
+            plan.summary()
+        );
         let edge = war[0];
         // Source must be the Exp compute node; target the copy into x's buffer.
         match &plan.dag[edge.source()] {
             BufferNode::Compute { op, .. } => assert_eq!(op.label(), "ExpFunctionalGeneric"),
             other => panic!("anti edge source should be ExpFunctionalGeneric, got {other:?}"),
         }
-        assert!(matches!(&plan.dag[edge.target()], BufferNode::BufferCopy { .. }));
+        assert!(matches!(
+            &plan.dag[edge.target()],
+            BufferNode::BufferCopy { .. }
+        ));
     }
 
     /// Copy-vs-copy WAR: out0 passes x onward into C (copy B->C reads B) while
@@ -677,7 +715,12 @@ mod harness_tests {
             .collect();
         // 1 WAR (the B-reading copy before the B-writing copy) + 1 lifetime
         // (the B-writing copy's src-read before y's buffer is freed).
-        assert_eq!(anti.len(), 2, "expected 1 WAR + 1 lifetime anti:\n{}", plan.summary());
+        assert_eq!(
+            anti.len(),
+            2,
+            "expected 1 WAR + 1 lifetime anti:\n{}",
+            plan.summary()
+        );
         let war: Vec<_> = anti
             .iter()
             .filter(|e| {
@@ -685,7 +728,12 @@ mod harness_tests {
                     if writes.is_empty())
             })
             .collect();
-        assert_eq!(war.len(), 1, "expected exactly one WAR anti:\n{}", plan.summary());
+        assert_eq!(
+            war.len(),
+            1,
+            "expected exactly one WAR anti:\n{}",
+            plan.summary()
+        );
         let edge = war[0];
         // Direction: the copy READING B (the B->C pass-onward) must run before
         // the copy WRITING B (the alloc->B overwrite).
@@ -923,168 +971,6 @@ mod harness_tests {
         assert_eq!(copies, 0, "zero copies:\n{}", plan.summary());
     }
 
-    /// THE MUTATING TIER, end to end: extraction restricted to
-    /// SqrtMutatingGeneric proves the one-buffer kernel through analysis and
-    /// planning — the tie is admitted (the op's own read is the same-use
-    /// exemption), the result rides x's caller buffer, and the boundary
-    /// passes through. Zero copies, zero allocations, no permits involved.
-    #[test]
-    fn mutating_sqrt_bufferizes_zero_copy_in_place() {
-        use luminal::bufferize::{BufferId, BufferNode};
-
-        let graph = extract_fixture_with_ops(
-            "boundary_in_place_mutation.egg",
-            &["LayoutTensorOpSqrtMutatingGeneric"],
-        );
-        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
-
-        assert!(
-            plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
-            "zero allocations:\n{}",
-            plan.summary()
-        );
-        let mut computes = 0;
-        for idx in plan.dag.node_indices() {
-            match &plan.dag[idx] {
-                BufferNode::BufferCopy { .. } => panic!("zero copies:\n{}", plan.summary()),
-                BufferNode::Compute { op, reads, writes, .. } => {
-                    computes += 1;
-                    assert_eq!(op.label(), "SqrtMutatingGeneric");
-                    assert_eq!(reads.len(), 1, "one buffer in:\n{}", plan.summary());
-                    assert_eq!(reads[0], writes[0], "mutated in place:\n{}", plan.summary());
-                    assert!(matches!(&writes[0], BufferId::Boundary(_)));
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(computes, 1);
-    }
-
-    /// THE MAY-SHARE PERMIT, end to end: z = x + x back into x's buffer,
-    /// extraction restricted to the input-alias-safe mutating add. The rhs
-    /// read aliases the mutated storage; the permit (whose all-layouts-equal
-    /// precondition the egglog match discharged) excuses it, and the whole
-    /// accumulation is zero-copy in the caller's buffer.
-    #[test]
-    fn alias_safe_add_accumulates_x_plus_x_in_place() {
-        use luminal::bufferize::{BufferId, BufferNode};
-
-        let graph = extract_fixture_with_ops(
-            "boundary_alias_safe_add.egg",
-            &["LayoutTensorOpAddMutatingInputAliasSafeGeneric"],
-        );
-        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
-
-        assert!(
-            plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
-            "zero allocations:\n{}",
-            plan.summary()
-        );
-        let mut computes = 0;
-        for idx in plan.dag.node_indices() {
-            match &plan.dag[idx] {
-                BufferNode::BufferCopy { .. } => panic!("zero copies:\n{}", plan.summary()),
-                BufferNode::Compute { op, reads, writes, .. } => {
-                    computes += 1;
-                    assert_eq!(op.label(), "AddMutatingInputAliasSafeGeneric");
-                    assert_eq!(reads.len(), 2, "{}", plan.summary());
-                    assert_eq!(reads[0], writes[0], "lhs mutated in place");
-                    assert_eq!(reads[1], writes[0], "rhs reads the SAME storage (permitted)");
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(computes, 1);
-    }
-
-    /// THE CONTRAST: the same x + x program through the PLAIN mutating add,
-    /// which declares no permit — absence is restrict semantics. The rhs
-    /// aliasing the mutated storage rejects the tie; the generic repair
-    /// relocates (copy-in to a fresh buffer, mutate there) and the boundary
-    /// copies back. Sound, two copies, one allocation — the price of the
-    /// missing permit.
-    #[test]
-    fn plain_mutating_add_on_x_plus_x_degrades_to_copies() {
-        use luminal::bufferize::{BufferId, BufferNode};
-
-        let graph = extract_fixture_with_ops(
-            "boundary_alias_safe_add.egg",
-            &["LayoutTensorOpAddMutatingGeneric"],
-        );
-        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
-
-        let allocs = plan
-            .buffers
-            .keys()
-            .filter(|id| matches!(id, BufferId::Allocated(_)))
-            .count();
-        assert_eq!(allocs, 1, "one relocation:\n{}", plan.summary());
-        let copies = plan
-            .dag
-            .node_indices()
-            .filter(|&idx| matches!(&plan.dag[idx], BufferNode::BufferCopy { .. }))
-            .count();
-        assert_eq!(copies, 2, "copy-in + boundary copy:\n{}", plan.summary());
-    }
-
-    /// The allow-list is a hard filter: a program not implementable within
-    /// it fails extraction loudly, never silently substitutes.
-    #[test]
-    fn op_filter_excluding_every_implementation_fails_loudly() {
-        let err = try_extract_fixture_with_ops(
-            "boundary_in_place_mutation.egg",
-            &["LayoutTensorOpExpMutatingGeneric"], // no Exp in this program
-        )
-        .expect_err("no implementation for sqrt is allowed");
-        assert!(err.to_string().contains("failed to extract"), "{err}");
-    }
-
-    /// Boundary in-place mutation through the FUNCTIONAL op, after the
-    /// engine stopped checking layouts: the same-op read of x against the
-    /// seeded destination has no unconditional permit, so the seed is
-    /// rejected and the plan degrades soundly — fresh allocation, boundary
-    /// copy back into the caller's buffer. No Anti edge is needed: the copy
-    /// is dataflow-ordered after the buffer's only reader (its source IS the
-    /// sqrt's output). (The zero-copy lowering for this program is the
-    /// MutatingGeneric op, which extraction does not yet prefer — the
-    /// recorded extraction-preference decision.)
-    #[test]
-    fn boundary_mutation_via_functional_degrades_to_copy() {
-        use luminal::bufferize::{BufferId, BufferNode, EdgeKind};
-        use petgraph::visit::EdgeRef;
-
-        let graph = extract_fixture("boundary_in_place_mutation.egg");
-        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
-
-        let allocs = plan
-            .buffers
-            .keys()
-            .filter(|id| matches!(id, BufferId::Allocated(_)))
-            .count();
-        assert_eq!(allocs, 1, "one relocated destination:\n{}", plan.summary());
-        let copies = plan
-            .dag
-            .node_indices()
-            .filter(|&idx| matches!(&plan.dag[idx], BufferNode::BufferCopy { .. }))
-            .count();
-        assert_eq!(copies, 1, "one boundary copy:\n{}", plan.summary());
-        // No WAR anti is needed (the copy is dataflow-ordered after the
-        // read); the one anti is lifetime — the boundary copy's src-read
-        // before the fresh buffer's free.
-        let anti: Vec<_> = plan
-            .dag
-            .edge_references()
-            .filter(|edge| edge.weight().kind == EdgeKind::Anti)
-            .collect();
-        assert_eq!(anti.len(), 1, "one lifetime anti only:\n{}", plan.summary());
-        assert!(
-            matches!(&plan.dag[anti[0].target()], BufferNode::Compute { writes, .. }
-                if writes.is_empty()),
-            "the sole anti targets the free:\n{}",
-            plan.summary()
-        );
-    }
-
     /// One value bound to TWO output buffers: the chain-root poison can only
     /// live in one of them. The seed goes to the lowest slot (D); the other
     /// slot (E) is served by a copy out of D.
@@ -1121,7 +1007,12 @@ mod harness_tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(copies.len(), 1, "one copy serves the losing slot:\n{}", plan.summary());
+        assert_eq!(
+            copies.len(),
+            1,
+            "one copy serves the losing slot:\n{}",
+            plan.summary()
+        );
         assert_eq!(
             copies[0].0,
             &plan.value_buffer[&r],
@@ -1180,7 +1071,12 @@ mod harness_tests {
                     if dst == &plan.value_buffer[&x])
             })
             .count();
-        assert_eq!(copies_into_d, 1, "boundary copy restored:\n{}", plan.summary());
+        assert_eq!(
+            copies_into_d,
+            1,
+            "boundary copy restored:\n{}",
+            plan.summary()
+        );
         // 1 WAR (the reader before the boundary copy) + 2 lifetime (each
         // fresh buffer's src-reading copy before its free).
         let anti: Vec<_> = plan
@@ -1188,7 +1084,12 @@ mod harness_tests {
             .edge_references()
             .filter(|edge| edge.weight().kind == EdgeKind::Anti)
             .collect();
-        assert_eq!(anti.len(), 3, "1 WAR + 2 lifetime antis:\n{}", plan.summary());
+        assert_eq!(
+            anti.len(),
+            3,
+            "1 WAR + 2 lifetime antis:\n{}",
+            plan.summary()
+        );
         let war = anti
             .iter()
             .filter(|e| {
@@ -1196,7 +1097,12 @@ mod harness_tests {
                     if writes.is_empty())
             })
             .count();
-        assert_eq!(war, 1, "reader ordered before the copy:\n{}", plan.summary());
+        assert_eq!(
+            war,
+            1,
+            "reader ordered before the copy:\n{}",
+            plan.summary()
+        );
     }
 
     /// RANK 6 + the CRITICAL WAR fix regression: two inputs swapping buffers
@@ -1385,13 +1291,6 @@ mod harness_tests {
         let _ = serialize_fixture("bool_bridge_example.egg");
     }
 
-
-
-
-
-
-
-
     /// The pinned-plan fixture list, shared by the pin test and the
     /// regenerator below.
     const GOLDEN_SCRIPTS: &[&str] = &[
@@ -1430,46 +1329,6 @@ mod harness_tests {
         }
     }
 
-
-    /// The DPS rewrite: every capable op gains one poison destination per
-    /// result (trailing operands), produced by synthesized Poison nodes whose
-    /// values carry the tied result's LAYOUT (the equivalence gate keys on it).
-    #[test]
-    fn dps_rewrite_appends_tied_poison_destinations() {
-        use luminal::layout_ir::ExtractedNode;
-        let graph = extract_fixture("boundary_in_place_mutation.egg");
-        let rewritten = luminal::dps::dps_rewrite(&graph);
-
-        // The DPS form keeps the base op's label (label policy: IR names are
-        // never edited), so DPS-ness is witnessed semantically: among
-        // extractable ops only DPS forms answer to_dps() = None.
-        let (op, result_layout) = rewritten
-            .dag
-            .node_weights()
-            .find_map(|node| match node {
-                ExtractedNode::LayoutOp(op)
-                    if op.op.label() == "SqrtFunctionalGeneric" && op.op.to_dps().is_none() =>
-                {
-                    Some((op.clone(), op.outputs[0].layout.eclass.clone()))
-                }
-                _ => None,
-            })
-            .expect("Sqrt was rewritten to its DPS form");
-        assert_eq!(op.inputs.len(), 2, "input + one destination");
-        assert!(op.inputs[1].port.starts_with("dest"));
-        // The poison producer exists and its value carries the result's layout.
-        let poison = rewritten
-            .dag
-            .node_weights()
-            .find_map(|node| match node {
-                ExtractedNode::LayoutOp(p) if p.op.label() == "Poison" => Some(p.clone()),
-                _ => None,
-            })
-            .expect("Poison producer synthesized");
-        assert_eq!(poison.outputs[0].eclass, op.inputs[1].value);
-        assert_eq!(poison.outputs[0].layout.eclass, result_layout);
-    }
-
     /// The zero-input source path (R7): iota extracts with an EMPTY operand
     /// list, and after the DPS rewrite its appended destination is the op's
     /// ONLY operand — the degenerate case of the trailing-destination
@@ -1506,46 +1365,6 @@ mod harness_tests {
         assert!(dps.inputs[0].port.starts_with("dest"));
     }
 
-    /// The in-place scatter path (R8 dual — the user's in-place ruling):
-    /// forced to the MUTATING implementation, the KV-cache update writes
-    /// straight into the caller's cache buffer — no result allocation, no
-    /// BufferCopy, and the operand slots read init/src/coord0/coord1.
-    /// (Full extraction currently prefers the functional form on a cost
-    /// tie and REPAIRS the in-place demand with a copy — the golden pins
-    /// that honest outcome; extraction preference is a deferred lever.)
-    #[test]
-    fn scatter_mutating_updates_the_cache_in_place() {
-        use luminal::layout_ir::ExtractedNode;
-        let graph = extract_fixture_with_ops(
-            "boundary_scatter.egg",
-            &["LayoutTensorOpScatterMutatingGeneric", "LayoutTensorOpIotaGeneric"],
-        );
-        let scatter = graph
-            .dag
-            .node_weights()
-            .find_map(|node| match node {
-                ExtractedNode::LayoutOp(op) if op.op.label() == "ScatterMutatingGeneric" => {
-                    Some(op.clone())
-                }
-                _ => None,
-            })
-            .expect("mutating scatter extracted");
-        assert_eq!(scatter.inputs.len(), 4, "init + src + one coord per init axis");
-        assert_eq!(scatter.inputs[0].port, "init");
-        assert_eq!(scatter.inputs[1].port, "src");
-        assert_eq!(scatter.inputs[2].port, "coord0");
-        assert_eq!(scatter.inputs[3].port, "coord1");
-
-        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph))
-            .expect("in-place scatter bufferizes");
-        let summary = plan.summary();
-        assert!(summary.contains("ScatterMutatingGeneric"), "{summary}");
-        assert!(
-            !summary.contains("BufferCopy"),
-            "in-place must be zero-copy: {summary}"
-        );
-    }
-
     /// A scatter whose coordinate shapes genuinely disagree with src's
     /// shape survives the gated main stratum untouched (fail-open) and
     /// dies inside the terminal stratum's coordinate-shape-lock closure —
@@ -1567,9 +1386,11 @@ mod harness_tests {
     src))
 (run-schedule (saturate (saturate (run)) (run subst-walk)) (saturate (run fixpoint-invariants)))
 "#;
-        let program = format!("{preamble}
+        let program = format!(
+            "{preamble}
 
-{script}");
+{script}"
+        );
         let mut egraph = luminal::egglog_snippet::new_egraph();
         let err = egraph
             .parse_and_run_program(None, &program)
@@ -1756,17 +1577,6 @@ mod harness_tests {
         );
     }
 
-    /// Idempotency: DPS forms answer to_dps() = None, so a second rewrite is a
-    /// no-op (same node and edge counts).
-    #[test]
-    fn dps_rewrite_is_idempotent() {
-        let graph = extract_fixture("basic_program.egg");
-        let once = luminal::dps::dps_rewrite(&graph);
-        let twice = luminal::dps::dps_rewrite(&once);
-        assert_eq!(once.dag.node_count(), twice.dag.node_count());
-        assert_eq!(once.dag.edge_count(), twice.dag.edge_count());
-    }
-
     /// A view is free: the consumer reads the PARENT's buffer directly, and
     /// the view op leaves no node in the plan (folded like a poison producer).
     #[test]
@@ -1777,7 +1587,10 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v],
             &[("r", "rm")],
         )[0]
@@ -1786,13 +1599,19 @@ mod harness_tests {
         let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert_eq!(
-            plan.value_buffer[&v], plan.value_buffer[&x],
+            plan.value_buffer[&v],
+            plan.value_buffer[&x],
             "the view derives its parent's buffer:\n{}",
             plan.summary()
         );
         for idx in plan.dag.node_indices() {
             if let BufferNode::Compute { op, reads, .. } = &plan.dag[idx] {
-                assert_ne!(op.label(), "MockView", "views are folded:\n{}", plan.summary());
+                assert_ne!(
+                    op.label(),
+                    "MockView",
+                    "views are folded:\n{}",
+                    plan.summary()
+                );
                 // Storage nodes (alloc/free) read no operands; the invariant
                 // under test is about the view's CONSUMER.
                 if op.label() == "MockOp" {
@@ -1814,7 +1633,10 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadOnly, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v],
             &[("r", "rm")],
         )[0]
@@ -1837,7 +1659,10 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
         let s = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v],
             &[("s", "rm")],
         )[0]
@@ -1863,7 +1688,10 @@ mod harness_tests {
         let v1 = g.op(Box::new(MockView), &[&x], &[("v1", "row0")])[0].clone();
         let v2 = g.op(Box::new(MockView), &[&v1], &[("v2", "cell0")])[0].clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v2],
             &[("r", "rm")],
         )[0]
@@ -1892,7 +1720,11 @@ mod harness_tests {
         let graph = g.build();
         let plan = bufferize_mock(&graph).expect("bufferizes");
 
-        assert!(plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))));
+        assert!(
+            plan.buffers
+                .keys()
+                .all(|id| matches!(id, BufferId::Boundary(_)))
+        );
         assert!(
             plan.dag
                 .node_indices()
@@ -1909,7 +1741,8 @@ mod harness_tests {
             })
             .expect("one output slot");
         assert_eq!(
-            slot.buffer, plan.value_buffer[&x],
+            slot.buffer,
+            plan.value_buffer[&x],
             "the slot is backed by the input buffer:\n{}",
             plan.summary()
         );
@@ -1920,228 +1753,6 @@ mod harness_tests {
         let table = luminal::test_support::mock_layout_table(&graph);
         assert_eq!(&slot.layout, &table[&v], "the view's layout, verbatim");
         assert_ne!(table[&v], table[&x], "the view is not its parent");
-    }
-
-    /// THE REAL VIEW OP, plan level (Step 3): `IndexMapApplyView` feeding a
-    /// compute op contributes ZERO plan nodes — the result binds its parent's
-    /// buffer and the consumer's kernel reads that storage directly. Same
-    /// shape as the MockView pin above, but proving the shipped op's declared
-    /// contract (un-read operand, un-written result, Must(0→0)) drives the
-    /// fold.
-    #[test]
-    fn real_view_op_feeds_compute_with_zero_plan_nodes() {
-        use luminal::bufferize::BufferNode;
-        use luminal_reference::ops::IndexMapApplyView;
-
-        let mut g = TestGraph::new();
-        let x = g.input("x", "B", Access::ReadWrite, "rm");
-        let v = g.op(Box::new(IndexMapApplyView { entries: None }), &[&x], &[("v", "row0")])[0].clone();
-        let r = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
-            &[&v],
-            &[("r", "rm")],
-        )[0]
-        .clone();
-        g.output(&r, "D");
-        let plan = bufferize_mock(&g.build()).expect("bufferizes");
-
-        assert_eq!(
-            plan.value_buffer[&v], plan.value_buffer[&x],
-            "the view derives its parent's buffer:\n{}",
-            plan.summary()
-        );
-        for idx in plan.dag.node_indices() {
-            if let BufferNode::Compute { op, reads, .. } = &plan.dag[idx] {
-                assert_ne!(
-                    op.label(),
-                    "IndexMapApplyViewGeneric",
-                    "views are folded:\n{}",
-                    plan.summary()
-                );
-                if op.label() == "MockOp" {
-                    assert_eq!(
-                        reads[0], plan.value_buffer[&x],
-                        "the consumer reads the parent buffer directly"
-                    );
-                }
-            }
-        }
-    }
-
-    /// THE REAL VIEW OP bound to an output slot on a DIFFERENT buffer than
-    /// its parent's — the original boundary-flowing spelling, re-pinned
-    /// under ESCAPE-AND-DISCLOSE (ruling 2026-08-27): the view's storage is
-    /// the caller's own input buffer, so the output returns ZERO-COPY —
-    /// the slot is backed by the input buffer, the declared output buffer
-    /// goes unused (DCE'd, never allocated by runtimes), and the binding
-    /// carries the elected layout for the caller to interpret the bytes
-    /// under. (Two prior pins died here: the pre-Phase-5 boundary copy —
-    /// "the accepted price of returning a view" — and the Phase-5b typed
-    /// refusal. Both are rejected by the ruling: "we just return the
-    /// buffer and the user interprets it".)
-    #[test]
-    fn real_view_op_to_output_slot_escapes_zero_copy() {
-        use luminal::bufferize::BufferNode;
-        use luminal_reference::ops::IndexMapApplyView;
-
-        let mut g = TestGraph::new();
-        let x = g.input("x", "B", Access::ReadWrite, "rm");
-        let v = g.op(Box::new(IndexMapApplyView { entries: None }), &[&x], &[("v", "row0")])[0].clone();
-        g.output(&v, "D");
-        let graph = g.build();
-        let plan = bufferize_mock(&graph)
-            .expect("a view of an input returns zero-copy under escape semantics");
-
-        assert_eq!(
-            plan.value_buffer[&v], plan.value_buffer[&x],
-            "the view value lives in its parent's buffer:\n{}",
-            plan.summary()
-        );
-        assert!(
-            plan.dag
-                .node_indices()
-                .all(|idx| !matches!(
-                    &plan.dag[idx],
-                    BufferNode::BufferCopy { .. } | BufferNode::Compute { .. }
-                )),
-            "zero copies, zero kernels — the storage is already the caller's:\n{}",
-            plan.summary()
-        );
-        let slot = plan
-            .dag
-            .node_weights()
-            .find_map(|node| match node {
-                BufferNode::BufferOutput { slots } => Some(slots[0].clone()),
-                _ => None,
-            })
-            .expect("one output slot");
-        assert_eq!(
-            slot.buffer, plan.value_buffer[&x],
-            "the slot is backed by the INPUT buffer:\n{}",
-            plan.summary()
-        );
-        let table = luminal::test_support::mock_layout_table(&graph);
-        assert_eq!(
-            &slot.layout, &table[&v],
-            "the binding discloses the elected view layout, verbatim"
-        );
-    }
-
-    /// STAGE 7 / STEP 4, the view-feeds-compute boundary fixture end to end:
-    /// the transpose view of the READ-ONLY input extracts as the zero-cost
-    /// view op and folds to zero plan nodes, so the whole program is ONE
-    /// kernel — Sqrt reading the caller's input buffer directly (specialized
-    /// against the composed layout) and writing its seeded output buffer.
-    /// Zero allocations, zero copies.
-    #[test]
-    fn view_feeds_compute_fixture_runs_one_kernel_on_the_input_buffer() {
-        use luminal::bufferize::{BufferId, BufferNode};
-
-        let graph = extract_fixture_on_test_runtime("boundary_view_feeds_compute.egg");
-        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
-
-        assert!(
-            plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
-            "zero allocations:\n{}",
-            plan.summary()
-        );
-        let launch: Vec<BufferId> = plan
-            .dag
-            .node_weights()
-            .filter_map(|node| match node {
-                BufferNode::BufferInput { slots } => {
-                    Some(slots.iter().map(|slot| slot.buffer.clone()))
-                }
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        assert_eq!(launch.len(), 1, "one caller input:\n{}", plan.summary());
-
-        let mut computes = 0;
-        for idx in plan.dag.node_indices() {
-            match &plan.dag[idx] {
-                BufferNode::BufferCopy { .. } => panic!("zero copies:\n{}", plan.summary()),
-                BufferNode::Compute { op, reads, writes, .. } => {
-                    computes += 1;
-                    assert_eq!(op.label(), "SqrtFunctionalGeneric", "{}", plan.summary());
-                    assert_eq!(
-                        reads[0], launch[0],
-                        "the kernel reads the input buffer directly through the folded view"
-                    );
-                    assert_ne!(
-                        writes[0], launch[0],
-                        "the read-only input is never written:\n{}",
-                        plan.summary()
-                    );
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(
-            computes, 1,
-            "the view contributed zero plan nodes:\n{}",
-            plan.summary()
-        );
-    }
-
-    /// STAGE 7 / STEP 4, the write-into-viewed-buffer boundary fixture: a
-    /// writer demanding the viewed buffer in place is REJECTED while a
-    /// view-reader is live (Exp is dataflow-independent of Sqrt, and the
-    /// analyzer is region-blind besides), so Sqrt degrades to a fresh
-    /// allocation and ONE boundary copy honors y@input-buffer — ordered
-    /// after Exp's read by the WAR anti edge. Exp still reads the viewed
-    /// buffer directly through the folded view.
-    #[test]
-    fn write_into_viewed_buffer_fixture_degrades_to_copy() {
-        use luminal::bufferize::{BufferId, BufferNode};
-
-        let graph = extract_fixture_on_test_runtime("boundary_write_into_viewed_buffer.egg");
-        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
-
-        let launch: Vec<BufferId> = plan
-            .dag
-            .node_weights()
-            .filter_map(|node| match node {
-                BufferNode::BufferInput { slots } => {
-                    Some(slots.iter().map(|slot| slot.buffer.clone()))
-                }
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        assert_eq!(launch.len(), 1, "one caller input:\n{}", plan.summary());
-        let viewed = launch[0].clone();
-
-        let mut copies = Vec::new();
-        let mut sqrt_writes = None;
-        let mut exp_reads = None;
-        for idx in plan.dag.node_indices() {
-            match &plan.dag[idx] {
-                BufferNode::BufferCopy { src, dst, .. } => copies.push((src.clone(), dst.clone())),
-                BufferNode::Compute { op, reads, writes, .. } => match op.label() {
-                    "SqrtFunctionalGeneric" => sqrt_writes = Some(writes[0].clone()),
-                    "ExpFunctionalGeneric" => exp_reads = Some(reads[0].clone()),
-                    "BufferAlloc" | "BufferFree" => {}
-                    other => panic!("unexpected kernel {other}:\n{}", plan.summary()),
-                },
-                _ => {}
-            }
-        }
-        assert_eq!(
-            exp_reads.expect("exp kernel present"),
-            viewed,
-            "exp reads the viewed buffer directly through the folded view"
-        );
-        let sqrt_writes = sqrt_writes.expect("sqrt kernel present");
-        assert!(
-            matches!(sqrt_writes, BufferId::Allocated(_)),
-            "the in-place wish was rejected:\n{}",
-            plan.summary()
-        );
-        assert_eq!(copies.len(), 1, "one boundary copy:\n{}", plan.summary());
-        assert_eq!(copies[0].0, sqrt_writes, "copied from the rejected writer's allocation");
-        assert_eq!(copies[0].1, viewed, "into the demanded output slot's buffer");
     }
 
     /// ALLOC/FREE PHASE 3, the donated-input fixture end to end: a READ-ONLY
@@ -2158,7 +1769,9 @@ mod harness_tests {
         let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
-            plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
+            plan.buffers
+                .keys()
+                .all(|id| matches!(id, BufferId::Boundary(_))),
             "no allocations:\n{}",
             plan.summary()
         );
@@ -2183,7 +1796,8 @@ mod harness_tests {
                     if op.label() == "BufferFree" {
                         frees += 1;
                         assert_eq!(
-                            reads[0], launch[0],
+                            reads[0],
+                            launch[0],
                             "the free consumes the donated input buffer:\n{}",
                             plan.summary()
                         );
@@ -2192,136 +1806,12 @@ mod harness_tests {
                 _ => {}
             }
         }
-        assert_eq!(frees, 1, "donated storage is freed exactly once:\n{}", plan.summary());
-    }
-
-    /// EXTRACTION PREFERS THE VIEW: where an IndexMapApply's consumer accepts
-    /// the COMPOSED layout, the free view op wins over the materializing
-    /// gather (declared-effect cost: 0 vs 2). In basic_program both apply
-    /// sites now extract as views — the transpose-onto-z site keeps a
-    /// layout-conversion CopyGeneric AFTER its view (z's output slot demands
-    /// a non-composed contiguous layout), and no Materialize survives
-    /// anywhere.
-    #[test]
-    fn extraction_prefers_the_view_op_where_the_layout_is_composed() {
-        use luminal::layout_ir::ExtractedNode;
-
-        let graph = extract_fixture_on_test_runtime("basic_program.egg");
-        let mut views = 0;
-        let mut materializes = 0;
-        let mut conversion_copies = 0;
-        for node in graph.dag.node_weights() {
-            if let ExtractedNode::LayoutOp(op) = node {
-                match op.op.label() {
-                    "IndexMapApplyViewGeneric" => views += 1,
-                    "IndexMapApplyMaterialize" => materializes += 1,
-                    "CopyGeneric" => conversion_copies += 1,
-                    _ => {}
-                }
-            }
-        }
-        assert_eq!(views, 2, "both apply sites extract as views");
-        assert_eq!(materializes, 0, "no materializing gather survives");
         assert_eq!(
-            conversion_copies, 1,
-            "the non-composed output slot re-lays-out through one copy kernel"
-        );
-    }
-
-    /// MUST-ALLOCATE OUTPUTS — a pinned gap, not a feature. basic_program's
-    /// output buffers (7, 8, 10) appear only in BufferOutputLit, never in BufferInputLit;
-    /// under existence-is-BufferInputLit-membership that storage does NOT exist at
-    /// launch, so the plan itself is responsible for allocating and returning
-    /// it. Today the planner cannot express that obligation: every boundary
-    /// buffer is interned caller-owned, silently coercing "allocate and
-    /// return" into "the caller passes it in pre-allocated". This test pins
-    /// the coercion; when the Alloc-node / plan-manifest stage lands, these
-    /// buffers must become system-owned allocations that escape, and this
-    /// test must be flipped to assert exactly that.
-    #[test]
-    fn must_alloc_outputs_are_coerced_to_caller_provided_storage() {
-        use std::collections::HashSet;
-
-        use luminal::bufferize::{BufferId, BufferNode, Owner};
-
-        let graph = extract_fixture("basic_program.egg");
-        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
-
-        // Storage that exists at launch = the buffers backing BufferInput
-        // nodes (the extractor admits those from BufferInputLit membership).
-        let launch_existing: HashSet<BufferId> = plan
-            .dag
-            .node_weights()
-            .filter_map(|node| match node {
-                BufferNode::BufferInput { slots } => Some(slots.iter()),
-                _ => None,
-            })
-            .flatten()
-            .map(|slot| slot.buffer.clone())
-            .collect();
-
-        // Every output destination that is not launch-existing storage is a
-        // must-allocate output.
-        let must_alloc: Vec<BufferId> = plan
-            .dag
-            .node_weights()
-            .filter_map(|node| match node {
-                BufferNode::BufferOutput { slots } => Some(slots.iter()),
-                _ => None,
-            })
-            .flatten()
-            .filter(|slot| !launch_existing.contains(&slot.buffer))
-            .map(|slot| slot.buffer.clone())
-            .collect();
-        assert_eq!(
-            must_alloc.len(),
-            3,
-            "basic_program has three must-allocate outputs (z, w, left_view):\n{}",
+            frees,
+            1,
+            "donated storage is freed exactly once:\n{}",
             plan.summary()
         );
-
-        for buffer in &must_alloc {
-            let info = &plan.buffers[buffer];
-            // THE COERCION: must-allocate storage is still pinned
-            // caller-owned — the plan demands a handle the caller was never
-            // supposed to provide, instead of allocating and returning it.
-            assert!(
-                matches!(buffer, BufferId::Boundary(_)),
-                "must-allocate output still interned as a pinned boundary buffer"
-            );
-            assert!(
-                matches!(info.owner, Owner::Caller),
-                "must-allocate output still recorded caller-owned: {}",
-                info.label
-            );
-        }
-    }
-
-    /// End to end through the pipeline: every DPS destination is admitted in
-    /// place into its poison's fresh storage — reads[dest] == writes[tied] for
-    /// every compute node, and Poison producers are folded (no compute node).
-    #[test]
-    fn dps_destinations_admitted_and_poisons_folded() {
-        use luminal::bufferize::BufferNode;
-        let graph = extract_fixture("basic_program.egg");
-        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
-        let mut computes = 0;
-        for idx in plan.dag.node_indices() {
-            if let BufferNode::Compute { op, reads, writes, .. } = &plan.dag[idx] {
-                assert_ne!(op.label(), "Poison", "poison producers must be folded");
-                if reads.is_empty() || writes.is_empty() {
-                    continue; // storage nodes (alloc/free): no DPS shape
-                }
-                computes += 1;
-                // Trailing destination operands read the buffer they write.
-                let dests = writes.len();
-                let data = reads.len() - dests;
-                for (j, write) in writes.iter().enumerate() {
-                    assert_eq!(&reads[data + j], write, "{}", plan.summary());
-                }
-            }
-        }
-        assert!(computes > 0);
     }
 
     /// COMMITTED-WRITER INTERFERENCE (review-confirmed miscompile, fixed):
@@ -2367,7 +1857,8 @@ mod harness_tests {
         // The two writers must not share storage: exactly one of the two
         // in-place candidates survives, so r1's buffer has ONE compute writer.
         assert_ne!(
-            plan.value_buffer[&r1], plan.value_buffer[&r2],
+            plan.value_buffer[&r1],
+            plan.value_buffer[&r2],
             "unordered writers must not share storage:\n{}",
             plan.summary()
         );
@@ -2382,7 +1873,8 @@ mod harness_tests {
             })
             .count();
         assert_eq!(
-            writers_of_r1_buffer, 1,
+            writers_of_r1_buffer,
+            1,
             "the output value's buffer has exactly one writer:\n{}",
             plan.summary()
         );
@@ -2400,7 +1892,11 @@ mod harness_tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let y = g.input("y", "C", Access::ReadWrite, "rm");
-        let results = g.op(Box::new(AddMulFused), &[&x, &y], &[("sum", "rm"), ("prod", "rm")]);
+        let results = g.op(
+            Box::new(AddMulFused),
+            &[&x, &y],
+            &[("sum", "rm"), ("prod", "rm")],
+        );
         let (sum, prod) = (results[0].clone(), results[1].clone());
         g.output(&sum, "D");
         g.output(&prod, "E");
@@ -2410,7 +1906,8 @@ mod harness_tests {
 
         // Each (poison, result) pair on its own allocation — never shared.
         assert_ne!(
-            plan.value_buffer[&sum], plan.value_buffer[&prod],
+            plan.value_buffer[&sum],
+            plan.value_buffer[&prod],
             "{}",
             plan.summary()
         );
@@ -2419,9 +1916,9 @@ mod harness_tests {
             .dag
             .node_indices()
             .find_map(|idx| match &plan.dag[idx] {
-                BufferNode::Compute { op, reads, writes, .. } if op.label() == "AddMulFusedGeneric" => {
-                    Some((reads.clone(), writes.clone()))
-                }
+                BufferNode::Compute {
+                    op, reads, writes, ..
+                } if op.label() == "AddMulFusedGeneric" => Some((reads.clone(), writes.clone())),
                 _ => None,
             })
             .expect("fused DPS node present");
@@ -2442,7 +1939,11 @@ mod harness_tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let y = g.input("y", "C", Access::ReadWrite, "rm");
-        let results = g.op(Box::new(AddMulFused), &[&x, &y], &[("sum", "rm"), ("prod", "rm")]);
+        let results = g.op(
+            Box::new(AddMulFused),
+            &[&x, &y],
+            &[("sum", "rm"), ("prod", "rm")],
+        );
         g.output(&results[0], "D");
         g.output(&results[1], "E");
 
@@ -2452,45 +1953,13 @@ mod harness_tests {
             assert!(dot.contains(span), "missing tie row {span:?} in:\n{dot}");
         }
         for dock in [":p_dest0:e ->", ":p_dest1:e ->"] {
-            assert!(dot.contains(dock), "tied result not docked at {dock:?} in:\n{dot}");
+            assert!(
+                dot.contains(dock),
+                "tied result not docked at {dock:?} in:\n{dot}"
+            );
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod intcoordvar_probe {
@@ -2671,7 +2140,8 @@ mod stage4b_probes {
         let mut cx = luminal::graph::Graph::new();
         let a = cx.tensor(2);
         let b = a.output();
-        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
+        let rt =
+            luminal_reference::harness::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
         let got = rt.get_f32(b.id).unwrap();
         assert_eq!(got, &vec![1.0, 2.0]);
     }
@@ -2683,7 +2153,7 @@ mod stage4b_probes {
     /// consumer resolves for itself.
     #[test]
     fn chain_strides_destructure_contract() {
-        use luminal::extractor::{chain_strides, ChainStride};
+        use luminal::extractor::{ChainStride, chain_strides};
         let body = r#"
 (let psh (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
 (let p (RightMajorContiguousElementLayoutLit psh (bits-of (F32))))
@@ -2697,7 +2167,9 @@ mod stage4b_probes {
 "#;
         let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
         let mut egraph = luminal::egglog_snippet::new_egraph();
-        egraph.parse_and_run_program(None, &full).expect("program runs");
+        egraph
+            .parse_and_run_program(None, &full)
+            .expect("program runs");
         let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
 
         let by_let = |name: &str| {
@@ -2717,7 +2189,10 @@ mod stage4b_probes {
 
         // Degenerate (1,2): the extent-1 slot is the FREE parameter.
         let d = chain_strides(&serialized, &by_let("d")).expect("degenerate destructures");
-        assert_eq!(d[0], None, "extent-1 slot must be the consumer's choice: {d:?}");
+        assert_eq!(
+            d[0], None,
+            "extent-1 slot must be the consumer's choice: {d:?}"
+        );
         assert_eq!(d[1], Some(ChainStride::Unit), "{d:?}");
 
         // Broadcast view (2,5,3): [3, DETERMINED 0, 1].
@@ -2746,7 +2221,11 @@ mod stage4b_probes {
             .expect("view LayoutTensor exists");
         let v = chain_strides(&serialized, &view_layout).expect("view destructures");
         assert!(matches!(v[0], Some(ChainStride::Expr(_))), "{v:?}");
-        assert_eq!(v[1], Some(ChainStride::Zero), "broadcast axis is determined: {v:?}");
+        assert_eq!(
+            v[1],
+            Some(ChainStride::Zero),
+            "broadcast axis is determined: {v:?}"
+        );
         assert_eq!(v[2], Some(ChainStride::Unit), "{v:?}");
     }
 
@@ -2768,156 +2247,168 @@ mod stage4b_probes {
     #[ignore = "diagnostic — run explicitly by name (release, bounded)"]
     fn rejoin_divergence_probe() {
         for lead in [1usize, 2usize] {
-        eprintln!("[rejoin-probe] ===== lead extent {lead} =====");
-        let mut cx = luminal::graph::Graph::new();
-        let x = cx.tensor((lead, 8usize));
-        let heads = x.split_dims(1, 4);
-        let x1 = heads.slice_along(0..2, 2);
-        let x2 = heads.slice_along(2..4, 2);
-        let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
-        let (pre, _inputs, _outputs, _post, _labeled) =
-            cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
-        let full = format!("{}\n\n{pre}", luminal_reference::assembled_program());
-        let mut egraph = luminal::egglog_snippet::new_egraph();
-        egraph.parse_and_run_program(None, &full).expect("body loads");
-        let sizes = |egraph: &mut egglog::EGraph| -> std::collections::HashMap<String, isize> {
-            let out = egraph
-                .parse_and_run_program(None, "(print-size)")
-                .expect("sizes");
-            let mut map = std::collections::HashMap::new();
-            for chunk in &out {
-                let text = chunk.to_string();
-                // Post-bump engine prints parenthesized pairs:
-                // ((name count) (name count) ...). The old `name: count`
-                // line format is parsed as fallback.
-                for fragment in text.split('(') {
-                    let fragment = fragment.trim().trim_end_matches(')');
-                    if let Some((name, count)) = fragment.rsplit_once(' ') {
-                        if let Ok(count) = count.trim().parse::<isize>() {
-                            map.insert(name.trim().to_string(), count);
+            eprintln!("[rejoin-probe] ===== lead extent {lead} =====");
+            let mut cx = luminal::graph::Graph::new();
+            let x = cx.tensor((lead, 8usize));
+            let heads = x.split_dims(1, 4);
+            let x1 = heads.slice_along(0..2, 2);
+            let x2 = heads.slice_along(2..4, 2);
+            let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
+            let (pre, _inputs, _outputs, _post, _labeled) = cx
+                .logical
+                .bound_parts(&luminal_reference::ReferenceBindings)
+                .expect("recorder clean");
+            let full = format!("{}\n\n{pre}", luminal_reference::assembled_program());
+            let mut egraph = luminal::egglog_snippet::new_egraph();
+            egraph
+                .parse_and_run_program(None, &full)
+                .expect("body loads");
+            let sizes = |egraph: &mut egglog::EGraph| -> std::collections::HashMap<String, isize> {
+                let out = egraph
+                    .parse_and_run_program(None, "(print-size)")
+                    .expect("sizes");
+                let mut map = std::collections::HashMap::new();
+                for chunk in &out {
+                    let text = chunk.to_string();
+                    // Post-bump engine prints parenthesized pairs:
+                    // ((name count) (name count) ...). The old `name: count`
+                    // line format is parsed as fallback.
+                    for fragment in text.split('(') {
+                        let fragment = fragment.trim().trim_end_matches(')');
+                        if let Some((name, count)) = fragment.rsplit_once(' ') {
+                            if let Ok(count) = count.trim().parse::<isize>() {
+                                map.insert(name.trim().to_string(), count);
+                            }
+                        }
+                    }
+                    for line in text.lines() {
+                        if let Some((name, count)) = line.rsplit_once(": ") {
+                            if let Ok(count) = count.trim().parse::<isize>() {
+                                map.insert(name.trim().to_string(), count);
+                            }
                         }
                     }
                 }
-                for line in text.lines() {
-                    if let Some((name, count)) = line.rsplit_once(": ") {
-                        if let Ok(count) = count.trim().parse::<isize>() {
-                            map.insert(name.trim().to_string(), count);
-                        }
+                map
+            };
+            // GROWTH-CHANNEL ACCOUNTING (Austin's root-cause experiment,
+            // 2026-08-11): per round, separate the three channels —
+            // NODES (spellings: IntAdd table size), CLASSES (new sub-sums:
+            // distinct IntAdd e-classes in a serialization), and DEMAND
+            // ROWS (subst-demand fan-out) — to name which growth LEADS at
+            // ignition. Serialization runs only near/after ignition.
+            let channel_counts = |egraph: &mut egglog::EGraph| -> (usize, usize, usize) {
+                use egglog::SerializeConfig;
+                let serialized = egraph.serialize(SerializeConfig::default()).egraph;
+                let mut intadd_nodes = 0usize;
+                let mut intadd_classes = std::collections::HashSet::new();
+                let mut all_classes = std::collections::HashSet::new();
+                for node in serialized.nodes.values() {
+                    all_classes.insert(node.eclass.clone());
+                    if node.op == "IntAdd" {
+                        intadd_nodes += 1;
+                        intadd_classes.insert(node.eclass.clone());
                     }
                 }
-            }
-            map
-        };
-        // GROWTH-CHANNEL ACCOUNTING (Austin's root-cause experiment,
-        // 2026-08-11): per round, separate the three channels —
-        // NODES (spellings: IntAdd table size), CLASSES (new sub-sums:
-        // distinct IntAdd e-classes in a serialization), and DEMAND
-        // ROWS (subst-demand fan-out) — to name which growth LEADS at
-        // ignition. Serialization runs only near/after ignition.
-        let channel_counts = |egraph: &mut egglog::EGraph| -> (usize, usize, usize) {
-            use egglog::SerializeConfig;
-            let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-            let mut intadd_nodes = 0usize;
-            let mut intadd_classes = std::collections::HashSet::new();
-            let mut all_classes = std::collections::HashSet::new();
-            for node in serialized.nodes.values() {
-                all_classes.insert(node.eclass.clone());
-                if node.op == "IntAdd" {
-                    intadd_nodes += 1;
-                    intadd_classes.insert(node.eclass.clone());
+                (intadd_nodes, intadd_classes.len(), all_classes.len())
+            };
+            let mut previous = sizes(&mut egraph);
+            for round in 1..=150 {
+                let start = std::time::Instant::now();
+                let round_out = egraph
+                    .parse_and_run_program(None, "(run 1)")
+                    .expect("round runs");
+                // Name the firing rules once the mint turns geometric.
+                for chunk in &round_out {
+                    let egglog::CommandOutput::RunSchedule(report) = chunk else {
+                        continue;
+                    };
+                    let mut rules: Vec<(String, usize)> = report
+                        .num_matches_per_rule
+                        .iter()
+                        .map(|(name, &matches)| (name.to_string(), matches))
+                        .collect();
+                    rules.sort_by_key(|(_, matches)| std::cmp::Reverse(*matches));
+                    let hot: Vec<String> = rules
+                        .iter()
+                        .take(4)
+                        .filter(|(_, matches)| *matches > 50)
+                        .map(|(name, matches)| {
+                            let flat: String =
+                                name.split_whitespace().collect::<Vec<_>>().join(" ");
+                            format!("x{matches} {}", flat.chars().take(90).collect::<String>())
+                        })
+                        .collect();
+                    if !hot.is_empty() {
+                        eprintln!("[rejoin-probe]   rules: {}", hot.join(" ‖ "));
+                    }
                 }
-            }
-            (intadd_nodes, intadd_classes.len(), all_classes.len())
-        };
-        let mut previous = sizes(&mut egraph);
-        for round in 1..=150 {
-            let start = std::time::Instant::now();
-            let round_out = egraph.parse_and_run_program(None, "(run 1)").expect("round runs");
-            // Name the firing rules once the mint turns geometric.
-            for chunk in &round_out {
-                let egglog::CommandOutput::RunSchedule(report) = chunk else {
-                    continue;
-                };
-                let mut rules: Vec<(String, usize)> = report
-                    .num_matches_per_rule
+                let current = sizes(&mut egraph);
+                let total: isize = current.values().sum();
+                let mut deltas: Vec<(String, isize)> = current
                     .iter()
-                    .map(|(name, &matches)| (name.to_string(), matches))
-                    .collect();
-                rules.sort_by_key(|(_, matches)| std::cmp::Reverse(*matches));
-                let hot: Vec<String> = rules
-                    .iter()
-                    .take(4)
-                    .filter(|(_, matches)| *matches > 50)
-                    .map(|(name, matches)| {
-                        let flat: String =
-                            name.split_whitespace().collect::<Vec<_>>().join(" ");
-                        format!("x{matches} {}", flat.chars().take(90).collect::<String>())
+                    .map(|(name, &count)| {
+                        (
+                            name.clone(),
+                            count - previous.get(name).copied().unwrap_or(0),
+                        )
                     })
+                    .filter(|(_, delta)| *delta != 0)
                     .collect();
-                if !hot.is_empty() {
-                    eprintln!("[rejoin-probe]   rules: {}", hot.join(" ‖ "));
-                }
-            }
-            let current = sizes(&mut egraph);
-            let total: isize = current.values().sum();
-            let mut deltas: Vec<(String, isize)> = current
-                .iter()
-                .map(|(name, &count)| {
-                    (name.clone(), count - previous.get(name).copied().unwrap_or(0))
-                })
-                .filter(|(_, delta)| *delta != 0)
-                .collect();
-            deltas.sort_by_key(|(_, delta)| -*delta);
-            let grew: isize = deltas.iter().map(|(_, delta)| *delta).sum();
-            let top: Vec<String> = deltas
-                .iter()
-                .take(6)
-                .map(|(name, delta)| format!("{name} {delta:+}"))
-                .collect();
-            eprintln!(
-                "[rejoin-probe] round {round}: total {total} ({grew:+}) in {:.2}s | {}",
-                start.elapsed().as_secs_f64(),
-                top.join(", ")
-            );
-            // Channel accounting near ignition: spellings-per-class vs
-            // class mint vs demand fan-out.
-            if (36..=50).contains(&round) {
-                let (nodes, classes, total_classes) = channel_counts(&mut egraph);
-                let demand_rows = current.get("int-subst-demand").copied().unwrap_or(0);
-                let image_rows = current.get("int-subst-of").copied().unwrap_or(0);
+                deltas.sort_by_key(|(_, delta)| -*delta);
+                let grew: isize = deltas.iter().map(|(_, delta)| *delta).sum();
+                let top: Vec<String> = deltas
+                    .iter()
+                    .take(6)
+                    .map(|(name, delta)| format!("{name} {delta:+}"))
+                    .collect();
                 eprintln!(
-                    "[channels] round {round}: IntAdd nodes {nodes} / classes {classes} \
+                    "[rejoin-probe] round {round}: total {total} ({grew:+}) in {:.2}s | {}",
+                    start.elapsed().as_secs_f64(),
+                    top.join(", ")
+                );
+                // Channel accounting near ignition: spellings-per-class vs
+                // class mint vs demand fan-out.
+                if (36..=50).contains(&round) {
+                    let (nodes, classes, total_classes) = channel_counts(&mut egraph);
+                    let demand_rows = current.get("int-subst-demand").copied().unwrap_or(0);
+                    let image_rows = current.get("int-subst-of").copied().unwrap_or(0);
+                    eprintln!(
+                        "[channels] round {round}: IntAdd nodes {nodes} / classes {classes} \
                      (spellings-per-class {:.2}) | all classes {total_classes} | \
                      int-subst-demand rows {demand_rows} | int-subst-of rows {image_rows}",
-                    nodes as f64 / classes.max(1) as f64
-                );
-            }
-            // Specimen dumps at the pre-ignition and early-geometric
-            // rounds: the ACTUAL IntAdd rows being bred (extracted
-            // representative terms), for the divergence walkthrough.
-            if round == 41 || round == 45 {
-                let dump = egraph
-                    .parse_and_run_program(None, "(print-function IntAdd 18)")
-                    .expect("dump");
-                eprintln!("[rejoin-probe] --- IntAdd rows @ round {round} ---");
-                for chunk in &dump {
-                    for line in chunk.to_string().lines().take(18) {
-                        let flat: String =
-                            line.split_whitespace().collect::<Vec<_>>().join(" ");
-                        eprintln!("[rejoin-probe]   {}", flat.chars().take(200).collect::<String>());
+                        nodes as f64 / classes.max(1) as f64
+                    );
+                }
+                // Specimen dumps at the pre-ignition and early-geometric
+                // rounds: the ACTUAL IntAdd rows being bred (extracted
+                // representative terms), for the divergence walkthrough.
+                if round == 41 || round == 45 {
+                    let dump = egraph
+                        .parse_and_run_program(None, "(print-function IntAdd 18)")
+                        .expect("dump");
+                    eprintln!("[rejoin-probe] --- IntAdd rows @ round {round} ---");
+                    for chunk in &dump {
+                        for line in chunk.to_string().lines().take(18) {
+                            let flat: String =
+                                line.split_whitespace().collect::<Vec<_>>().join(" ");
+                            eprintln!(
+                                "[rejoin-probe]   {}",
+                                flat.chars().take(200).collect::<String>()
+                            );
+                        }
                     }
                 }
+                if grew > 200_000 {
+                    eprintln!("[rejoin-probe] BAIL: runaway round — divergence confirmed");
+                    break;
+                }
+                if grew == 0 {
+                    eprintln!("[rejoin-probe] SATURATED at round {round}");
+                    break;
+                }
+                previous = current;
             }
-            if grew > 200_000 {
-                eprintln!("[rejoin-probe] BAIL: runaway round — divergence confirmed");
-                break;
-            }
-            if grew == 0 {
-                eprintln!("[rejoin-probe] SATURATED at round {round}");
-                break;
-            }
-            previous = current;
-        }
         }
     }
 
@@ -2933,8 +2424,10 @@ mod stage4b_probes {
         let a = cx.tensor((1usize, 2usize, 3usize));
         let b = cx.tensor((3usize, 5usize));
         let _out = a.matmul(b).output();
-        let (pre, _is, _os, post, _labeled) =
-            cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+        let (pre, _is, _os, post, _labeled) = cx
+            .logical
+            .bound_parts(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean");
         let program = format!(
             "{}\n\n{pre}{}{post}",
             luminal_reference::assembled_program(),
@@ -2966,8 +2459,10 @@ mod stage4b_probes {
                     .slice((2..6, 7..10))
                     .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
                     .output();
-                let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                let (pre, _is, _os, _post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
                 pre
             }),
             ("batch_matmul(2,3,4)x(4,5)", {
@@ -2975,8 +2470,10 @@ mod stage4b_probes {
                 let a = cx.tensor((2usize, 3usize, 4usize));
                 let b = cx.tensor((4usize, 5usize));
                 let _out = a.matmul(b).output();
-                let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                let (pre, _is, _os, _post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
                 pre
             }),
             ("specimen(1,2,3)x(3,5)", {
@@ -2984,8 +2481,10 @@ mod stage4b_probes {
                 let a = cx.tensor((1usize, 2usize, 3usize));
                 let b = cx.tensor((3usize, 5usize));
                 let _out = a.matmul(b).output();
-                let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                let (pre, _is, _os, _post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
                 pre
             }),
             ("rejoin_lead1(1,8)", {
@@ -2995,15 +2494,19 @@ mod stage4b_probes {
                 let x1 = heads.slice_along(0..2, 2);
                 let x2 = heads.slice_along(2..4, 2);
                 let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
-                let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                let (pre, _is, _os, _post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
                 pre
             }),
         ];
         for (name, pre) in &specimens {
             let mut egraph = luminal::egglog_snippet::new_egraph();
             let body = format!("{}\n\n{pre}", luminal_reference::assembled_program());
-            egraph.parse_and_run_program(None, &body).expect("body loads");
+            egraph
+                .parse_and_run_program(None, &body)
+                .expect("body loads");
             let start = std::time::Instant::now();
             egraph
                 .parse_and_run_program(None, luminal_reference::ReferenceBindings::SCHEDULE)
@@ -3059,16 +2562,28 @@ mod stage4b_probes {
                     .slice((2..6, 7..10))
                     .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
                     .output();
-                let (pre, _is, _os, post, _labeled) = cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
-                format!("{pre}{}{post}", luminal_reference::ReferenceBindings::SCHEDULE)
+                let (pre, _is, _os, post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
+                format!(
+                    "{pre}{}{post}",
+                    luminal_reference::ReferenceBindings::SCHEDULE
+                )
             }),
             ("batch_matmul(2,3,4,5)", {
                 let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((2usize, 3usize, 4usize));
                 let b = cx.tensor((4usize, 5usize));
                 let _out = a.matmul(b).output();
-                let (pre, _is, _os, post, _labeled) = cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
-                format!("{pre}{}{post}", luminal_reference::ReferenceBindings::SCHEDULE)
+                let (pre, _is, _os, post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
+                format!(
+                    "{pre}{}{post}",
+                    luminal_reference::ReferenceBindings::SCHEDULE
+                )
             }),
         ];
         // The fixed floor: parse + declare the assembled preamble alone.
@@ -3076,7 +2591,9 @@ mod stage4b_probes {
             let preamble = luminal_reference::assembled_program();
             let start = std::time::Instant::now();
             let mut egraph = luminal::egglog_snippet::new_egraph();
-            egraph.parse_and_run_program(None, &preamble).expect("preamble loads");
+            egraph
+                .parse_and_run_program(None, &preamble)
+                .expect("preamble loads");
             eprintln!(
                 "[prof] ===== preamble only (parse+declare, no body/schedule): {:.2}s, {} lines =====",
                 start.elapsed().as_secs_f64(),
@@ -3087,7 +2604,9 @@ mod stage4b_probes {
             let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
             let mut egraph = luminal::egglog_snippet::new_egraph();
             let start = std::time::Instant::now();
-            let outputs = egraph.parse_and_run_program(None, &full).expect("program runs");
+            let outputs = egraph
+                .parse_and_run_program(None, &full)
+                .expect("program runs");
             let wall = start.elapsed().as_secs_f64();
             eprintln!("\n[prof] ===== {name}: total wall {wall:.2}s =====");
             for chunk in &outputs {
@@ -3101,17 +2620,25 @@ mod stage4b_probes {
                     .collect();
                 rulesets.sort_by(|a, b| b.1.total_cmp(&a.1));
                 for (ruleset, secs) in rulesets.iter().take(6) {
-                    let label = if ruleset.is_empty() { "(default)" } else { ruleset };
+                    let label = if ruleset.is_empty() {
+                        "(default)"
+                    } else {
+                        ruleset
+                    };
                     let rebuild = report
                         .rebuild_time_per_ruleset
                         .iter()
-                        .find(|(name, _)| name.as_ref() == label || (label == "(default)" && name.is_empty()))
+                        .find(|(name, _)| {
+                            name.as_ref() == label || (label == "(default)" && name.is_empty())
+                        })
                         .map(|(_, time)| time.as_secs_f64())
                         .unwrap_or(0.0);
                     let merge = report
                         .merge_time_per_ruleset
                         .iter()
-                        .find(|(name, _)| name.as_ref() == label || (label == "(default)" && name.is_empty()))
+                        .find(|(name, _)| {
+                            name.as_ref() == label || (label == "(default)" && name.is_empty())
+                        })
                         .map(|(_, time)| time.as_secs_f64())
                         .unwrap_or(0.0);
                     eprintln!(
@@ -3122,11 +2649,7 @@ mod stage4b_probes {
                     .search_and_apply_time_per_rule
                     .iter()
                     .map(|(name, time)| {
-                        let matches = report
-                            .num_matches_per_rule
-                            .get(name)
-                            .copied()
-                            .unwrap_or(0);
+                        let matches = report.num_matches_per_rule.get(name).copied().unwrap_or(0);
                         (name.to_string(), time.as_secs_f64(), matches)
                     })
                     .collect();
@@ -3219,8 +2742,15 @@ mod subst_guard_study {
             "legacy" => {
                 assert!(text.contains(LANDED_GUARD), "landed guard text drifted");
                 let t = text.replacen(LANDED_GUARD, LEGACY_GUARD, 1);
-                assert!(t.contains(STRUCTURAL_ARM_ANCHOR), "structural arm text drifted");
-                t.replacen(STRUCTURAL_ARM_ANCHOR, "; [study: structural arm removed]", 1)
+                assert!(
+                    t.contains(STRUCTURAL_ARM_ANCHOR),
+                    "structural arm text drifted"
+                );
+                t.replacen(
+                    STRUCTURAL_ARM_ANCHOR,
+                    "; [study: structural arm removed]",
+                    1,
+                )
             }
             other => panic!("unknown variant {other}"),
         }
@@ -3250,9 +2780,19 @@ mod subst_guard_study {
 (int-subst-demand s4_coord s4_map)\n\
 (run-schedule (saturate (saturate (run)) (run subst-walk)))\n";
         vec![
-            ("sg1_admits", format!("{sg1_common}(check (= (int-subst-of sg_coord sg_map) sg_entry))\n")),
-            ("sg1_tighten", format!("{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (saturate (run)) (run subst-walk)))\n")),
-            ("sg2_static", "\
+            (
+                "sg1_admits",
+                format!("{sg1_common}(check (= (int-subst-of sg_coord sg_map) sg_entry))\n"),
+            ),
+            (
+                "sg1_tighten",
+                format!(
+                    "{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (saturate (run)) (run subst-walk)))\n"
+                ),
+            ),
+            (
+                "sg2_static",
+                "\
 (let s2_cout_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))\n\
 (let s2_cout (CoordVar s2_cout_shape 0))\n\
 (let s2_entry (IntAdd s2_cout (IntLit 1)))\n\
@@ -3261,8 +2801,12 @@ mod subst_guard_study {
 (let s2_coord (CoordVar s2_src 0))\n\
 (int-subst-demand s2_coord s2_map)\n\
 (run-schedule (saturate (saturate (run)) (run subst-walk)))\n\
-(check (= (int-subst-of s2_coord s2_map) s2_entry))\n".to_string()),
-            ("sg3_identity", "\
+(check (= (int-subst-of s2_coord s2_map) s2_entry))\n"
+                    .to_string(),
+            ),
+            (
+                "sg3_identity",
+                "\
 (let s3n (IntVar \"s3n\"))\n\
 (set (lower-bound-of s3n) (bigint 1))\n\
 (set (upper-bound-of s3n) (bigint 8))\n\
@@ -3273,9 +2817,23 @@ mod subst_guard_study {
 (let s3_coord (CoordVar s3_src 0))\n\
 (int-subst-demand s3_coord s3_map)\n\
 (run-schedule (saturate (saturate (run)) (run subst-walk)))\n\
-(check (= (int-subst-of s3_coord s3_map) s3_entry))\n".to_string()),
-            ("sg4_admits", format!("{s4}(check (= (int-subst-of s4_coord s4_map) s4_entry))\n", s4 = sg4_common)),
-            ("sg4_tighten", format!("{s4}(set (upper-bound-of s4n) (bigint 1))\n(run-schedule (saturate (saturate (run)) (run subst-walk)))\n", s4 = sg4_common)),
+(check (= (int-subst-of s3_coord s3_map) s3_entry))\n"
+                    .to_string(),
+            ),
+            (
+                "sg4_admits",
+                format!(
+                    "{s4}(check (= (int-subst-of s4_coord s4_map) s4_entry))\n",
+                    s4 = sg4_common
+                ),
+            ),
+            (
+                "sg4_tighten",
+                format!(
+                    "{s4}(set (upper-bound-of s4n) (bigint 1))\n(run-schedule (saturate (saturate (run)) (run subst-walk)))\n",
+                    s4 = sg4_common
+                ),
+            ),
         ]
     }
 
@@ -3354,7 +2912,11 @@ mod subst_guard_study {
         assert_eq!(inputs[0].label, "blocks.0.wq.weight");
         assert_eq!(inputs[0].id, a.id, "spec id is the staging key");
         assert_eq!(
-            inputs[0].dims.iter().map(|d| d.to_usize().unwrap()).collect::<Vec<_>>(),
+            inputs[0]
+                .dims
+                .iter()
+                .map(|d| d.to_usize().unwrap())
+                .collect::<Vec<_>>(),
             vec![2, 3]
         );
         assert_eq!(inputs[0].dtype, DType::F32);
@@ -3375,7 +2937,10 @@ mod subst_guard_study {
         let c = cx.tensor((2usize, 3usize));
         let _ = c.output_named("logits");
         assert!(
-            cx.logical.model_text().unwrap_err().contains("duplicate output name"),
+            cx.logical
+                .model_text()
+                .unwrap_err()
+                .contains("duplicate output name"),
             "second \"logits\" poisons loudly"
         );
 
@@ -3448,7 +3013,10 @@ mod subst_guard_study {
         cx.set_dim('s', 1);
         let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
         let out = (x.squeeze(0) * 2.0).output();
-        let rt = luminal_reference::harness::run_reference(&cx, &[(x.id, vec![1.0f32, 2.0, 3.0].into())]);
+        let rt = luminal_reference::harness::run_reference(
+            &cx,
+            &[(x.id, vec![1.0f32, 2.0, 3.0].into())],
+        );
         assert_eq!(rt.get_f32(out.id).unwrap(), &[2.0, 4.0, 6.0]);
 
         let mut cx = Graph::default();
@@ -3456,10 +3024,12 @@ mod subst_guard_study {
         let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
         let _ = (x.squeeze(0) * 2.0).output();
         let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("records + loads");
-        let data: rustc_hash::FxHashMap<_, _> =
-            [(x.id, luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 6]))]
-                .into_iter()
-                .collect();
+        let data: rustc_hash::FxHashMap<_, _> = [(
+            x.id,
+            luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 6]),
+        )]
+        .into_iter()
+        .collect();
         rt.bind_dyn_range('s', 2, 2).expect("bind");
         let err = rt
             .search(
@@ -3517,10 +3087,12 @@ mod subst_guard_study {
         let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
         let _ = x.unfold((3usize,), (1usize,), (1usize,)).sum(1).output();
         let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("records + loads");
-        let data: rustc_hash::FxHashMap<_, _> =
-            [(x.id, luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 2]))]
-                .into_iter()
-                .collect();
+        let data: rustc_hash::FxHashMap<_, _> = [(
+            x.id,
+            luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 2]),
+        )]
+        .into_iter()
+        .collect();
         rt.bind_dyn_range('s', 2, 2).expect("bind");
         let err = rt
             .search(
@@ -3533,7 +3105,6 @@ mod subst_guard_study {
             "the labeled door names the unfold contract: {err:#}"
         );
     }
-
 }
 
 /// RING IGNITION BATTERY — the G2 fence's permanent regression suite
@@ -3608,7 +3179,6 @@ mod ring_ignition_battery {
         }
         map
     }
-
 
     const RING_ONLY: &str = "(run 1)";
     const RING_AND_SUBST: &str = "(run 1) (run subst-walk 1)";
@@ -3750,7 +3320,13 @@ mod ring_ignition_battery {
 
     fn assert_group(entries: &[(&str, String)]) {
         for (label, body) in entries {
-            assert_quiesce(label, body, RING_ONLY, BARE_MAX_ROUNDS, BARE_QUIESCE_CEILING);
+            assert_quiesce(
+                label,
+                body,
+                RING_ONLY,
+                BARE_MAX_ROUNDS,
+                BARE_QUIESCE_CEILING,
+            );
         }
     }
 
@@ -3760,16 +3336,76 @@ mod ring_ignition_battery {
     #[test]
     fn group_a_controls_and_flagship_igniter_quiesce() {
         assert_group(&[
-            ("A1_add_st", e(r#"(IntAdd (IntVar "s") (IntVar "t"))"#, &format!("{S5}{T2}"))),
-            ("A2_sub_s3", e(r#"(IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3)))"#, S5)),
-            ("A3_sub_s3_p1_flagship", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, S5)),
-            ("A4_add_st_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntVar "t")) (IntLit 1))"#, &format!("{S5}{T2}"))),
-            ("A5_sub_st", e(r#"(IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t")))"#, &format!("{S5}{T2}"))),
-            ("A6_sub_st_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#, &format!("{S5}{T2}"))),
-            ("A7_mul_s2_p1", e(r#"(IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntLit 1))"#, S5)),
-            ("A8_mul_s2_pt", e(r#"(IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntVar "t"))"#, &format!("{S5}{T2}"))),
-            ("A9_div_s2_p1", e(r#"(IntAdd (IntTruncDiv (IntVar "s") (IntLit 2)) (IntLit 1))"#, S5)),
-            ("A10_win_full", e(r#"(IntAdd (IntTruncDiv (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 2)) (IntLit 1))"#, S5)),
+            (
+                "A1_add_st",
+                e(
+                    r#"(IntAdd (IntVar "s") (IntVar "t"))"#,
+                    &format!("{S5}{T2}"),
+                ),
+            ),
+            (
+                "A2_sub_s3",
+                e(
+                    r#"(IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3)))"#,
+                    S5,
+                ),
+            ),
+            (
+                "A3_sub_s3_p1_flagship",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
+            (
+                "A4_add_st_p1",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntVar "t")) (IntLit 1))"#,
+                    &format!("{S5}{T2}"),
+                ),
+            ),
+            (
+                "A5_sub_st",
+                e(
+                    r#"(IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t")))"#,
+                    &format!("{S5}{T2}"),
+                ),
+            ),
+            (
+                "A6_sub_st_p1",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#,
+                    &format!("{S5}{T2}"),
+                ),
+            ),
+            (
+                "A7_mul_s2_p1",
+                e(
+                    r#"(IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
+            (
+                "A8_mul_s2_pt",
+                e(
+                    r#"(IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntVar "t"))"#,
+                    &format!("{S5}{T2}"),
+                ),
+            ),
+            (
+                "A9_div_s2_p1",
+                e(
+                    r#"(IntAdd (IntTruncDiv (IntVar "s") (IntLit 2)) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
+            (
+                "A10_win_full",
+                e(
+                    r#"(IntAdd (IntTruncDiv (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 2)) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
         ]);
     }
 
@@ -3779,17 +3415,83 @@ mod ring_ignition_battery {
     #[test]
     fn group_b_predicate_discriminators_quiesce() {
         assert_group(&[
-            ("B1_add_s3_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 3)) (IntLit 1))"#, S5)),
-            ("B2_sublit_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit -3)) (IntLit 1))"#, S5)),
-            ("B3_sub_s3_pt", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntVar "t"))"#, &format!("{S5}{T2}"))),
-            ("B4_deep", e(r#"(IntAdd (IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1)) (IntLit 1))"#, S5)),
-            ("B6_lit_first", e(r#"(IntAdd (IntAdd (IntLit 3) (IntMul (IntLit -1) (IntVar "s"))) (IntLit 1))"#, S5)),
-            ("B7_mulvar_p1", e(r#"(IntAdd (IntMul (IntVar "s") (IntVar "t")) (IntLit 1))"#, &format!("{S5}{T2}"))),
-            ("B8_sub_s1_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 1))) (IntLit 1))"#, S5)),
-            ("B9_pad_out", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 1)) (IntLit 1))"#, S5)),
-            ("B10_two_prods", e(r#"(IntAdd (IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, S5)),
-            ("B11_prodpair", e(r#"(IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3)))"#, S5)),
-            ("B12_prodpair_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3))) (IntLit 1))"#, S5)),
+            (
+                "B1_add_s3_p1",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntLit 3)) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
+            (
+                "B2_sublit_p1",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntLit -3)) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
+            (
+                "B3_sub_s3_pt",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntVar "t"))"#,
+                    &format!("{S5}{T2}"),
+                ),
+            ),
+            (
+                "B4_deep",
+                e(
+                    r#"(IntAdd (IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1)) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
+            (
+                "B6_lit_first",
+                e(
+                    r#"(IntAdd (IntAdd (IntLit 3) (IntMul (IntLit -1) (IntVar "s"))) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
+            (
+                "B7_mulvar_p1",
+                e(
+                    r#"(IntAdd (IntMul (IntVar "s") (IntVar "t")) (IntLit 1))"#,
+                    &format!("{S5}{T2}"),
+                ),
+            ),
+            (
+                "B8_sub_s1_p1",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 1))) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
+            (
+                "B9_pad_out",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntLit 1)) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
+            (
+                "B10_two_prods",
+                e(
+                    r#"(IntAdd (IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
+            (
+                "B11_prodpair",
+                e(
+                    r#"(IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3)))"#,
+                    S5,
+                ),
+            ),
+            (
+                "B12_prodpair_p1",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3))) (IntLit 1))"#,
+                    S5,
+                ),
+            ),
         ]);
     }
 
@@ -3806,7 +3508,13 @@ mod ring_ignition_battery {
             r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntAdd (IntVar "t") (IntMul (IntLit -1) (IntLit 3))))) (IntLit 1))"#,
             &format!("{S5}{T2}"),
         );
-        assert_quiesce("B5_sub_nest_t", &body, RING_ONLY, BARE_MAX_ROUNDS, BARE_QUIESCE_CEILING);
+        assert_quiesce(
+            "B5_sub_nest_t",
+            &body,
+            RING_ONLY,
+            BARE_MAX_ROUNDS,
+            BARE_QUIESCE_CEILING,
+        );
     }
 
     /// Group C: bounds variants of the flagship igniter — wide ranges
@@ -3814,10 +3522,34 @@ mod ring_ignition_battery {
     #[test]
     fn group_c_bounds_variants_quiesce() {
         assert_group(&[
-            ("C1_ign_wide", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 4, 100)]))),
-            ("C2_ign_zerox", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 1, 100)]))),
-            ("C3_ign_zerox0", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 0, 10)]))),
-            ("C4_ign_nobounds", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, "")),
+            (
+                "C1_ign_wide",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#,
+                    &seeds(&[("s", 4, 100)]),
+                ),
+            ),
+            (
+                "C2_ign_zerox",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#,
+                    &seeds(&[("s", 1, 100)]),
+                ),
+            ),
+            (
+                "C3_ign_zerox0",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#,
+                    &seeds(&[("s", 0, 10)]),
+                ),
+            ),
+            (
+                "C4_ign_nobounds",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#,
+                    "",
+                ),
+            ),
         ]);
     }
 
@@ -3826,12 +3558,18 @@ mod ring_ignition_battery {
     /// unfold window-count spellings.
     #[test]
     fn group_d_e_value_coincidence_and_symbolic_window_quiesce() {
-        let sub_s3_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#;
-        let sub_st_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#;
-        let lit_first = r#"(IntAdd (IntAdd (IntLit 3) (IntMul (IntLit -1) (IntVar "s"))) (IntLit 1))"#;
-        let sub_s1_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 1))) (IntLit 1))"#;
-        let sub_s3_p3 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 3))"#;
-        let sub_s2_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 2))) (IntLit 1))"#;
+        let sub_s3_p1 =
+            r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#;
+        let sub_st_p1 =
+            r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#;
+        let lit_first =
+            r#"(IntAdd (IntAdd (IntLit 3) (IntMul (IntLit -1) (IntVar "s"))) (IntLit 1))"#;
+        let sub_s1_p1 =
+            r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 1))) (IntLit 1))"#;
+        let sub_s3_p3 =
+            r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 3))"#;
+        let sub_s2_p1 =
+            r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 2))) (IntLit 1))"#;
         let dividend = r#"(IntAdd (IntVar "d") (IntMul (IntLit -1) (IntAdd (IntMul (IntVar "l") (IntAdd (IntVar "k") (IntMul (IntLit -1) (IntLit 1)))) (IntLit 1))))"#;
         let win_sym = format!(r#"(IntAdd (IntTruncDiv {dividend} (IntLit 2)) (IntLit 1))"#);
         assert_group(&[
@@ -3845,9 +3583,18 @@ mod ring_ignition_battery {
             ("D8_B8_s7", e(sub_s1_p1, &seeds(&[("s", 7, 7)]))),
             ("D9_s5", e(sub_s3_p3, &seeds(&[("s", 5, 5)]))),
             ("D10_s9", e(sub_s2_p1, &seeds(&[("s", 9, 9)]))),
-            ("E1_dividend", e(dividend, &seeds(&[("d", 16, 16), ("k", 3, 3), ("l", 2, 2)]))),
-            ("E2_win_sym", e(&win_sym, &seeds(&[("d", 16, 16), ("k", 3, 3), ("l", 2, 2)]))),
-            ("E3_win_sym", e(&win_sym, &seeds(&[("d", 17, 17), ("k", 4, 4), ("l", 1, 1)]))),
+            (
+                "E1_dividend",
+                e(dividend, &seeds(&[("d", 16, 16), ("k", 3, 3), ("l", 2, 2)])),
+            ),
+            (
+                "E2_win_sym",
+                e(&win_sym, &seeds(&[("d", 16, 16), ("k", 3, 3), ("l", 2, 2)])),
+            ),
+            (
+                "E3_win_sym",
+                e(&win_sym, &seeds(&[("d", 17, 17), ("k", 4, 4), ("l", 1, 1)])),
+            ),
         ]);
     }
 
@@ -3857,14 +3604,43 @@ mod ring_ignition_battery {
     #[test]
     fn group_f_predicate_boundaries_quiesce() {
         assert_group(&[
-            ("F1_tail_hits_var", e(r#"(IntAdd (IntAdd (IntVar "s") (IntVar "t")) (IntLit 1))"#, &seeds(&[("s", 5, 5), ("t", 4, 4)]))),
-            ("F2_tail_hits_op", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 2, 2)]))),
-            ("F3_diag_no_prod", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 1, 1)]))),
-            ("F4_no_coll", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 6, 6)]))),
-            ("F5_var_is_leaf", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 2, 2)]))),
+            (
+                "F1_tail_hits_var",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntVar "t")) (IntLit 1))"#,
+                    &seeds(&[("s", 5, 5), ("t", 4, 4)]),
+                ),
+            ),
+            (
+                "F2_tail_hits_op",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3))) (IntLit 1))"#,
+                    &seeds(&[("s", 2, 2)]),
+                ),
+            ),
+            (
+                "F3_diag_no_prod",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#,
+                    &seeds(&[("s", 1, 1)]),
+                ),
+            ),
+            (
+                "F4_no_coll",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#,
+                    &seeds(&[("s", 6, 6)]),
+                ),
+            ),
+            (
+                "F5_var_is_leaf",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#,
+                    &seeds(&[("s", 2, 2)]),
+                ),
+            ),
         ]);
     }
-
 
     /// Group M: nested-PRODUCT shapes against the Assoc-IntMul fence
     /// premise. Probed 2026-08-27 with that premise ABLATED: none of
@@ -3877,15 +3653,69 @@ mod ring_ignition_battery {
     #[test]
     fn group_m_nested_products_quiesce() {
         assert_group(&[
-            ("M1_s5_x3_x2", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 3)) (IntLit 2))"#, S5)),
-            ("M2_s3_x2_x3", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 3, 3)]))),
-            ("M3_st_x2", e(r#"(IntMul (IntMul (IntVar "s") (IntVar "t")) (IntLit 2))"#, &seeds(&[("s", 3, 3), ("t", 2, 2)]))),
-            ("M4_s2_x2_x2", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 2))"#, &seeds(&[("s", 2, 2)]))),
-            ("M5_s7_x2_x3_nocoll", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 7, 7)]))),
-            ("M6_deep_mul", e(r#"(IntMul (IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3)) (IntLit 2))"#, &seeds(&[("s", 2, 2)]))),
-            ("M7_mul_of_sub", e(r#"(IntMul (IntMul (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 2)) (IntLit 3))"#, S5)),
-            ("M8_mixed_addroot", e(r#"(IntAdd (IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3)) (IntLit 1))"#, &seeds(&[("s", 3, 3)]))),
-            ("M9_win_times", e(r#"(IntMul (IntMul (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 3)) (IntLit 2))"#, S5)),
+            (
+                "M1_s5_x3_x2",
+                e(
+                    r#"(IntMul (IntMul (IntVar "s") (IntLit 3)) (IntLit 2))"#,
+                    S5,
+                ),
+            ),
+            (
+                "M2_s3_x2_x3",
+                e(
+                    r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3))"#,
+                    &seeds(&[("s", 3, 3)]),
+                ),
+            ),
+            (
+                "M3_st_x2",
+                e(
+                    r#"(IntMul (IntMul (IntVar "s") (IntVar "t")) (IntLit 2))"#,
+                    &seeds(&[("s", 3, 3), ("t", 2, 2)]),
+                ),
+            ),
+            (
+                "M4_s2_x2_x2",
+                e(
+                    r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 2))"#,
+                    &seeds(&[("s", 2, 2)]),
+                ),
+            ),
+            (
+                "M5_s7_x2_x3_nocoll",
+                e(
+                    r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3))"#,
+                    &seeds(&[("s", 7, 7)]),
+                ),
+            ),
+            (
+                "M6_deep_mul",
+                e(
+                    r#"(IntMul (IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3)) (IntLit 2))"#,
+                    &seeds(&[("s", 2, 2)]),
+                ),
+            ),
+            (
+                "M7_mul_of_sub",
+                e(
+                    r#"(IntMul (IntMul (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 2)) (IntLit 3))"#,
+                    S5,
+                ),
+            ),
+            (
+                "M8_mixed_addroot",
+                e(
+                    r#"(IntAdd (IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3)) (IntLit 1))"#,
+                    &seeds(&[("s", 3, 3)]),
+                ),
+            ),
+            (
+                "M9_win_times",
+                e(
+                    r#"(IntMul (IntMul (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 3)) (IntLit 2))"#,
+                    S5,
+                ),
+            ),
         ]);
     }
 
@@ -3903,9 +3733,21 @@ mod ring_ignition_battery {
         const DIST_EXPAND: &str = "(rule\n  (\n    (= ?expr (IntMul ?summands ?factor))\n    (= ?summands (IntAdd ?lhs ?rhs))\n    (provably-cannot-union-with-zero ?expr)\n    (provably-cannot-union-with-zero ?lhs)\n    (provably-cannot-union-with-zero ?rhs)\n    (provably-cannot-union-with-zero ?factor)\n    (= ?summands_lower (lower-bound-of ?summands))\n    (= ?summands_upper (upper-bound-of ?summands))\n    (< ?summands_lower ?summands_upper)\n  )\n  ((union ?expr (IntAdd (IntMul ?lhs ?factor) (IntMul ?rhs ?factor))))\n)";
         let program = luminal_reference::assembled_program();
         for (name, rule, action) in [
-            ("Assoc-IntAdd", ASSOC_INTADD, "((union ?expr (IntAdd ?lhs (IntAdd ?rhs ?outer))))"),
-            ("Assoc-IntMul", ASSOC_INTMUL, "((union ?expr (IntMul ?lhs (IntMul ?rhs ?outer))))"),
-            ("Distributivity-expand", DIST_EXPAND, "((union ?expr (IntAdd (IntMul ?lhs ?factor) (IntMul ?rhs ?factor))))"),
+            (
+                "Assoc-IntAdd",
+                ASSOC_INTADD,
+                "((union ?expr (IntAdd ?lhs (IntAdd ?rhs ?outer))))",
+            ),
+            (
+                "Assoc-IntMul",
+                ASSOC_INTMUL,
+                "((union ?expr (IntMul ?lhs (IntMul ?rhs ?outer))))",
+            ),
+            (
+                "Distributivity-expand",
+                DIST_EXPAND,
+                "((union ?expr (IntAdd (IntMul ?lhs ?factor) (IntMul ?rhs ?factor))))",
+            ),
         ] {
             assert!(
                 program.contains(rule),
@@ -3927,9 +3769,27 @@ mod ring_ignition_battery {
     #[test]
     fn group_g_mixed_bounds_quiesce() {
         assert_group(&[
-            ("G1_wide_s_lit2", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 2))) (IntLit 1))"#, &seeds(&[("s", 4, 100)]))),
-            ("G2_wide_s_pt_t", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#, &seeds(&[("s", 4, 100), ("t", 2, 2)]))),
-            ("G3_wide_s_lit3", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 4, 100)]))),
+            (
+                "G1_wide_s_lit2",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 2))) (IntLit 1))"#,
+                    &seeds(&[("s", 4, 100)]),
+                ),
+            ),
+            (
+                "G2_wide_s_pt_t",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#,
+                    &seeds(&[("s", 4, 100), ("t", 2, 2)]),
+                ),
+            ),
+            (
+                "G3_wide_s_lit3",
+                e(
+                    r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#,
+                    &seeds(&[("s", 4, 100)]),
+                ),
+            ),
         ]);
     }
 
@@ -4010,7 +3870,8 @@ mod ring_ignition_battery {
             .logical
             .bound_parts(&luminal_reference::ReferenceBindings)
             .expect("recorder clean");
-        let raw_window = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#;
+        let raw_window =
+            r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#;
         // The shield check: this tree's frontend simplify must have
         // folded the recorder's window count — if the raw nested
         // spelling ever starts arriving from the recorder, the fixture
@@ -4019,9 +3880,7 @@ mod ring_ignition_battery {
             "[g2-battery:unfold] recorder emits raw spelling: {}",
             pre.contains(raw_window)
         );
-        let body = format!(
-            "{pre}\n(let g2_raw_window {raw_window})\n{S5}"
-        );
+        let body = format!("{pre}\n(let g2_raw_window {raw_window})\n{S5}");
         assert_quiesce("unfold_raw_window", &body, RING_AND_SUBST, 60, 10_000);
     }
 }
@@ -4137,7 +3996,10 @@ mod escape_execution_tests {
         );
         let mut dag: DiGraph<BufferNode<RefLayout>, BufferEdge> = DiGraph::new();
         let input = dag.add_node(BufferNode::BufferInput {
-            slots: vec![InputBinding { value: x.clone(), buffer: input_id.clone() }],
+            slots: vec![InputBinding {
+                value: x.clone(),
+                buffer: input_id.clone(),
+            }],
         });
         // The copy carries ONLY {src, dst} — a dumb exact-size whole-buffer
         // copy (both buffers are the parent's 6 f32s). Ordering is this
@@ -4162,7 +4024,11 @@ mod escape_execution_tests {
         dag.add_edge(
             input,
             copy,
-            BufferEdge { buffer: input_id, port: "in".to_string(), kind: EdgeKind::Data },
+            BufferEdge {
+                buffer: input_id,
+                port: "in".to_string(),
+                kind: EdgeKind::Data,
+            },
         );
         dag.add_edge(
             copy,
@@ -4175,7 +4041,12 @@ mod escape_execution_tests {
         );
         let mut value_buffer = std::collections::BTreeMap::new();
         value_buffer.insert(x, BufferId::Allocated(0));
-        BufferIrGraph { dag, buffers, value_buffer, outputs: vec![out] }
+        BufferIrGraph {
+            dag,
+            buffers,
+            value_buffer,
+            outputs: vec![out],
+        }
     }
 
     /// PROBE 1, the executed-bytes half — OPTION B RESTRUCTURE: the
@@ -4271,7 +4142,9 @@ mod escape_execution_tests {
         let mut rt = ReferenceRuntime::default();
         rt.load_plan(plan);
         rt.set_data_buffer(7, vec![0.0f32; 6]);
-        let err = rt.execute().expect_err("the escape guard must refuse donated backing");
+        let err = rt
+            .execute()
+            .expect_err("the escape guard must refuse donated backing");
         assert!(
             err.to_string().contains("NON-ESCAPING") && err.to_string().contains("Caller"),
             "the guard names the violation and the owner: {err:#}"

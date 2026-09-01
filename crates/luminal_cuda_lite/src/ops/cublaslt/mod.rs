@@ -59,15 +59,15 @@ use luminal::layout_ir::{
 // rehomed test_runtime `cublaslt_marker.rs`, semantics-identical; these
 // siblings are the estate's other rehomed/new halves.
 // ---------------------------------------------------------------------------
+/// The cudarc result-layer dispatch (device feature only).
+#[cfg(feature = "device")]
+pub mod device_call;
 /// The round-11 election core, rehomed from the test_runtime lib
 /// (vocabulary now a parameter; `test_runtime` wraps with its own).
 pub mod election;
 /// CPU-side host-call planning + the executor-owned validation the
 /// library does not provide (ld bounds, descriptor construction).
 pub mod exec;
-/// The cudarc result-layer dispatch (device feature only).
-#[cfg(feature = "device")]
-pub mod device_call;
 
 /// HOST-CALL DISPATCHABLE: the allow-list face of the cuBLASLt estate.
 /// Kernel-bearing ops are claimable because a codegen row exists;
@@ -121,7 +121,10 @@ impl CublasLtForm {
     }
 
     pub fn has_c(self) -> bool {
-        matches!(self, CublasLtForm::Accumulate | CublasLtForm::AccumulateBias)
+        matches!(
+            self,
+            CublasLtForm::Accumulate | CublasLtForm::AccumulateBias
+        )
     }
 
     pub fn has_bias(self) -> bool {
@@ -266,7 +269,10 @@ impl LtMatmulSpec {
     }
 
     fn validate(&self, d_rows: &CuDim, d_cols: &CuDim) {
-        assert!(self.order_col, "cuBLASLt marker spec: non-COL descriptor minted");
+        assert!(
+            self.order_col,
+            "cuBLASLt marker spec: non-COL descriptor minted"
+        );
         assert!(
             *d_rows == self.m && *d_cols == self.n,
             "cuBLASLt marker spec inconsistent: D is {d_rows}x{d_cols}, call wants {}x{}",
@@ -275,7 +281,10 @@ impl LtMatmulSpec {
         );
         for (name, dim) in [("m", &self.m), ("n", &self.n), ("k", &self.k)] {
             if let Some(v) = dim.literal() {
-                assert!(v >= 1, "cuBLASLt marker spec inconsistent: empty geometry {name}={v}");
+                assert!(
+                    v >= 1,
+                    "cuBLASLt marker spec inconsistent: empty geometry {name}={v}"
+                );
             }
         }
         assert_eq!(self.has_c, self.form.has_c());
@@ -312,10 +321,18 @@ fn parse_dim(site: &ExtractionSite<'_>, class: &ClassId) -> CuDim {
 }
 
 fn parse_operation(site: &ExtractionSite<'_>, class: &ClassId) -> Option<bool> {
-    if site.nodes_in_class_value(class, "CublasLtOperationN").next().is_some() {
+    if site
+        .nodes_in_class_value(class, "CublasLtOperationN")
+        .next()
+        .is_some()
+    {
         return Some(false);
     }
-    if site.nodes_in_class_value(class, "CublasLtOperationT").next().is_some() {
+    if site
+        .nodes_in_class_value(class, "CublasLtOperationT")
+        .next()
+        .is_some()
+    {
         return Some(true);
     }
     None
@@ -338,7 +355,9 @@ fn parse_operand_descriptor(
         let lt = site.class_of_child(node, 1)?;
         // The OPERATION is the orientation carrier: the rules prove it
         // from the index map, which the layout cannot supply.
-        if let Some(operation) = site.class_of_child(node, 2).and_then(|c| parse_operation(site, &c))
+        if let Some(operation) = site
+            .class_of_child(node, 2)
+            .and_then(|c| parse_operation(site, &c))
         {
             return Some((lt, operation));
         }
@@ -384,10 +403,16 @@ fn storage_dims(
     let mut list_class = site.class_of_child(shape_lit, 0)?;
     let mut dims = Vec::new();
     loop {
-        if site.nodes_in_class_value(&list_class, "IntExprNil").next().is_some() {
+        if site
+            .nodes_in_class_value(&list_class, "IntExprNil")
+            .next()
+            .is_some()
+        {
             break;
         }
-        let cons = site.nodes_in_class_value(&list_class, "IntExprCons").next()?;
+        let cons = site
+            .nodes_in_class_value(&list_class, "IntExprCons")
+            .next()?;
         let head = site.class_of_child(cons, 0)?;
         dims.push((parse_dim(site, &head), head));
         list_class = site.class_of_child(cons, 1)?;
@@ -401,18 +426,28 @@ fn storage_dims(
 /// happen for layouts we read, and which is rejected loudly by callers).
 fn stride_chain(site: &ExtractionSite<'_>, layout_class: &ClassId) -> Option<Vec<ClassId>> {
     for layout in site.nodes_in_class_value(layout_class, "StridedElementLayoutLit") {
-        let Some(mut cur) = site.class_of_child(layout, 1) else { continue };
+        let Some(mut cur) = site.class_of_child(layout, 1) else {
+            continue;
+        };
         let mut entries = Vec::new();
         loop {
-            if site.nodes_in_class_value(&cur, "IntAffineExprNil").next().is_some() {
+            if site
+                .nodes_in_class_value(&cur, "IntAffineExprNil")
+                .next()
+                .is_some()
+            {
                 break;
             }
             let Some(cons) = site.nodes_in_class_value(&cur, "IntAffineExprCons").next() else {
                 break;
             };
-            let Some(entry) = site.class_of_child(cons, 0) else { break };
+            let Some(entry) = site.class_of_child(cons, 0) else {
+                break;
+            };
             entries.push(entry);
-            let Some(tail) = site.class_of_child(cons, 1) else { break };
+            let Some(tail) = site.class_of_child(cons, 1) else {
+                break;
+            };
             cur = tail;
             if entries.len() > 8 {
                 break;
@@ -453,8 +488,10 @@ fn entry_pitch_class(site: &ExtractionSite<'_>, entry: &ClassId) -> Option<Class
         [] => None,
         [only] => Some(only.clone()),
         many => {
-            let lits: std::collections::BTreeSet<i64> =
-                many.iter().filter_map(|c| parse_i64_expr(site, c)).collect();
+            let lits: std::collections::BTreeSet<i64> = many
+                .iter()
+                .filter_map(|c| parse_i64_expr(site, c))
+                .collect();
             if lits.len() > 1 {
                 panic!(
                     "cuBLASLt marker: stride entry has discriminated pitch factors with \
@@ -469,7 +506,9 @@ fn entry_pitch_class(site: &ExtractionSite<'_>, entry: &ClassId) -> Option<Class
 /// Does this stride entry's class carry a bare-CoordVar spelling (the
 /// x*1-subsumed unit stride)? A membership test — binds nothing.
 fn entry_is_bare_coord(site: &ExtractionSite<'_>, entry: &ClassId) -> bool {
-    site.nodes_in_class_value(entry, "CoordVar").next().is_some()
+    site.nodes_in_class_value(entry, "CoordVar")
+        .next()
+        .is_some()
 }
 
 /// The leading dimension of a descriptor, read from the elected enode's
@@ -550,11 +589,19 @@ fn direct_buffer_of(site: &ExtractionSite<'_>, lt_class: &ClassId) -> Option<Cla
         if node.op != "BufferTensorLit" {
             continue;
         }
-        let Some(lt) = node.children.first().and_then(|id| site.egraph.nodes.get(id)) else {
+        let Some(lt) = node
+            .children
+            .first()
+            .and_then(|id| site.egraph.nodes.get(id))
+        else {
             continue;
         };
         if &lt.eclass == lt_class {
-            return node.children.get(1).and_then(|id| site.egraph.nodes.get(id)).map(|c| c.eclass.clone());
+            return node
+                .children
+                .get(1)
+                .and_then(|id| site.egraph.nodes.get(id))
+                .map(|c| c.eclass.clone());
         }
     }
     None
@@ -587,21 +634,34 @@ fn resolve_buffer(site: &ExtractionSite<'_>, lt_class: &ClassId, depth: usize) -
     }
     // Every apply spelling of the view's logical value...
     for apply in site.nodes_in_class_value(&logical, "LogicalIndexMapApply") {
-        let Some(parent_logical) = site.class_of_child(apply, 0) else { continue };
-        let Some(map_class) = site.class_of_child(apply, 1) else { continue };
+        let Some(parent_logical) = site.class_of_child(apply, 0) else {
+            continue;
+        };
+        let Some(map_class) = site.class_of_child(apply, 1) else {
+            continue;
+        };
         // ...every layout tensor of that parent...
         for plt in site.egraph.nodes.values() {
             if plt.op != "LayoutTensorLit" {
                 continue;
             }
-            let Some(pl) = plt.children.first().and_then(|id| site.egraph.nodes.get(id)) else {
+            let Some(pl) = plt
+                .children
+                .first()
+                .and_then(|id| site.egraph.nodes.get(id))
+            else {
                 continue;
             };
             if pl.eclass != parent_logical {
                 continue;
             }
             let plt_class = plt.eclass.clone();
-            let Some(p_layout) = plt.children.get(1).and_then(|id| site.egraph.nodes.get(id)).map(|c| c.eclass.clone()) else {
+            let Some(p_layout) = plt
+                .children
+                .get(1)
+                .and_then(|id| site.egraph.nodes.get(id))
+                .map(|c| c.eclass.clone())
+            else {
                 continue;
             };
             // ...whose composition through THIS map is L (the tie).
@@ -612,8 +672,18 @@ fn resolve_buffer(site: &ExtractionSite<'_>, lt_class: &ClassId, depth: usize) -
                     site.egraph.nodes.values().any(|n| {
                         n.op == "int-subst-of"
                             && n.children.len() >= 2
-                            && site.egraph.nodes.get(&n.children[0]).map(|c| c.eclass == p_expr).unwrap_or(false)
-                            && site.egraph.nodes.get(&n.children[1]).map(|c| c.eclass == map_class).unwrap_or(false)
+                            && site
+                                .egraph
+                                .nodes
+                                .get(&n.children[0])
+                                .map(|c| c.eclass == p_expr)
+                                .unwrap_or(false)
+                            && site
+                                .egraph
+                                .nodes
+                                .get(&n.children[1])
+                                .map(|c| c.eclass == map_class)
+                                .unwrap_or(false)
                             && l_exprs.contains(&n.eclass)
                     })
                 });
@@ -907,7 +977,11 @@ impl Bufferizable for CublasLtDps {
         }];
         if self.op.form.has_c() {
             // C sits at Lit slot 2 in the contract order [a, b, c, bias?].
-            aliases.push(AliasInfo { operand: 2, result: 0, sharing: Sharing::May });
+            aliases.push(AliasInfo {
+                operand: 2,
+                result: 0,
+                sharing: Sharing::May,
+            });
         }
         aliases
     }
