@@ -8,7 +8,6 @@
 //! must-share ties, may-share permits, accumulators), which by design have no
 //! egglog surface.
 
-
 pub mod test_ops {
     //! TEST FIXTURE (seed of the future TestRuntime, ruling 2026-08-13):
     //! the reference runtime implements ONLY non-mutating spellings of the
@@ -17,8 +16,8 @@ pub mod test_ops {
     //! home is a small TestRuntime with simple view/mutation/multi-output
     //! implementations — recorded in the queue, not built yet.
 
-    use crate::layout_ir::{AliasInfo, Bufferizable, LayoutIrOp, Sharing, ToDps};
     use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
+    use crate::layout_ir::{AliasInfo, Bufferizable, LayoutIrOp, Sharing, ToDps};
 
     /// `AddMulFusedGeneric(lhs, rhs) -> (add_out, mul_out)`
     ///
@@ -98,8 +97,16 @@ pub mod test_ops {
     impl Bufferizable for AddMulFusedDps {
         fn alias_info(&self) -> Vec<AliasInfo> {
             vec![
-                AliasInfo { operand: 2, result: 0, sharing: Sharing::Must },
-                AliasInfo { operand: 3, result: 1, sharing: Sharing::Must },
+                AliasInfo {
+                    operand: 2,
+                    result: 0,
+                    sharing: Sharing::Must,
+                },
+                AliasInfo {
+                    operand: 3,
+                    result: 1,
+                    sharing: Sharing::Must,
+                },
             ]
         }
     }
@@ -124,10 +131,9 @@ use petgraph::graph::NodeIndex;
 
 use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 use crate::layout_ir::{
-    AliasInfo, BufferInfo, Bufferizable, ExtractedDag, ExtractedEdge,
-    Access, ExtractedGraph, ExtractedNode, FreedBy, InputNode, LayoutInfo, LayoutIrOp,
-    LayoutTensorInfo,
-    LogicalInfo, OpInput, OpNode, OutputNode, OutputSlot, Sharing,
+    Access, AliasInfo, BufferInfo, Bufferizable, ExtractedDag, ExtractedEdge, ExtractedGraph,
+    ExtractedNode, FreedBy, InputNode, LayoutInfo, LayoutIrOp, LayoutTensorInfo, LogicalInfo,
+    OpInput, OpNode, OutputNode, OutputSlot, Sharing,
 };
 
 // =============================================================================
@@ -177,10 +183,18 @@ impl Bufferizable for MockOp {
     fn alias_info(&self) -> Vec<AliasInfo> {
         let mut info = Vec::new();
         if let Some(operand) = self.in_place_operand {
-            info.push(AliasInfo { operand, result: 0, sharing: Sharing::Must });
+            info.push(AliasInfo {
+                operand,
+                result: 0,
+                sharing: Sharing::Must,
+            });
             if self.not_conflicting {
                 for read in 0..self.reads.len() {
-                    info.push(AliasInfo { operand: read, result: 0, sharing: Sharing::May });
+                    info.push(AliasInfo {
+                        operand: read,
+                        result: 0,
+                        sharing: Sharing::May,
+                    });
                 }
             }
         }
@@ -224,7 +238,11 @@ impl BufferTensorIrOp for MockView {
 
 impl Bufferizable for MockView {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 0,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -279,6 +297,12 @@ pub struct TestGraph {
     producers: HashMap<ClassId, NodeIndex>,
     slots: Vec<OutputSlot>,
     next: u32,
+}
+
+impl Default for TestGraph {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestGraph {
@@ -383,8 +407,10 @@ impl TestGraph {
             .iter()
             .map(|(name, layout)| self.value_info(name, layout))
             .collect();
-        let result_classes: Vec<ClassId> =
-            output_infos.iter().map(|info| info.eclass.clone()).collect();
+        let result_classes: Vec<ClassId> = output_infos
+            .iter()
+            .map(|info| info.eclass.clone())
+            .collect();
         let op_inputs: Vec<OpInput> = inputs
             .iter()
             .enumerate()
@@ -485,10 +511,7 @@ mod harness_tests {
     use luminal::bufferize;
     use luminal::layout_ir::Access;
     use luminal::test_support::*;
-    use luminal_reference::harness::{
-        extract_fixture, extract_fixture_with_ops,
-        serialize_fixture, try_extract_fixture_with_ops,
-    };
+    use luminal_reference::harness::{extract_fixture, serialize_fixture};
 
     /// The builder produces a graph the real pipeline accepts end to end.
     #[test]
@@ -539,7 +562,12 @@ mod harness_tests {
             .collect();
         // 1 WAR (Exp's read before the copy overwriting x's buffer) + 2
         // lifetime (each fresh buffer's src-reading copy before its free).
-        assert_eq!(anti.len(), 3, "expected 1 WAR + 2 lifetime antis:\n{}", plan.summary());
+        assert_eq!(
+            anti.len(),
+            3,
+            "expected 1 WAR + 2 lifetime antis:\n{}",
+            plan.summary()
+        );
         let war: Vec<_> = anti
             .iter()
             .filter(|e| {
@@ -547,14 +575,22 @@ mod harness_tests {
                     if writes.is_empty())
             })
             .collect();
-        assert_eq!(war.len(), 1, "expected exactly one WAR anti:\n{}", plan.summary());
+        assert_eq!(
+            war.len(),
+            1,
+            "expected exactly one WAR anti:\n{}",
+            plan.summary()
+        );
         let edge = war[0];
         // Source must be the Exp compute node; target the copy into x's buffer.
         match &plan.dag[edge.source()] {
             BufferNode::Compute { op, .. } => assert_eq!(op.label(), "ExpFunctionalGeneric"),
             other => panic!("anti edge source should be ExpFunctionalGeneric, got {other:?}"),
         }
-        assert!(matches!(&plan.dag[edge.target()], BufferNode::BufferCopy { .. }));
+        assert!(matches!(
+            &plan.dag[edge.target()],
+            BufferNode::BufferCopy { .. }
+        ));
     }
 
     /// Copy-vs-copy WAR: out0 passes x onward into C (copy B->C reads B) while
@@ -588,7 +624,12 @@ mod harness_tests {
             .collect();
         // 1 WAR (the B-reading copy before the B-writing copy) + 1 lifetime
         // (the B-writing copy's src-read before y's buffer is freed).
-        assert_eq!(anti.len(), 2, "expected 1 WAR + 1 lifetime anti:\n{}", plan.summary());
+        assert_eq!(
+            anti.len(),
+            2,
+            "expected 1 WAR + 1 lifetime anti:\n{}",
+            plan.summary()
+        );
         let war: Vec<_> = anti
             .iter()
             .filter(|e| {
@@ -596,7 +637,12 @@ mod harness_tests {
                     if writes.is_empty())
             })
             .collect();
-        assert_eq!(war.len(), 1, "expected exactly one WAR anti:\n{}", plan.summary());
+        assert_eq!(
+            war.len(),
+            1,
+            "expected exactly one WAR anti:\n{}",
+            plan.summary()
+        );
         let edge = war[0];
         // Direction: the copy READING B (the B->C pass-onward) must run before
         // the copy WRITING B (the alloc->B overwrite).
@@ -870,7 +916,12 @@ mod harness_tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(copies.len(), 1, "one copy serves the losing slot:\n{}", plan.summary());
+        assert_eq!(
+            copies.len(),
+            1,
+            "one copy serves the losing slot:\n{}",
+            plan.summary()
+        );
         assert_eq!(
             copies[0].0,
             &plan.value_buffer[&r],
@@ -929,7 +980,12 @@ mod harness_tests {
                     if dst == &plan.value_buffer[&x])
             })
             .count();
-        assert_eq!(copies_into_d, 1, "boundary copy restored:\n{}", plan.summary());
+        assert_eq!(
+            copies_into_d,
+            1,
+            "boundary copy restored:\n{}",
+            plan.summary()
+        );
         // 1 WAR (the reader before the boundary copy) + 2 lifetime (each
         // fresh buffer's src-reading copy before its free).
         let anti: Vec<_> = plan
@@ -937,7 +993,12 @@ mod harness_tests {
             .edge_references()
             .filter(|edge| edge.weight().kind == EdgeKind::Anti)
             .collect();
-        assert_eq!(anti.len(), 3, "1 WAR + 2 lifetime antis:\n{}", plan.summary());
+        assert_eq!(
+            anti.len(),
+            3,
+            "1 WAR + 2 lifetime antis:\n{}",
+            plan.summary()
+        );
         let war = anti
             .iter()
             .filter(|e| {
@@ -945,7 +1006,12 @@ mod harness_tests {
                     if writes.is_empty())
             })
             .count();
-        assert_eq!(war, 1, "reader ordered before the copy:\n{}", plan.summary());
+        assert_eq!(
+            war,
+            1,
+            "reader ordered before the copy:\n{}",
+            plan.summary()
+        );
     }
 
     /// RANK 6 + the CRITICAL WAR fix regression: two inputs swapping buffers
@@ -1134,13 +1200,6 @@ mod harness_tests {
         let _ = serialize_fixture("bool_bridge_example.egg");
     }
 
-
-
-
-
-
-
-
     /// The pinned-plan fixture list, shared by the pin test and the
     /// regenerator below.
     /// Stems whose fixture lives in THIS tree and extracts on the
@@ -1180,7 +1239,6 @@ mod harness_tests {
                 .expect("golden writes");
         }
     }
-
 
     /// The zero-input source path (R7): iota extracts with an EMPTY operand
     /// list, and after the DPS rewrite its appended destination is the op's
@@ -1239,9 +1297,11 @@ mod harness_tests {
     src))
 (run-schedule (saturate (saturate (run)) (run subst-walk)) (saturate (run fixpoint-invariants)))
 "#;
-        let program = format!("{preamble}
+        let program = format!(
+            "{preamble}
 
-{script}");
+{script}"
+        );
         let mut egraph = luminal::egglog_snippet::new_egraph();
         let err = egraph
             .parse_and_run_program(None, &program)
@@ -1311,9 +1371,9 @@ mod harness_tests {
         let mut allocated_int = 0usize;
         for buffer in plan.buffers.values() {
             if buffer.element_bits.is_some() {
-                let dtype = buffer.dtype.unwrap_or_else(|| {
-                    panic!("buffer {} has geometry but no dtype", buffer.label)
-                });
+                let dtype = buffer
+                    .dtype
+                    .unwrap_or_else(|| panic!("buffer {} has geometry but no dtype", buffer.label));
                 assert_eq!(
                     dtype.egglog_bits(),
                     buffer.element_bits.expect("checked above"),
@@ -1422,7 +1482,10 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v],
             &[("r", "rm")],
         )[0]
@@ -1431,13 +1494,19 @@ mod harness_tests {
         let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
 
         assert_eq!(
-            plan.value_buffer[&v], plan.value_buffer[&x],
+            plan.value_buffer[&v],
+            plan.value_buffer[&x],
             "the view derives its parent's buffer:\n{}",
             plan.summary()
         );
         for idx in plan.dag.node_indices() {
             if let BufferNode::Compute { op, reads, .. } = &plan.dag[idx] {
-                assert_ne!(op.label(), "MockView", "views are folded:\n{}", plan.summary());
+                assert_ne!(
+                    op.label(),
+                    "MockView",
+                    "views are folded:\n{}",
+                    plan.summary()
+                );
                 // Storage nodes (alloc/free) read no operands; the invariant
                 // under test is about the view's CONSUMER.
                 if op.label() == "MockOp" {
@@ -1459,7 +1528,10 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadOnly, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v],
             &[("r", "rm")],
         )[0]
@@ -1482,7 +1554,10 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
         let s = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v],
             &[("s", "rm")],
         )[0]
@@ -1508,7 +1583,10 @@ mod harness_tests {
         let v1 = g.op(Box::new(MockView), &[&x], &[("v1", "row0")])[0].clone();
         let v2 = g.op(Box::new(MockView), &[&v1], &[("v2", "cell0")])[0].clone();
         let r = g.op(
-            Box::new(MockOp { reads: vec![true], ..Default::default() }),
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
             &[&v2],
             &[("r", "rm")],
         )[0]
@@ -1532,7 +1610,11 @@ mod harness_tests {
         g.output(&v, "B");
         let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
 
-        assert!(plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))));
+        assert!(
+            plan.buffers
+                .keys()
+                .all(|id| matches!(id, BufferId::Boundary(_)))
+        );
         assert!(
             plan.dag
                 .node_indices()
@@ -1556,7 +1638,9 @@ mod harness_tests {
         let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
-            plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
+            plan.buffers
+                .keys()
+                .all(|id| matches!(id, BufferId::Boundary(_))),
             "no allocations:\n{}",
             plan.summary()
         );
@@ -1581,7 +1665,8 @@ mod harness_tests {
                     if op.label() == "BufferFree" {
                         frees += 1;
                         assert_eq!(
-                            reads[0], launch[0],
+                            reads[0],
+                            launch[0],
                             "the free consumes the donated input buffer:\n{}",
                             plan.summary()
                         );
@@ -1590,7 +1675,12 @@ mod harness_tests {
                 _ => {}
             }
         }
-        assert_eq!(frees, 1, "donated storage is freed exactly once:\n{}", plan.summary());
+        assert_eq!(
+            frees,
+            1,
+            "donated storage is freed exactly once:\n{}",
+            plan.summary()
+        );
     }
 
     /// COMMITTED-WRITER INTERFERENCE (review-confirmed miscompile, fixed):
@@ -1636,7 +1726,8 @@ mod harness_tests {
         // The two writers must not share storage: exactly one of the two
         // in-place candidates survives, so r1's buffer has ONE compute writer.
         assert_ne!(
-            plan.value_buffer[&r1], plan.value_buffer[&r2],
+            plan.value_buffer[&r1],
+            plan.value_buffer[&r2],
             "unordered writers must not share storage:\n{}",
             plan.summary()
         );
@@ -1651,7 +1742,8 @@ mod harness_tests {
             })
             .count();
         assert_eq!(
-            writers_of_r1_buffer, 1,
+            writers_of_r1_buffer,
+            1,
             "the output value's buffer has exactly one writer:\n{}",
             plan.summary()
         );
@@ -1669,7 +1761,11 @@ mod harness_tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let y = g.input("y", "C", Access::ReadWrite, "rm");
-        let results = g.op(Box::new(AddMulFused), &[&x, &y], &[("sum", "rm"), ("prod", "rm")]);
+        let results = g.op(
+            Box::new(AddMulFused),
+            &[&x, &y],
+            &[("sum", "rm"), ("prod", "rm")],
+        );
         let (sum, prod) = (results[0].clone(), results[1].clone());
         g.output(&sum, "D");
         g.output(&prod, "E");
@@ -1679,7 +1775,8 @@ mod harness_tests {
 
         // Each (poison, result) pair on its own allocation — never shared.
         assert_ne!(
-            plan.value_buffer[&sum], plan.value_buffer[&prod],
+            plan.value_buffer[&sum],
+            plan.value_buffer[&prod],
             "{}",
             plan.summary()
         );
@@ -1688,9 +1785,9 @@ mod harness_tests {
             .dag
             .node_indices()
             .find_map(|idx| match &plan.dag[idx] {
-                BufferNode::Compute { op, reads, writes, .. } if op.label() == "AddMulFusedGeneric" => {
-                    Some((reads.clone(), writes.clone()))
-                }
+                BufferNode::Compute {
+                    op, reads, writes, ..
+                } if op.label() == "AddMulFusedGeneric" => Some((reads.clone(), writes.clone())),
                 _ => None,
             })
             .expect("fused DPS node present");
@@ -1711,7 +1808,11 @@ mod harness_tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let y = g.input("y", "C", Access::ReadWrite, "rm");
-        let results = g.op(Box::new(AddMulFused), &[&x, &y], &[("sum", "rm"), ("prod", "rm")]);
+        let results = g.op(
+            Box::new(AddMulFused),
+            &[&x, &y],
+            &[("sum", "rm"), ("prod", "rm")],
+        );
         g.output(&results[0], "D");
         g.output(&results[1], "E");
 
@@ -1721,45 +1822,13 @@ mod harness_tests {
             assert!(dot.contains(span), "missing tie row {span:?} in:\n{dot}");
         }
         for dock in [":p_dest0:e ->", ":p_dest1:e ->"] {
-            assert!(dot.contains(dock), "tied result not docked at {dock:?} in:\n{dot}");
+            assert!(
+                dot.contains(dock),
+                "tied result not docked at {dock:?} in:\n{dot}"
+            );
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod intcoordvar_probe {
@@ -1940,7 +2009,8 @@ mod stage4b_probes {
         let mut cx = luminal::graph::Graph::new();
         let a = cx.tensor(2);
         let b = a.output();
-        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
+        let rt =
+            luminal_reference::harness::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
         let got = rt.get_f32(b.id).unwrap();
         assert_eq!(got, &vec![1.0, 2.0]);
     }
@@ -1952,7 +2022,7 @@ mod stage4b_probes {
     /// consumer resolves for itself.
     #[test]
     fn chain_strides_destructure_contract() {
-        use luminal::extractor::{chain_strides, ChainStride};
+        use luminal::extractor::{ChainStride, chain_strides};
         let body = r#"
 (let psh (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
 (let p (RightMajorContiguousElementLayoutLit psh (bits-of (F32))))
@@ -1966,7 +2036,9 @@ mod stage4b_probes {
 "#;
         let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
         let mut egraph = luminal::egglog_snippet::new_egraph();
-        egraph.parse_and_run_program(None, &full).expect("program runs");
+        egraph
+            .parse_and_run_program(None, &full)
+            .expect("program runs");
         let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
 
         let by_let = |name: &str| {
@@ -1986,7 +2058,10 @@ mod stage4b_probes {
 
         // Degenerate (1,2): the extent-1 slot is the FREE parameter.
         let d = chain_strides(&serialized, &by_let("d")).expect("degenerate destructures");
-        assert_eq!(d[0], None, "extent-1 slot must be the consumer's choice: {d:?}");
+        assert_eq!(
+            d[0], None,
+            "extent-1 slot must be the consumer's choice: {d:?}"
+        );
         assert_eq!(d[1], Some(ChainStride::Unit), "{d:?}");
 
         // Broadcast view (2,5,3): [3, DETERMINED 0, 1].
@@ -2015,7 +2090,11 @@ mod stage4b_probes {
             .expect("view LayoutTensor exists");
         let v = chain_strides(&serialized, &view_layout).expect("view destructures");
         assert!(matches!(v[0], Some(ChainStride::Expr(_))), "{v:?}");
-        assert_eq!(v[1], Some(ChainStride::Zero), "broadcast axis is determined: {v:?}");
+        assert_eq!(
+            v[1],
+            Some(ChainStride::Zero),
+            "broadcast axis is determined: {v:?}"
+        );
         assert_eq!(v[2], Some(ChainStride::Unit), "{v:?}");
     }
 
@@ -2037,156 +2116,168 @@ mod stage4b_probes {
     #[ignore = "diagnostic — run explicitly by name (release, bounded)"]
     fn rejoin_divergence_probe() {
         for lead in [1usize, 2usize] {
-        eprintln!("[rejoin-probe] ===== lead extent {lead} =====");
-        let mut cx = luminal::graph::Graph::new();
-        let x = cx.tensor((lead, 8usize));
-        let heads = x.split_dims(1, 4);
-        let x1 = heads.slice_along(0..2, 2);
-        let x2 = heads.slice_along(2..4, 2);
-        let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
-        let (pre, _inputs, _outputs, _post, _labeled) =
-            cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
-        let full = format!("{}\n\n{pre}", luminal_reference::assembled_program());
-        let mut egraph = luminal::egglog_snippet::new_egraph();
-        egraph.parse_and_run_program(None, &full).expect("body loads");
-        let sizes = |egraph: &mut egglog::EGraph| -> std::collections::HashMap<String, isize> {
-            let out = egraph
-                .parse_and_run_program(None, "(print-size)")
-                .expect("sizes");
-            let mut map = std::collections::HashMap::new();
-            for chunk in &out {
-                let text = chunk.to_string();
-                // Post-bump engine prints parenthesized pairs:
-                // ((name count) (name count) ...). The old `name: count`
-                // line format is parsed as fallback.
-                for fragment in text.split('(') {
-                    let fragment = fragment.trim().trim_end_matches(')');
-                    if let Some((name, count)) = fragment.rsplit_once(' ') {
-                        if let Ok(count) = count.trim().parse::<isize>() {
-                            map.insert(name.trim().to_string(), count);
+            eprintln!("[rejoin-probe] ===== lead extent {lead} =====");
+            let mut cx = luminal::graph::Graph::new();
+            let x = cx.tensor((lead, 8usize));
+            let heads = x.split_dims(1, 4);
+            let x1 = heads.slice_along(0..2, 2);
+            let x2 = heads.slice_along(2..4, 2);
+            let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
+            let (pre, _inputs, _outputs, _post, _labeled) = cx
+                .logical
+                .bound_parts(&luminal_reference::ReferenceBindings)
+                .expect("recorder clean");
+            let full = format!("{}\n\n{pre}", luminal_reference::assembled_program());
+            let mut egraph = luminal::egglog_snippet::new_egraph();
+            egraph
+                .parse_and_run_program(None, &full)
+                .expect("body loads");
+            let sizes = |egraph: &mut egglog::EGraph| -> std::collections::HashMap<String, isize> {
+                let out = egraph
+                    .parse_and_run_program(None, "(print-size)")
+                    .expect("sizes");
+                let mut map = std::collections::HashMap::new();
+                for chunk in &out {
+                    let text = chunk.to_string();
+                    // Post-bump engine prints parenthesized pairs:
+                    // ((name count) (name count) ...). The old `name: count`
+                    // line format is parsed as fallback.
+                    for fragment in text.split('(') {
+                        let fragment = fragment.trim().trim_end_matches(')');
+                        if let Some((name, count)) = fragment.rsplit_once(' ') {
+                            if let Ok(count) = count.trim().parse::<isize>() {
+                                map.insert(name.trim().to_string(), count);
+                            }
+                        }
+                    }
+                    for line in text.lines() {
+                        if let Some((name, count)) = line.rsplit_once(": ") {
+                            if let Ok(count) = count.trim().parse::<isize>() {
+                                map.insert(name.trim().to_string(), count);
+                            }
                         }
                     }
                 }
-                for line in text.lines() {
-                    if let Some((name, count)) = line.rsplit_once(": ") {
-                        if let Ok(count) = count.trim().parse::<isize>() {
-                            map.insert(name.trim().to_string(), count);
-                        }
+                map
+            };
+            // GROWTH-CHANNEL ACCOUNTING (Austin's root-cause experiment,
+            // 2026-08-11): per round, separate the three channels —
+            // NODES (spellings: IntAdd table size), CLASSES (new sub-sums:
+            // distinct IntAdd e-classes in a serialization), and DEMAND
+            // ROWS (subst-demand fan-out) — to name which growth LEADS at
+            // ignition. Serialization runs only near/after ignition.
+            let channel_counts = |egraph: &mut egglog::EGraph| -> (usize, usize, usize) {
+                use egglog::SerializeConfig;
+                let serialized = egraph.serialize(SerializeConfig::default()).egraph;
+                let mut intadd_nodes = 0usize;
+                let mut intadd_classes = std::collections::HashSet::new();
+                let mut all_classes = std::collections::HashSet::new();
+                for node in serialized.nodes.values() {
+                    all_classes.insert(node.eclass.clone());
+                    if node.op == "IntAdd" {
+                        intadd_nodes += 1;
+                        intadd_classes.insert(node.eclass.clone());
                     }
                 }
-            }
-            map
-        };
-        // GROWTH-CHANNEL ACCOUNTING (Austin's root-cause experiment,
-        // 2026-08-11): per round, separate the three channels —
-        // NODES (spellings: IntAdd table size), CLASSES (new sub-sums:
-        // distinct IntAdd e-classes in a serialization), and DEMAND
-        // ROWS (subst-demand fan-out) — to name which growth LEADS at
-        // ignition. Serialization runs only near/after ignition.
-        let channel_counts = |egraph: &mut egglog::EGraph| -> (usize, usize, usize) {
-            use egglog::SerializeConfig;
-            let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-            let mut intadd_nodes = 0usize;
-            let mut intadd_classes = std::collections::HashSet::new();
-            let mut all_classes = std::collections::HashSet::new();
-            for node in serialized.nodes.values() {
-                all_classes.insert(node.eclass.clone());
-                if node.op == "IntAdd" {
-                    intadd_nodes += 1;
-                    intadd_classes.insert(node.eclass.clone());
+                (intadd_nodes, intadd_classes.len(), all_classes.len())
+            };
+            let mut previous = sizes(&mut egraph);
+            for round in 1..=150 {
+                let start = std::time::Instant::now();
+                let round_out = egraph
+                    .parse_and_run_program(None, "(run 1)")
+                    .expect("round runs");
+                // Name the firing rules once the mint turns geometric.
+                for chunk in &round_out {
+                    let egglog::CommandOutput::RunSchedule(report) = chunk else {
+                        continue;
+                    };
+                    let mut rules: Vec<(String, usize)> = report
+                        .num_matches_per_rule
+                        .iter()
+                        .map(|(name, &matches)| (name.to_string(), matches))
+                        .collect();
+                    rules.sort_by_key(|(_, matches)| std::cmp::Reverse(*matches));
+                    let hot: Vec<String> = rules
+                        .iter()
+                        .take(4)
+                        .filter(|(_, matches)| *matches > 50)
+                        .map(|(name, matches)| {
+                            let flat: String =
+                                name.split_whitespace().collect::<Vec<_>>().join(" ");
+                            format!("x{matches} {}", flat.chars().take(90).collect::<String>())
+                        })
+                        .collect();
+                    if !hot.is_empty() {
+                        eprintln!("[rejoin-probe]   rules: {}", hot.join(" ‖ "));
+                    }
                 }
-            }
-            (intadd_nodes, intadd_classes.len(), all_classes.len())
-        };
-        let mut previous = sizes(&mut egraph);
-        for round in 1..=150 {
-            let start = std::time::Instant::now();
-            let round_out = egraph.parse_and_run_program(None, "(run 1)").expect("round runs");
-            // Name the firing rules once the mint turns geometric.
-            for chunk in &round_out {
-                let egglog::CommandOutput::RunSchedule(report) = chunk else {
-                    continue;
-                };
-                let mut rules: Vec<(String, usize)> = report
-                    .num_matches_per_rule
+                let current = sizes(&mut egraph);
+                let total: isize = current.values().sum();
+                let mut deltas: Vec<(String, isize)> = current
                     .iter()
-                    .map(|(name, &matches)| (name.to_string(), matches))
-                    .collect();
-                rules.sort_by_key(|(_, matches)| std::cmp::Reverse(*matches));
-                let hot: Vec<String> = rules
-                    .iter()
-                    .take(4)
-                    .filter(|(_, matches)| *matches > 50)
-                    .map(|(name, matches)| {
-                        let flat: String =
-                            name.split_whitespace().collect::<Vec<_>>().join(" ");
-                        format!("x{matches} {}", flat.chars().take(90).collect::<String>())
+                    .map(|(name, &count)| {
+                        (
+                            name.clone(),
+                            count - previous.get(name).copied().unwrap_or(0),
+                        )
                     })
+                    .filter(|(_, delta)| *delta != 0)
                     .collect();
-                if !hot.is_empty() {
-                    eprintln!("[rejoin-probe]   rules: {}", hot.join(" ‖ "));
-                }
-            }
-            let current = sizes(&mut egraph);
-            let total: isize = current.values().sum();
-            let mut deltas: Vec<(String, isize)> = current
-                .iter()
-                .map(|(name, &count)| {
-                    (name.clone(), count - previous.get(name).copied().unwrap_or(0))
-                })
-                .filter(|(_, delta)| *delta != 0)
-                .collect();
-            deltas.sort_by_key(|(_, delta)| -*delta);
-            let grew: isize = deltas.iter().map(|(_, delta)| *delta).sum();
-            let top: Vec<String> = deltas
-                .iter()
-                .take(6)
-                .map(|(name, delta)| format!("{name} {delta:+}"))
-                .collect();
-            eprintln!(
-                "[rejoin-probe] round {round}: total {total} ({grew:+}) in {:.2}s | {}",
-                start.elapsed().as_secs_f64(),
-                top.join(", ")
-            );
-            // Channel accounting near ignition: spellings-per-class vs
-            // class mint vs demand fan-out.
-            if (36..=50).contains(&round) {
-                let (nodes, classes, total_classes) = channel_counts(&mut egraph);
-                let demand_rows = current.get("int-subst-demand").copied().unwrap_or(0);
-                let image_rows = current.get("int-subst-of").copied().unwrap_or(0);
+                deltas.sort_by_key(|(_, delta)| -*delta);
+                let grew: isize = deltas.iter().map(|(_, delta)| *delta).sum();
+                let top: Vec<String> = deltas
+                    .iter()
+                    .take(6)
+                    .map(|(name, delta)| format!("{name} {delta:+}"))
+                    .collect();
                 eprintln!(
-                    "[channels] round {round}: IntAdd nodes {nodes} / classes {classes} \
+                    "[rejoin-probe] round {round}: total {total} ({grew:+}) in {:.2}s | {}",
+                    start.elapsed().as_secs_f64(),
+                    top.join(", ")
+                );
+                // Channel accounting near ignition: spellings-per-class vs
+                // class mint vs demand fan-out.
+                if (36..=50).contains(&round) {
+                    let (nodes, classes, total_classes) = channel_counts(&mut egraph);
+                    let demand_rows = current.get("int-subst-demand").copied().unwrap_or(0);
+                    let image_rows = current.get("int-subst-of").copied().unwrap_or(0);
+                    eprintln!(
+                        "[channels] round {round}: IntAdd nodes {nodes} / classes {classes} \
                      (spellings-per-class {:.2}) | all classes {total_classes} | \
                      int-subst-demand rows {demand_rows} | int-subst-of rows {image_rows}",
-                    nodes as f64 / classes.max(1) as f64
-                );
-            }
-            // Specimen dumps at the pre-ignition and early-geometric
-            // rounds: the ACTUAL IntAdd rows being bred (extracted
-            // representative terms), for the divergence walkthrough.
-            if round == 41 || round == 45 {
-                let dump = egraph
-                    .parse_and_run_program(None, "(print-function IntAdd 18)")
-                    .expect("dump");
-                eprintln!("[rejoin-probe] --- IntAdd rows @ round {round} ---");
-                for chunk in &dump {
-                    for line in chunk.to_string().lines().take(18) {
-                        let flat: String =
-                            line.split_whitespace().collect::<Vec<_>>().join(" ");
-                        eprintln!("[rejoin-probe]   {}", flat.chars().take(200).collect::<String>());
+                        nodes as f64 / classes.max(1) as f64
+                    );
+                }
+                // Specimen dumps at the pre-ignition and early-geometric
+                // rounds: the ACTUAL IntAdd rows being bred (extracted
+                // representative terms), for the divergence walkthrough.
+                if round == 41 || round == 45 {
+                    let dump = egraph
+                        .parse_and_run_program(None, "(print-function IntAdd 18)")
+                        .expect("dump");
+                    eprintln!("[rejoin-probe] --- IntAdd rows @ round {round} ---");
+                    for chunk in &dump {
+                        for line in chunk.to_string().lines().take(18) {
+                            let flat: String =
+                                line.split_whitespace().collect::<Vec<_>>().join(" ");
+                            eprintln!(
+                                "[rejoin-probe]   {}",
+                                flat.chars().take(200).collect::<String>()
+                            );
+                        }
                     }
                 }
+                if grew > 200_000 {
+                    eprintln!("[rejoin-probe] BAIL: runaway round — divergence confirmed");
+                    break;
+                }
+                if grew == 0 {
+                    eprintln!("[rejoin-probe] SATURATED at round {round}");
+                    break;
+                }
+                previous = current;
             }
-            if grew > 200_000 {
-                eprintln!("[rejoin-probe] BAIL: runaway round — divergence confirmed");
-                break;
-            }
-            if grew == 0 {
-                eprintln!("[rejoin-probe] SATURATED at round {round}");
-                break;
-            }
-            previous = current;
-        }
         }
     }
 
@@ -2202,8 +2293,10 @@ mod stage4b_probes {
         let a = cx.tensor((1usize, 2usize, 3usize));
         let b = cx.tensor((3usize, 5usize));
         let _out = a.matmul(b).output();
-        let (pre, _is, _os, post, _labeled) =
-            cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+        let (pre, _is, _os, post, _labeled) = cx
+            .logical
+            .bound_parts(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean");
         let program = format!(
             "{}\n\n{pre}{}{post}",
             luminal_reference::assembled_program(),
@@ -2235,8 +2328,10 @@ mod stage4b_probes {
                     .slice((2..6, 7..10))
                     .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
                     .output();
-                let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                let (pre, _is, _os, _post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
                 pre
             }),
             ("batch_matmul(2,3,4)x(4,5)", {
@@ -2244,8 +2339,10 @@ mod stage4b_probes {
                 let a = cx.tensor((2usize, 3usize, 4usize));
                 let b = cx.tensor((4usize, 5usize));
                 let _out = a.matmul(b).output();
-                let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                let (pre, _is, _os, _post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
                 pre
             }),
             ("specimen(1,2,3)x(3,5)", {
@@ -2253,8 +2350,10 @@ mod stage4b_probes {
                 let a = cx.tensor((1usize, 2usize, 3usize));
                 let b = cx.tensor((3usize, 5usize));
                 let _out = a.matmul(b).output();
-                let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                let (pre, _is, _os, _post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
                 pre
             }),
             ("rejoin_lead1(1,8)", {
@@ -2264,15 +2363,19 @@ mod stage4b_probes {
                 let x1 = heads.slice_along(0..2, 2);
                 let x2 = heads.slice_along(2..4, 2);
                 let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
-                let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                let (pre, _is, _os, _post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
                 pre
             }),
         ];
         for (name, pre) in &specimens {
             let mut egraph = luminal::egglog_snippet::new_egraph();
             let body = format!("{}\n\n{pre}", luminal_reference::assembled_program());
-            egraph.parse_and_run_program(None, &body).expect("body loads");
+            egraph
+                .parse_and_run_program(None, &body)
+                .expect("body loads");
             let start = std::time::Instant::now();
             egraph
                 .parse_and_run_program(None, luminal_reference::ReferenceBindings::SCHEDULE)
@@ -2328,16 +2431,28 @@ mod stage4b_probes {
                     .slice((2..6, 7..10))
                     .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
                     .output();
-                let (pre, _is, _os, post, _labeled) = cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
-                format!("{pre}{}{post}", luminal_reference::ReferenceBindings::SCHEDULE)
+                let (pre, _is, _os, post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
+                format!(
+                    "{pre}{}{post}",
+                    luminal_reference::ReferenceBindings::SCHEDULE
+                )
             }),
             ("batch_matmul(2,3,4,5)", {
                 let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((2usize, 3usize, 4usize));
                 let b = cx.tensor((4usize, 5usize));
                 let _out = a.matmul(b).output();
-                let (pre, _is, _os, post, _labeled) = cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
-                format!("{pre}{}{post}", luminal_reference::ReferenceBindings::SCHEDULE)
+                let (pre, _is, _os, post, _labeled) = cx
+                    .logical
+                    .bound_parts(&luminal_reference::ReferenceBindings)
+                    .expect("recorder clean");
+                format!(
+                    "{pre}{}{post}",
+                    luminal_reference::ReferenceBindings::SCHEDULE
+                )
             }),
         ];
         // The fixed floor: parse + declare the assembled preamble alone.
@@ -2345,7 +2460,9 @@ mod stage4b_probes {
             let preamble = luminal_reference::assembled_program();
             let start = std::time::Instant::now();
             let mut egraph = luminal::egglog_snippet::new_egraph();
-            egraph.parse_and_run_program(None, &preamble).expect("preamble loads");
+            egraph
+                .parse_and_run_program(None, preamble)
+                .expect("preamble loads");
             eprintln!(
                 "[prof] ===== preamble only (parse+declare, no body/schedule): {:.2}s, {} lines =====",
                 start.elapsed().as_secs_f64(),
@@ -2356,7 +2473,9 @@ mod stage4b_probes {
             let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
             let mut egraph = luminal::egglog_snippet::new_egraph();
             let start = std::time::Instant::now();
-            let outputs = egraph.parse_and_run_program(None, &full).expect("program runs");
+            let outputs = egraph
+                .parse_and_run_program(None, &full)
+                .expect("program runs");
             let wall = start.elapsed().as_secs_f64();
             eprintln!("\n[prof] ===== {name}: total wall {wall:.2}s =====");
             for chunk in &outputs {
@@ -2370,17 +2489,25 @@ mod stage4b_probes {
                     .collect();
                 rulesets.sort_by(|a, b| b.1.total_cmp(&a.1));
                 for (ruleset, secs) in rulesets.iter().take(6) {
-                    let label = if ruleset.is_empty() { "(default)" } else { ruleset };
+                    let label = if ruleset.is_empty() {
+                        "(default)"
+                    } else {
+                        ruleset
+                    };
                     let rebuild = report
                         .rebuild_time_per_ruleset
                         .iter()
-                        .find(|(name, _)| name.as_ref() == label || (label == "(default)" && name.is_empty()))
+                        .find(|(name, _)| {
+                            name.as_ref() == label || (label == "(default)" && name.is_empty())
+                        })
                         .map(|(_, time)| time.as_secs_f64())
                         .unwrap_or(0.0);
                     let merge = report
                         .merge_time_per_ruleset
                         .iter()
-                        .find(|(name, _)| name.as_ref() == label || (label == "(default)" && name.is_empty()))
+                        .find(|(name, _)| {
+                            name.as_ref() == label || (label == "(default)" && name.is_empty())
+                        })
                         .map(|(_, time)| time.as_secs_f64())
                         .unwrap_or(0.0);
                     eprintln!(
@@ -2391,11 +2518,7 @@ mod stage4b_probes {
                     .search_and_apply_time_per_rule
                     .iter()
                     .map(|(name, time)| {
-                        let matches = report
-                            .num_matches_per_rule
-                            .get(name)
-                            .copied()
-                            .unwrap_or(0);
+                        let matches = report.num_matches_per_rule.get(name).copied().unwrap_or(0);
                         (name.to_string(), time.as_secs_f64(), matches)
                     })
                     .collect();
@@ -2488,8 +2611,15 @@ mod subst_guard_study {
             "legacy" => {
                 assert!(text.contains(LANDED_GUARD), "landed guard text drifted");
                 let t = text.replacen(LANDED_GUARD, LEGACY_GUARD, 1);
-                assert!(t.contains(STRUCTURAL_ARM_ANCHOR), "structural arm text drifted");
-                t.replacen(STRUCTURAL_ARM_ANCHOR, "; [study: structural arm removed]", 1)
+                assert!(
+                    t.contains(STRUCTURAL_ARM_ANCHOR),
+                    "structural arm text drifted"
+                );
+                t.replacen(
+                    STRUCTURAL_ARM_ANCHOR,
+                    "; [study: structural arm removed]",
+                    1,
+                )
             }
             other => panic!("unknown variant {other}"),
         }
@@ -2519,9 +2649,19 @@ mod subst_guard_study {
 (int-subst-demand s4_coord s4_map)\n\
 (run-schedule (saturate (saturate (run)) (run subst-walk)))\n";
         vec![
-            ("sg1_admits", format!("{sg1_common}(check (= (int-subst-of sg_coord sg_map) sg_entry))\n")),
-            ("sg1_tighten", format!("{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (saturate (run)) (run subst-walk)))\n")),
-            ("sg2_static", "\
+            (
+                "sg1_admits",
+                format!("{sg1_common}(check (= (int-subst-of sg_coord sg_map) sg_entry))\n"),
+            ),
+            (
+                "sg1_tighten",
+                format!(
+                    "{sg1_common}(set (upper-bound-of sgn) (bigint 1))\n(run-schedule (saturate (saturate (run)) (run subst-walk)))\n"
+                ),
+            ),
+            (
+                "sg2_static",
+                "\
 (let s2_cout_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))\n\
 (let s2_cout (CoordVar s2_cout_shape 0))\n\
 (let s2_entry (IntAdd s2_cout (IntLit 1)))\n\
@@ -2530,8 +2670,12 @@ mod subst_guard_study {
 (let s2_coord (CoordVar s2_src 0))\n\
 (int-subst-demand s2_coord s2_map)\n\
 (run-schedule (saturate (saturate (run)) (run subst-walk)))\n\
-(check (= (int-subst-of s2_coord s2_map) s2_entry))\n".to_string()),
-            ("sg3_identity", "\
+(check (= (int-subst-of s2_coord s2_map) s2_entry))\n"
+                    .to_string(),
+            ),
+            (
+                "sg3_identity",
+                "\
 (let s3n (IntVar \"s3n\"))\n\
 (set (lower-bound-of s3n) (bigint 1))\n\
 (set (upper-bound-of s3n) (bigint 8))\n\
@@ -2542,9 +2686,23 @@ mod subst_guard_study {
 (let s3_coord (CoordVar s3_src 0))\n\
 (int-subst-demand s3_coord s3_map)\n\
 (run-schedule (saturate (saturate (run)) (run subst-walk)))\n\
-(check (= (int-subst-of s3_coord s3_map) s3_entry))\n".to_string()),
-            ("sg4_admits", format!("{s4}(check (= (int-subst-of s4_coord s4_map) s4_entry))\n", s4 = sg4_common)),
-            ("sg4_tighten", format!("{s4}(set (upper-bound-of s4n) (bigint 1))\n(run-schedule (saturate (saturate (run)) (run subst-walk)))\n", s4 = sg4_common)),
+(check (= (int-subst-of s3_coord s3_map) s3_entry))\n"
+                    .to_string(),
+            ),
+            (
+                "sg4_admits",
+                format!(
+                    "{s4}(check (= (int-subst-of s4_coord s4_map) s4_entry))\n",
+                    s4 = sg4_common
+                ),
+            ),
+            (
+                "sg4_tighten",
+                format!(
+                    "{s4}(set (upper-bound-of s4n) (bigint 1))\n(run-schedule (saturate (saturate (run)) (run subst-walk)))\n",
+                    s4 = sg4_common
+                ),
+            ),
         ]
     }
 
@@ -2589,7 +2747,7 @@ mod subst_guard_study {
         ];
         let base = luminal_reference::assembled_program();
         for var_name in ["landed", "legacy"] {
-            let varied = variant(&base, var_name);
+            let varied = variant(base, var_name);
             for (scen_name, tail) in scenarios() {
                 let verdict = run_verdict(&format!("{varied}\n{tail}"));
                 let want = expected
@@ -2623,7 +2781,11 @@ mod subst_guard_study {
         assert_eq!(inputs[0].label, "blocks.0.wq.weight");
         assert_eq!(inputs[0].id, a.id, "spec id is the staging key");
         assert_eq!(
-            inputs[0].dims.iter().map(|d| d.to_usize().unwrap()).collect::<Vec<_>>(),
+            inputs[0]
+                .dims
+                .iter()
+                .map(|d| d.to_usize().unwrap())
+                .collect::<Vec<_>>(),
             vec![2, 3]
         );
         assert_eq!(inputs[0].dtype, DType::F32);
@@ -2644,7 +2806,10 @@ mod subst_guard_study {
         let c = cx.tensor((2usize, 3usize));
         let _ = c.output_named("logits");
         assert!(
-            cx.logical.model_text().unwrap_err().contains("duplicate output name"),
+            cx.logical
+                .model_text()
+                .unwrap_err()
+                .contains("duplicate output name"),
             "second \"logits\" poisons loudly"
         );
 
@@ -2717,7 +2882,10 @@ mod subst_guard_study {
         cx.set_dim('s', 1);
         let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
         let out = (x.squeeze(0) * 2.0).output();
-        let rt = luminal_reference::harness::run_reference(&cx, &[(x.id, vec![1.0f32, 2.0, 3.0].into())]);
+        let rt = luminal_reference::harness::run_reference(
+            &cx,
+            &[(x.id, vec![1.0f32, 2.0, 3.0].into())],
+        );
         assert_eq!(rt.get_f32(out.id).unwrap(), &[2.0, 4.0, 6.0]);
 
         let mut cx = Graph::default();
@@ -2725,10 +2893,12 @@ mod subst_guard_study {
         let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
         let _ = (x.squeeze(0) * 2.0).output();
         let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("records + loads");
-        let data: rustc_hash::FxHashMap<_, _> =
-            [(x.id, luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 6]))]
-                .into_iter()
-                .collect();
+        let data: rustc_hash::FxHashMap<_, _> = [(
+            x.id,
+            luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 6]),
+        )]
+        .into_iter()
+        .collect();
         rt.bind_dyn_range('s', 2, 2).expect("bind");
         let err = rt
             .search(
@@ -2786,10 +2956,12 @@ mod subst_guard_study {
         let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
         let _ = x.unfold((3usize,), (1usize,), (1usize,)).sum(1).output();
         let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("records + loads");
-        let data: rustc_hash::FxHashMap<_, _> =
-            [(x.id, luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 2]))]
-                .into_iter()
-                .collect();
+        let data: rustc_hash::FxHashMap<_, _> = [(
+            x.id,
+            luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 2]),
+        )]
+        .into_iter()
+        .collect();
         rt.bind_dyn_range('s', 2, 2).expect("bind");
         let err = rt
             .search(
@@ -2802,5 +2974,4 @@ mod subst_guard_study {
             "the labeled door names the unfold contract: {err:#}"
         );
     }
-
 }

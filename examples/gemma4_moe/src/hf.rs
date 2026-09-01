@@ -170,7 +170,10 @@ pub fn combine_safetensors_to_bf16(
                 .unwrap_or(name)
                 .to_string();
             let tensor = st.tensor(name)?;
-            all_tensors.insert(stored_name.clone(), stored_tensor_bf16(&stored_name, &tensor));
+            all_tensors.insert(
+                stored_name.clone(),
+                stored_tensor_bf16(&stored_name, &tensor),
+            );
         }
     }
 
@@ -188,15 +191,18 @@ pub fn combine_safetensors_to_bf16(
     for l in 0..layer_count {
         let expert_count = (0..)
             .take_while(|e| {
-                all_tensors
-                    .contains_key(&format!("model.layers.{l}.mlp.experts.{e}.gate_proj.weight"))
+                all_tensors.contains_key(&format!(
+                    "model.layers.{l}.mlp.experts.{e}.gate_proj.weight"
+                ))
             })
             .count();
         let mut gate_up_data = Vec::new();
         let mut shape_2i_h: Option<Vec<usize>> = None;
         for e in 0..expert_count {
             let gate = all_tensors
-                .remove(&format!("model.layers.{l}.mlp.experts.{e}.gate_proj.weight"))
+                .remove(&format!(
+                    "model.layers.{l}.mlp.experts.{e}.gate_proj.weight"
+                ))
                 .expect("gate_proj present");
             let up = all_tensors
                 .remove(&format!("model.layers.{l}.mlp.experts.{e}.up_proj.weight"))
@@ -218,7 +224,9 @@ pub fn combine_safetensors_to_bf16(
         let mut shape_h_i: Option<Vec<usize>> = None;
         for e in 0..expert_count {
             let down = all_tensors
-                .remove(&format!("model.layers.{l}.mlp.experts.{e}.down_proj.weight"))
+                .remove(&format!(
+                    "model.layers.{l}.mlp.experts.{e}.down_proj.weight"
+                ))
                 .expect("down_proj present");
             shape_h_i = Some(vec![expert_count, down.shape[0], down.shape[1]]);
             down_data.extend_from_slice(&down.data);
@@ -233,30 +241,30 @@ pub fn combine_safetensors_to_bf16(
         );
         // layer_scalar: a checkpoint scalar, broadcast to (hidden,) F32.
         let scalar_key = format!("model.layers.{l}.layer_scalar");
-        if let Some(stored) = all_tensors.get(&scalar_key) {
-            if stored.shape.iter().product::<usize>() == 1 {
-                let value = f32::from_le_bytes([
-                    stored.data[0],
-                    stored.data[1],
-                    stored.data[2],
-                    stored.data[3],
-                ]);
-                let hidden = all_tensors
-                    .get("model.norm.weight")
-                    .map(|t| t.shape[0])
-                    .expect("final norm sizes hidden");
-                all_tensors.insert(
-                    scalar_key,
-                    StoredTensor {
-                        shape: vec![hidden],
-                        dtype: Dtype::F32,
-                        data: vec![value; hidden]
-                            .iter()
-                            .flat_map(|v| v.to_le_bytes())
-                            .collect(),
-                    },
-                );
-            }
+        if let Some(stored) = all_tensors.get(&scalar_key)
+            && stored.shape.iter().product::<usize>() == 1
+        {
+            let value = f32::from_le_bytes([
+                stored.data[0],
+                stored.data[1],
+                stored.data[2],
+                stored.data[3],
+            ]);
+            let hidden = all_tensors
+                .get("model.norm.weight")
+                .map(|t| t.shape[0])
+                .expect("final norm sizes hidden");
+            all_tensors.insert(
+                scalar_key,
+                StoredTensor {
+                    shape: vec![hidden],
+                    dtype: Dtype::F32,
+                    data: vec![value; hidden]
+                        .iter()
+                        .flat_map(|v| v.to_le_bytes())
+                        .collect(),
+                },
+            );
         }
     }
 

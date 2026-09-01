@@ -1,7 +1,9 @@
 //! Elementwise modulo (remainder — luminal's Mod).
 
-use luminal::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
 use luminal::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
+use luminal::layout_ir::{
+    AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
+};
 
 /// `ModFunctionalGeneric(numerator, denominator) -> out`
 ///
@@ -74,7 +76,11 @@ impl BufferTensorIrOp for ModFunctionalDps {
 
 impl Bufferizable for ModFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 2, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 2,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -85,7 +91,6 @@ impl ToDps for ModFunctionalDps {
 }
 
 impl LayoutIrOp for ModFunctionalDps {}
-
 
 // ---------------------------------------------------------------------------
 // Matchers
@@ -114,7 +119,6 @@ impl OpMatcher for ModFunctionalMatcher {
         ]
     }
 
-
     fn metadata_slots(&self) -> &'static [(&'static str, usize)] {
         &[("out_layout", 2)]
     }
@@ -123,7 +127,6 @@ impl OpMatcher for ModFunctionalMatcher {
         Box::new(ModFunctional)
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // ---- kernel ----
@@ -136,7 +139,10 @@ use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 
 /// Same story as the Div kernel: f32 `%` only; integer remainder is
 /// TruncRem.
-pub(crate) fn kernel(_op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+pub(crate) fn kernel(
+    _op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
     match &ctx.operands[0] {
         TypedBuffer::F32(_) => ctx.binary_elementwise(|a, b| a % b),
         other => anyhow::bail!(

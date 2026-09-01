@@ -442,6 +442,9 @@ pub struct ExtractedGraph {
 
 /// A node in the dataflow DAG: a dataflow op or a program boundary.
 #[derive(Debug, Clone)]
+// Boundary specifications are intentionally inline because this graph is
+// cloned and traversed as a compact plan; boxing would change its public IR.
+#[allow(clippy::large_enum_variant)]
 pub enum ExtractedNode {
     /// A program input boundary: a LayoutTensor backed by a pre-assigned buffer.
     /// Not a `LayoutOp` — it is a (caller-owned) storage specification.
@@ -915,8 +918,10 @@ impl DotEmitter {
                     label.push_str("<TD></TD>");
                     continue;
                 }
-                label.push_str("<TD CELLPADDING=\"0\"><TABLE BORDER=\"0\" CELLBORDER=\"0\" \
-                                CELLSPACING=\"0\" CELLPADDING=\"3\">");
+                label.push_str(
+                    "<TD CELLPADDING=\"0\"><TABLE BORDER=\"0\" CELLBORDER=\"0\" \
+                                CELLSPACING=\"0\" CELLPADDING=\"3\">",
+                );
                 let mut first_row = true;
                 for slot in slots {
                     if !first_row {
@@ -1077,7 +1082,14 @@ impl DotEmitter {
 
     /// An edge with explicit color and line style (dependency-ordering
     /// rendering).
-    pub(crate) fn styled_edge(&mut self, from: usize, to: usize, label: &str, color: &str, style: &str) {
+    pub(crate) fn styled_edge(
+        &mut self,
+        from: usize,
+        to: usize,
+        label: &str,
+        color: &str,
+        style: &str,
+    ) {
         self.body.push_str(&format!(
             "  n{from} -> n{to} [label=\"{}\", color=\"{color}\", fontcolor=\"{color}\", style=\"{style}\"];\n",
             dot_escape(label)
@@ -1159,4 +1171,3 @@ pub(crate) fn slot_port(slot: &str) -> String {
         .collect();
     format!("p_{sanitized}")
 }
-

@@ -45,7 +45,11 @@ pub struct KernelSource {
 
 impl KernelSource {
     pub(crate) fn plain(source: String, n: usize) -> Self {
-        Self { source, n, scratch_bytes: 0 }
+        Self {
+            source,
+            n,
+            scratch_bytes: 0,
+        }
     }
 }
 
@@ -62,7 +66,11 @@ fn row<T: 'static>(
     label: &'static str,
     codegen: fn(&dyn BufferTensorIrOp, &CodegenCtx) -> Result<Vec<KernelSource>>,
 ) -> CudaKernel {
-    CudaKernel { label, op_type: TypeId::of::<T>(), codegen }
+    CudaKernel {
+        label,
+        op_type: TypeId::of::<T>(),
+        codegen,
+    }
 }
 
 /// CUDA scalar type for a plan dtype. CL-1 covers the reference
@@ -84,7 +92,10 @@ pub(crate) fn numel(dims: &[usize]) -> usize {
 /// `out[i] = <expr of a[i], b[i]>` over the destination's numel.
 pub(crate) fn binary(ctx: &CodegenCtx, expr: &str) -> Result<Vec<KernelSource>> {
     let [a, b, _dest] = ctx.operand_dtypes.as_slice() else {
-        bail!("binary op expects two operands + dest, got {}", ctx.operand_dtypes.len());
+        bail!(
+            "binary op expects two operands + dest, got {}",
+            ctx.operand_dtypes.len()
+        );
     };
     let (ta, tb) = (cuda_type(*a)?, cuda_type(*b)?);
     let to = cuda_type(ctx.dest_dtypes[0])?;
@@ -180,7 +191,11 @@ pub(crate) fn lower_expr(expr: &IotaExpr, rank: usize) -> Result<String> {
             format!("(({a}) > ({b}) ? ({a}) : ({b}))")
         }
         IotaExpr::LessThanCast(a, b) => {
-            format!("(({}) < ({}) ? 1LL : 0LL)", lower_expr(a, rank)?, lower_expr(b, rank)?)
+            format!(
+                "(({}) < ({}) ? 1LL : 0LL)",
+                lower_expr(a, rank)?,
+                lower_expr(b, rank)?
+            )
         }
     })
 }
@@ -248,10 +263,7 @@ pub fn cuda_kernels() -> &'static [CudaKernel] {
                 ops::index_map_apply_materialize::codegen,
             ),
             row::<ops::gather::GatherDps>("Gather", ops::gather::codegen),
-            row::<ops::scatter::ScatterFunctionalDps>(
-                "ScatterFunctional",
-                ops::scatter::codegen,
-            ),
+            row::<ops::scatter::ScatterFunctionalDps>("ScatterFunctional", ops::scatter::codegen),
         ]
     })
 }

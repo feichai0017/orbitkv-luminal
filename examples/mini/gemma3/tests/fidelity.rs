@@ -3,8 +3,8 @@
 
 use luminal::prelude::*;
 use luminal::shape::IntExpr;
-use scalar_refs::*;
 use mini_gemma3::MiniGemma3;
+use scalar_refs::*;
 
 /// MiniGemma3 at FULL gemma anatomy vs a complete scalar reference:
 /// two layers (layer 0 LOCAL: window mask + θ=10k; layer 1 GLOBAL:
@@ -80,7 +80,10 @@ fn mini_gemma3_matches_scalar_reference() {
         (gather_idx.id, vec![0i32, 1].into()),
         (scatter_idx.id, vec![1i32].into()),
         (rope_rot.id, rot_matrix.clone().into()),
-        (model.final_norm.weight.expect("weighted").id, weights(D, 660).into()),
+        (
+            model.final_norm.weight.expect("weighted").id,
+            weights(D, 660).into(),
+        ),
     ];
     for (layer, (cos_table, sin_table)) in role_tables.iter().enumerate() {
         pairs.push((rope_inputs[layer].0.id, cos_table.clone().into()));
@@ -88,17 +91,47 @@ fn mini_gemma3_matches_scalar_reference() {
     }
     let mut ref_caches: Vec<(Vec<f32>, Vec<f32>)> = Vec::new();
     for (layer, block) in model.blocks.iter().enumerate() {
-        pairs.push((block.wq.weight.id, weights(D * Q_DIM, seeds(layer, 0)).into()));
-        pairs.push((block.wk.weight.id, weights(D * KV_DIM, seeds(layer, 1)).into()));
-        pairs.push((block.wv.weight.id, weights(D * KV_DIM, seeds(layer, 2)).into()));
-        pairs.push((block.wo.weight.id, weights(Q_DIM * D, seeds(layer, 3)).into()));
-        pairs.push((block.gate.weight.id, weights(D * FF, seeds(layer, 4)).into()));
+        pairs.push((
+            block.wq.weight.id,
+            weights(D * Q_DIM, seeds(layer, 0)).into(),
+        ));
+        pairs.push((
+            block.wk.weight.id,
+            weights(D * KV_DIM, seeds(layer, 1)).into(),
+        ));
+        pairs.push((
+            block.wv.weight.id,
+            weights(D * KV_DIM, seeds(layer, 2)).into(),
+        ));
+        pairs.push((
+            block.wo.weight.id,
+            weights(Q_DIM * D, seeds(layer, 3)).into(),
+        ));
+        pairs.push((
+            block.gate.weight.id,
+            weights(D * FF, seeds(layer, 4)).into(),
+        ));
         pairs.push((block.up.weight.id, weights(D * FF, seeds(layer, 5)).into()));
-        pairs.push((block.down.weight.id, weights(FF * D, seeds(layer, 6)).into()));
-        pairs.push((block.input_norm.weight.expect("weighted").id, weights(D, seeds(layer, 7)).into()));
-        pairs.push((block.post_attn_norm.weight.expect("weighted").id, weights(D, seeds(layer, 8)).into()));
-        pairs.push((block.pre_ff_norm.weight.expect("weighted").id, weights(D, seeds(layer, 9)).into()));
-        pairs.push((block.post_ff_norm.weight.expect("weighted").id, weights(D, seeds(layer, 10)).into()));
+        pairs.push((
+            block.down.weight.id,
+            weights(FF * D, seeds(layer, 6)).into(),
+        ));
+        pairs.push((
+            block.input_norm.weight.expect("weighted").id,
+            weights(D, seeds(layer, 7)).into(),
+        ));
+        pairs.push((
+            block.post_attn_norm.weight.expect("weighted").id,
+            weights(D, seeds(layer, 8)).into(),
+        ));
+        pairs.push((
+            block.pre_ff_norm.weight.expect("weighted").id,
+            weights(D, seeds(layer, 9)).into(),
+        ));
+        pairs.push((
+            block.post_ff_norm.weight.expect("weighted").id,
+            weights(D, seeds(layer, 10)).into(),
+        ));
         pairs.push((block.q_norm.id, weights(HD, seeds(layer, 11)).into()));
         pairs.push((block.k_norm.id, weights(HD, seeds(layer, 12)).into()));
         let kc = weights(SLOTS * KV_DIM, 300 + layer);
@@ -111,14 +144,14 @@ fn mini_gemma3_matches_scalar_reference() {
     // ---- scalar reference ----
     let wrms = |x: &[f32], w: &[f32]| -> Vec<f32> {
         // Gemma (1+w): the reference mirrors the in-graph unit offset.
-        ref_rms_norm(x, 1e-6).iter().zip(w).map(|(v, w)| v * (1.0 + w)).collect()
+        ref_rms_norm(x, 1e-6)
+            .iter()
+            .zip(w)
+            .map(|(v, w)| v * (1.0 + w))
+            .collect()
     };
-    let mul = |a: &[f32], b: &[f32]| -> Vec<f32> {
-        a.iter().zip(b).map(|(x, y)| x * y).collect()
-    };
-    let add = |a: &[f32], b: &[f32]| -> Vec<f32> {
-        a.iter().zip(b).map(|(x, y)| x + y).collect()
-    };
+    let mul = |a: &[f32], b: &[f32]| -> Vec<f32> { a.iter().zip(b).map(|(x, y)| x * y).collect() };
+    let add = |a: &[f32], b: &[f32]| -> Vec<f32> { a.iter().zip(b).map(|(x, y)| x + y).collect() };
     let mut x: Vec<f32> = embed_w[token * D..(token + 1) * D]
         .iter()
         .map(|v| v * (D as f32).sqrt())
@@ -130,12 +163,18 @@ fn mini_gemma3_matches_scalar_reference() {
         let (kc, vc) = &mut ref_caches[layer];
         let h = wrms(&x, &weights(D, seeds(layer, 7)));
         let q = ref_matmul(&h, &weights(D * Q_DIM, seeds(layer, 0)), D, Q_DIM);
-        let qw1: Vec<f32> = weights(HD, seeds(layer, 11)).iter().map(|w| 1.0 + w).collect();
+        let qw1: Vec<f32> = weights(HD, seeds(layer, 11))
+            .iter()
+            .map(|w| 1.0 + w)
+            .collect();
         let q = ref_rms_head_norm(&q, HD, &qw1);
         let q: Vec<f32> = q.iter().map(|v| v * scale).collect(); // folded into Q
         let q = ref_rotary_apply(&q, HD, cos_table, sin_table, &rot_matrix);
         let k = ref_matmul(&h, &weights(D * KV_DIM, seeds(layer, 1)), D, KV_DIM);
-        let kw1: Vec<f32> = weights(HD, seeds(layer, 12)).iter().map(|w| 1.0 + w).collect();
+        let kw1: Vec<f32> = weights(HD, seeds(layer, 12))
+            .iter()
+            .map(|w| 1.0 + w)
+            .collect();
         let k = ref_rms_head_norm(&k, HD, &kw1);
         let k = ref_rotary_apply(&k, HD, cos_table, sin_table, &rot_matrix);
         let v = ref_matmul(&h, &weights(D * KV_DIM, seeds(layer, 2)), D, KV_DIM);
@@ -157,7 +196,12 @@ fn mini_gemma3_matches_scalar_reference() {
         let attn_out = ref_matmul(&attn, &weights(Q_DIM * D, seeds(layer, 3)), Q_DIM, D);
         x = add(&x, &wrms(&attn_out, &weights(D, seeds(layer, 8))));
         let ff_in = wrms(&x, &weights(D, seeds(layer, 9)));
-        let gate = ref_gelu_tanh(&ref_matmul(&ff_in, &weights(D * FF, seeds(layer, 4)), D, FF));
+        let gate = ref_gelu_tanh(&ref_matmul(
+            &ff_in,
+            &weights(D * FF, seeds(layer, 4)),
+            D,
+            FF,
+        ));
         let up = ref_matmul(&ff_in, &weights(D * FF, seeds(layer, 5)), D, FF);
         let ff = ref_matmul(&mul(&gate, &up), &weights(FF * D, seeds(layer, 6)), FF, D);
         x = add(&x, &wrms(&ff, &weights(D, seeds(layer, 10))));
@@ -180,8 +224,14 @@ fn mini_gemma3_matches_scalar_reference() {
     rt.execute().expect("winner executes");
     assert_close(rt.get_f32(logits.id).expect("logits"), &ref_logits);
     for layer in 0..LAYERS {
-        assert_close(rt.get_f32(caches_out[layer].0.id).unwrap(), &ref_caches[layer].0);
-        assert_close(rt.get_f32(caches_out[layer].1.id).unwrap(), &ref_caches[layer].1);
+        assert_close(
+            rt.get_f32(caches_out[layer].0.id).unwrap(),
+            &ref_caches[layer].0,
+        );
+        assert_close(
+            rt.get_f32(caches_out[layer].1.id).unwrap(),
+            &ref_caches[layer].1,
+        );
     }
 }
 
@@ -206,8 +256,7 @@ fn probe_gemma_constructs() {
     let run = |label: &str, cx: &Graph, pairs: &[(petgraph::graph::NodeIndex, TypedBuffer)]| {
         let start = std::time::Instant::now();
         let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
-        let mut rt =
-            luminal_reference::ReferenceRuntime::load(cx).expect("native load");
+        let mut rt = luminal_reference::ReferenceRuntime::load(cx).expect("native load");
         match rt.search(&data, &budget) {
             Ok(outcome) => eprintln!(
                 "[gemma-probe] {label}: wall {:.1}s | {}",
@@ -286,8 +335,24 @@ fn probe_gemma_constructs() {
         let mut cx = Graph::new();
         let x = cx.tensor((1, 6));
         let w = cx.tensor((6, 6));
-        let pre = luminal_nn::LayerNorm::new(6, true, false, false, 1e-6, &Ns::root().child("pre"), &mut cx);
-        let post = luminal_nn::LayerNorm::new(6, true, false, false, 1e-6, &Ns::root().child("post"), &mut cx);
+        let pre = luminal_nn::LayerNorm::new(
+            6,
+            true,
+            false,
+            false,
+            1e-6,
+            &Ns::root().child("pre"),
+            &mut cx,
+        );
+        let post = luminal_nn::LayerNorm::new(
+            6,
+            true,
+            false,
+            false,
+            1e-6,
+            &Ns::root().child("post"),
+            &mut cx,
+        );
         let out = (x + post.forward(pre.forward(x).matmul(w))).output();
         let _ = out;
         let pairs: Vec<(petgraph::graph::NodeIndex, TypedBuffer)> = vec![

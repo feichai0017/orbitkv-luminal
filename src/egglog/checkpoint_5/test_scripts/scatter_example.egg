@@ -70,4 +70,3 @@
              (LayoutTensorCons (LayoutTensorLit column_iota_logical position_layout)
                (LayoutTensorNil)))))
        (LayoutTensorCons (LayoutTensorLit updated_logical cache_layout) (LayoutTensorNil)))))
-

@@ -256,9 +256,11 @@ impl Whisper {
         let x = conv1d_bias(x, self.conv2_w, self.conv2_b, 3, 2, 1).gelu();
         let mut x = x.transpose(0, 1) + self.enc_pos;
         for layer in &self.enc_layers {
-            x = x + layer.attn.bidirectional(layer.attn_norm.forward(x), layer.attn_norm.forward(x));
+            x = x + layer
+                .attn
+                .bidirectional(layer.attn_norm.forward(x), layer.attn_norm.forward(x));
             let ff_in = layer.ff_norm.forward(x);
-            x = x + layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
+            x += layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
         }
         self.enc_final_norm.forward(x)
     }
@@ -289,13 +291,13 @@ impl Whisper {
                 scatter_idx,
                 q_pos,
             );
-            x = x + attn;
+            x += attn;
             caches_out.push((k_cache, v_cache));
             x = x + layer
                 .cross_attn
                 .bidirectional(layer.cross_norm.forward(x), xa);
             let ff_in = layer.ff_norm.forward(x);
-            x = x + layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
+            x += layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
         }
         let x = self.dec_final_norm.forward(x);
         (self.embed.reverse(x), caches_out)

@@ -28,8 +28,6 @@ pub(crate) mod add;
 pub(crate) mod cast;
 pub(crate) mod constant;
 pub(crate) mod div;
-pub(crate) mod trunc_div;
-pub(crate) mod trunc_rem;
 pub(crate) mod exp;
 pub(crate) mod exp2;
 pub(crate) mod gather;
@@ -39,6 +37,8 @@ pub(crate) mod less_than;
 pub(crate) mod log2;
 pub(crate) mod modulo;
 pub(crate) mod mul;
+pub(crate) mod trunc_div;
+pub(crate) mod trunc_rem;
 // (poison moved to core `luminal::poison` in Step B; re-exported below.)
 pub(crate) mod recip;
 pub(crate) mod reduce_max;
@@ -67,9 +67,9 @@ pub use index_map_apply_materialize::IndexMapApplyMaterialize;
 pub use iota::Iota;
 pub use less_than::LessThan;
 pub use log2::Log2Functional;
+pub use luminal::poison::Poison;
 pub use modulo::ModFunctional;
 pub use mul::MulFunctional;
-pub use luminal::poison::Poison;
 pub use recip::RecipFunctional;
 pub use reduce_max::ReduceMax;
 pub use reduce_sum::ReduceSum;
@@ -104,8 +104,6 @@ pub use add::AddFunctionalMatcher;
 pub use cast::CastMatcher;
 pub use constant::ConstantMatcher;
 pub use div::DivFunctionalMatcher;
-pub use trunc_div::{TruncDivFunctional, TruncDivFunctionalDps, TruncDivFunctionalMatcher};
-pub use trunc_rem::{TruncRemFunctional, TruncRemFunctionalDps, TruncRemFunctionalMatcher};
 pub use exp::ExpFunctionalMatcher;
 pub use exp2::Exp2FunctionalMatcher;
 pub use gather::GatherMatcher;
@@ -121,6 +119,8 @@ pub use reduce_sum::ReduceSumMatcher;
 pub use scatter::ScatterFunctionalMatcher;
 pub use sin::SinFunctionalMatcher;
 pub use sqrt::SqrtFunctionalMatcher;
+pub use trunc_div::{TruncDivFunctional, TruncDivFunctionalDps, TruncDivFunctionalMatcher};
+pub use trunc_rem::{TruncRemFunctional, TruncRemFunctionalDps, TruncRemFunctionalMatcher};
 
 /// The matcher half of [`reference_ops`] — what the extractor builds its
 /// constructor-name registry from. Not a list in its own right: every
@@ -167,53 +167,103 @@ pub fn reference_ops() -> &'static [ReferenceOp] {
     OPS.get_or_init(|| {
         vec![
             // ── elementwise binary ──
-            ReferenceOp { matcher: || Box::new(AddFunctionalMatcher),
-                kernel: entry::<AddFunctionalDps>("AddFunctionalGeneric", add::kernel) },
-            ReferenceOp { matcher: || Box::new(MulFunctionalMatcher),
-                kernel: entry::<MulFunctionalDps>("MulFunctionalGeneric", mul::kernel) },
-            ReferenceOp { matcher: || Box::new(DivFunctionalMatcher),
-                kernel: entry::<DivFunctionalDps>("DivFunctionalGeneric", div::kernel) },
-            ReferenceOp { matcher: || Box::new(TruncDivFunctionalMatcher),
-                kernel: entry::<TruncDivFunctionalDps>("TruncDivFunctionalGeneric", trunc_div::kernel) },
-            ReferenceOp { matcher: || Box::new(TruncRemFunctionalMatcher),
-                kernel: entry::<TruncRemFunctionalDps>("TruncRemFunctionalGeneric", trunc_rem::kernel) },
-            ReferenceOp { matcher: || Box::new(ModFunctionalMatcher),
-                kernel: entry::<ModFunctionalDps>("ModFunctionalGeneric", modulo::kernel) },
-            ReferenceOp { matcher: || Box::new(LessThanMatcher),
-                kernel: entry::<LessThanDps>("LessThanGeneric", less_than::kernel) },
+            ReferenceOp {
+                matcher: || Box::new(AddFunctionalMatcher),
+                kernel: entry::<AddFunctionalDps>("AddFunctionalGeneric", add::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(MulFunctionalMatcher),
+                kernel: entry::<MulFunctionalDps>("MulFunctionalGeneric", mul::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(DivFunctionalMatcher),
+                kernel: entry::<DivFunctionalDps>("DivFunctionalGeneric", div::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(TruncDivFunctionalMatcher),
+                kernel: entry::<TruncDivFunctionalDps>(
+                    "TruncDivFunctionalGeneric",
+                    trunc_div::kernel,
+                ),
+            },
+            ReferenceOp {
+                matcher: || Box::new(TruncRemFunctionalMatcher),
+                kernel: entry::<TruncRemFunctionalDps>(
+                    "TruncRemFunctionalGeneric",
+                    trunc_rem::kernel,
+                ),
+            },
+            ReferenceOp {
+                matcher: || Box::new(ModFunctionalMatcher),
+                kernel: entry::<ModFunctionalDps>("ModFunctionalGeneric", modulo::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(LessThanMatcher),
+                kernel: entry::<LessThanDps>("LessThanGeneric", less_than::kernel),
+            },
             // ── elementwise unary ──
-            ReferenceOp { matcher: || Box::new(SqrtFunctionalMatcher),
-                kernel: entry::<SqrtFunctionalDps>("SqrtFunctionalGeneric", sqrt::kernel) },
-            ReferenceOp { matcher: || Box::new(ExpFunctionalMatcher),
-                kernel: entry::<ExpFunctionalDps>("ExpFunctionalGeneric", exp::kernel) },
-            ReferenceOp { matcher: || Box::new(Exp2FunctionalMatcher),
-                kernel: entry::<Exp2FunctionalDps>("Exp2FunctionalGeneric", exp2::kernel) },
-            ReferenceOp { matcher: || Box::new(Log2FunctionalMatcher),
-                kernel: entry::<Log2FunctionalDps>("Log2FunctionalGeneric", log2::kernel) },
-            ReferenceOp { matcher: || Box::new(SinFunctionalMatcher),
-                kernel: entry::<SinFunctionalDps>("SinFunctionalGeneric", sin::kernel) },
-            ReferenceOp { matcher: || Box::new(RecipFunctionalMatcher),
-                kernel: entry::<RecipFunctionalDps>("RecipFunctionalGeneric", recip::kernel) },
-            ReferenceOp { matcher: || Box::new(CastMatcher),
-                kernel: entry::<CastDps>("CastGeneric", cast::kernel) },
+            ReferenceOp {
+                matcher: || Box::new(SqrtFunctionalMatcher),
+                kernel: entry::<SqrtFunctionalDps>("SqrtFunctionalGeneric", sqrt::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(ExpFunctionalMatcher),
+                kernel: entry::<ExpFunctionalDps>("ExpFunctionalGeneric", exp::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(Exp2FunctionalMatcher),
+                kernel: entry::<Exp2FunctionalDps>("Exp2FunctionalGeneric", exp2::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(Log2FunctionalMatcher),
+                kernel: entry::<Log2FunctionalDps>("Log2FunctionalGeneric", log2::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(SinFunctionalMatcher),
+                kernel: entry::<SinFunctionalDps>("SinFunctionalGeneric", sin::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(RecipFunctionalMatcher),
+                kernel: entry::<RecipFunctionalDps>("RecipFunctionalGeneric", recip::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(CastMatcher),
+                kernel: entry::<CastDps>("CastGeneric", cast::kernel),
+            },
             // ── sources ──
-            ReferenceOp { matcher: || Box::new(ConstantMatcher),
-                kernel: entry::<ConstantDps>("ConstantGeneric", constant::kernel) },
-            ReferenceOp { matcher: || Box::new(IotaMatcher),
-                kernel: entry::<IotaDps>("IotaGeneric", iota::kernel) },
+            ReferenceOp {
+                matcher: || Box::new(ConstantMatcher),
+                kernel: entry::<ConstantDps>("ConstantGeneric", constant::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(IotaMatcher),
+                kernel: entry::<IotaDps>("IotaGeneric", iota::kernel),
+            },
             // ── reductions ──
-            ReferenceOp { matcher: || Box::new(ReduceSumMatcher),
-                kernel: entry::<ReduceSumDps>("ReduceSumGeneric", reduce_sum::kernel) },
-            ReferenceOp { matcher: || Box::new(ReduceMaxMatcher),
-                kernel: entry::<ReduceMaxDps>("ReduceMaxGeneric", reduce_max::kernel) },
+            ReferenceOp {
+                matcher: || Box::new(ReduceSumMatcher),
+                kernel: entry::<ReduceSumDps>("ReduceSumGeneric", reduce_sum::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(ReduceMaxMatcher),
+                kernel: entry::<ReduceMaxDps>("ReduceMaxGeneric", reduce_max::kernel),
+            },
             // ── data movement ──
-            ReferenceOp { matcher: || Box::new(GatherMatcher),
-                kernel: entry::<GatherDps>("GatherGeneric", gather::kernel) },
-            ReferenceOp { matcher: || Box::new(ScatterFunctionalMatcher),
-                kernel: entry::<ScatterFunctionalDps>("ScatterFunctionalGeneric", scatter::kernel) },
-            ReferenceOp { matcher: || Box::new(IndexMapApplyMaterializeMatcher),
+            ReferenceOp {
+                matcher: || Box::new(GatherMatcher),
+                kernel: entry::<GatherDps>("GatherGeneric", gather::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(ScatterFunctionalMatcher),
+                kernel: entry::<ScatterFunctionalDps>("ScatterFunctionalGeneric", scatter::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(IndexMapApplyMaterializeMatcher),
                 kernel: entry::<IndexMapApplyMaterializeDps>(
-                    "IndexMapApplyMaterialize", index_map_apply_materialize::kernel) },
+                    "IndexMapApplyMaterialize",
+                    index_map_apply_materialize::kernel,
+                ),
+            },
         ]
     })
 }
@@ -259,8 +309,8 @@ mod registry_contract {
     #[test]
     fn builtin_ops_declare_no_unconditional_permits() {
         use super::{
-            AddFunctional, DivFunctional, ExpFunctional, IndexMapApplyMaterialize,
-            MulFunctional, ReduceMax, ReduceSum, SqrtFunctional,
+            AddFunctional, DivFunctional, ExpFunctional, IndexMapApplyMaterialize, MulFunctional,
+            ReduceMax, ReduceSum, SqrtFunctional,
         };
         let ops: Vec<Box<dyn LayoutIrOp>> = vec![
             Box::new(SqrtFunctional),
@@ -274,7 +324,9 @@ mod registry_contract {
         ];
         for op in &ops {
             assert!(
-                op.alias_info().iter().all(|info| info.sharing == Sharing::Must),
+                op.alias_info()
+                    .iter()
+                    .all(|info| info.sharing == Sharing::Must),
                 "{}",
                 op.label()
             );

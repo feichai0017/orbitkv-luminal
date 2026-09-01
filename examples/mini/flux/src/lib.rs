@@ -58,7 +58,6 @@ pub struct MiniDit {
     pub single_knorm: GraphTensor,
     ln: LayerNorm, // no-affine LayerNorm, shared (stateless)
     d: usize,
-    n_heads: usize,
     head_dim: usize,
     mlp: usize,
     t_half: usize,
@@ -106,14 +105,19 @@ impl MiniDit {
             ff_out: Linear::new(mlp, d, false, &Ns::root().child("ff_out"), cx),
             ctx_ff_in: Linear::new(d, 2 * mlp, false, &Ns::root().child("ctx_ff_in"), cx),
             ctx_ff_out: Linear::new(mlp, d, false, &Ns::root().child("ctx_ff_out"), cx),
-            single_proj: Linear::new(d, 3 * d + 2 * mlp, false, &Ns::root().child("single_proj"), cx),
+            single_proj: Linear::new(
+                d,
+                3 * d + 2 * mlp,
+                false,
+                &Ns::root().child("single_proj"),
+                cx,
+            ),
             single_out_attn: Linear::new(d, d, false, &Ns::root().child("single_out_attn"), cx),
             single_out_mlp: Linear::new(mlp, d, false, &Ns::root().child("single_out_mlp"), cx),
             single_qnorm: cx.named_tensor("SglQNorm", head_dim),
             single_knorm: cx.named_tensor("SglKNorm", head_dim),
             ln: LayerNorm::new(d, false, false, true, 1e-6, &Ns::root().child("ln"), cx),
             d,
-            n_heads,
             head_dim,
             mlp,
             t_half,
@@ -158,8 +162,12 @@ impl MiniDit {
         joint_base: GraphTensor,
     ) -> GraphTensor {
         let (d, mlp, s_txt) = (self.d, self.mlp, self.s_txt);
-        let temb = self.t_mlp2.forward(self.t_mlp1.forward(self.sinusoid(t)).silu())
-            + self.g_mlp2.forward(self.g_mlp1.forward(self.sinusoid(guidance)).silu()); // (1, d)
+        let temb = self
+            .t_mlp2
+            .forward(self.t_mlp1.forward(self.sinusoid(t)).silu())
+            + self
+                .g_mlp2
+                .forward(self.g_mlp1.forward(self.sinusoid(guidance)).silu()); // (1, d)
         let cond = temb.silu();
         let m_img = self.mod_img.forward(cond); // (1, 6d): 2 × (shift, scale, gate)
         let m_txt = self.mod_txt.forward(cond);
@@ -167,8 +175,8 @@ impl MiniDit {
         let triple = |m: GraphTensor, set: usize| {
             let base = set * 3 * d;
             (
-                m.slice_along(base..base + d, 1),          // shift
-                m.slice_along(base + d..base + 2 * d, 1),  // scale
+                m.slice_along(base..base + d, 1),             // shift
+                m.slice_along(base + d..base + 2 * d, 1),     // scale
                 m.slice_along(base + 2 * d..base + 3 * d, 1), // gate
             )
         };
@@ -202,9 +210,8 @@ impl MiniDit {
             let scores = q.matmul(k.permute((0, 2, 1))) * scale; // (H,S,S)
             scores.softmax(2).matmul(v) // (H,S,hd)
         };
-        let swiglu = |u: GraphTensor| {
-            u.slice_along(0..mlp, 1).silu() * u.slice_along(mlp..2 * mlp, 1)
-        };
+        let swiglu =
+            |u: GraphTensor| u.slice_along(0..mlp, 1).silu() * u.slice_along(mlp..2 * mlp, 1);
 
         // ---- double-stream block (txt first in every concat/split) ----
         let (shift0, scale0, gate0) = triple(m_img, 0);
@@ -236,12 +243,18 @@ impl MiniDit {
         )); // (s, d)
         let attn_txt = attn.slice_along(0..s_txt, 0);
         let attn_img = attn.slice_along(s_txt.., 0);
-        img = img + gate(self.img_out.forward(attn_img), gate0);
-        txt = txt + gate(self.txt_out.forward(attn_txt), c_gate0);
-        let ff = swiglu(self.ff_in.forward(ada(self.ln.forward(img), scale1, shift1)));
-        img = img + gate(self.ff_out.forward(ff), gate1);
-        let c_ff = swiglu(self.ctx_ff_in.forward(ada(self.ln.forward(txt), c_scale1, c_shift1)));
-        txt = txt + gate(self.ctx_ff_out.forward(c_ff), c_gate1);
+        img += gate(self.img_out.forward(attn_img), gate0);
+        txt += gate(self.txt_out.forward(attn_txt), c_gate0);
+        let ff = swiglu(
+            self.ff_in
+                .forward(ada(self.ln.forward(img), scale1, shift1)),
+        );
+        img += gate(self.ff_out.forward(ff), gate1);
+        let c_ff = swiglu(
+            self.ctx_ff_in
+                .forward(ada(self.ln.forward(txt), c_scale1, c_shift1)),
+        );
+        txt += gate(self.ctx_ff_out.forward(c_ff), c_gate1);
 
         // ---- single-stream block over [txt ‖ img] ----
         // The joint sequence assembles by SCATTER writes into a zero
@@ -267,13 +280,12 @@ impl MiniDit {
         let v = heads(proj.slice_along(2 * d..3 * d, 1));
         let attn = unheads(sdpa(rope(q), rope(k), v)); // (s, d)
         let mlp_out = swiglu(proj.slice_along(3 * d..3 * d + 2 * mlp, 1)); // (s, mlp)
-        // Fused out-projection over [attn ‖ mlp], spelled as the
-        // row-split sum (see the single_out_* field note).
-        hidden = hidden
-            + gate(
-                self.single_out_attn.forward(attn) + self.single_out_mlp.forward(mlp_out),
-                s_gate,
-            );
+                                                                           // Fused out-projection over [attn ‖ mlp], spelled as the
+                                                                           // row-split sum (see the single_out_* field note).
+        hidden += gate(
+            self.single_out_attn.forward(attn) + self.single_out_mlp.forward(mlp_out),
+            s_gate,
+        );
 
         // ---- AdaLayerNormContinuous head: (scale, shift) — REVERSED ----
         let img_final = hidden.slice_along(s_txt.., 0); // (s_img, d)
@@ -301,10 +313,10 @@ pub fn mini_dit_rope_tables(s_txt: usize, h: usize, w: usize) -> (Vec<f32>, Vec<
     }
     let (mut cos, mut sin) = (Vec::new(), Vec::new());
     for id in ids {
-        for axis in 0..4 {
+        for coordinate in id {
             for _ in 0..2 {
-                cos.push(id[axis].cos());
-                sin.push(id[axis].sin());
+                cos.push(coordinate.cos());
+                sin.push(coordinate.sin());
             }
         }
     }

@@ -1,7 +1,9 @@
 //! Elementwise sine.
 
-use luminal::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
 use luminal::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
+use luminal::layout_ir::{
+    AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
+};
 
 /// `SinFunctionalGeneric(input) -> out`
 ///
@@ -71,7 +73,11 @@ impl BufferTensorIrOp for SinFunctionalDps {
 
 impl Bufferizable for SinFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 1,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -82,7 +88,6 @@ impl ToDps for SinFunctionalDps {
 }
 
 impl LayoutIrOp for SinFunctionalDps {}
-
 
 // ---------------------------------------------------------------------------
 // Matchers
@@ -111,7 +116,6 @@ impl OpMatcher for SinFunctionalMatcher {
         ]
     }
 
-
     fn metadata_slots(&self) -> &'static [(&'static str, usize)] {
         &[("layout", 1)]
     }
@@ -120,7 +124,6 @@ impl OpMatcher for SinFunctionalMatcher {
         Box::new(SinFunctional)
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // ---- kernel ----
@@ -131,6 +134,9 @@ impl OpMatcher for SinFunctionalMatcher {
 
 use luminal::buffer_tensor_ir::ReferenceKernelCtx;
 
-pub(crate) fn kernel(_op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+pub(crate) fn kernel(
+    _op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
     ctx.unary_elementwise(|x| x.sin())
 }

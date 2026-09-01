@@ -1,7 +1,9 @@
 //! Max reduction along one axis (the axis is op metadata, not an operand).
 
-use luminal::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
 use luminal::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
+use luminal::layout_ir::{
+    AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
+};
 
 /// `ReduceMaxGeneric(input) -> out`
 ///
@@ -75,7 +77,11 @@ impl BufferTensorIrOp for ReduceMaxDps {
 
 impl Bufferizable for ReduceMaxDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 1,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -114,13 +120,14 @@ impl OpMatcher for ReduceMaxMatcher {
         ]
     }
 
-
     fn metadata_slots(&self) -> &'static [(&'static str, usize)] {
         &[("axis", 1), ("out_layout", 2)]
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ReduceMax { axis: site.child_i64(1) })
+        Box::new(ReduceMax {
+            axis: site.child_i64(1),
+        })
     }
 }
 
@@ -131,12 +138,15 @@ impl OpMatcher for ReduceMaxMatcher {
 // 2026-08-13: everything about an op lives in the op's folder).
 // ---------------------------------------------------------------------------
 
-use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 use crate::kernels::expect_op;
+use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 
 /// Axis reduce-max. Int max needs no overflow check (max never leaves
 /// the operand range).
-pub(crate) fn kernel(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+pub(crate) fn kernel(
+    op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
     let op = expect_op::<ReduceMaxDps>(op)?;
     match &ctx.operands[0] {
         TypedBuffer::F32(_) => ctx.reduce_axis(op.axis, f32::NEG_INFINITY, |acc, x| acc.max(x)),

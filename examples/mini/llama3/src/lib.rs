@@ -12,6 +12,7 @@ use luminal_nn::{Embedding, GatedFfn, LayerNorm, LlamaBlock};
 /// family keeps its own NAMED front door (ruling 2026-08-10: minis are
 /// named for the model they represent, not parameterized as llama) so
 /// family-specific constructs accrete in one visible place.
+#[allow(clippy::too_many_arguments)]
 fn gqa_lm_new(
     vocab: usize,
     d: usize,
@@ -28,7 +29,11 @@ fn gqa_lm_new(
         .map(|l| {
             let layer_ns = model.child("layers").index(l);
             let block = LlamaBlock::new_with_ffn(d, ff, n_heads, n_kv_heads, ffn, &layer_ns, cx);
-            if qk_norm { block.with_qk_norm(&layer_ns, cx) } else { block }
+            if qk_norm {
+                block.with_qk_norm(&layer_ns, cx)
+            } else {
+                block
+            }
         })
         .collect();
     (
@@ -38,6 +43,7 @@ fn gqa_lm_new(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gqa_lm_forward(
     embed: &Embedding,
     blocks: &[LlamaBlock],
@@ -84,9 +90,22 @@ impl MiniLlama3 {
         layers: usize,
         cx: &mut Graph,
     ) -> Self {
-        let (embed, blocks, final_norm) =
-            gqa_lm_new(vocab, d, ff, n_heads, n_kv_heads, layers, GatedFfn::SwiGlu, false, cx);
-        Self { embed, blocks, final_norm }
+        let (embed, blocks, final_norm) = gqa_lm_new(
+            vocab,
+            d,
+            ff,
+            n_heads,
+            n_kv_heads,
+            layers,
+            GatedFfn::SwiGlu,
+            false,
+            cx,
+        );
+        Self {
+            embed,
+            blocks,
+            final_norm,
+        }
     }
 
     /// ids (s,) Int + one (k, v) cache pair per layer → (logits, caches').

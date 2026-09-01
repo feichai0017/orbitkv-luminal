@@ -20,7 +20,12 @@ fn allow_list_claims_the_expression_carrying_ops() {
     let cuda = CudaRuntime::allow_list();
     assert!(!cuda.is_empty(), "CUDA claims nothing");
     // CL-1b: the expression-carrying ops are claimed now.
-    for present in ["Iota", "Gather", "ScatterFunctional", "IndexMapApplyMaterialize"] {
+    for present in [
+        "Iota",
+        "Gather",
+        "ScatterFunctional",
+        "IndexMapApplyMaterialize",
+    ] {
         assert!(
             cuda.iter().any(|op| op.contains(present)),
             "{present} missing from the CL-1b claim set"
@@ -71,7 +76,9 @@ fn search_produces_a_codegen_complete_plan() {
     #[cfg(not(feature = "device"))]
     {
         // Without the device feature, execute refuses loudly.
-        let err = rt.execute().expect_err("execute must refuse without a device");
+        let err = rt
+            .execute()
+            .expect_err("execute must refuse without a device");
         assert!(
             err.to_string().contains("device"),
             "refusal must name the missing feature: {err}"

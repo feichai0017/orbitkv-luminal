@@ -14,7 +14,9 @@
 //! output-role buffer back to host `TypedBuffer`s keyed by BufferLit.
 
 use anyhow::{anyhow, bail, Context, Result};
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, LaunchConfig, PushKernelArg};
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaModule, CudaSlice, LaunchConfig, PushKernelArg,
+};
 use cudarc::nvrtc::compile_ptx;
 use luminal::buffer_tensor_ir::TypedBuffer;
 use luminal::bufferize::{BufferId, BufferIrGraph, BufferNode, EdgeKind};
@@ -53,13 +55,22 @@ fn bytemuck_cast<T>(v: &[T]) -> &[u8] {
 fn bytes_to_typed(bytes: &[u8], dtype: PlanDtype) -> Result<TypedBuffer> {
     Ok(match dtype {
         PlanDtype::F32 => TypedBuffer::F32(
-            bytes.chunks_exact(4).map(|c| f32::from_ne_bytes(c.try_into().unwrap())).collect(),
+            bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+                .collect(),
         ),
         PlanDtype::Int => TypedBuffer::I32(
-            bytes.chunks_exact(4).map(|c| i32::from_ne_bytes(c.try_into().unwrap())).collect(),
+            bytes
+                .chunks_exact(4)
+                .map(|c| i32::from_ne_bytes(c.try_into().unwrap()))
+                .collect(),
         ),
         PlanDtype::Int64 => TypedBuffer::I64(
-            bytes.chunks_exact(8).map(|c| i64::from_ne_bytes(c.try_into().unwrap())).collect(),
+            bytes
+                .chunks_exact(8)
+                .map(|c| i64::from_ne_bytes(c.try_into().unwrap()))
+                .collect(),
         ),
         PlanDtype::Bool | PlanDtype::Bool8 => TypedBuffer::bool8(bytes.to_vec())?,
         other => bail!("cuda-lite CL-2 cannot read back {other:?}"),
@@ -80,8 +91,8 @@ impl KernelCache {
         if let Some((_, func)) = self.modules.get(&key) {
             return Ok(func.clone());
         }
-        let ptx = compile_ptx(source)
-            .map_err(|e| anyhow!("NVRTC failed: {e:?}\nsource:\n{source}"))?;
+        let ptx =
+            compile_ptx(source).map_err(|e| anyhow!("NVRTC failed: {e:?}\nsource:\n{source}"))?;
         let module = self.ctx.load_module(ptx).context("module load")?;
         let func = module.load_function("k").context("entry `k` missing")?;
         self.modules.insert(key, (module, func.clone()));
@@ -97,7 +108,10 @@ pub fn execute_plan(
 ) -> Result<FxHashMap<i64, TypedBuffer>> {
     let ctx = CudaContext::new(0).context("no CUDA device 0")?;
     let stream = ctx.default_stream();
-    let mut cache = KernelCache { ctx: ctx.clone(), modules: HashMap::new() };
+    let mut cache = KernelCache {
+        ctx: ctx.clone(),
+        modules: HashMap::new(),
+    };
 
     // Phase 1: materialize every buffer on device.
     let mut storage: FxHashMap<BufferId, CudaSlice<u8>> = FxHashMap::default();
@@ -110,7 +124,10 @@ pub fn execute_plan(
         let dtype = buffer
             .dtype
             .ok_or_else(|| anyhow!("buffer {:?} has no dtype", buffer.label))?;
-        let dims: Vec<usize> = dims.iter().map(|&d| usize::try_from(d).unwrap_or(0)).collect();
+        let dims: Vec<usize> = dims
+            .iter()
+            .map(|&d| usize::try_from(d).unwrap_or(0))
+            .collect();
         let numel: usize = dims.iter().product();
         let bytes = numel * dtype_bytes(dtype)?;
         let mut slice = stream
@@ -147,10 +164,14 @@ pub fn execute_plan(
         match &plan.dag[node] {
             BufferNode::BufferInput { .. } | BufferNode::BufferOutput { .. } => {}
             BufferNode::BufferCopy { src, dst } => {
-                let (src_geo, src_dtype) =
-                    geometry.get(src).ok_or_else(|| anyhow!("copy src unknown"))?.clone();
-                let (dst_geo, dst_dtype) =
-                    geometry.get(dst).ok_or_else(|| anyhow!("copy dst unknown"))?.clone();
+                let (src_geo, src_dtype) = geometry
+                    .get(src)
+                    .ok_or_else(|| anyhow!("copy src unknown"))?
+                    .clone();
+                let (dst_geo, dst_dtype) = geometry
+                    .get(dst)
+                    .ok_or_else(|| anyhow!("copy dst unknown"))?
+                    .clone();
                 if src_geo.iter().product::<usize>() != dst_geo.iter().product::<usize>()
                     || src_dtype != dst_dtype
                 {
@@ -158,9 +179,13 @@ pub fn execute_plan(
                 }
                 let src_slice = storage.get(src).unwrap().clone();
                 let dst_slice = storage.get_mut(dst).unwrap();
-                stream.memcpy_dtod(&src_slice, dst_slice).context("D2D copy")?;
+                stream
+                    .memcpy_dtod(&src_slice, dst_slice)
+                    .context("D2D copy")?;
             }
-            BufferNode::Compute { op, reads, writes, .. } => {
+            BufferNode::Compute {
+                op, reads, writes, ..
+            } => {
                 let label = op.label();
                 if label == "BufferAlloc" || label == "BufferFree" {
                     continue; // storage is pre-materialized in CL-2
@@ -199,15 +224,21 @@ pub fn execute_plan(
                 // one sequence share the stream, so phase ordering
                 // (e.g. scatter's init-copy then writes) is free.
                 if writes.len() != 1 {
-                    bail!("{label}: CL-2 handles single-destination ops, got {}", writes.len());
+                    bail!(
+                        "{label}: CL-2 handles single-destination ops, got {}",
+                        writes.len()
+                    );
                 }
                 let input_count = reads.len().saturating_sub(writes.len());
-                let inputs: Vec<CudaSlice<u8>> =
-                    reads[..input_count].iter().map(|id| storage.get(id).unwrap().clone()).collect();
+                let inputs: Vec<CudaSlice<u8>> = reads[..input_count]
+                    .iter()
+                    .map(|id| storage.get(id).unwrap().clone())
+                    .collect();
                 let (dest_dims, dest_dtype) = geometry.get(&writes[0]).unwrap().clone();
-                let dest_bytes =
-                    dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
-                let mut dest = stream.alloc_zeros::<u8>(dest_bytes.max(1)).context("dest alloc")?;
+                let dest_bytes = dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
+                let mut dest = stream
+                    .alloc_zeros::<u8>(dest_bytes.max(1))
+                    .context("dest alloc")?;
                 let mut scratch: Option<CudaSlice<u8>> = None;
 
                 for generated in &launches {

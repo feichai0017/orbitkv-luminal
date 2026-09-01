@@ -53,10 +53,8 @@ pub fn extract_layout_ir_with_genome(
 pub fn producer_index_with_ops(
     egraph: &egraph_serialize::EGraph,
     allowed_ops: Option<&[&str]>,
-) -> std::collections::BTreeMap<
-    egraph_serialize::ClassId,
-    Vec<(String, extractor::ProducerChoice)>,
-> {
+) -> std::collections::BTreeMap<egraph_serialize::ClassId, Vec<(String, extractor::ProducerChoice)>>
+{
     extractor::ExtractionSession::new_with_matcher_set(
         egraph,
         allowed_ops,
@@ -114,10 +112,7 @@ pub fn genome_preferring(
 
 /// Genome-driven fixture extraction (the selection adapter's walk) plus the
 /// plan fingerprint the search dedups on.
-pub fn extract_fixture_with_genome(
-    script: &str,
-    preferences: &[&str],
-) -> (ExtractedGraph, u64) {
+pub fn extract_fixture_with_genome(script: &str, preferences: &[&str]) -> (ExtractedGraph, u64) {
     let egraph = serialize_fixture(script);
     let genome = genome_preferring(&egraph, preferences);
     let graph = extract_layout_ir_with_genome(&egraph, &genome)
@@ -215,7 +210,10 @@ pub fn plain_plan_exists(cx: &luminal::graph::Graph) -> anyhow::Result<()> {
 /// (`luminal::test_support::harness_search_options`).
 pub fn run_reference(
     cx: &luminal::graph::Graph,
-    inputs: &[(petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer)],
+    inputs: &[(
+        petgraph::graph::NodeIndex,
+        luminal::buffer_tensor_ir::TypedBuffer,
+    )],
 ) -> crate::runtime::ReferenceRuntime {
     run_reference_with_ranges(cx, inputs, &[])
 }
@@ -228,11 +226,14 @@ pub fn run_reference(
 /// `bind_value_range` between load and search.
 pub fn run_reference_with_ranges(
     cx: &luminal::graph::Graph,
-    inputs: &[(petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer)],
+    inputs: &[(
+        petgraph::graph::NodeIndex,
+        luminal::buffer_tensor_ir::TypedBuffer,
+    )],
     ranges: &[(petgraph::graph::NodeIndex, i64, i64)],
 ) -> crate::runtime::ReferenceRuntime {
-    let mut rt = crate::runtime::ReferenceRuntime::load(cx)
-        .expect("recorder clean for a covered graph");
+    let mut rt =
+        crate::runtime::ReferenceRuntime::load(cx).expect("recorder clean for a covered graph");
     let mut vars: Vec<_> = cx.dyn_map.iter().collect();
     vars.sort();
     for (var, value) in vars {

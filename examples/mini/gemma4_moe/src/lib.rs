@@ -48,6 +48,7 @@ fn moe_lm_new(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn moe_lm_forward(
     embed: &Embedding,
     blocks: &[DecoderBlock],
@@ -98,9 +99,13 @@ impl MiniGemma4Moe {
         layers: usize,
         cx: &mut Graph,
     ) -> Self {
-        let (embed, blocks, final_norm) =
-            moe_lm_new(vocab, d, experts, top_k, n_heads, layers, cx);
-        Self { embed, blocks, final_norm, logit_softcap: 30.0 }
+        let (embed, blocks, final_norm) = moe_lm_new(vocab, d, experts, top_k, n_heads, layers, cx);
+        Self {
+            embed,
+            blocks,
+            final_norm,
+            logit_softcap: 30.0,
+        }
     }
 
     pub fn forward(

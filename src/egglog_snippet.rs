@@ -133,16 +133,13 @@ pub fn new_egraph() -> egglog::EGraph {
     egraph
 }
 
-
 /// [`assembled_program`] for an arbitrary RUNTIME's matcher set — the
 /// TestRuntime seam (ruling 2026-08-13: test-only op variants live in a
 /// small tests-side runtime, and extraction takes the runtime's
 /// matchers instead of hardcoding the reference registry). Logical-op
 /// snippets are always included; the matcher contributions come from
 /// the caller.
-pub fn assembled_program_for(
-    matchers: &[Box<dyn crate::layout_ir::OpMatcher>],
-) -> String {
+pub fn assembled_program_for(matchers: &[Box<dyn crate::layout_ir::OpMatcher>]) -> String {
     let core = include_str!("egglog/checkpoint_5/egglog_preamble.egg");
     let mut snippets: Vec<EgglogSnippet> = Vec::new();
     for op in crate::logical_op::built_in_logical_ops() {
@@ -164,9 +161,18 @@ mod tests {
     fn splices_in_order_at_the_anchor() {
         let core = "top\n;; @SPLICE logical-constructors\n\n;; @SPLICE layout-op-constructors\n\n;; @SPLICE dtype\n\n;; @SPLICE seed\n\n;; @SPLICE shape\n\n;; @SPLICE rewrites\n\n;; @SPLICE forward\n\n;; @SPLICE match\n\n;; @SPLICE coordinate\n\n;; @SPLICE fixpoint\nbottom\n";
         let snippets = [
-            EgglogSnippet { category: SpliceCategory::Dtype, text: "(rule-a)\n" },
-            EgglogSnippet { category: SpliceCategory::Dtype, text: "(rule-b)\n" },
-            EgglogSnippet { category: SpliceCategory::Fixpoint, text: "(rule-c)\n" },
+            EgglogSnippet {
+                category: SpliceCategory::Dtype,
+                text: "(rule-a)\n",
+            },
+            EgglogSnippet {
+                category: SpliceCategory::Dtype,
+                text: "(rule-b)\n",
+            },
+            EgglogSnippet {
+                category: SpliceCategory::Fixpoint,
+                text: "(rule-c)\n",
+            },
         ];
         let out = assemble(core, &snippets);
         assert!(out.contains(";; @SPLICE dtype\n\n(rule-a)\n\n(rule-b)"));

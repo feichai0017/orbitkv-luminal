@@ -70,7 +70,11 @@ impl BufferTensorIrOp for ModFunctionalDps {
 
 impl Bufferizable for ModFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 2, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 2,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -83,10 +87,7 @@ impl ToDps for ModFunctionalDps {
 impl LayoutIrOp for ModFunctionalDps {}
 
 /// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    _op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(_op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     // Float mod mirrors the reference kernel's fmodf semantics.
     binary(ctx, "fmodf(a[i], b[i])")
 }

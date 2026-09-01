@@ -135,7 +135,11 @@ impl BufferTensorIrOp for ScatterFunctionalDps {
 
 impl Bufferizable for ScatterFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: self.dest_index(), result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: self.dest_index(),
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -148,10 +152,7 @@ impl ToDps for ScatterFunctionalDps {
 impl LayoutIrOp for ScatterFunctionalDps {}
 
 /// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     let Some(scatter) = op.as_any().downcast_ref::<ScatterFunctionalDps>() else {
         bail!("scatter codegen reached with a non-Scatter op");
     };
@@ -198,8 +199,16 @@ pub(crate) fn codegen(
     );
     let flags_bytes = dest_n * std::mem::size_of::<u32>();
     Ok(vec![
-        KernelSource { source: copy_src, n: dest_n, scratch_bytes: flags_bytes },
-        KernelSource { source: scatter_src, n: src_n, scratch_bytes: flags_bytes },
+        KernelSource {
+            source: copy_src,
+            n: dest_n,
+            scratch_bytes: flags_bytes,
+        },
+        KernelSource {
+            source: scatter_src,
+            n: src_n,
+            scratch_bytes: flags_bytes,
+        },
     ])
 }
 
@@ -234,6 +243,8 @@ impl OpMatcher for ScatterFunctionalMatcher {
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ScatterFunctional { rank: coordinate_rank(site, 2) })
+        Box::new(ScatterFunctional {
+            rank: coordinate_rank(site, 2),
+        })
     }
 }

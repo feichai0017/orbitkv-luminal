@@ -91,7 +91,11 @@ impl BufferTensorIrOp for GatherDps {
 
 impl Bufferizable for GatherDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: self.dest_index(), result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: self.dest_index(),
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -104,10 +108,7 @@ impl ToDps for GatherDps {
 impl LayoutIrOp for GatherDps {}
 
 /// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     let Some(gather) = op.as_any().downcast_ref::<GatherDps>() else {
         bail!("gather codegen reached with a non-Gather op");
     };

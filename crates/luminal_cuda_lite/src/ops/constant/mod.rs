@@ -67,7 +67,11 @@ impl BufferTensorIrOp for ConstantDps {
 
 impl Bufferizable for ConstantDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 0,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -80,10 +84,7 @@ impl ToDps for ConstantDps {
 impl LayoutIrOp for ConstantDps {}
 
 /// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     let Some(constant) = op.as_any().downcast_ref::<ConstantDps>() else {
         bail!("constant codegen reached with a non-Constant op");
     };
@@ -128,6 +129,8 @@ impl OpMatcher for ConstantMatcher {
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(Constant { value: site.child_f64(0) })
+        Box::new(Constant {
+            value: site.child_f64(0),
+        })
     }
 }

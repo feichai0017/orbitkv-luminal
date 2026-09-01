@@ -52,10 +52,7 @@ impl GraphTensor {
             .logical
             .apply_movement(
                 &(self.id, current_dims),
-                crate::graph::Movement::ExpandDim {
-                    axis,
-                    size: size.clone(),
-                },
+                crate::graph::Movement::ExpandDim { axis, size },
             )
             .expect("logical movement insertion failed");
         self.dims.insert(axis, size);
@@ -460,7 +457,7 @@ impl GraphTensor {
                         .graph()
                         .constant(data_strides[d])
                         .expand_rhs(ar_flat.dims());
-                    base_expanded = base_expanded + ar_flat * stride_tensor;
+                    base_expanded += ar_flat * stride_tensor;
                 }
                 base_expanded
             };
@@ -686,14 +683,14 @@ impl GraphTensor {
                             from_end: out_rank - 1 - p,
                             extent: window_counts[p],
                         }),
-                        strides[p].into(),
+                        strides[p],
                     )),
                     Box::new(crate::graph::MapEntry::Mul(
                         Box::new(crate::graph::MapEntry::Coord {
                             from_end: out_rank - 1 - (n + p),
                             extent: kernel[p],
                         }),
-                        dilation[p].into(),
+                        dilation[p],
                     )),
                 )
             })
@@ -904,9 +901,9 @@ impl GraphTensor {
 mod tests {
     use crate::frontend::binary::tests::test_binary;
     use crate::frontend::unary::tests::test_unary;
-    use luminal::prelude::*;
     use crate::tests::assert_exact;
     use candle_core::{IndexOp, Tensor};
+    use luminal::prelude::*;
     use proptest::prelude::*;
 
     proptest! {

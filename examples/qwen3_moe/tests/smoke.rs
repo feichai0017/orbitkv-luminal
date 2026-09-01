@@ -3,9 +3,9 @@
 //! the anatomy is validated against scalar references in luminal_nn;
 //! these prove the crate's decode loop over the position-slots driver.
 
+use luminal::implementation_search::ImplementationSearchOptions;
 use qwen3_moe::model::Qwen3MoeDims;
 use qwen3_moe::{DecodeStep, Decoder, weights};
-use luminal::implementation_search::ImplementationSearchOptions;
 
 fn smoke_search() -> ImplementationSearchOptions {
     ImplementationSearchOptions {

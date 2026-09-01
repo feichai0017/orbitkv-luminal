@@ -39,7 +39,12 @@ impl MiniGemma3 {
         cx: &mut Graph,
     ) -> Self {
         Self {
-            embed: Embedding::new(vocab, d, &Ns::root().child("model").child("embed_tokens"), cx),
+            embed: Embedding::new(
+                vocab,
+                d,
+                &Ns::root().child("model").child("embed_tokens"),
+                cx,
+            ),
             blocks: (0..layers)
                 .map(|layer| {
                     let local = (layer + 1) % pattern != 0;
@@ -50,7 +55,13 @@ impl MiniGemma3 {
                 })
                 .collect(),
             final_norm: LayerNorm::new(
-                d, true, false, false, 1e-6, &Ns::root().child("model").child("norm"), cx,
+                d,
+                true,
+                false,
+                false,
+                1e-6,
+                &Ns::root().child("model").child("norm"),
+                cx,
             )
             .with_unit_offset(),
             d,

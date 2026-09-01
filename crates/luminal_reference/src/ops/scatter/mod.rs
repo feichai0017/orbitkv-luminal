@@ -24,7 +24,9 @@
 //! slots first, the variable tail last.
 
 use luminal::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
-use luminal::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
+use luminal::layout_ir::{
+    AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
+};
 
 /// Walk the LayoutTensorCons spine at `child` counting elements — the
 /// shared rank reader for both scatter matchers (same class-resolving walk
@@ -146,7 +148,11 @@ impl BufferTensorIrOp for ScatterFunctionalDps {
 
 impl Bufferizable for ScatterFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: self.dest_index(), result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: self.dest_index(),
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -157,7 +163,6 @@ impl ToDps for ScatterFunctionalDps {
 }
 
 impl LayoutIrOp for ScatterFunctionalDps {}
-
 
 // ---------------------------------------------------------------------------
 // Matchers
@@ -189,16 +194,16 @@ impl OpMatcher for ScatterFunctionalMatcher {
         ]
     }
 
-
     fn metadata_slots(&self) -> &'static [(&'static str, usize)] {
         &[("out_layout", 3)]
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ScatterFunctional { rank: coordinate_rank(site, 2) })
+        Box::new(ScatterFunctional {
+            rank: coordinate_rank(site, 2),
+        })
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // ---- kernel ----
@@ -207,8 +212,8 @@ impl OpMatcher for ScatterFunctionalMatcher {
 // 2026-08-13: everything about an op lives in the op's folder).
 // ---------------------------------------------------------------------------
 
-use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 use crate::kernels::{coordinate_columns, expect_op};
+use luminal::buffer_tensor_ir::{ReferenceKernelCtx, TypedBuffer};
 
 /// The CHECKED scatter kernel (ruling 2026-08-06): dest starts as a copy
 /// of init, then dest[coords(i)] = src[i] over the src iteration space.

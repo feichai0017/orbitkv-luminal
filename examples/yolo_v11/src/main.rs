@@ -1,4 +1,3 @@
-
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
@@ -318,8 +317,10 @@ fn main() {
     let file = std::fs::File::open(&weights_path).expect("weights open");
     let mmap = unsafe { memmap2::Mmap::map(&file).expect("weights mmap") };
     let tensors = safetensors::SafeTensors::deserialize(&mmap).expect("weights parse");
-    let mut pairs: Vec<(petgraph::graph::NodeIndex, luminal::buffer_tensor_ir::TypedBuffer)> =
-        Vec::new();
+    let mut pairs: Vec<(
+        petgraph::graph::NodeIndex,
+        luminal::buffer_tensor_ir::TypedBuffer,
+    )> = Vec::new();
     for spec in cx.logical.input_specs() {
         let (label, id) = (spec.label, spec.id);
         if label == "input.image" {

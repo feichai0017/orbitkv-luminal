@@ -11,21 +11,21 @@ use luminal::graph::Graph;
 use luminal::prelude::{FxHashMap, NodeIndex};
 use luminal_cuda_lite::CudaRuntime;
 
-fn run_both(
-    cx: &Graph,
-    inputs: &[(NodeIndex, Vec<f32>)],
-    out: NodeIndex,
-) -> (Vec<f32>, Vec<f32>) {
+fn run_both(cx: &Graph, inputs: &[(NodeIndex, Vec<f32>)], out: NodeIndex) -> (Vec<f32>, Vec<f32>) {
     // Reference side.
-    let staged: Vec<(NodeIndex, TypedBuffer)> =
-        inputs.iter().map(|(id, v)| (*id, v.clone().into())).collect();
+    let staged: Vec<(NodeIndex, TypedBuffer)> = inputs
+        .iter()
+        .map(|(id, v)| (*id, v.clone().into()))
+        .collect();
     let reference = luminal::test_support::run_reference(cx, &staged);
     let want = reference.get_f32(out).expect("reference output").clone();
 
     // Device side.
     let mut rt = CudaRuntime::load(cx).expect("cuda load");
-    let data: FxHashMap<NodeIndex, TypedBuffer> =
-        inputs.iter().map(|(id, v)| (*id, v.clone().into())).collect();
+    let data: FxHashMap<NodeIndex, TypedBuffer> = inputs
+        .iter()
+        .map(|(id, v)| (*id, v.clone().into()))
+        .collect();
     rt.search(&data, &luminal::test_support::harness_search_options())
         .expect("cuda search");
     for (id, v) in inputs {
@@ -88,11 +88,7 @@ fn movement_materialize() {
         .slice((1..3, 1..4))
         .pad(((1usize, 0usize), (0usize, 2usize)), 0.)
         .output();
-    let (want, got) = run_both(
-        &cx,
-        &[(a.id, (0..20).map(|i| i as f32).collect())],
-        out.id,
-    );
+    let (want, got) = run_both(&cx, &[(a.id, (0..20).map(|i| i as f32).collect())], out.id);
     assert_close(&want, &got, "slice+pad materialize");
 }
 
@@ -129,10 +125,7 @@ fn scatter_write() {
     let out = init.scatter(&[coords], src).output();
     let (want, got) = run_both(
         &cx,
-        &[
-            (init.id, vec![10.0; 6]),
-            (src.id, vec![-1.0, -2.0]),
-        ],
+        &[(init.id, vec![10.0; 6]), (src.id, vec![-1.0, -2.0])],
         out.id,
     );
     assert_close(&want, &got, "scatter");

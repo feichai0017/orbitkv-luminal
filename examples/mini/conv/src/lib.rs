@@ -18,8 +18,28 @@ impl MiniConvNet {
     /// Input (ch_in, h, w) with h = w = 5 and 3×3 valid convs: 5→3→1.
     pub fn new(ch_in: usize, c1: usize, c2: usize, classes: usize, cx: &mut Graph) -> Self {
         Self {
-            conv1: ConvND::new(ch_in, c1, [3, 3], [1, 1], [1, 1], [0, 0], false, &Ns::root().child("conv1"), cx),
-            conv2: ConvND::new(c1, c2, [3, 3], [1, 1], [1, 1], [0, 0], false, &Ns::root().child("conv2"), cx),
+            conv1: ConvND::new(
+                ch_in,
+                c1,
+                [3, 3],
+                [1, 1],
+                [1, 1],
+                [0, 0],
+                false,
+                &Ns::root().child("conv1"),
+                cx,
+            ),
+            conv2: ConvND::new(
+                c1,
+                c2,
+                [3, 3],
+                [1, 1],
+                [1, 1],
+                [0, 0],
+                false,
+                &Ns::root().child("conv2"),
+                cx,
+            ),
             head: Linear::new(c2, classes, false, &Ns::root().child("head"), cx),
             classes,
         }

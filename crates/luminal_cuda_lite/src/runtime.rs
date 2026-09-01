@@ -46,8 +46,10 @@ impl CudaRuntime {
     /// Record the graph's native program. Saturation happens in
     /// [`CudaRuntime::search`].
     pub fn load(graph: &graph::Graph) -> Result<Self> {
-        let (pre_schedule, input_slots, output_slots, post_checks, labeled_checks) =
-            graph.logical.bound_parts(&crate::bindings::CudaBindings).map_err(|e| anyhow!(e))?;
+        let (pre_schedule, input_slots, output_slots, post_checks, labeled_checks) = graph
+            .logical
+            .bound_parts(&crate::bindings::CudaBindings)
+            .map_err(|e| anyhow!(e))?;
         Ok(Self {
             native: Some(NativeParts {
                 pre_schedule,
@@ -69,7 +71,10 @@ impl CudaRuntime {
         lower: u64,
         upper: u64,
     ) -> Result<()> {
-        let native = self.native.as_mut().ok_or_else(|| anyhow!("load before bind"))?;
+        let native = self
+            .native
+            .as_mut()
+            .ok_or_else(|| anyhow!("load before bind"))?;
         let name = var.into();
         native.binding_seeds.push_str(&format!(
             "(set (lower-bound-of (IntVar \"{name}\")) (bigint {lower}))\n\
@@ -82,16 +87,17 @@ impl CudaRuntime {
     /// `reference_allow_list()` — matcher constructors whose label has
     /// a codegen row.
     pub fn allow_list() -> Vec<&'static str> {
-        let labels: Vec<&'static str> =
-            crate::kernels::cuda_kernels().iter().map(|k| k.label).collect();
+        let labels: Vec<&'static str> = crate::kernels::cuda_kernels()
+            .iter()
+            .map(|k| k.label)
+            .collect();
         crate::ops::cuda_matchers()
             .iter()
             .map(|m| m.egglog_constructor())
             .filter(|ctor| {
                 let stripped = ctor.trim_start_matches("LayoutTensorOp");
                 labels.iter().any(|label| {
-                    stripped == *label
-                        || stripped.trim_end_matches("Generic") == *label
+                    stripped == *label || stripped.trim_end_matches("Generic") == *label
                 })
             })
             .collect()
@@ -105,7 +111,10 @@ impl CudaRuntime {
         input_data: &FxHashMap<NodeIndex, TypedBuffer>,
         options: &ImplementationSearchOptions,
     ) -> Result<SearchOutcome> {
-        let native = self.native.as_ref().ok_or_else(|| anyhow!("load before search"))?;
+        let native = self
+            .native
+            .as_ref()
+            .ok_or_else(|| anyhow!("load before search"))?;
         let program = graph::LogicalProgram {
             text: format!(
                 "{}{}{}{}",
@@ -188,7 +197,10 @@ impl CudaRuntime {
     /// Run the plan on the CUDA device. Requires the `device` feature
     /// and an available device; refuses loudly otherwise.
     pub fn execute(&mut self) -> Result<()> {
-        let plan = self.plan.as_ref().ok_or_else(|| anyhow!("search before execute"))?;
+        let plan = self
+            .plan
+            .as_ref()
+            .ok_or_else(|| anyhow!("search before execute"))?;
         #[cfg(feature = "device")]
         {
             let outputs = crate::device::execute_plan(plan, &self.staged)?;

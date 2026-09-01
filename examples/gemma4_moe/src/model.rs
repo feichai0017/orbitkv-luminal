@@ -90,15 +90,23 @@ impl Gemma4Dims {
     }
 
     pub fn is_sliding(&self, layer: usize) -> bool {
-        (layer + 1) % self.sliding_pattern != 0
+        !(layer + 1).is_multiple_of(self.sliding_pattern)
     }
 
     pub fn head_dim(&self, layer: usize) -> usize {
-        if self.is_sliding(layer) { self.sliding_head_dim } else { self.full_head_dim }
+        if self.is_sliding(layer) {
+            self.sliding_head_dim
+        } else {
+            self.full_head_dim
+        }
     }
 
     pub fn kv_heads(&self, layer: usize) -> usize {
-        if self.is_sliding(layer) { self.sliding_kv_heads } else { self.full_kv_heads }
+        if self.is_sliding(layer) {
+            self.sliding_kv_heads
+        } else {
+            self.full_kv_heads
+        }
     }
 
     pub fn kv_dim(&self, layer: usize) -> usize {
@@ -130,7 +138,13 @@ impl Gemma4MoeFfn {
         let router = ns.child("router");
         let mlp = ns.child("mlp");
         Self {
-            router_proj: Linear::new_permuted(d.hidden, d.experts, false, &router.child("proj"), cx),
+            router_proj: Linear::new_permuted(
+                d.hidden,
+                d.experts,
+                false,
+                &router.child("proj"),
+                cx,
+            ),
             router_scale: cx.named_tensor(router.leaf("scale"), d.hidden),
             per_expert_scale: cx.named_tensor(router.leaf("per_expert_scale"), d.experts),
             gate_up: cx.named_tensor(
@@ -156,8 +170,7 @@ impl Gemma4MoeFfn {
 
         // Router: std-normed raw stream × router.scale × 1/sqrt(hidden).
         let scale = self.router_scale.expand_lhs(&raw.dims()[..1]);
-        let router_hidden =
-            raw.std_norm(1, self.rms_eps) * scale * (h as f32).sqrt().recip();
+        let router_hidden = raw.std_norm(1, self.rms_eps) * scale * (h as f32).sqrt().recip();
         let probs = self.router_proj.forward(router_hidden).softmax(1);
         let idx = probs.topk_indexes(k, 1); // (s, k)
 
@@ -192,7 +205,7 @@ impl Gemma4MoeFfn {
 
 /// The tanh-approx GELU in sigmoid form (fewer e-graph nodes).
 fn gemma_gelu(x: GraphTensor) -> GraphTensor {
-    x * (x * 1.595_769_1 * (x * x * 0.044715 + 1.0)).sigmoid()
+    x * (x * 1.595_769 * (x * x * 0.044715 + 1.0)).sigmoid()
 }
 
 pub struct Gemma4Block {
@@ -231,7 +244,15 @@ impl Gemma4Block {
         let attn = ns.child("self_attn");
         let mlp = ns.child("mlp");
         let rms = |segment: &str, cx: &mut Graph| {
-            LayerNorm::new(d.hidden, true, false, false, d.rms_eps, &ns.child(segment), cx)
+            LayerNorm::new(
+                d.hidden,
+                true,
+                false,
+                false,
+                d.rms_eps,
+                &ns.child(segment),
+                cx,
+            )
         };
         Self {
             input_norm: rms("input_layernorm", cx),
@@ -249,9 +270,27 @@ impl Gemma4Block {
             wo: Linear::new_permuted(q_dim, d.hidden, false, &attn.child("o_proj"), cx),
             q_norm: cx.named_tensor(attn.child("q_norm").leaf("weight"), head_dim),
             k_norm: cx.named_tensor(attn.child("k_norm").leaf("weight"), head_dim),
-            gate: Linear::new_permuted(d.hidden, d.dense_intermediate, false, &mlp.child("gate_proj"), cx),
-            up: Linear::new_permuted(d.hidden, d.dense_intermediate, false, &mlp.child("up_proj"), cx),
-            down: Linear::new_permuted(d.dense_intermediate, d.hidden, false, &mlp.child("down_proj"), cx),
+            gate: Linear::new_permuted(
+                d.hidden,
+                d.dense_intermediate,
+                false,
+                &mlp.child("gate_proj"),
+                cx,
+            ),
+            up: Linear::new_permuted(
+                d.hidden,
+                d.dense_intermediate,
+                false,
+                &mlp.child("up_proj"),
+                cx,
+            ),
+            down: Linear::new_permuted(
+                d.dense_intermediate,
+                d.hidden,
+                false,
+                &mlp.child("down_proj"),
+                cx,
+            ),
             moe: Gemma4MoeFfn::new(&ns, d, cx),
             sliding,
             head_dim,
@@ -312,13 +351,12 @@ impl Gemma4Block {
         );
         let x = x + self.post_attn_norm.forward(self.wo.forward(attn));
 
-        let dense = self
-            .down
-            .forward(gemma_gelu(self.gate.forward(self.pre_ff_norm.forward(x))) * self.up.forward(self.pre_ff_norm.forward(x)));
+        let dense = self.down.forward(
+            gemma_gelu(self.gate.forward(self.pre_ff_norm.forward(x)))
+                * self.up.forward(self.pre_ff_norm.forward(x)),
+        );
         let dense = self.post_ff_norm_1.forward(dense);
-        let moe = self
-            .moe
-            .forward(x, self.pre_ff_norm_2.forward(x));
+        let moe = self.moe.forward(x, self.pre_ff_norm_2.forward(x));
         let moe = self.post_ff_norm_2.forward(moe);
         let ff_out = self.post_ff_norm.forward(dense + moe);
         let x = x + ff_out;
@@ -378,7 +416,11 @@ impl Gemma4Moe {
         let mut x = self.embed.forward(tokens) * (self.dims.hidden as f32).sqrt();
         let mut caches_out = Vec::with_capacity(self.blocks.len());
         for (layer, block) in self.blocks.iter().enumerate() {
-            let (cos, sin, rot) = if block.sliding { rope_sliding } else { rope_full };
+            let (cos, sin, rot) = if block.sliding {
+                rope_sliding
+            } else {
+                rope_full
+            };
             let (next, k_cache, v_cache) = block.forward(
                 &self.dims,
                 x,

@@ -10,15 +10,15 @@
 //! tick, each row carrying any sequence's next token.
 
 pub use llama3::model::{Llama3, Llama3Dims};
-use luminal::prelude::Ns;
 pub use llama3::{hf, weights};
+use luminal::prelude::Ns;
 
 use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, TypedBuffer};
-use luminal_reference::ReferenceRuntime;
 use luminal_nn::{CacheState, KvCachePool, PageTable};
+use luminal_reference::ReferenceRuntime;
 use std::error::Error;
 
 /// Fixed batch width of the step-invariant tick graph.
@@ -50,7 +50,13 @@ impl BatchStep {
         let gather_idx = cx.tensor_dtyped(slots, DType::Int);
         let scatter_idx = cx.tensor_dtyped(ROWS, DType::Int);
         let mask = cx.tensor((ROWS, slots));
-        let pool = KvCachePool::new(&mut cx, dims.layers, slots, dims.kv_dim(), &Ns::root().child("cache"));
+        let pool = KvCachePool::new(
+            &mut cx,
+            dims.layers,
+            slots,
+            dims.kv_dim(),
+            &Ns::root().child("cache"),
+        );
 
         let mut x = model.embed.forward(tokens);
         let mut cache_outs = Vec::with_capacity(model.blocks.len());
@@ -69,10 +75,7 @@ impl BatchStep {
             x = next;
             cache_outs.push((k_cache, v_cache));
         }
-        let logits = model
-            .lm_head
-            .forward(model.final_norm.forward(x))
-            .output();
+        let logits = model.lm_head.forward(model.final_norm.forward(x)).output();
         let cache_outs: Vec<_> = cache_outs
             .into_iter()
             .map(|(k, v)| (k.output(), v.output()))
@@ -154,10 +157,7 @@ impl Ticker {
             rt.set_data(*id, data.clone());
         }
         rt.set_data(step.rope_rot.id, rot);
-        rt.set_data(
-            step.gather_idx.id,
-            (0..slots as i32).collect::<Vec<i32>>(),
-        );
+        rt.set_data(step.gather_idx.id, (0..slots as i32).collect::<Vec<i32>>());
 
         Ok(Self {
             step,

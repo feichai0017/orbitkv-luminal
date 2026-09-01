@@ -12,7 +12,9 @@
 //! is answered from that stored rank.
 
 use luminal::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
-use luminal::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps};
+use luminal::layout_ir::{
+    AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
+};
 
 /// `GatherGeneric(data, coord0, .., coord{r-1}) -> out`
 ///
@@ -96,7 +98,11 @@ impl BufferTensorIrOp for GatherDps {
 
 impl Bufferizable for GatherDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: self.dest_index(), result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: self.dest_index(),
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -138,7 +144,6 @@ impl OpMatcher for GatherMatcher {
             },
         ]
     }
-
 
     fn metadata_slots(&self) -> &'static [(&'static str, usize)] {
         &[("out_layout", 2)]
@@ -201,13 +206,16 @@ impl OpMatcher for GatherMatcher {
 // 2026-08-13: everything about an op lives in the op's folder).
 // ---------------------------------------------------------------------------
 
-use luminal::buffer_tensor_ir::ReferenceKernelCtx;
 use crate::kernels::{coordinate_columns, expect_op, move_gathered};
+use luminal::buffer_tensor_ir::ReferenceKernelCtx;
 
 /// Coordinate gather: `dest[flat] = data[coords(flat)]` with loud
 /// bounds checks (out-of-bounds is UB per the scatter/gather ruling,
 /// surfaced loudly).
-pub(crate) fn kernel(op: &dyn BufferTensorIrOp, ctx: &mut ReferenceKernelCtx) -> anyhow::Result<()> {
+pub(crate) fn kernel(
+    op: &dyn BufferTensorIrOp,
+    ctx: &mut ReferenceKernelCtx,
+) -> anyhow::Result<()> {
     let op = expect_op::<GatherDps>(op)?;
     let rank = op.rank;
     let data_dims = &ctx.operand_dims[0];

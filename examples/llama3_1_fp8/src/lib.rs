@@ -11,8 +11,8 @@ use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, Ns, TypedBuffer};
-use luminal_reference::ReferenceRuntime;
 use luminal_nn::{CacheState, KvCachePool, PositionSlots};
+use luminal_reference::ReferenceRuntime;
 use model::{Fp8Dims, Llama31Fp8};
 use std::error::Error;
 use std::io::Write as _;
@@ -89,7 +89,14 @@ impl DecodeStep {
             &Ns::root().child("kv_cache"),
         );
         let (logits, cache_outs) = model.forward(
-            token, q_pos, rope_cos, rope_sin, rope_rot, &pool, gather_idx, scatter_idx,
+            token,
+            q_pos,
+            rope_cos,
+            rope_sin,
+            rope_rot,
+            &pool,
+            gather_idx,
+            scatter_idx,
         );
         let logits = logits.output();
         let cache_outs: Vec<_> = cache_outs
@@ -269,7 +276,10 @@ pub fn run_llama3_1_fp8(config: Fp8RunConfig) -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    println!("Recording the decode-step graph ({} layers)...", dims.layers);
+    println!(
+        "Recording the decode-step graph ({} layers)...",
+        dims.layers
+    );
     let step = DecodeStep::build(&dims, config.max_seq);
     let pairs = match &model_dir {
         Some(dir) => {
@@ -328,8 +338,7 @@ pub fn run_llama3_1_fp8(config: Fp8RunConfig) -> Result<(), Box<dyn Error>> {
         prompt_tokens.len()
     );
     if !step_times.is_empty() {
-        let per_token =
-            step_times.iter().sum::<Duration>().as_secs_f64() / step_times.len() as f64;
+        let per_token = step_times.iter().sum::<Duration>().as_secs_f64() / step_times.len() as f64;
         println!("  decode: {per_token:.2} s/token");
     }
     Ok(())

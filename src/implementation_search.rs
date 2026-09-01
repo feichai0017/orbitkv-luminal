@@ -17,10 +17,10 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow, ensure};
-use std::collections::BTreeMap;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashMap;
+use std::collections::BTreeMap;
 
 use crate::bufferize::BufferIrGraph;
 use crate::extractor::{self, Genome};
@@ -207,11 +207,8 @@ pub fn search_implementations_with_runtime(
     let analysis_start = Instant::now();
     // The allow list narrows the caller's matcher set; None = the whole set.
     let allow = allow_override;
-    let mut session = extractor::ExtractionSession::new_with_matcher_set(
-        egraph,
-        allow.as_deref(),
-        matchers,
-    );
+    let mut session =
+        extractor::ExtractionSession::new_with_matcher_set(egraph, allow.as_deref(), matchers);
     let index = session.producer_index();
     timings.analysis_nanos = analysis_start.elapsed().as_nanos();
     // An empty index is NOT an error: a graph with no searchable producer
@@ -359,7 +356,6 @@ pub fn search_implementations_with_runtime(
     let mut breakdown = RefusalBreakdown::default();
     let mut best: Option<(u128, Genome, BufferIrGraph)> = None;
 
-
     for generation in 0..options.generations {
         let mut candidates: Vec<Genome> = Vec::with_capacity(options.generation_size);
         match &best {
@@ -456,13 +452,19 @@ pub fn search_implementations_with_runtime(
                     };
                     cache.insert(fingerprint, nanos);
                     plans_profiled += 1;
-                    if best.as_ref().is_none_or(|(best_nanos, _, _)| nanos < *best_nanos) {
+                    if best
+                        .as_ref()
+                        .is_none_or(|(best_nanos, _, _)| nanos < *best_nanos)
+                    {
                         best = Some((nanos, genome.clone(), plan));
                     }
                     continue;
                 }
             };
-            if best.as_ref().is_none_or(|(best_nanos, _, _)| nanos < *best_nanos) {
+            if best
+                .as_ref()
+                .is_none_or(|(best_nanos, _, _)| nanos < *best_nanos)
+            {
                 let build_start = Instant::now();
                 let built = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph));
                 timings.plan_build_nanos += build_start.elapsed().as_nanos();
@@ -478,10 +480,9 @@ pub fn search_implementations_with_runtime(
         }
     }
 
-    let (best_nanos, best_genome, best_plan) =
-        best.ok_or_else(|| {
-            anyhow!("no candidate genome produced an executable plan; refusals: {refusals:#?}")
-        })?;
+    let (best_nanos, best_genome, best_plan) = best.ok_or_else(|| {
+        anyhow!("no candidate genome produced an executable plan; refusals: {refusals:#?}")
+    })?;
     let _ = program; // binding tables travel with the caller; kept for future bucket plumbing
     Ok(SearchOutcome {
         best_plan,
@@ -493,7 +494,6 @@ pub fn search_implementations_with_runtime(
         refusal_breakdown: breakdown,
     })
 }
-
 
 /// One bucket combination's finished search: the dim ranges it covers, the
 /// representative pins it was searched at, and the winning plan.
@@ -515,12 +515,16 @@ pub struct BucketPlan {
 /// Slice note (documented divergence from their symbolic LLIR): each
 /// winning plan is STATIC at its representative; executing at another pin
 /// re-renders — genome transfer across renders is future work.
+// The runtime assembly inputs are deliberately explicit: core owns neither
+// the matcher registry, profiler, bindings, nor assembled runtime program.
+#[allow(clippy::too_many_arguments)]
 pub fn bucketed_search_implementations(
     graph: &crate::graph::Graph,
     dim_buckets: &BTreeMap<crate::shape::Symbol, Vec<crate::graph::DimBucket>>,
     input_data: impl Fn(
         &crate::shape::DynMap,
-    ) -> FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
+    )
+        -> FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
     assembled_program: &str,
     matchers: impl Fn() -> Vec<Box<dyn crate::layout_ir::OpMatcher>>,
@@ -547,15 +551,12 @@ pub fn bucketed_search_implementations(
         }
         text
     };
-    let assemble = |seeds: &BTreeMap<crate::shape::Symbol, (u64, u64)>| crate::graph::LogicalProgram {
-        text: format!(
-            "{pre}{}{}{post}",
-            seeds_text(seeds),
-            bindings.schedule()
-        ),
-        input_slots: input_slots.clone(),
-        output_slots: output_slots.clone(),
-    };
+    let assemble =
+        |seeds: &BTreeMap<crate::shape::Symbol, (u64, u64)>| crate::graph::LogicalProgram {
+            text: format!("{pre}{}{}{post}", seeds_text(seeds), bindings.schedule()),
+            input_slots: input_slots.clone(),
+            output_slots: output_slots.clone(),
+        };
 
     // Cartesian combinations, dims in sorted order (their bucket_combinations).
     let dims: Vec<&crate::shape::Symbol> = dim_buckets.keys().collect();
@@ -594,11 +595,7 @@ pub fn bucketed_search_implementations(
             validation_seeds.insert(*dim, (*min as u64, *max as u64));
         }
         let validation = assemble(&validation_seeds);
-        let text = format!(
-            "{}\n\n{}",
-            assembled_program,
-            validation.text
-        );
+        let text = format!("{}\n\n{}", assembled_program, validation.text);
         crate::egglog_snippet::new_egraph()
             .parse_and_run_program(None, &text)
             .map_err(|err| anyhow!("bucket {ranges:?} fails bucket-wide validation: {err}"))?;
@@ -609,11 +606,7 @@ pub fn bucketed_search_implementations(
             pin_seeds.insert(*dim, (*value as u64, *value as u64));
         }
         let program = assemble(&pin_seeds);
-        let text = format!(
-            "{}\n\n{}",
-            assembled_program,
-            program.text
-        );
+        let text = format!("{}\n\n{}", assembled_program, program.text);
         let mut egraph = crate::egglog_snippet::new_egraph();
         egraph
             .parse_and_run_program(None, &text)
@@ -629,7 +622,12 @@ pub fn bucketed_search_implementations(
             matchers(),
             profiler,
         )?;
-        plans.push(BucketPlan { ranges, representative, program, outcome });
+        plans.push(BucketPlan {
+            ranges,
+            representative,
+            program,
+            outcome,
+        });
     }
     Ok(plans)
 }
@@ -641,7 +639,8 @@ pub fn select_bucket<'a>(
 ) -> Option<&'a BucketPlan> {
     plans.iter().find(|plan| {
         plan.ranges.iter().all(|(dim, (min, max))| {
-            dims.get(dim).is_some_and(|value| value >= min && value <= max)
+            dims.get(dim)
+                .is_some_and(|value| value >= min && value <= max)
         })
     })
 }
@@ -660,9 +659,9 @@ mod tests {
 
     use luminal::graph::Graph;
     use luminal::implementation_search::{
-        bucketed_search_implementations, select_bucket, ImplementationSearchOptions,
+        ImplementationSearchOptions, bucketed_search_implementations, select_bucket,
     };
-    use luminal_reference::{search_implementations, ReferenceRuntime};
+    use luminal_reference::{ReferenceRuntime, search_implementations};
 
     /// A REAL selection space (x+y and x*y from shared inputs offers the
     /// fused kernel vs the pair, plus commuted and mutating variants): the
@@ -687,14 +686,19 @@ mod tests {
 
         // Our search.
         let (cx2, x2, y2, a2, m2) = build();
-        let program = cx2.logical.bound_program(&luminal_reference::ReferenceBindings).expect("native program");
+        let program = cx2
+            .logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("native program");
         let text = format!(
             "{}\n\n{}",
             luminal_reference::assembled_program(),
             program.text
         );
         let mut egraph = luminal::egglog_snippet::new_egraph();
-        egraph.parse_and_run_program(None, &text).expect("program runs");
+        egraph
+            .parse_and_run_program(None, &text)
+            .expect("program runs");
         let serialized = egraph.serialize(SerializeConfig::default()).egraph;
 
         let mut inputs = FxHashMap::default();
@@ -752,7 +756,8 @@ mod tests {
             (cx, x, y, out)
         };
 
-        let buckets: BTreeMap<luminal::shape::Symbol, Vec<DimBucket>> = [(luminal::shape::Symbol::from('a'),
+        let buckets: BTreeMap<luminal::shape::Symbol, Vec<DimBucket>> = [(
+            luminal::shape::Symbol::from('a'),
             vec![DimBucket::new(2, 4), DimBucket::new(5, 9)],
         )]
         .into();
@@ -763,8 +768,14 @@ mod tests {
         let data_for = |rep: &luminal::shape::DynMap| {
             let n = rep[&luminal::shape::Symbol::from('a')] * 2;
             let mut data = FxHashMap::default();
-            data.insert(x.id, (0..n).map(|v| v as f32 + 1.0).collect::<Vec<f32>>().into());
-            data.insert(y.id, (0..n).map(|v| v as f32 * 0.5).collect::<Vec<f32>>().into());
+            data.insert(
+                x.id,
+                (0..n).map(|v| v as f32 + 1.0).collect::<Vec<f32>>().into(),
+            );
+            data.insert(
+                y.id,
+                (0..n).map(|v| v as f32 * 0.5).collect::<Vec<f32>>().into(),
+            );
             data
         };
         let plans = bucketed_search_implementations(
@@ -783,9 +794,15 @@ mod tests {
         // Selection covers each bucket; out-of-range dims select nothing.
         let mut dims = FxHashMap::default();
         dims.insert(luminal::shape::Symbol::from('a'), 3usize);
-        assert!(select_bucket(&plans, &dims).unwrap().ranges[&luminal::shape::Symbol::from('a')] == (2, 4));
+        assert!(
+            select_bucket(&plans, &dims).unwrap().ranges[&luminal::shape::Symbol::from('a')]
+                == (2, 4)
+        );
         dims.insert(luminal::shape::Symbol::from('a'), 7usize);
-        assert!(select_bucket(&plans, &dims).unwrap().ranges[&luminal::shape::Symbol::from('a')] == (5, 9));
+        assert!(
+            select_bucket(&plans, &dims).unwrap().ranges[&luminal::shape::Symbol::from('a')]
+                == (5, 9)
+        );
         dims.insert(luminal::shape::Symbol::from('a'), 20usize);
         assert!(select_bucket(&plans, &dims).is_none());
 
@@ -795,7 +812,9 @@ mod tests {
             // GOLDEN (computed: out = x * y with x[i] = i+1, y[i] = i*0.5
             // — the data_for closure's values at this representative).
             let n = rep * 2;
-            let expected: Vec<f32> = (0..n).map(|v| (v as f32 + 1.0) * (v as f32 * 0.5)).collect();
+            let expected: Vec<f32> = (0..n)
+                .map(|v| (v as f32 + 1.0) * (v as f32 * 0.5))
+                .collect();
             let data = data_for(&plan.representative);
 
             let mut runtime = ReferenceRuntime::default();
@@ -804,7 +823,9 @@ mod tests {
             for (id, values) in &data {
                 runtime.set_data(*id, values.clone());
             }
-            runtime.execute().expect("bucket plan executes at representative");
+            runtime
+                .execute()
+                .expect("bucket plan executes at representative");
             let ours = runtime
                 .get_f32(plan.program.output_slots[0].tensor)
                 .unwrap();
@@ -818,5 +839,4 @@ mod tests {
             }
         }
     }
-
 }
