@@ -172,7 +172,7 @@ impl ToDot for crate::graph::LogicalGraph {
 }
 
 /// The extraction artifact — the most useful single type to render:
-/// `extractor::extract_layout_ir_with_ops` returns
+/// `extractor::extract_layout_ir_with_ops_and_matchers` returns
 /// `Result<Option<ExtractedGraph>>` and `dps::dps_rewrite` both consumes
 /// AND produces this same type, so one impl covers the whole
 /// extract → DPS ladder (render before and after the rewrite).
@@ -186,7 +186,7 @@ impl ToDot for crate::layout_ir::ExtractedGraph {
 
 /// The bufferized plan; the inherent renderer (bufferize.rs) carries the
 /// slot-table grammar and buffer-name labeling.
-impl ToDot for crate::bufferize::BufferIrGraph {
+impl<L: crate::bufferize::PlanLayout> ToDot for crate::bufferize::BufferIrGraph<L> {
     fn to_dot(&self) -> Result<String> {
         Ok(crate::bufferize::BufferIrGraph::to_dot(self))
     }

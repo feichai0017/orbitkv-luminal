@@ -10,8 +10,18 @@ path = "src/main.rs"
 # Pure-logical zoo conversion (rulings 2026-08-12): exactly
 # NousResearch/Meta-Llama-3-8B-Instruct, every feature of that
 # checkpoint, position-slots KV cache form, reference runtime only.
+# Opt-in marker for this crate's heavy fidelity proofs (full genetic
+# search + decode/transcribe loops on a real runtime — llama3 measured at
+# 185s). OFF by default so the core loop stays fast; run them with
+#   cargo test -p <crate> --features zoo-proofs
+# A named feature rather than bare #[ignore] keeps "slow" distinguishable
+# from "ignored because broken".
+[features]
+zoo-proofs = []
+
 [dependencies]
 luminal = { path = "../.." }
+luminal_reference = { path = "../../crates/luminal_reference" }
 luminal_nn = { path = "../../crates/luminal_nn" }
 rustc-hash = "2.1"
 tokenizers = "0.22.2"

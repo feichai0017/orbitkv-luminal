@@ -9,12 +9,13 @@ use luminal::prelude::*;
 use yolo_v11::model::{IMG_SIZE, YoloV11};
 
 #[test]
+#[cfg_attr(not(feature = "zoo-proofs"), ignore = "zoo fidelity proof: a full search + decode loop (llama3 measured at 185s). The zoo is not part of the default test path — run explicitly, e.g. `cargo test -p llama3 -- --ignored`.")]
 fn full_graph_records_cleanly() {
     let mut cx = Graph::default();
     let img = cx.named_tensor("input.image", (1usize, 3usize, IMG_SIZE, IMG_SIZE));
     let yolo = YoloV11::init(&mut cx);
     let _logits = yolo.forward(img).output();
-    let program = cx.logical.native_program().expect("recorder clean — no poison");
+    let program = cx.logical.bound_program(&luminal_reference::ReferenceBindings).expect("recorder clean — no poison");
     assert!(
         program.text.contains("(LogicalIndexMapApply"),
         "conv unfolds record as index-map views"
@@ -33,7 +34,7 @@ fn full_graph_records_cleanly() {
 #[ignore = "heavy — 3GB-watchdog kill after ~4min on 2026-08-12 (parked-era: >10min/30GB); run by name under an RSS watchdog"]
 fn saturation_probe() {
     use luminal::implementation_search::ImplementationSearchOptions;
-    use luminal::reference::ReferenceRuntime;
+    use luminal_reference::ReferenceRuntime;
     let mut cx = Graph::default();
     let img = cx.named_tensor("input.image", (1usize, 3usize, IMG_SIZE, IMG_SIZE));
     let yolo = YoloV11::init(&mut cx);

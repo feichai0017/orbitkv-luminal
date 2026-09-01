@@ -180,13 +180,15 @@ impl MiniDit {
             let dims = x.dims();
             x * g.expand(dims)
         };
-        let heads = |x: GraphTensor| x.split_dims(1, self.head_dim).permute((1, 0, 2)); // (H,S,hd)
-        let unheads = |x: GraphTensor| x.permute((1, 0, 2)).merge_dims(1, 2); // (S,d)
+        // ONE apply per reshape/broadcast construct (ruling 2026-08-26).
+        let heads =
+            |x: GraphTensor| x.view().split_dims(1, self.head_dim).permute((1, 0, 2)).finish(); // (H,S,hd)
+        let unheads = |x: GraphTensor| x.view().permute((1, 0, 2)).merge_dims(1, 2).finish(); // (S,d)
         let head_rms = |x: GraphTensor, weight: GraphTensor| {
             let dims = x.dims();
             let inv = ((x * x).mean(2) + 1e-6).sqrt().reciprocal(); // (H,S)
-            x * inv.unsqueeze(2).expand(dims.clone())
-                * weight.unsqueeze(0).unsqueeze(0).expand(dims)
+            x * inv.view().unsqueeze(2).expand(dims.clone()).finish()
+                * weight.view().unsqueeze(0).unsqueeze(0).expand(dims).finish()
         };
         let rope = |x: GraphTensor| {
             // Interleaved-pair rotation via the pairing matrix — the
@@ -194,8 +196,8 @@ impl MiniDit {
             // rope(x) = x ⊙ cos + (x @ R) ⊙ sin on (H, S, hd).
             let dims = x.dims();
             let rotated = x.matmul(rope_rot);
-            x * rope_cos.unsqueeze(0).expand(dims.clone())
-                + rotated * rope_sin.unsqueeze(0).expand(dims)
+            x * rope_cos.view().unsqueeze(0).expand(dims.clone()).finish()
+                + rotated * rope_sin.view().unsqueeze(0).expand(dims).finish()
         };
         let sdpa = |q: GraphTensor, k: GraphTensor, v: GraphTensor| {
             let scale = 1.0 / (self.head_dim as f32).sqrt();

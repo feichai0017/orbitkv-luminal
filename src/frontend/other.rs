@@ -7,7 +7,7 @@ impl Graph {
         let id = self
             .logical
             .record_iota(&expr, &[])
-            .expect("logical iota insertion failed");
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
         GraphTensor::from_id(id, (), self, DType::Int)
     }
 
@@ -16,7 +16,7 @@ impl Graph {
         let id = self
             .logical
             .op(LogicalOp::Constant(i as f64), &[], Vec::new(), DType::F32)
-            .expect("logical constant insertion failed");
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
         GraphTensor::from_id(id, (), self, DType::F32)
     }
 
@@ -39,11 +39,14 @@ impl Graph {
     ) -> GraphTensor {
         let sh = shape.to_shape();
         let coords: Vec<IntExpr> = (0..sh.len()).map(IntExpr::coord).collect();
+        // Frontend simplification restored (Austin's revert ruling
+        // 2026-08-27): the recorded value expression is
+        // construction-simplified, as pre-R-C.
         let expr = f(&coords).simplify();
         let id = self
             .logical
             .record_iota(&expr, &sh)
-            .expect("logical iota insertion failed");
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
         GraphTensor::from_id(id, sh, self, DType::Int)
     }
 
@@ -137,14 +140,15 @@ impl GraphTensor {
             .graph()
             .logical
             .op(LogicalOp::Cast(dtype), &[operand], out_dims, dtype)
-            .expect("logical cast insertion failed");
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
         GraphTensor::from_id(id, self.dims(), self.graph_ref, dtype)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{prelude::*, tests::assert_close};
+    use luminal::prelude::*;
+    use crate::tests::assert_close;
     use candle_core::{Device, Tensor};
     use proptest::prelude::*;
 
@@ -155,7 +159,7 @@ mod tests {
         let mut cx = Graph::new();
         let b = func(&mut cx).output();
 
-        let rt = crate::test_support::run_reference(&cx, &[]);
+        let rt = luminal_reference::harness::run_reference(&cx, &[]);
 
         // Reference
         let device = Device::Cpu;
@@ -225,7 +229,7 @@ mod tests {
         let a_data = random_vec(6);
         let b_data = random_vec(6);
         let c_data = random_vec(6);
-        let rt = crate::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (a.id, a_data.clone().into()),

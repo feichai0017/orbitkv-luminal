@@ -141,7 +141,9 @@ pub(crate) fn must_ties<O: Bufferizable + ?Sized>(op: &O) -> Vec<(usize, usize)>
 /// `write_operand` is must-tied to (the permit routes through the written
 /// result — the edge universe is operand→result). The other derived view of
 /// [`Bufferizable::alias_info`] (see [`must_ties`] for why it lives here).
-pub(crate) fn permits_sharing<O: Bufferizable + ?Sized>(
+/// Public so runtime registries can pin their declared contracts against
+/// the same reading (Step B).
+pub fn permits_sharing<O: Bufferizable + ?Sized>(
     op: &O,
     read_operand: usize,
     write_operand: usize,
@@ -419,14 +421,46 @@ pub trait OpMatcher: std::fmt::Debug {
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp>;
 }
 
+/// The runtime's LAYOUT RENDERER — the layout-side mirror of the
+/// [`OpMatcher`] registration seam (resident-geometry cleanup, ruling
+/// 2026-08-31). Where matchers turn elected op enodes into instances, the
+/// renderer turns each elected value's LAYOUT e-class into the runtime's
+/// own opaque layout value `L` — the type the bufferizer transports on
+/// [`crate::bufferize::Buffer`] without ever interpreting it. Core CALLS
+/// this hook (once per distinct layout class, see
+/// [`crate::extractor::rendered_layout_table`]) and never parses a layout
+/// spelling itself.
+///
+/// RENDERING RULE for implementors: any spelling present in the class is
+/// correct — all spellings of a layout class denote one function — and
+/// the most-structured spelling present (RightMajor > LeftMajor >
+/// Strided > ElementOffset > BitOffset) is preferred as a rendering
+/// preference only. No normalization, no analysis, and failure is LOUD:
+/// an error refuses the plan; there is no silent default layout.
+/// PER-VALUE RENDERING (Option B rework, 2026-08-31): the hook receives
+/// the elected VALUE's [`LayoutTensorInfo`] — its layout class plus the
+/// extraction-side facts the runtime already owns (notably `dtype_enum`,
+/// the `dtype-of` row) — so a runtime may fold whatever it wants of its
+/// OWN knowledge into `L` (e.g. a typed layout). Core still never reads
+/// any of it back. CACHE CONTRACT: the rendering must be a pure function
+/// of `(value.layout.eclass, value.dtype_enum)` — core caches on exactly
+/// that key across genomes.
+pub trait LayoutRenderer<L> {
+    /// Render one elected value's layout into `L`.
+    fn render_layout(
+        &self,
+        egraph: &egraph_serialize::EGraph,
+        value: &LayoutTensorInfo,
+    ) -> anyhow::Result<L>;
+}
+
 // The op INVENTORY does not live here (ruling 2026-08-06): layout_ir
 // defines the IR framework — the traits, extraction machinery, and plan
 // types — and stays distant from where ops are implemented. The
-// reference runtime's inventory is `crate::reference::ops`; a future
-// runtime crate brings its own. (Remaining crate-split coupling: the
-// extractor and egglog assembly still call
-// reference::ops::built_in_matchers directly — the plugin registry
-// parameter is the next seam.)
+// reference runtime's inventory is `luminal_reference::ops`; every
+// runtime crate brings its own. (Step B closed the crate-split coupling:
+// the extractor and egglog assembly take the matcher set as a
+// parameter.)
 
 /// The petgraph carrying the dataflow DAG.
 pub type ExtractedDag = DiGraph<ExtractedNode, ExtractedEdge>;
@@ -513,6 +547,27 @@ pub struct LayoutInfo {
 /// plan's duration. `ReadWrite` = exclusive read/write (transient scribbling
 /// included). Preserving a value across the boundary is an *obligation* (an
 /// exit binding), never an access property.
+///
+/// THE TWO BOUNDARY CONTRACTS (M4 Phase 2, ruled by Austin 2026-08-27):
+///
+/// CONTRACT 1 — BUFFERLIT DISJOINTNESS. Distinct `BufferLit` e-classes
+/// warrant DISJOINT storage: each `BufferLit` names a unique,
+/// non-overlapping piece of memory. A caller binding two tensors that
+/// share underlying storage must bind them to the SAME `BufferLit`,
+/// distinguished by their layouts. Binding overlapping pointer ranges to
+/// distinct `BufferLit`s violates the plan's aliasing model — every
+/// certificate, anti-edge, and executor storage decision keys on
+/// `BufferId` equality — and real backends must assert pairwise
+/// non-overlap of bound pointer ranges at bind time and refuse loudly.
+///
+/// CONTRACT 2 — READWRITE EXCLUSIVITY. A buffer bound `ReadWrite` is the
+/// program's EXCLUSIVELY for the plan's duration: the caller must neither
+/// read nor write it mid-execution, and the program may consume it — a
+/// `ReadWrite` input whose value has no surviving later read is a legal
+/// in-place destination, including when reached through view chains, and
+/// its prior contents are then destroyed. Callers who want their bytes
+/// back unchanged bind `ReadOnly`; callers who want results delivered
+/// into their storage declare an output binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     ReadOnly,

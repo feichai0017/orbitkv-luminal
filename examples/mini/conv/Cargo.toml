@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 luminal = { path = "../../.." }
+luminal_reference = { path = "../../../crates/luminal_reference" }
 luminal_nn = { path = "../../../crates/luminal_nn" }
 rustc-hash = "2.1.1"
 

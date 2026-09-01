@@ -11,6 +11,14 @@
 //! MATCHER LIST plus fixture runners — no runtime machinery duplicated.
 
 pub mod add_mul_fused;
+pub mod test_equality;
+
+/// The cuBLASLt marker estate — REHOMED (Train 3 op-ownership move) to
+/// `luminal_cuda_lite::ops::cublaslt`, its executing runtime. The board
+/// keeps its `test_runtime::cublaslt_marker::…` spelling through this
+/// re-export; the rule text, extractor, and election core are the SAME
+/// items, never forked.
+pub use luminal_cuda_lite::ops::cublaslt as cublaslt_marker;
 
 pub use add_mul_fused::{AddMulFused, AddMulFusedDps, AddMulFusedMatcher};
 
@@ -31,7 +39,7 @@ pub mod logical_op {
 }
 pub mod reference {
     pub mod ops {
-        pub use luminal::reference::ops::*;
+        pub use luminal_reference::ops::*;
     }
 }
 
@@ -43,9 +51,12 @@ use luminal::layout_ir::OpMatcher;
 /// view op and the fused add+mul pair. Tests in this crate extract and
 /// assemble against exactly this list.
 pub fn matchers() -> Vec<Box<dyn OpMatcher>> {
-    let mut matchers = luminal::reference::ops::built_in_matchers();
-    matchers.push(Box::new(luminal::reference::ops::IndexMapApplyViewMatcher));
+    let mut matchers = luminal_reference::ops::built_in_matchers();
+    matchers.push(Box::new(luminal_reference::ops::IndexMapApplyViewMatcher));
     matchers.push(Box::new(AddMulFusedMatcher));
+    for matcher in cublaslt_marker::all_matchers() {
+        matchers.push(Box::new(matcher));
+    }
     matchers
 }
 
@@ -73,32 +84,38 @@ pub fn extract_fixture(script_text: &str) -> ExtractedGraph {
         .expect("fixture produced no extracted graph")
 }
 
-/// Build a TOTAL genome over a fixture's produced classes: each class takes
-/// the first preference (an implementation constructor name) it can satisfy,
-/// falling back to its first candidate — the producer index is
-/// deterministically sorted, so the same preferences always build the same
-/// genome. (Adapted from `luminal::test_support::genome_preferring`, which
-/// is public but hard-wired to the built-in producer index; this one runs
-/// over THIS runtime's matcher set via the genome seam.)
+// ---------------------------------------------------------------------------
+// The round-11 ELECTION CORE was rehomed with the marker estate (Train 3:
+// `luminal_cuda_lite::ops::cublaslt::election`). Semantics are identical;
+// the core's vocabulary is now a parameter, and these wrappers keep the
+// board's original signatures by passing THIS runtime's `matchers()`.
+// ---------------------------------------------------------------------------
+
+/// See `luminal_cuda_lite::ops::cublaslt::election::genome_preferring` —
+/// this wrapper binds the board vocabulary.
 pub fn genome_preferring(
     egraph: &luminal::prelude::egraph_serialize::EGraph,
     preferences: &[&str],
 ) -> luminal::extractor::Genome {
-    let index = luminal::extractor::producer_index_with_matchers(egraph, matchers());
-    let mut genome = luminal::extractor::Genome::default();
-    for (class, candidates) in index {
-        let pick = preferences
-            .iter()
-            .find_map(|preferred| {
-                candidates
-                    .iter()
-                    .find(|(name, _)| name.as_str() == *preferred)
-            })
-            .or_else(|| candidates.first())
-            .expect("produced classes have candidates");
-        genome.choices.insert(class, pick.1.clone());
-    }
-    genome
+    luminal_cuda_lite::ops::cublaslt::election::genome_preferring(
+        egraph,
+        matchers(),
+        preferences,
+    )
+}
+
+/// Re-export: the strictness-level admission predicate (rehomed core).
+pub use luminal_cuda_lite::ops::cublaslt::election::level_admits;
+
+/// The viability-aware election core (round 11) — rehomed
+/// (`luminal_cuda_lite::ops::cublaslt::election::genome_with_ordering`);
+/// this wrapper binds the board vocabulary and keeps the original
+/// signature for the board's call sites.
+pub fn genome_with_ordering(
+    egraph: &luminal::prelude::egraph_serialize::EGraph,
+    ordered: &dyn Fn(&[(String, luminal::extractor::ProducerChoice)], usize) -> Vec<usize>,
+) -> luminal::extractor::Genome {
+    luminal_cuda_lite::ops::cublaslt::election::genome_with_ordering(egraph, matchers(), ordered)
 }
 
 /// Genome-driven fixture extraction (the selection adapter's walk) plus the

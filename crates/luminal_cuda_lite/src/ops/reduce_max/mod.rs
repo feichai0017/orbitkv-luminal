@@ -96,7 +96,9 @@ pub(crate) fn codegen(
         bail!("reduce_max codegen reached with a non-ReduceMax op");
     };
     let axis = usize::try_from(r.axis).context("negative reduce axis")?;
-    reduce(ctx, axis, "-INFINITY", "v > acc ? v : acc")
+    // NVRTC compiles the program with no math headers, so the INFINITY macro
+    // does not exist there; this intrinsic is IEEE -inf by bit pattern.
+    reduce(ctx, axis, "__int_as_float(0xff800000)", "v > acc ? v : acc")
 }
 
 /// Matches `LayoutTensorOpReduceMaxGeneric` and produces this

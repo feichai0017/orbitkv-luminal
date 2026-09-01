@@ -19,7 +19,7 @@ pub fn gather_rows(data: GraphTensor, indices: GraphTensor, d: usize) -> GraphTe
     assert_eq!(indices.dtype, DType::Int);
     let n = indices.dims1();
     let rows = indices.expand_dim(1, d); // (N, D)
-    let cols = data.graph().arange(d as i32).expand_dim(0, n); // (N, D)
+    let cols = data.graph().iota((n, d), |c| c[1]); // (N, D) coordinate iota
     data.gather(&[rows, cols])
 }
 
@@ -42,7 +42,7 @@ pub fn scatter_rows(
     assert_eq!(indices.dtype, DType::Int);
     let n = indices.dims1();
     let rows = indices.expand_dim(1, d); // (N, D) over src's shape
-    let cols = src.graph().arange(d as i32).expand_dim(0, n); // (N, D)
+    let cols = src.graph().iota((n, d), |c| c[1]); // (N, D) coordinate iota
     dest.scatter(&[rows, cols], src)
 }
 
@@ -223,18 +223,40 @@ pub fn paged_attention_masked(
     let k = gather_rows(k_cache, gather_idx, kv_dim);
     let v = gather_rows(v_cache, gather_idx, kv_dim);
 
+    // Each reshape construct mints ONE apply (ruling 2026-08-26).
     let q = q
+        .view()
         .split_dims(1, head_dim)
         .split_dims(1, kv_groups)
-        .permute((1, 2, 0, 3));
-    let k = k.split_dims(1, head_dim).permute((1, 2, 0)).expand_dim(1, kv_groups);
-    let v = v.split_dims(1, head_dim).permute((1, 0, 2)).expand_dim(1, kv_groups);
+        .permute((1, 2, 0, 3))
+        .finish();
+    let k = k
+        .view()
+        .split_dims(1, head_dim)
+        .permute((1, 2, 0))
+        .expand_dim(1, kv_groups)
+        .finish();
+    let v = v
+        .view()
+        .split_dims(1, head_dim)
+        .permute((1, 0, 2))
+        .expand_dim(1, kv_groups)
+        .finish();
 
     let scores = q.matmul(k) * score_scale;
-    let mask = mask.expand_dim(0, n_kv_heads).expand_dim(1, kv_groups);
+    let mask = mask
+        .view()
+        .expand_dim(0, n_kv_heads)
+        .expand_dim(1, kv_groups)
+        .finish();
     let weights = (scores + mask).softmax(3);
     let out = weights.matmul(v);
-    let out = out.permute((2, 0, 1, 3)).merge_dims(1, 2).merge_dims(1, 2);
+    let out = out
+        .view()
+        .permute((2, 0, 1, 3))
+        .merge_dims(1, 2)
+        .merge_dims(1, 2)
+        .finish();
     (out, k_cache, v_cache)
 }
 
@@ -274,25 +296,32 @@ fn paged_attention_core(
     // ── Phase 3: Reshape for multi-head attention ──
     // Q: (s, hidden) → (s, n_heads, head_dim) → (s, n_kv_heads, kv_groups, head_dim)
     //                 → (n_kv_heads, kv_groups, s, head_dim)
+    // ONE apply (ruling 2026-08-26).
     let q = q
+        .view()
         .split_dims(1, head_dim) // (s, n_heads, head_dim)
         .split_dims(1, kv_groups) // (s, n_kv_heads, kv_groups, head_dim)
-        .permute((1, 2, 0, 3)); // (n_kv_heads, kv_groups, s, head_dim)
+        .permute((1, 2, 0, 3)) // (n_kv_heads, kv_groups, s, head_dim)
+        .finish();
 
-    // K: (ctx, kv_dim) → (ctx, n_kv_heads, head_dim) → (n_kv_heads, head_dim, ctx)
+    // K: (ctx, kv_dim) → (n_kv_heads, kv_groups, head_dim, ctx); the
+    // kv_groups broadcast rides the SAME one apply.
     let k = k
+        .view()
         .split_dims(1, head_dim) // (ctx, n_kv_heads, head_dim)
-        .permute((1, 2, 0)); // (n_kv_heads, head_dim, ctx)
+        .permute((1, 2, 0)) // (n_kv_heads, head_dim, ctx)
+        .expand_dim(1, kv_groups) // (n_kv_heads, kv_groups, head_dim, ctx)
+        .finish();
 
-    // V: (ctx, kv_dim) → (ctx, n_kv_heads, head_dim) → (n_kv_heads, ctx, head_dim)
+    // V: (ctx, kv_dim) → (n_kv_heads, kv_groups, ctx, head_dim), same.
     let v = v
+        .view()
         .split_dims(1, head_dim) // (ctx, n_kv_heads, head_dim)
-        .permute((1, 0, 2)); // (n_kv_heads, ctx, head_dim)
+        .permute((1, 0, 2)) // (n_kv_heads, ctx, head_dim)
+        .expand_dim(1, kv_groups) // (n_kv_heads, kv_groups, ctx, head_dim)
+        .finish();
 
     // ── Phase 4: Attention ──
-    // Broadcast K, V over kv_groups dimension
-    let k = k.expand_dim(1, kv_groups); // (n_kv_heads, kv_groups, head_dim, ctx)
-    let v = v.expand_dim(1, kv_groups); // (n_kv_heads, kv_groups, ctx, head_dim)
 
     // QK^T: (n_kv_heads, kv_groups, s, head_dim) @ (n_kv_heads, kv_groups, head_dim, ctx)
     //     → (n_kv_heads, kv_groups, s, ctx)
@@ -309,8 +338,12 @@ fn paged_attention_core(
         mask = mask + outside;
     }
 
-    // Broadcast (s, ctx) → (n_kv_heads, kv_groups, s, ctx)
-    let mask = mask.expand_dim(0, n_kv_heads).expand_dim(1, kv_groups);
+    // Broadcast (s, ctx) → (n_kv_heads, kv_groups, s, ctx) — ONE apply.
+    let mask = mask
+        .view()
+        .expand_dim(0, n_kv_heads)
+        .expand_dim(1, kv_groups)
+        .finish();
     let scores = scores + mask;
 
     // Softmax over context dimension (axis 3)
@@ -325,7 +358,12 @@ fn paged_attention_core(
     // Head merge as an EXPLICIT view (A2: no tracker reassignment —
     // the old code silently reinterpreted the permuted view as fresh
     // contiguous storage): (s, n_kv, groups, hd) -> (s, n_heads*hd).
-    let out = out.permute((2, 0, 1, 3)).merge_dims(1, 2).merge_dims(1, 2);
+    let out = out
+        .view()
+        .permute((2, 0, 1, 3))
+        .merge_dims(1, 2)
+        .merge_dims(1, 2)
+        .finish();
 
     (out, k_cache, v_cache)
 }
@@ -352,8 +390,9 @@ pub fn rotary_apply(
     let heads = x.split_dims(1, head_dim); // (s, n, head_dim)
     let dims = heads.dims();
     let rotated = heads.matmul(rot); // (s, n, head_dim)
-    let cos = cos.unsqueeze(1).expand(dims.clone());
-    let sin = sin.unsqueeze(1).expand(dims);
+    // ONE broadcast apply each (ruling 2026-08-26).
+    let cos = cos.view().unsqueeze(1).expand(dims.clone()).finish();
+    let sin = sin.view().unsqueeze(1).expand(dims).finish();
     (heads * cos + rotated * sin).merge_dims(1, 2)
 }
 
@@ -492,7 +531,7 @@ pub fn rms_norm_heads_unweighted(x: GraphTensor, head_dim: usize, epsilon: f32) 
     let heads = x.split_dims(1, head_dim);
     let dims = heads.dims();
     let inv = ((heads * heads).mean(2) + epsilon).sqrt().reciprocal();
-    (heads * inv.unsqueeze(2).expand(dims)).merge_dims(1, 2)
+    (heads * inv.view().unsqueeze(2).expand(dims).finish()).merge_dims(1, 2)
 }
 
 pub fn rms_norm_heads(
@@ -505,8 +544,8 @@ pub fn rms_norm_heads(
     let dims = heads.dims();
     let inv = ((heads * heads).mean(2) + epsilon).sqrt().reciprocal(); // (s, n_heads)
     let scaled = heads
-        * inv.unsqueeze(2).expand(dims.clone())
-        * weight.unsqueeze(0).unsqueeze(0).expand(dims);
+        * inv.view().unsqueeze(2).expand(dims.clone()).finish()
+        * weight.view().unsqueeze(0).unsqueeze(0).expand(dims).finish();
     scaled.merge_dims(1, 2)
 }
 
@@ -522,14 +561,15 @@ pub fn attention(
     let scale = 1.0 / (head_dim as f32).sqrt();
     let sq = q.dims()[0];
     let sk = k.dims()[0];
-    let q = q.split_dims(1, head_dim).permute((1, 0, 2)); // (nh, sq, hd)
-    let k = k.split_dims(1, head_dim).permute((1, 2, 0)); // (nh, hd, sk)
-    let v = v.split_dims(1, head_dim).permute((1, 0, 2)); // (nh, sk, hd)
+    // ONE apply per operand reshape (ruling 2026-08-26).
+    let q = q.view().split_dims(1, head_dim).permute((1, 0, 2)).finish(); // (nh, sq, hd)
+    let k = k.view().split_dims(1, head_dim).permute((1, 2, 0)).finish(); // (nh, hd, sk)
+    let v = v.view().split_dims(1, head_dim).permute((1, 0, 2)).finish(); // (nh, sk, hd)
     let scores = q.matmul(k) * scale; // (nh, sq, sk)
     let weights = scores.softmax(2);
     let out = weights.matmul(v); // (nh, sq, hd)
     let _ = (sq, sk);
-    out.permute((1, 0, 2)).merge_dims(1, 2) // (sq, nh·hd)
+    out.view().permute((1, 0, 2)).merge_dims(1, 2).finish() // (sq, nh·hd)
 }
 
 #[cfg(test)]
@@ -538,7 +578,7 @@ mod tests {
     use luminal::implementation_search::ImplementationSearchOptions;
     use luminal::prelude::*;
     use luminal::shape::IntExpr;
-    use luminal::reference::ReferenceRuntime;
+    use luminal_reference::ReferenceRuntime;
     use rustc_hash::FxHashMap;
 
     fn assert_close(ours: &[f32], expected: &[f32]) {
@@ -685,7 +725,7 @@ mod tests {
             }
         }
 
-        let rt = luminal::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (q.id, q_vals.into()),
@@ -798,7 +838,7 @@ mod tests {
             }
         }
 
-        let rt = luminal::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (q.id, q_vals.into()),
@@ -899,7 +939,7 @@ mod masked_tests {
             }
         }
 
-        let rt = luminal::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (q.id, q_vals.into()),

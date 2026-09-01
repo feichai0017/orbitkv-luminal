@@ -14,7 +14,9 @@ edition = "2021"
 
 [features]
 default = []
-device = ["dep:cudarc"]
+# Train 3: the cuBLASLt host-call dispatch rides the same feature —
+# cudarc's `cublaslt` module (result layer) joins the driver/NVRTC set.
+device = ["dep:cudarc", "cudarc/cublaslt"]
 
 [dependencies]
 luminal = { path = "../.." }
@@ -23,3 +25,21 @@ rustc-hash = "2"
 cudarc = { version = "0.19.8", optional = true, features = ["cuda-version-from-build-system", "fallback-latest"] }
 
 [dev-dependencies]
+# Step B: the reference inventory the subset test pins against now lives
+# in its own crate.
+luminal_reference = { path = "../luminal_reference" }
+# M4 Phase 5: the refusal-accounting ladder (the cycle-anatomy L1-L8
+# discipline) runs the nn llama-block graphs through THIS runtime's
+# search with views admitted.
+luminal_nn = { path = "../luminal_nn" }
+# Per-model example applications (examples/): each builds its graph with
+# the mini crate's own builder at the mini's canonical dims, then runs
+# the reference-vs-device differential (examples/support/mod.rs).
+mini_conv = { path = "../../examples/mini/conv" }
+mini_llama3 = { path = "../../examples/mini/llama3" }
+mini_qwen3 = { path = "../../examples/mini/qwen3" }
+mini_qwen3_moe = { path = "../../examples/mini/qwen3_moe" }
+mini_whisper = { path = "../../examples/mini/whisper" }
+mini_gemma3 = { path = "../../examples/mini/gemma3" }
+mini_gemma4_moe = { path = "../../examples/mini/gemma4_moe" }
+mini_flux = { path = "../../examples/mini/flux" }

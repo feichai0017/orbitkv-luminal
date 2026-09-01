@@ -111,7 +111,7 @@ impl Graph {
         let id = self
             .logical
             .input(&name, &dims, dtype)
-            .expect("logical input insertion failed");
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(id, dims, self, dtype)
     }
 }
@@ -135,16 +135,15 @@ impl Graph {
 // Model/binding split (M3 Step 1): the recorder emits MODEL text only —
 // input declarations, ops, output naming, signature lists. Boundary
 // vocabulary (layouts, buffers, access, freed-by, Bool8 casts) is the
-// runtime binding generator's business (`reference_binding`), never the
+// runtime binding generator's business (`runtime_binding`), never the
 // model's.
 //
 // Coverage is honest: any construct the recorder does not understand
 // POISONS it with a reason — the first reason wins, the native path
-// refuses loudly at load, and their pipeline is untouched. Every operand
-// resolution cross-checks the tensor's tracker dims against the recorded
-// dims, so a direct tracker mutation the recorder never saw (the ways a
-// frontend method can bypass the movement API) poisons instead of
-// silently mistranslating.
+// refuses loudly at load, and their pipeline is untouched. Handle dims
+// are DERIVED from the recorded value after every record call (R-D
+// ruling 2026-08-26), so a tracker/recorder dims divergence is
+// unrepresentable — the old resolve() cross-check tripwire is deleted.
 
 use crate::shape::{IntExpr, Term};
 use anyhow::{bail, Result as AnyResult};
@@ -170,46 +169,39 @@ pub enum MapEntry {
     Max(Box<MapEntry>, Box<MapEntry>),
 }
 
+// MapEntry::substitute as a RECORDER fold (composing maps across
+// already-recorded values) is DELETED with fold 1 (Austin's ruling
+// 2026-08-26): composition of recorded index-map applies is egglog's
+// job. What remains below is CONSTRUCTION-TIME composition for ONE
+// macro call — the same ruling's flip side: "macro interiors mint ONE
+// apply per logical construct", with the map built at construction
+// inside the one call. `ViewChain` (frontend/movement.rs) is the only
+// user.
 impl MapEntry {
-    /// Substitute every Coord leaf (a previous-out coordinate) with its
-    /// replacement in the new out space — the movement-composition step.
-    fn substitute(&self, replacement: &[MapEntry], prev_rank: usize) -> MapEntry {
+    /// Replace each Coord leaf (an axis of the intermediate space,
+    /// whose rank is `rank`) with that axis's entry over the next
+    /// space. Purely construction-time; nothing recorded is rewritten.
+    pub(crate) fn substitute(&self, replacements: &[MapEntry], rank: usize) -> MapEntry {
         match self {
-            MapEntry::Coord { from_end, .. } => replacement[prev_rank - 1 - from_end].clone(),
-            MapEntry::Lit(value) => MapEntry::Lit(value.clone()),
+            MapEntry::Coord { from_end, extent: _ } => replacements[rank - 1 - from_end].clone(),
+            MapEntry::Lit(value) => MapEntry::Lit(*value),
             MapEntry::Add(a, b) => MapEntry::Add(
-                Box::new(a.substitute(replacement, prev_rank)),
-                Box::new(b.substitute(replacement, prev_rank)),
+                Box::new(a.substitute(replacements, rank)),
+                Box::new(b.substitute(replacements, rank)),
             ),
-            MapEntry::Mul(a, e) => {
-                MapEntry::Mul(Box::new(a.substitute(replacement, prev_rank)), e.clone())
-            }
-            MapEntry::Div(a, e) => {
-                MapEntry::Div(Box::new(a.substitute(replacement, prev_rank)), e.clone())
-            }
-            MapEntry::Rem(a, e) => {
-                MapEntry::Rem(Box::new(a.substitute(replacement, prev_rank)), e.clone())
-            }
+            MapEntry::Mul(a, e) => MapEntry::Mul(Box::new(a.substitute(replacements, rank)), *e),
+            MapEntry::Div(a, e) => MapEntry::Div(Box::new(a.substitute(replacements, rank)), *e),
+            MapEntry::Rem(a, e) => MapEntry::Rem(Box::new(a.substitute(replacements, rank)), *e),
             MapEntry::Min(a, b) => MapEntry::Min(
-                Box::new(a.substitute(replacement, prev_rank)),
-                Box::new(b.substitute(replacement, prev_rank)),
+                Box::new(a.substitute(replacements, rank)),
+                Box::new(b.substitute(replacements, rank)),
             ),
             MapEntry::Max(a, b) => MapEntry::Max(
-                Box::new(a.substitute(replacement, prev_rank)),
-                Box::new(b.substitute(replacement, prev_rank)),
+                Box::new(a.substitute(replacements, rank)),
+                Box::new(b.substitute(replacements, rank)),
             ),
         }
     }
-}
-
-/// A tracker-level view: `base_node` seen through `entries` (listed from
-/// the PARENT's outermost axis inward, the house map convention), with the
-/// view's own output dims.
-#[derive(Debug, Clone)]
-pub struct ViewValue {
-    pub base_node: usize,
-    pub entries: Vec<MapEntry>,
-    pub dims: Vec<IntExpr>,
 }
 
 /// A movement transform, as the frontend method states it — its own
@@ -238,8 +230,21 @@ pub enum Movement {
 /// value; there is no parallel frontend-id keyspace.
 pub type ValueId = NodeIndex;
 
+/// The sentinel id of an UNRECORDED handle (a source op recorded onto an
+/// already-poisoned graph): never present in the graph, so any use of the
+/// handle resolves to a loud poison instead of a panic. Handles are TOTAL
+/// (the poison-door discipline: the frontend never panics; the graph
+/// refuses at load with the reason).
+pub(crate) fn unrecorded_value() -> ValueId {
+    ValueId::end()
+}
+
 /// An operand as a record call sees it: the handle's value plus its
-/// tracker dims (the divergence tripwire input).
+/// dims. The dims payload is VESTIGIAL (R-D ruling 2026-08-26,
+/// reasserted 2026-09-01: handle dims are derived from the recorded
+/// value after every record call, so the divergence tripwire it fed is
+/// deleted; the tuple shape is kept only to avoid churn at ~40 call
+/// sites).
 pub type Operand = (ValueId, Vec<IntExpr>);
 
 /// Logical operation carried by an SSA node. Rendering details remain at
@@ -419,6 +424,13 @@ impl LogicalGraph {
         &self.graph
     }
 
+    /// The recorded dims of a value — THE dims (R-D ruling 2026-08-26:
+    /// `GraphTensor.dims` is derived from this after every record call
+    /// by `with_logical`).
+    pub fn value_dims(&self, id: ValueId) -> &[IntExpr] {
+        &self.graph[id].dims
+    }
+
     pub(crate) fn viz_nodes(&self) -> impl Iterator<Item = (ValueId, &LogicalNode)> {
         self.graph.node_indices().map(|id| (id, &self.graph[id]))
     }
@@ -555,43 +567,30 @@ impl LogicalGraph {
             .collect()
     }
 
-    /// Resolve an operand: it must carry a value, and its tracker dims
-    /// must agree with the recorded dims — the tripwire for tracker
-    /// mutations the graph never saw.
+    /// Resolve an operand: it must be a value in the graph. (The
+    /// tracker-vs-recorded dims tripwire is DELETED — R-D ruling
+    /// 2026-08-26, reasserted 2026-09-01 over the petgraph backing:
+    /// handle dims derive from the recorded value after every record
+    /// call, so divergence is unrepresentable. The operand's dims
+    /// payload is vestigial and ignored here.)
     fn resolve(&mut self, operand: &Operand, at: &str) -> Result<ValueId, String> {
-        let (id, tracker_dims) = operand;
-        let Some(value) = self.graph.node_weight(*id) else {
+        let (id, _vestigial_dims) = operand;
+        if self.graph.node_weight(*id).is_none() {
             return Err(format!("{at}: operand {id:?} is not in the logical graph"));
-        };
-        let dims = &value.dims;
-        if dims.len() != tracker_dims.len()
-            || dims.iter().zip(tracker_dims).any(|(a, b)| {
-                // Static: value equality. Symbolic: structural equality
-                // is the fast path, PROPER equality saturation the
-                // fallback (ruling 2026-08-13 — (s+t) and (t+s) are the
-                // same extent; only a genuine divergence trips).
-                a.to_usize() != b.to_usize()
-                    || a.to_usize().is_none() && *a != *b && !a.egglog_equal(b)
-            })
-        {
-            return Err(format!(
-                "{at}: tracker dims {tracker_dims:?} diverged from recorded dims {dims:?} \
-                 (a tracker was mutated outside the movement API)"
-            ));
         }
         Ok(*id)
     }
 
     /// Record an input declaration. The returned graph node is both its
     /// SSA identity and its staging key.
+    /// TOTAL: an input is recorded even on a poisoned graph (it has no
+    /// operands, so nothing about it can be wrong that the poison does
+    /// not already cover), and a bad shape poisons AND still records —
+    /// the handle stays usable and load() refuses with the reason.
     pub fn input(&mut self, label: &str, dims: &[IntExpr], dtype: DType) -> Option<ValueId> {
-        if self.poisoned.is_some() {
-            return None;
-        }
         let at = self.graph.node_count();
         if let Err(reason) = Self::shape_term(dims) {
             self.poison(format!("input t{at}: {reason}"));
-            return None;
         }
         // STAGE 3 (rulings 2026-08-13): every input has a unique
         // pristine label. Anonymous inputs auto-name "arg.{k}" in
@@ -848,6 +847,9 @@ impl LogicalGraph {
         let mut out_dims = Vec::with_capacity(rank);
         let mut out_terms = Vec::with_capacity(rank);
         for k in 0..rank {
+            // Frontend simplification restored (Austin's revert ruling
+            // 2026-08-27): recorder-authored expressions are
+            // construction-simplified, as pre-R-C.
             let out_dim = (befores[k] + in_dims[k] + afters[k]).simplify();
             match Self::dim_term(&out_dim) {
                 Ok(term) => out_terms.push(term),
@@ -985,20 +987,12 @@ impl LogicalGraph {
         Some(self.push(LogicalOp::Scatter, &ids, out_dims, out_dtype))
     }
 
-    /// Identity entries: parent axis p reads the like-positioned coord.
-    fn identity_entries(dims: &[IntExpr]) -> Vec<MapEntry> {
-        let rank = dims.len();
-        (0..rank)
-            .map(|p| MapEntry::Coord {
-                from_end: rank - 1 - p,
-                extent: dims[p].clone(),
-            })
-            .collect()
-    }
-
-    /// Apply a movement: composes onto an existing view value (a new
-    /// value over the SAME base — the intermediate view goes dead and is
-    /// elided at render) or wraps identity entries over a plain value.
+    /// Apply a movement: mints ONE view value per movement on the
+    /// CURRENT value, carrying that single movement's map (fold-1
+    /// removal, Austin's ruling 2026-08-26, REASSERTED 2026-09-01 over
+    /// the petgraph backing: no base short-circuit, no entry
+    /// composition — movement chains are recorded as chains and egglog
+    /// composes the index-map applies).
     pub fn apply_movement(&mut self, current: &Operand, movement: Movement) -> Option<ValueId> {
         if self.poisoned.is_some() {
             return None;
@@ -1012,26 +1006,37 @@ impl LogicalGraph {
             }
         };
         let value = &self.graph[current_id];
-        let (base, entries, prev_dims) = match &value.op {
-            LogicalOp::IndexMapApply { entries } => (
-                self.operands(current_id)[0],
-                entries.clone(),
-                value.dims.clone(),
-            ),
-            _ => (
-                current_id,
-                Self::identity_entries(&value.dims),
-                value.dims.clone(),
-            ),
-        };
+        let prev_dims = value.dims.clone();
         let out_dtype = value.dtype;
-        let prev_rank = prev_dims.len();
 
-        let (replacement, new_dims): (Vec<MapEntry>, Vec<IntExpr>) = match movement {
+        let (replacement, new_dims) = match movement_entries(movement, &prev_dims) {
+            Ok(pair) => pair,
+            Err(reason) => {
+                self.poison(reason);
+                return None;
+            }
+        };
+
+        // Fold-1 removed: `replacement` IS this movement's map (the
+        // per-parent-axis entries over the new out space) — push it
+        // directly on the current value.
+        self.push_view(current_id, replacement, new_dims, out_dtype)
+    }
+}
+
+/// One movement's index map, stated from the movement's own parameters:
+/// per PARENT axis, an entry over the movement's OUT space, plus the out
+/// dims. Shared by `apply_movement` (one view per movement) and
+/// `ViewChain` (construction-time composition for one macro call).
+pub(crate) fn movement_entries(
+    movement: Movement,
+    prev_dims: &[IntExpr],
+) -> Result<(Vec<MapEntry>, Vec<IntExpr>), String> {
+    let prev_rank = prev_dims.len();
+    let pair: (Vec<MapEntry>, Vec<IntExpr>) = match movement {
             Movement::Permute(axes) => {
                 if axes.len() != prev_rank {
-                    self.poison(format!("permute arity {} vs rank {prev_rank}", axes.len()));
-                    return None;
+                    return Err(format!("permute arity {} vs rank {prev_rank}", axes.len()));
                 }
                 let mut replacement = vec![MapEntry::Lit(0.into()); prev_rank];
                 for (q, &p) in axes.iter().enumerate() {
@@ -1045,8 +1050,7 @@ impl LogicalGraph {
             }
             Movement::ExpandDim { axis, size } => {
                 if axis > prev_rank {
-                    self.poison(format!("expand_dim axis {axis} vs rank {prev_rank}"));
-                    return None;
+                    return Err(format!("expand_dim axis {axis} vs rank {prev_rank}"));
                 }
                 let new_rank = prev_rank + 1;
                 let replacement = (0..prev_rank)
@@ -1058,16 +1062,15 @@ impl LogicalGraph {
                         }
                     })
                     .collect();
-                let mut new_dims = prev_dims.clone();
+                let mut new_dims = prev_dims.to_vec();
                 new_dims.insert(axis, size);
                 (replacement, new_dims)
             }
             Movement::RemoveDim { axis } => {
                 if axis >= prev_rank || prev_dims[axis].to_usize().is_some_and(|d| d != 1) {
-                    self.poison(format!(
+                    return Err(format!(
                         "remove_dim axis {axis} of dims {prev_dims:?} (must be a size-1 axis)"
                     ));
-                    return None;
                 }
                 let new_rank = prev_rank - 1;
                 let replacement = (0..prev_rank)
@@ -1083,15 +1086,15 @@ impl LogicalGraph {
                         }
                     })
                     .collect();
-                let mut new_dims = prev_dims.clone();
+                let mut new_dims = prev_dims.to_vec();
                 new_dims.remove(axis);
                 (replacement, new_dims)
             }
             Movement::SplitDims { axis, inner } => {
                 if axis >= prev_rank {
-                    self.poison(format!("split_dims axis {axis} vs rank {prev_rank}"));
-                    return None;
+                    return Err(format!("split_dims axis {axis} vs rank {prev_rank}"));
                 }
+                // Frontend simplification restored (revert ruling 2026-08-27).
                 let outer = (prev_dims[axis] / inner).simplify();
                 let new_rank = prev_rank + 1;
                 let replacement = (0..prev_rank)
@@ -1119,17 +1122,17 @@ impl LogicalGraph {
                         }
                     })
                     .collect();
-                let mut new_dims = prev_dims.clone();
+                let mut new_dims = prev_dims.to_vec();
                 new_dims[axis] = outer;
                 new_dims.insert(axis + 1, inner);
                 (replacement, new_dims)
             }
             Movement::MergeDims { axis1, axis2 } => {
                 if axis1 >= axis2 || axis2 >= prev_rank {
-                    self.poison(format!("merge_dims ({axis1},{axis2}) vs rank {prev_rank}"));
-                    return None;
+                    return Err(format!("merge_dims ({axis1},{axis2}) vs rank {prev_rank}"));
                 }
                 let inner = prev_dims[axis2].clone();
+                // Frontend simplification restored (revert ruling 2026-08-27).
                 let merged = (prev_dims[axis1] * prev_dims[axis2]).simplify();
                 let new_rank = prev_rank - 1;
                 let merged_coord = MapEntry::Coord {
@@ -1151,18 +1154,14 @@ impl LogicalGraph {
                         }
                     })
                     .collect();
-                let mut new_dims = prev_dims.clone();
+                let mut new_dims = prev_dims.to_vec();
                 new_dims[axis1] = merged;
                 new_dims.remove(axis2);
                 (replacement, new_dims)
             }
             Movement::Repeat(repeats) => {
                 if repeats.len() != prev_rank {
-                    self.poison(format!(
-                        "repeat arity {} vs rank {prev_rank}",
-                        repeats.len()
-                    ));
-                    return None;
+                    return Err(format!("repeat arity {} vs rank {prev_rank}", repeats.len()));
                 }
                 let replacement = (0..prev_rank)
                     .map(|p| {
@@ -1172,6 +1171,8 @@ impl LogicalGraph {
                                 extent: prev_dims[p].clone(),
                             }
                         } else {
+                            // Frontend simplification restored (revert
+                            // ruling 2026-08-27).
                             let tiled = (prev_dims[p] * repeats[p]).simplify();
                             MapEntry::Rem(
                                 Box::new(MapEntry::Coord {
@@ -1192,11 +1193,7 @@ impl LogicalGraph {
             }
             Movement::Shrink { new_dims } => {
                 if new_dims.len() != prev_rank {
-                    self.poison(format!(
-                        "shrink arity {} vs rank {prev_rank}",
-                        new_dims.len()
-                    ));
-                    return None;
+                    return Err(format!("shrink arity {} vs rank {prev_rank}", new_dims.len()));
                 }
                 let replacement = (0..prev_rank)
                     .map(|p| MapEntry::Coord {
@@ -1207,14 +1204,10 @@ impl LogicalGraph {
                 (replacement, new_dims)
             }
         };
+    Ok(pair)
+}
 
-        let composed: Vec<MapEntry> = entries
-            .iter()
-            .map(|entry| entry.substitute(&replacement, prev_rank))
-            .collect();
-        self.push_view(base, composed, new_dims, out_dtype)
-    }
-
+impl LogicalGraph {
     /// Append post-schedule authoring checks (iota bounds pairs).
     /// SHAPE-CONTRACT INVARIANTS (ruling 2026-08-13, squeeze "option
     /// 3"): record always; validity is a POST-SATURATION check against
@@ -1429,12 +1422,16 @@ impl LogicalGraph {
         &self.post_checks
     }
 
-    /// The native assembly SPLIT at the schedule (binding seeds inject
+    /// The bound assembly SPLIT at the schedule (binding seeds inject
     /// before saturation): (pre-schedule text, input slots, output slots,
-    /// post-schedule checks).
+    /// post-schedule checks). The model text is runtime-neutral; every
+    /// boundary statement comes from the caller's
+    /// [`RuntimeBindingsGenerator`](crate::runtime_binding::RuntimeBindingsGenerator)
+    /// — each runtime hands in its own (Step C, 2026-08-17).
     #[allow(clippy::type_complexity)]
-    pub fn native_parts(
+    pub fn bound_parts(
         &self,
+        bindings: &dyn crate::runtime_binding::RuntimeBindingsGenerator,
     ) -> Result<
         (
             String,
@@ -1464,12 +1461,12 @@ impl LogicalGraph {
             } else {
                 format!("v{}", id.index())
             };
-            text.push_str(&crate::reference_binding::input_binding(
+            text.push_str(&bindings.input_binding(
                 &stem,
                 buffer as usize,
                 &value_name,
                 &shape,
-                &crate::reference_binding::width_term(value.dtype),
+                &bindings.width_term(value.dtype),
             ));
             input_buffer_tensors.push(format!("{stem}_buffer_tensor"));
             input_slots.push(InputSlot {
@@ -1489,7 +1486,7 @@ impl LogicalGraph {
             let stem = format!("natout{key}");
             let buffer = next_buffer;
             next_buffer += 1;
-            text.push_str(&crate::reference_binding::output_binding(
+            text.push_str(&bindings.output_binding(
                 &stem,
                 buffer as usize,
                 &format!("v{}", id.index()),
@@ -1503,7 +1500,7 @@ impl LogicalGraph {
                 size: key as u64,
             });
         }
-        text.push_str(&crate::reference_binding::boundary_lists(
+        text.push_str(&bindings.boundary_lists(
             &input_buffer_tensors,
             &output_buffer_tensors,
             "nat_input_boundary",
@@ -1518,11 +1515,14 @@ impl LogicalGraph {
         ))
     }
 
-    /// The assembled native program (model + reference-binding defaults).
-    pub fn native_program(&self) -> Result<LogicalProgram, String> {
-        let (pre, input_slots, output_slots, post_checks, _labeled) = self.native_parts()?;
+    /// The assembled program under the given runtime's bindings.
+    pub fn bound_program(
+        &self,
+        bindings: &dyn crate::runtime_binding::RuntimeBindingsGenerator,
+    ) -> Result<LogicalProgram, String> {
+        let (pre, input_slots, output_slots, post_checks, _labeled) = self.bound_parts(bindings)?;
         Ok(LogicalProgram {
-            text: format!("{pre}{}{post_checks}", crate::reference_binding::SCHEDULE),
+            text: format!("{pre}{}{post_checks}", bindings.schedule()),
             input_slots,
             output_slots,
         })
@@ -1560,7 +1560,8 @@ pub struct OutputSlot {
 #[derive(Debug, Clone)]
 pub struct LogicalProgram {
     /// Model + binding + schedule + authoring-contract checks. Run as
-    /// `format!("{}\n\n{}", egglog_snippet::assembled_program(), text)`.
+    /// `format!("{}\n\n{}", <the runtime's assembled program>, text)` —
+    /// e.g. `luminal_reference::assembled_program()`.
     pub text: String,
     /// Bound inputs in signature order.
     pub input_slots: Vec<InputSlot>,

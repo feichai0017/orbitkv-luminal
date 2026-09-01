@@ -23,8 +23,10 @@ pub struct GraphTensor {
     /// The tensor's ordered logical dims — the ONLY shape state a handle
     /// carries (the ShapeTracker died with the HLIR pipeline at M3 Step 4;
     /// strides/contiguity/sizing are the compiler's business — views are
-    /// explicit logical structure, layout is binding vocabulary). The
-    /// recorder cross-checks these against its own recorded dims.
+    /// explicit logical structure, layout is binding vocabulary). R-D
+    /// ruling 2026-08-26: this is a CACHE of the recorder's dims for the
+    /// current value, refreshed from `LogicalGraph::value_dims` by
+    /// `with_logical` after every record call — never hand-maintained.
     pub(crate) dims: ArrayVec<[IntExpr; 10]>,
     pub dtype: DType,
 }
@@ -49,6 +51,30 @@ impl GraphTensor {
             dims: shape.to_shape().into_iter().collect(),
             dtype,
         }
+    }
+
+    /// Adopt the recorded logical value: the handle's id BECOMES the
+    /// value (`GraphTensor.id` is the canonical SSA identity, PR #423)
+    /// AND the dims derive from the recorder (R-D ruling 2026-08-26,
+    /// reasserted 2026-09-01: the recorder's dims are THE dims; no
+    /// frontend method keeps parallel dims arithmetic). `None`
+    /// (poisoned/unrecorded) keeps the current id and dims so reads
+    /// stay panic-free; the graph fails at load with the poison reason.
+    pub(crate) fn with_logical(
+        mut self,
+        value: Option<crate::graph::ValueId>,
+    ) -> Self {
+        if let Some(id) = value {
+            self.id = id;
+            self.dims = self
+                .graph()
+                .logical
+                .value_dims(id)
+                .iter()
+                .cloned()
+                .collect();
+        }
+        self
     }
 
     /// Get a mutable reference to the graph this tensor belongs to

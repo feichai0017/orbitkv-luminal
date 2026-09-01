@@ -11,6 +11,27 @@ use luminal::graph::Graph;
 use luminal::prelude::{FxHashMap, NodeIndex};
 use luminal_cuda_lite::CudaRuntime;
 
+
+/// Read the device output DENSELY through its RETURNED LAYOUT
+/// (escape-and-disclose + the corrected contract, 2026-08-31): a
+/// view-elected output returns its BACKING buffer's bytes (possibly
+/// parent-sized) plus the elected layout `L`, and the honest comparison
+/// EVALUATES that layout at each coordinate. The hop-chain walker is
+/// gone with the hop machinery; the reader is this runtime evaluating
+/// its OWN vocabulary (`layouts::dense_f32`). A dense election evaluates
+/// the identity, so this stays the universal readback.
+fn walked_dense(rt: &CudaRuntime, out: NodeIndex) -> Vec<f32> {
+    let (data, binding) = rt.fetch(out).expect("escape-and-disclose fetch");
+    let bytes = match data {
+        TypedBuffer::F32(values) => values,
+        other => panic!("output is {}, not f32", other.type_name()),
+    };
+    // The value's shape and read path both come from the RETURNED
+    // LAYOUT; there is no `dims` field and no hop chain any more.
+    luminal_cuda_lite::layouts::dense_f32(bytes, &binding.layout)
+        .expect("the returned layout reads dense over its backing buffer")
+}
+
 fn run_both(
     cx: &Graph,
     inputs: &[(NodeIndex, Vec<f32>)],
@@ -19,7 +40,7 @@ fn run_both(
     // Reference side.
     let staged: Vec<(NodeIndex, TypedBuffer)> =
         inputs.iter().map(|(id, v)| (*id, v.clone().into())).collect();
-    let reference = luminal::test_support::run_reference(cx, &staged);
+    let reference = luminal_reference::harness::run_reference(cx, &staged);
     let want = reference.get_f32(out).expect("reference output").clone();
 
     // Device side.
@@ -32,7 +53,7 @@ fn run_both(
         rt.set_data(*id, v.clone());
     }
     rt.execute().expect("device execute");
-    let got = rt.get_f32(out).expect("device output").clone();
+    let got = walked_dense(&rt, out);
     (want, got)
 }
 

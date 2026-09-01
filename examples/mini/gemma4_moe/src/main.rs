@@ -41,6 +41,6 @@ fn main() {
         (gather_idx.id, vec![0i32, 1].into()),
         (scatter_idx.id, vec![1i32].into()),
     ];
-    let rt = luminal::test_support::run_reference(&cx, &pairs);
+    let rt = luminal_reference::harness::run_reference(&cx, &pairs);
     println!("soft-capped logits: {:?}", rt.get_f32(logits.id).unwrap());
 }

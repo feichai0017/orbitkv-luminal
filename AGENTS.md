@@ -10,6 +10,28 @@ All other functionality is split into crates in the `crates/` directory. For ins
 - Currently running `cargo test` in luminal_metal and luminal_cuda_lite require access to an Apple and Nvidia GPU respectively.
 - PRs must have no clippy errors and `cargo fmt` must be ran before a PR is submitted.
 
+### Run only the tests you need (tiers)
+`cargo test --workspace` is a LANDING gate, not an iteration gate. Reaching for it
+mid-change is the single biggest waste in this repo — measured: one zoo decode
+loop is 185s, `luminal_nn`'s `decoder_block_matches_scalar_reference` is 98s and
+`llama_block_forward_rope...` is 47s, while genuine unit tests are 1-2s each.
+
+- **Spin** (working in core / the bufferizer / rewrites): `cargo test -p luminal --lib`.
+  Nothing else. This is the loop you should be in almost all the time.
+- **Spin + proof of life** (the core change must still drive a runtime): add ONE
+  targeted runtime test, e.g. `cargo test -p luminal_reference --lib <filter>` or a
+  single named `-p luminal_cuda_lite --test <file>`. Enough to prove the seam,
+  not the corpus.
+- **Landing** (about to commit, or the change is done): the full sweep —
+  `cargo test -p luminal`, `-p luminal_reference`, `-p luminal_cuda_lite`,
+  `-p test_runtime`, `-p luminal_nn`, plus device suites where a GPU is available.
+
+Heavy proofs are marked, not deleted. The model-zoo fidelity tests (full genetic
+search + decode loops) sit behind each zoo crate's `zoo-proofs` feature:
+`cargo test -p llama3 --features zoo-proofs`. A named feature rather than a bare
+`#[ignore]` keeps "slow on purpose" distinguishable from "ignored because broken"
+— the whisper proof is currently both, and says so in its own reason string.
+
 ## Debugging and Correctness
 - Treat model examples as specifications of the intended architecture. Do not change model code, prompt templates, weights, or example logic to hide compiler/runtime/search bugs unless the model code is demonstrably semantically wrong.
 - When outputs are incorrect, first root-cause the failing compiler/runtime path. Prefer isolating the bad LLIR/HLIR graph, rewrite, op lowering, shape/stride assumption, layout contract, or runtime implementation that caused the mismatch.

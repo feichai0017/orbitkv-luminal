@@ -5,6 +5,11 @@ edition = "2021"
 
 [dependencies]
 luminal = { path = "../.." }
+luminal_reference = { path = "../../crates/luminal_reference" }
+# Train 3 (op-ownership move): the cuBLASLt marker estate lives in the
+# CUDA-lite crate now (`ops/cublaslt`); this is a CPU-side dependency —
+# CL compiles fully without its `device` feature.
+luminal_cuda_lite = { path = "../../crates/luminal_cuda_lite" }
 # Versions track luminal's Cargo.toml exactly — the egglog/egraph-serialize/
 # petgraph types must UNIFY with luminal's so the fixture runners can hand
 # this crate's egraphs to luminal's extractor and bufferizer.

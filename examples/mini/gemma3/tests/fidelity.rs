@@ -168,7 +168,7 @@ fn mini_gemma3_matches_scalar_reference() {
         .collect();
 
     let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
-    let mut rt = luminal::reference::ReferenceRuntime::load(&cx).expect("native load");
+    let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("native load");
     rt.search(
         &data,
         &luminal::implementation_search::ImplementationSearchOptions::default(),
@@ -207,7 +207,7 @@ fn probe_gemma_constructs() {
         let start = std::time::Instant::now();
         let data: rustc_hash::FxHashMap<_, _> = pairs.iter().cloned().collect();
         let mut rt =
-            luminal::reference::ReferenceRuntime::load(cx).expect("native load");
+            luminal_reference::ReferenceRuntime::load(cx).expect("native load");
         match rt.search(&data, &budget) {
             Ok(outcome) => eprintln!(
                 "[gemma-probe] {label}: wall {:.1}s | {}",

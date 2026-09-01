@@ -19,6 +19,6 @@ fn main() {
         (model.conv2.weight.id, weights(54, 3).into()),
         (model.head.weight.id, weights(6, 4).into()),
     ];
-    let rt = luminal::test_support::run_reference(&cx, &pairs);
+    let rt = luminal_reference::harness::run_reference(&cx, &pairs);
     println!("logits: {:?}", rt.get_f32(out.id).unwrap());
 }

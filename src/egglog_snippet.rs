@@ -19,8 +19,6 @@
 //! assembled program is semantically identical to the old monolith — the
 //! byte-stable goldens are the proof.
 
-use std::sync::OnceLock;
-
 /// Where in the core preamble a snippet is spliced. One variant per
 /// `;; @SPLICE` anchor, in the anchors' file order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,24 +133,6 @@ pub fn new_egraph() -> egglog::EGraph {
     egraph
 }
 
-/// THE assembled egglog program: the core preamble plus every registered
-/// op's contributions, in registry order. This is what the pipeline and
-/// every fixture run; the monolithic-preamble era's semantics are
-/// preserved anchor-for-anchor.
-pub fn assembled_program() -> &'static str {
-    static PROGRAM: OnceLock<String> = OnceLock::new();
-    PROGRAM.get_or_init(|| {
-        let core = include_str!("egglog/checkpoint_5/egglog_preamble.egg");
-        let mut snippets: Vec<EgglogSnippet> = Vec::new();
-        for op in crate::logical_op::built_in_logical_ops() {
-            snippets.extend(op.snippets());
-        }
-        for matcher in crate::reference::ops::built_in_matchers() {
-            snippets.extend(matcher.snippets());
-        }
-        assemble(core, &snippets)
-    })
-}
 
 /// [`assembled_program`] for an arbitrary RUNTIME's matcher set — the
 /// TestRuntime seam (ruling 2026-08-13: test-only op variants live in a
@@ -193,14 +173,16 @@ mod tests {
         assert!(out.contains(";; @SPLICE fixpoint\n\n(rule-c)\nbottom"));
     }
 
-    /// The real assembled program parses cleanly end to end — every
+    /// The assembled program parses cleanly end to end — every
     /// declaration precedes its uses, every included `.egg` file is
-    /// balanced. (The full semantic proof is the fixture suite, which
-    /// runs this program everywhere.)
+    /// balanced. Core owns no runtime registry (Step B), so this proves
+    /// the core preamble + logical-op snippets alone; the reference
+    /// registry's assembly is proven by luminal_reference's suites,
+    /// which run its program everywhere.
     #[test]
     fn assembled_program_is_loadable() {
         new_egraph()
-            .parse_and_run_program(None, assembled_program())
+            .parse_and_run_program(None, &assembled_program_for(&[]))
             .expect("assembled program loads");
     }
 }

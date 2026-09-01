@@ -25,7 +25,6 @@ use rustc_hash::FxHashMap;
 use crate::bufferize::BufferIrGraph;
 use crate::extractor::{self, Genome};
 use crate::graph::LogicalProgram;
-use crate::reference::ReferenceRuntime;
 
 #[derive(Debug, Clone)]
 pub struct ImplementationSearchOptions {
@@ -52,8 +51,8 @@ impl Default for ImplementationSearchOptions {
 }
 
 #[derive(Debug)]
-pub struct SearchOutcome {
-    pub best_plan: BufferIrGraph,
+pub struct SearchOutcome<L: crate::bufferize::PlanLayout> {
+    pub best_plan: BufferIrGraph<L>,
     pub best_genome: Genome,
     pub best_nanos: u128,
     /// Plans actually profiled (distinct fingerprints).
@@ -139,15 +138,6 @@ impl SearchTimings {
 
 /// Search the saturated e-graph for the fastest executable plan, profiling
 /// with the given caller data. Deterministic for a fixed seed.
-pub fn search_implementations(
-    egraph: &egraph_serialize::EGraph,
-    program: &LogicalProgram,
-    input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
-    options: &ImplementationSearchOptions,
-) -> Result<SearchOutcome> {
-    search_implementations_with_ops(egraph, program, input_data, options, None)
-}
-
 /// As [`search_implementations`], with the runtime's ALLOWABLE-OPS
 /// inventory made explicit (M3 Step 2: per-runtime, unstandardized).
 /// How search prices a candidate plan. Runtimes supply their own
@@ -155,45 +145,17 @@ pub fn search_implementations(
 /// how its candidates are timed); the in-core implementations are the
 /// reference host executor (the historical behavior) and a static
 /// ranker that never executes.
-pub trait PlanProfiler {
+pub trait PlanProfiler<L: crate::bufferize::PlanLayout> {
     /// Best-of-`trials` cost for the plan with buffer-keyed inputs;
     /// smaller wins. `heuristic_cost` is the extracted graph's summed
     /// bytes-moved estimate, for profilers that rank without running.
     fn profile(
         &mut self,
-        plan: &crate::bufferize::BufferIrGraph,
+        plan: &crate::bufferize::BufferIrGraph<L>,
         input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
         trials: usize,
         heuristic_cost: u64,
     ) -> Result<u128>;
-}
-
-/// The historical profiler: execute on the reference host runtime.
-#[derive(Default)]
-pub struct ReferenceProfiler;
-
-impl PlanProfiler for ReferenceProfiler {
-    fn profile(
-        &mut self,
-        plan: &crate::bufferize::BufferIrGraph,
-        input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
-        trials: usize,
-        _heuristic_cost: u64,
-    ) -> Result<u128> {
-        let mut runtime = ReferenceRuntime::default();
-        runtime.load_plan(plan.clone());
-        for (id, data) in input_data {
-            runtime.set_data_buffer(*id, data.clone());
-        }
-        runtime.execute()?; // warmup + validity
-        let mut best_nanos = u128::MAX;
-        for _ in 0..trials.max(1) {
-            let start = Instant::now();
-            runtime.execute()?;
-            best_nanos = best_nanos.min(start.elapsed().as_nanos());
-        }
-        Ok(best_nanos)
-    }
 }
 
 /// Rank by the heuristic byte-move estimate without executing —
@@ -202,10 +164,10 @@ impl PlanProfiler for ReferenceProfiler {
 #[derive(Default)]
 pub struct StaticProfiler;
 
-impl PlanProfiler for StaticProfiler {
+impl<L: crate::bufferize::PlanLayout> PlanProfiler<L> for StaticProfiler {
     fn profile(
         &mut self,
-        _plan: &crate::bufferize::BufferIrGraph,
+        _plan: &crate::bufferize::BufferIrGraph<L>,
         _input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
         _trials: usize,
         heuristic_cost: u64,
@@ -214,36 +176,19 @@ impl PlanProfiler for StaticProfiler {
     }
 }
 
-pub fn search_implementations_with_ops(
-    egraph: &egraph_serialize::EGraph,
-    program: &LogicalProgram,
-    input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
-    options: &ImplementationSearchOptions,
-    allow_override: Option<Vec<&'static str>>,
-) -> Result<SearchOutcome> {
-    search_implementations_with_runtime(
-        egraph,
-        program,
-        input_data,
-        options,
-        allow_override,
-        None,
-        &mut ReferenceProfiler,
-    )
-}
-
 /// The runtime-owned search entry (ruling 2026-08-17): the caller
 /// supplies its OWN matcher set (None = the in-core reference
 /// registry, which Step B moves out) and its OWN profiler.
-pub fn search_implementations_with_runtime(
+pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
     egraph: &egraph_serialize::EGraph,
     program: &LogicalProgram,
     input_data: &FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
     allow_override: Option<Vec<&'static str>>,
-    matchers: Option<Vec<Box<dyn crate::layout_ir::OpMatcher>>>,
-    profiler: &mut dyn PlanProfiler,
-) -> Result<SearchOutcome> {
+    matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
+    layout_renderer: &dyn crate::layout_ir::LayoutRenderer<L>,
+    profiler: &mut dyn PlanProfiler<L>,
+) -> Result<SearchOutcome<L>> {
     // Tensor-keyed at the boundary (the retired-HLIR-keyspace design);
     // buffer-keyed internally via the program's slots.
     let buffer_data: FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer> = input_data
@@ -258,21 +203,17 @@ pub fn search_implementations_with_runtime(
         })
         .collect();
     let input_data = &buffer_data;
-    let allow = allow_override.unwrap_or_else(crate::reference::reference_allow_list);
+
     let mut timings = SearchTimings::default();
     let analysis_start = Instant::now();
-    let (mut session, index) = match matchers {
-        Some(matchers) => {
-            let session =
-                extractor::ExtractionSession::new_with_matcher_set(egraph, Some(&allow), matchers);
-            let index = session.producer_index();
-            (session, index)
-        }
-        None => (
-            extractor::ExtractionSession::new(egraph, Some(&allow)),
-            extractor::producer_index_with_ops(egraph, Some(&allow)),
-        ),
-    };
+    // The allow list narrows the caller's matcher set; None = the whole set.
+    let allow = allow_override;
+    let mut session = extractor::ExtractionSession::new_with_matcher_set(
+        egraph,
+        allow.as_deref(),
+        matchers,
+    );
+    let index = session.producer_index();
     timings.analysis_nanos = analysis_start.elapsed().as_nanos();
     // An empty index is NOT an error: a graph with no searchable producer
     // classes (pure identity — every output is an input value) has a
@@ -410,6 +351,12 @@ pub fn search_implementations_with_runtime(
 
     // fingerprint → measured nanos (the dedup cache).
     let mut cache: FxHashMap<u64, u128> = FxHashMap::default();
+    // Rendered layouts are pure functions of (layout class, dtype fact)
+    // — the renderer cache contract — so one cache serves every genome.
+    let mut layout_cache: std::collections::HashMap<
+        (egraph_serialize::ClassId, Option<crate::dtype::PlanDtype>),
+        L,
+    > = std::collections::HashMap::new();
     let mut plans_profiled = 0usize;
     let mut fingerprint_hits = 0usize;
     // Refusal accounting, minimal form (Step 5 down-payment): keep the
@@ -417,7 +364,7 @@ pub fn search_implementations_with_runtime(
     // causes instead of shrugging.
     let mut refusals: Vec<String> = Vec::new();
     let mut breakdown = RefusalBreakdown::default();
-    let mut best: Option<(u128, Genome, BufferIrGraph)> = None;
+    let mut best: Option<(u128, Genome, BufferIrGraph<L>)> = None;
 
 
     for generation in 0..options.generations {
@@ -480,7 +427,24 @@ pub fn search_implementations_with_runtime(
                 }
                 None => {
                     let build_start = Instant::now();
-                    let built = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph));
+                    // Render the elected layouts (the runtime's hook; a
+                    // refusal rejects THIS genome, loudly accounted, and
+                    // the search tries others), then bufferize under the
+                    // rendered table.
+                    // The table is VALUE-keyed (corrected contract), so it
+                    // must be built over the graph bufferize sees — the
+                    // POST-DPS one, whose poison destinations are fresh
+                    // values. They clone their tied result's layout class
+                    // AND dtype fact, so every poison is a renderer-cache
+                    // HIT: value-keying costs no extra renderer calls.
+                    let dps = crate::dps::dps_rewrite(&graph);
+                    let built = extractor::rendered_layout_table(
+                        egraph,
+                        &dps,
+                        layout_renderer,
+                        &mut layout_cache,
+                    )
+                    .and_then(|table| crate::bufferize::bufferize(&dps, &table));
                     timings.plan_build_nanos += build_start.elapsed().as_nanos();
                     let plan = match built {
                         Ok(plan) => plan,
@@ -524,7 +488,14 @@ pub fn search_implementations_with_runtime(
             };
             if best.as_ref().is_none_or(|(best_nanos, _, _)| nanos < *best_nanos) {
                 let build_start = Instant::now();
-                let built = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph));
+                let dps = crate::dps::dps_rewrite(&graph);
+                let built = extractor::rendered_layout_table(
+                    egraph,
+                    &dps,
+                    layout_renderer,
+                    &mut layout_cache,
+                )
+                .and_then(|table| crate::bufferize::bufferize(&dps, &table));
                 timings.plan_build_nanos += build_start.elapsed().as_nanos();
                 let Ok(plan) = built else {
                     continue;
@@ -558,11 +529,11 @@ pub fn search_implementations_with_runtime(
 /// One bucket combination's finished search: the dim ranges it covers, the
 /// representative pins it was searched at, and the winning plan.
 #[derive(Debug)]
-pub struct BucketPlan {
+pub struct BucketPlan<L: crate::bufferize::PlanLayout> {
     pub ranges: BTreeMap<crate::shape::Symbol, (usize, usize)>,
     pub representative: crate::shape::DynMap,
     pub program: LogicalProgram,
-    pub outcome: SearchOutcome,
+    pub outcome: SearchOutcome<L>,
 }
 
 /// Range-seeded bucketed search, mirroring their per-bucket model: one
@@ -575,14 +546,19 @@ pub struct BucketPlan {
 /// Slice note (documented divergence from their symbolic LLIR): each
 /// winning plan is STATIC at its representative; executing at another pin
 /// re-renders — genome transfer across renders is future work.
-pub fn bucketed_search_implementations(
+pub fn bucketed_search_implementations<L: crate::bufferize::PlanLayout>(
     graph: &crate::graph::Graph,
     dim_buckets: &BTreeMap<crate::shape::Symbol, Vec<crate::graph::DimBucket>>,
     input_data: impl Fn(
         &crate::shape::DynMap,
     ) -> FxHashMap<petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer>,
     options: &ImplementationSearchOptions,
-) -> Result<Vec<BucketPlan>> {
+    assembled_program: &str,
+    matchers: impl Fn() -> Vec<Box<dyn crate::layout_ir::OpMatcher>>,
+    layout_renderer: &dyn crate::layout_ir::LayoutRenderer<L>,
+    profiler: &mut dyn PlanProfiler<L>,
+    bindings: &dyn crate::runtime_binding::RuntimeBindingsGenerator,
+) -> Result<Vec<BucketPlan<L>>> {
     ensure!(!dim_buckets.is_empty(), "no dim buckets supplied");
 
     // M3 Topic C: buckets assemble NATIVELY — one recorder model, per-
@@ -591,7 +567,7 @@ pub fn bucketed_search_implementations(
     // never changes across buckets; only the binding does.
     let (pre, input_slots, output_slots, post, _labeled) = graph
         .logical
-        .native_parts()
+        .bound_parts(bindings)
         .map_err(|reason| anyhow!("native load refused: {reason}"))?;
     let seeds_text = |seeds: &BTreeMap<crate::shape::Symbol, (u64, u64)>| {
         let mut text = String::new();
@@ -607,7 +583,7 @@ pub fn bucketed_search_implementations(
         text: format!(
             "{pre}{}{}{post}",
             seeds_text(seeds),
-            crate::reference_binding::SCHEDULE
+            bindings.schedule()
         ),
         input_slots: input_slots.clone(),
         output_slots: output_slots.clone(),
@@ -652,7 +628,7 @@ pub fn bucketed_search_implementations(
         let validation = assemble(&validation_seeds);
         let text = format!(
             "{}\n\n{}",
-            crate::egglog_snippet::assembled_program(),
+            assembled_program,
             validation.text
         );
         crate::egglog_snippet::new_egraph()
@@ -667,7 +643,7 @@ pub fn bucketed_search_implementations(
         let program = assemble(&pin_seeds);
         let text = format!(
             "{}\n\n{}",
-            crate::egglog_snippet::assembled_program(),
+            assembled_program,
             program.text
         );
         let mut egraph = crate::egglog_snippet::new_egraph();
@@ -676,17 +652,26 @@ pub fn bucketed_search_implementations(
             .map_err(|err| anyhow!("bucket {ranges:?} representative render fails: {err}"))?;
         let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
         let data = input_data(&representative);
-        let outcome = search_implementations(&serialized, &program, &data, options)?;
+        let outcome = search_implementations_with_runtime(
+            &serialized,
+            &program,
+            &data,
+            options,
+            None,
+            matchers(),
+            layout_renderer,
+            profiler,
+        )?;
         plans.push(BucketPlan { ranges, representative, program, outcome });
     }
     Ok(plans)
 }
 
 /// The covering bucket plan for a concrete dim assignment, if any.
-pub fn select_bucket<'a>(
-    plans: &'a [BucketPlan],
+pub fn select_bucket<'a, L: crate::bufferize::PlanLayout>(
+    plans: &'a [BucketPlan<L>],
     dims: &crate::shape::DynMap,
-) -> Option<&'a BucketPlan> {
+) -> Option<&'a BucketPlan<L>> {
     plans.iter().find(|plan| {
         plan.ranges.iter().all(|(dim, (min, max))| {
             dims.get(dim).is_some_and(|value| value >= min && value <= max)
@@ -696,9 +681,21 @@ pub fn select_bucket<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::graph::Graph;
+    // DEP-WORLD tests (Step B): these suites drive the reference runtime
+    // through the luminal_reference dev-dependency, so every luminal type
+    // they touch must come from the `luminal::` build that crate links,
+    // never `crate` (the cyclic dev-dependency compiles the library
+    // twice, and the two builds' types do not unify).
+    use std::collections::BTreeMap;
+
     use egglog::SerializeConfig;
+    use rustc_hash::FxHashMap;
+
+    use luminal::graph::Graph;
+    use luminal::implementation_search::{
+        bucketed_search_implementations, select_bucket, ImplementationSearchOptions,
+    };
+    use luminal_reference::{search_implementations, ReferenceRuntime};
 
     /// A REAL selection space (x+y and x*y from shared inputs offers the
     /// fused kernel vs the pair, plus commuted and mutating variants): the
@@ -723,13 +720,13 @@ mod tests {
 
         // Our search.
         let (cx2, x2, y2, a2, m2) = build();
-        let program = cx2.logical.native_program().expect("native program");
+        let program = cx2.logical.bound_program(&luminal_reference::ReferenceBindings).expect("native program");
         let text = format!(
             "{}\n\n{}",
-            crate::egglog_snippet::assembled_program(),
+            luminal_reference::assembled_program(),
             program.text
         );
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         egraph.parse_and_run_program(None, &text).expect("program runs");
         let serialized = egraph.serialize(SerializeConfig::default()).egraph;
 
@@ -777,7 +774,7 @@ mod tests {
     /// representative.
     #[test]
     fn bucketed_search_validates_searches_and_selects() {
-        use crate::graph::DimBucket;
+        use luminal::graph::DimBucket;
 
         let build = |dim: usize| {
             let mut cx = Graph::new();
@@ -788,7 +785,7 @@ mod tests {
             (cx, x, y, out)
         };
 
-        let buckets: BTreeMap<crate::shape::Symbol, Vec<DimBucket>> = [(crate::shape::Symbol::from('a'),
+        let buckets: BTreeMap<luminal::shape::Symbol, Vec<DimBucket>> = [(luminal::shape::Symbol::from('a'),
             vec![DimBucket::new(2, 4), DimBucket::new(5, 9)],
         )]
         .into();
@@ -796,8 +793,8 @@ mod tests {
         // The graph used for SEARCH: built at any pin (per-bucket renders
         // re-pin), sharing the same HLIR shape.
         let (cx, x, y, _out) = build(3);
-        let data_for = |rep: &crate::shape::DynMap| {
-            let n = rep[&crate::shape::Symbol::from('a')] * 2;
+        let data_for = |rep: &luminal::shape::DynMap| {
+            let n = rep[&luminal::shape::Symbol::from('a')] * 2;
             let mut data = FxHashMap::default();
             data.insert(x.id, (0..n).map(|v| v as f32 + 1.0).collect::<Vec<f32>>().into());
             data.insert(y.id, (0..n).map(|v| v as f32 * 0.5).collect::<Vec<f32>>().into());
@@ -808,22 +805,27 @@ mod tests {
             &buckets,
             data_for,
             &ImplementationSearchOptions::default(),
+            luminal_reference::assembled_program(),
+            luminal_reference::ops::built_in_matchers,
+            &luminal_reference::ReferenceLayoutRenderer,
+            &mut luminal_reference::ReferenceProfiler,
+            &luminal_reference::ReferenceBindings,
         )
         .expect("bucketed search completes");
         assert_eq!(plans.len(), 2, "one plan per bucket");
 
         // Selection covers each bucket; out-of-range dims select nothing.
         let mut dims = FxHashMap::default();
-        dims.insert(crate::shape::Symbol::from('a'), 3usize);
-        assert!(select_bucket(&plans, &dims).unwrap().ranges[&crate::shape::Symbol::from('a')] == (2, 4));
-        dims.insert(crate::shape::Symbol::from('a'), 7usize);
-        assert!(select_bucket(&plans, &dims).unwrap().ranges[&crate::shape::Symbol::from('a')] == (5, 9));
-        dims.insert(crate::shape::Symbol::from('a'), 20usize);
+        dims.insert(luminal::shape::Symbol::from('a'), 3usize);
+        assert!(select_bucket(&plans, &dims).unwrap().ranges[&luminal::shape::Symbol::from('a')] == (2, 4));
+        dims.insert(luminal::shape::Symbol::from('a'), 7usize);
+        assert!(select_bucket(&plans, &dims).unwrap().ranges[&luminal::shape::Symbol::from('a')] == (5, 9));
+        dims.insert(luminal::shape::Symbol::from('a'), 20usize);
         assert!(select_bucket(&plans, &dims).is_none());
 
         // Numeric agreement at each bucket's representative.
         for plan in &plans {
-            let rep = plan.representative[&crate::shape::Symbol::from('a')];
+            let rep = plan.representative[&luminal::shape::Symbol::from('a')];
             // GOLDEN (computed: out = x * y with x[i] = i+1, y[i] = i*0.5
             // — the data_for closure's values at this representative).
             let n = rep * 2;

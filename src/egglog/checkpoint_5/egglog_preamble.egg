@@ -2653,21 +2653,35 @@
 ; the positive merge pins in the fence fixture keep it honest instead.
 
 ; Associativity : IntAdd
+; [G2 FENCE, ruled 2026-08-27]: refuse CONSTANT inner classes (point
+; bounds, lower == upper). A point-bound class is a known constant owned
+; by the fold/pin machinery; regrouping constants is the pin-collapse
+; orbit's fuel. Associativity is equivalence discovery for UNKNOWNS.
+; Regression suite: src/test_support.rs, mod ring_ignition_battery (the
+; battery fails loudly if any of the three G2 premises is weakened).
+; Analysis: the Ring Ignition dossier (raw-spelling repro, 2026-08-27).
 (rule
   (
     (= ?expr (IntAdd ?inner ?outer))
     (= ?inner (IntAdd ?lhs ?rhs))
     (provably-cannot-union-with-zero ?inner)
+    (= ?inner_lower (lower-bound-of ?inner))
+    (= ?inner_upper (upper-bound-of ?inner))
+    (< ?inner_lower ?inner_upper)
   )
   ((union ?expr (IntAdd ?lhs (IntAdd ?rhs ?outer))))
 )
 
 ; Associativity : IntMul
+; [G2 FENCE, ruled 2026-08-27]: same constant-class refusal.
 (rule
   (
     (= ?expr (IntMul ?inner ?outer))
     (= ?inner (IntMul ?lhs ?rhs))
     (provably-cannot-union-with-zero ?inner)
+    (= ?inner_lower (lower-bound-of ?inner))
+    (= ?inner_upper (upper-bound-of ?inner))
+    (< ?inner_lower ?inner_upper)
   )
   ((union ?expr (IntMul ?lhs (IntMul ?rhs ?outer))))
 )
@@ -2715,6 +2729,10 @@
 ; factoring route to it never fires.
 
 ; Distributivity : expand
+; [G2 FENCE, ruled 2026-08-27]: same constant-class refusal as the
+; associativity guard — a point-bound summand class is a known constant;
+; distributing over its sum spellings manufactures new atoms out of the
+; pin-collapse orbit and discovers nothing about unknowns.
 (rule
   (
     (= ?expr (IntMul ?summands ?factor))
@@ -2723,6 +2741,9 @@
     (provably-cannot-union-with-zero ?lhs)
     (provably-cannot-union-with-zero ?rhs)
     (provably-cannot-union-with-zero ?factor)
+    (= ?summands_lower (lower-bound-of ?summands))
+    (= ?summands_upper (upper-bound-of ?summands))
+    (< ?summands_lower ?summands_upper)
   )
   ((union ?expr (IntAdd (IntMul ?lhs ?factor) (IntMul ?rhs ?factor))))
 )

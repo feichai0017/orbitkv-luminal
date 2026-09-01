@@ -15,7 +15,7 @@ use luminal::dtype::DType;
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, GraphTensor, NodeIndex, Ns, TypedBuffer};
-use luminal::reference::ReferenceRuntime;
+use luminal_reference::ReferenceRuntime;
 use luminal_nn::{CacheState, KvCachePool, PositionSlots};
 use model::{Whisper, WhisperDims};
 use std::error::Error;

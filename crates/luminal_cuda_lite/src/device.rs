@@ -10,14 +10,20 @@
 //! NVRTC-compiled launches for compute (out-of-place: inputs are the
 //! operand buffers, the destination is a fresh zeroed slice swapped in
 //! after the launch — mirroring the reference's alias-safety
-//! convention; `ties` are ordering-only in CL-2). Phase 4 copies every
-//! output-role buffer back to host `TypedBuffer`s keyed by BufferLit.
+//! convention; `ties` are ordering-only in CL-2). Phase 4 copies each
+//! output SLOT's backing buffer back to a host `TypedBuffer`, keyed by
+//! slot index and paired with the slot's [`OutputBinding`] — the
+//! escape-and-disclose contract (ruling 2026-08-27): the caller gets
+//! the backing bytes (possibly parent-sized, for an escaped view
+//! election) plus the layout to interpret them under.
 
 use anyhow::{anyhow, bail, Context, Result};
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, LaunchConfig, PushKernelArg};
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaModule, CudaSlice, DevicePtr, LaunchConfig, PushKernelArg,
+};
 use cudarc::nvrtc::compile_ptx;
 use luminal::buffer_tensor_ir::TypedBuffer;
-use luminal::bufferize::{BufferId, BufferIrGraph, BufferNode, EdgeKind};
+use luminal::bufferize::{BufferId, BufferIrGraph, BufferNode, EdgeKind, OutputBinding};
 use luminal::dtype::PlanDtype;
 use luminal::prelude::FxHashMap;
 use std::collections::HashMap;
@@ -89,29 +95,113 @@ impl KernelCache {
     }
 }
 
-/// Execute a bufferized plan on device 0. Returns host copies of every
-/// output-role buffer, keyed by BufferLit.
+/// Bring-up/test helper: NVRTC-compile `source` (entry `k`), launch it
+/// once over `n` threads on device 0 with the given input byte buffers
+/// followed by one zeroed `out_bytes` output and the `n` argument (the
+/// standard generated-kernel signature), and return the output bytes.
+/// Used by the Phase-4 synthetic-descriptor device gates to launch
+/// strided-read kernels outside a plan.
+pub fn launch_single(source: &str, inputs: &[&[u8]], out_bytes: usize, n: usize) -> Result<Vec<u8>> {
+    let ctx = CudaContext::new(0).context("no CUDA device 0")?;
+    let stream = ctx.default_stream();
+    let mut cache = KernelCache { ctx: ctx.clone(), modules: HashMap::new() };
+    let func = cache.function(source)?;
+    let mut device_inputs = Vec::with_capacity(inputs.len());
+    for host in inputs {
+        let mut slice = stream.alloc_zeros::<u8>(host.len().max(1)).context("input alloc")?;
+        if !host.is_empty() {
+            stream.memcpy_htod(*host, &mut slice).context("H2D")?;
+        }
+        device_inputs.push(slice);
+    }
+    let mut dest = stream.alloc_zeros::<u8>(out_bytes.max(1)).context("dest alloc")?;
+    let n_arg = n as u64;
+    let cfg = LaunchConfig {
+        grid_dim: (((n as u32).max(1) + 255) / 256, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut builder = stream.launch_builder(&func);
+    for input in &device_inputs {
+        builder.arg(input);
+    }
+    builder.arg(&mut dest);
+    builder.arg(&n_arg);
+    unsafe { builder.launch(cfg) }.context("launch")?;
+    stream.synchronize().context("stream sync")?;
+    let mut host = vec![0u8; dest.len()];
+    stream.memcpy_dtoh(&dest, &mut host).context("D2H")?;
+    Ok(host)
+}
+
+/// Execute a bufferized plan on device 0. Returns, per output slot
+/// index, a host copy of the slot's BACKING buffer plus its
+/// [`OutputBinding`] (the elected layout) — the escape-and-disclose
+/// fetch, universal over dense and view elections.
 pub fn execute_plan(
-    plan: &BufferIrGraph,
+    plan: &BufferIrGraph<crate::layouts::CudaLayout>,
     staged: &FxHashMap<i64, TypedBuffer>,
-) -> Result<FxHashMap<i64, TypedBuffer>> {
+) -> Result<FxHashMap<usize, (TypedBuffer, OutputBinding<crate::layouts::CudaLayout>)>> {
+    // ESCAPE GUARD (ruling 2026-08-27): an output slot's backing storage
+    // must SURVIVE the call — FreedBy::Caller, whatever the owner.
+    // FreedBy::Program backing an output hands the caller bytes the
+    // program destroys: minted non-escaping storage (Owner::System) and
+    // DONATED boundary storage (Owner::Caller — validate()'s donated arm
+    // forbids exactly this plan shape) alike. The pre-lowering
+    // certificate enforces this for planner-built plans; hand-built /
+    // externally loaded plans never met it — re-check here, loudly,
+    // before any bytes move.
+    for node in plan.dag.node_weights() {
+        if let BufferNode::BufferOutput { slots } = node {
+            for slot in slots {
+                let buffer = plan
+                    .buffers
+                    .get(&slot.buffer)
+                    .ok_or_else(|| anyhow!("output slot {} names unknown buffer", slot.index))?;
+                if buffer.freed_by != luminal::layout_ir::FreedBy::Caller {
+                    bail!(
+                        "output slot {} is backed by NON-ESCAPING buffer {} \
+                         (FreedBy::Program, {:?}-owned) — escaped output storage \
+                         must be FreedBy::Caller; refusing to hand the caller bytes \
+                         the program destroys",
+                        slot.index,
+                        buffer.label,
+                        buffer.owner,
+                    );
+                }
+            }
+        }
+    }
+
     let ctx = CudaContext::new(0).context("no CUDA device 0")?;
     let stream = ctx.default_stream();
     let mut cache = KernelCache { ctx: ctx.clone(), modules: HashMap::new() };
 
-    // Phase 1: materialize every buffer on device.
+    // Phase 1: materialize every buffer on device — ALLOCATION BY
+    // ASSIGNMENT LOOKUP (corrected contract, 2026-08-31): the buffer
+    // backs one tensor, its carried layout gives the span in elements
+    // and the dtype fact gives the byte width. No walk, no voting.
     let mut storage: FxHashMap<BufferId, CudaSlice<u8>> = FxHashMap::default();
     let mut geometry: FxHashMap<BufferId, (Vec<usize>, PlanDtype)> = FxHashMap::default();
     for (id, buffer) in &plan.buffers {
-        let dims = buffer
-            .dims
-            .as_ref()
-            .ok_or_else(|| anyhow!("buffer {:?} has no numeric geometry", buffer.label))?;
-        let dtype = buffer
-            .dtype
-            .ok_or_else(|| anyhow!("buffer {:?} has no dtype", buffer.label))?;
-        let dims: Vec<usize> = dims.iter().map(|&d| usize::try_from(d).unwrap_or(0)).collect();
-        let numel: usize = dims.iter().product();
+        let dims = buffer.layout.mirror.literal_extents().ok_or_else(|| {
+            anyhow!(
+                "buffer {:?} (backing {}) has symbolic layout extents — not executable",
+                buffer.label,
+                buffer.backs
+            )
+        })?;
+        let numel = buffer.layout.mirror.literal_span_elements().ok_or_else(|| {
+            anyhow!(
+                "buffer {:?} (backing {}) has no literal span — symbolic or \
+                 undisclosed-reach layouts are not executable",
+                buffer.label,
+                buffer.backs
+            )
+        })?;
+        let dtype = buffer.layout.dtype.ok_or_else(|| {
+            anyhow!("buffer {:?} (backing {}) carries no dtype fact", buffer.label, buffer.backs)
+        })?;
         let bytes = numel * dtype_bytes(dtype)?;
         let mut slice = stream
             .alloc_zeros::<u8>(bytes.max(1))
@@ -133,6 +223,28 @@ pub fn execute_plan(
         geometry.insert(id.clone(), (dims, dtype));
     }
 
+    // CONTRACT-1 (bind-time): distinct BufferIds must be backed by
+    // disjoint device ranges — folded-view reads and WAR ordering are
+    // both keyed on BufferId identity. Fresh `alloc_zeros` per buffer
+    // makes this hold by construction today; the assert is the
+    // contract's enforcement face for when raw caller pointers arrive
+    // at this binding surface. Loud refusal, never mistranslation.
+    {
+        let bound: Vec<crate::binding_check::BoundRange> = storage
+            .iter()
+            .map(|(id, slice)| {
+                let (base, _sync) = slice.device_ptr(&stream);
+                crate::binding_check::BoundRange {
+                    buffer: format!("{id:?}"),
+                    base: base as u64,
+                    bytes: slice.len() as u64,
+                }
+            })
+            .collect();
+        crate::binding_check::assert_disjoint(&bound)
+            .context("CONTRACT-1 bind-time check")?;
+    }
+
     // Phase 2: toposort — Anti edges are ordinary edges here, so WAR
     // ordering is enforced by construction.
     let order = luminal::prelude::petgraph::algo::toposort(&plan.dag, None)
@@ -147,49 +259,156 @@ pub fn execute_plan(
         match &plan.dag[node] {
             BufferNode::BufferInput { .. } | BufferNode::BufferOutput { .. } => {}
             BufferNode::BufferCopy { src, dst } => {
-                let (src_geo, src_dtype) =
-                    geometry.get(src).ok_or_else(|| anyhow!("copy src unknown"))?.clone();
-                let (dst_geo, dst_dtype) =
-                    geometry.get(dst).ok_or_else(|| anyhow!("copy dst unknown"))?.clone();
-                if src_geo.iter().product::<usize>() != dst_geo.iter().product::<usize>()
-                    || src_dtype != dst_dtype
-                {
-                    bail!("copy geometry/dtype mismatch: {src_geo:?}/{src_dtype:?} -> {dst_geo:?}/{dst_dtype:?}");
+                // THE BUFFERCOPY CONTRACT, executor side (Austin, ruled
+                // 2026-08-31 — see `bufferize::BufferNode::BufferCopy`):
+                //
+                // * The node carries ONLY {src, dst}.
+                // * Semantics: a DUMB EXACT-SIZE WHOLE-BUFFER copy — one
+                //   `memcpy_dtod` of the whole slice, no layout awareness,
+                //   no element walk. "If a runtime chooses to do resource
+                //   reuse and do unequal sized buffer that is an entirely
+                //   runtime owned choice"; CL-2 pre-materializes exactly
+                //   sized slices and makes no such choice, so unequal
+                //   lengths are a bug HERE and bail loudly (this is the
+                //   executor's own discipline over bufferizer-authored
+                //   nodes, NOT a type fence re-checking an e-graph premise).
+                // * ORDERING IS THIS RUNTIME'S OBLIGATION. The plan supplied
+                //   dependency structure only (data + WAR anti-edges); we
+                //   discharge it by issuing in toposort order onto ONE
+                //   stream, which serializes the copy against every op that
+                //   depends on it and every prior reader of `dst`. A
+                //   multi-stream executor would owe events/barriers here.
+                // * The three causes (conflict repair, boundary placement,
+                //   lifetime repair) are the bufferizer's business; all
+                //   three execute identically.
+                let src_slice = storage
+                    .get(src)
+                    .ok_or_else(|| anyhow!("copy src unknown"))?
+                    .clone();
+                let dst_slice =
+                    storage.get_mut(dst).ok_or_else(|| anyhow!("copy dst unknown"))?;
+                if src_slice.len() != dst_slice.len() {
+                    bail!(
+                        "copy length mismatch: {} -> {} bytes",
+                        src_slice.len(),
+                        dst_slice.len()
+                    );
                 }
-                let src_slice = storage.get(src).unwrap().clone();
-                let dst_slice = storage.get_mut(dst).unwrap();
                 stream.memcpy_dtod(&src_slice, dst_slice).context("D2D copy")?;
             }
-            BufferNode::Compute { op, reads, writes, .. } => {
+            BufferNode::Compute { op, reads, writes, operand_info, result_info, .. } => {
                 let label = op.label();
                 if label == "BufferAlloc" || label == "BufferFree" {
                     continue; // storage is pre-materialized in CL-2
                 }
+                // Train 3: the HOST-CALL arm — cuBLASLt contracts
+                // dispatch as one `cublasLtMatmul` library call on the
+                // SAME stream as the surrounding kernels, never an
+                // NVRTC kernel. The destination follows the executor's
+                // out-of-place convention (fresh zeroed slice, swapped
+                // into storage after the call), so the C-fold forms
+                // read their C operand buffer and write fresh D
+                // (C != D pointers, beta = 1.0f — legal, identical
+                // layouts by the marker's rule guard).
+                if let Some(dps) =
+                    op.as_any().downcast_ref::<crate::ops::cublaslt::CublasLtDps>()
+                {
+                    let mut call = crate::ops::cublaslt::exec::plan_call(&dps.op)
+                        .with_context(|| format!("cuBLASLt call planning for {label}"))?;
+                    if writes.len() != 1 {
+                        bail!("{label}: single-destination contract, got {}", writes.len());
+                    }
+                    // THE PLAN/CALL-FRAME COHERENCE FENCE — restored,
+                    // strengthened, and CLASSIFIED (2026-08-31; the full
+                    // taxonomy lives on `exec::bind_destination`).
+                    //
+                    // Correction 4 of the Option-B landing deleted the
+                    // `[m, n]` frame check here as "runtime type-checking
+                    // ... rule premises, not our business". THAT
+                    // CLASSIFICATION WAS WRONG, and this is the note that
+                    // keeps the next cleanup from repeating it:
+                    //
+                    //  * An E-GRAPH RE-CHECK restates a fact a rule
+                    //    premise guarantees (F32 scope; C's dims/fold
+                    //    matching D's by rule guard). Those are gone and
+                    //    stay gone.
+                    //  * A VENDOR CHECK verifies the library where its own
+                    //    guarantees are vacuous (TF32 detector, ld bounds).
+                    //    Those stay.
+                    //  * A COHERENCE FENCE reconciles the PLAN's vocabulary
+                    //    (elected layouts) with a CALL FRAME THE EXECUTOR
+                    //    INVENTS (m/n/k, descriptors, orders, lds). No
+                    //    e-graph rule has ever seen an `LtCall`, so nothing
+                    //    upstream can guarantee the two agree. This is that
+                    //    fence. It is NOT disposable.
+                    //
+                    // It also does what the deleted check could not: the
+                    // old one compared EXTENTS only, and the regression it
+                    // was supposed to catch had matching extents and a
+                    // diverging ORDER (the transpose-sandwich sibling's
+                    // elected destination layout is LEFT-major). So the
+                    // fence RESOLVES the C/D order from the elected layout
+                    // instead of asserting a convention.
+                    let dest_slot = result_info.first().ok_or_else(|| {
+                        anyhow!("{label}: host-call node carries no result descriptor")
+                    })?;
+                    crate::ops::cublaslt::exec::bind_destination(
+                        &mut call,
+                        &dest_slot.layout,
+                        label,
+                    )
+                    .with_context(|| {
+                        format!("cuBLASLt destination frame binding for {label}")
+                    })?;
+                    let input_count = reads.len().saturating_sub(writes.len());
+                    let inputs: Vec<CudaSlice<u8>> = reads[..input_count]
+                        .iter()
+                        .map(|id| storage.get(id).unwrap().clone())
+                        .collect();
+                    let operand_refs: Vec<&CudaSlice<u8>> = inputs.iter().collect();
+                    // E-GRAPH RE-CHECKS STAY DEAD (corrected contract,
+                    // 2026-08-31, correction 4): the F32 end-to-end
+                    // re-check and the C-operand dims/fold re-checks
+                    // that stood here restated facts the e-graph
+                    // guarantees by rule premise (the marker's contracts
+                    // match F32 dense frames; Cdesc == Ddesc by rule
+                    // guard). They are REMOVED and stay removed. The
+                    // frame check that stood alongside them was NOT one
+                    // of them — see the coherence fence above.
+                    let (dest_dims, dest_dtype) = geometry.get(&writes[0]).unwrap().clone();
+                    let dest_bytes =
+                        dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
+                    let mut dest =
+                        stream.alloc_zeros::<u8>(dest_bytes.max(1)).context("dest alloc")?;
+                    crate::ops::cublaslt::device_call::dispatch(
+                        &call,
+                        &operand_refs,
+                        &mut dest,
+                        &stream,
+                    )
+                    .with_context(|| format!("cuBLASLt dispatch for {label}"))?;
+                    storage.insert(writes[0].clone(), dest);
+                    continue;
+                }
                 let Some(kernel) = codegen_for(op.as_ref()) else {
                     bail!("no cuda codegen for {label}");
                 };
-                let ctxinfo = CodegenCtx {
-                    operand_dims: reads
-                        .iter()
-                        .map(|id| geometry.get(id).map(|(d, _)| d.clone()))
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| anyhow!("{label} operand lacks geometry"))?,
-                    operand_dtypes: reads
-                        .iter()
-                        .map(|id| geometry.get(id).map(|(_, t)| *t))
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| anyhow!("{label} operand lacks dtype"))?,
-                    dest_dims: writes
-                        .iter()
-                        .map(|id| geometry.get(id).map(|(d, _)| d.clone()))
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| anyhow!("{label} dest lacks geometry"))?,
-                    dest_dtypes: writes
-                        .iter()
-                        .map(|id| geometry.get(id).map(|(_, t)| *t))
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| anyhow!("{label} dest lacks dtype"))?,
-                };
+                // Phase 3: codegen geometry comes from the node's OWN slot
+                // descriptors, never the shared buffer table — `geometry`
+                // stays for allocation sizing and the copy check only. A
+                // compute node arriving without its descriptors is
+                // malformed: bail loudly (mirror of the None-dims bail).
+                if operand_info.len() != reads.len() || result_info.len() != writes.len() {
+                    bail!(
+                        "{label}: compute node lacks slot descriptors \
+                         (operand_info {}/{}, result_info {}/{})",
+                        operand_info.len(),
+                        reads.len(),
+                        result_info.len(),
+                        writes.len()
+                    );
+                }
+                let ctxinfo = CodegenCtx::from_descriptors(label, operand_info, result_info)?;
                 let launches = (kernel.codegen)(op.as_ref(), &ctxinfo)
                     .with_context(|| format!("codegen for {label}"))?;
 
@@ -208,17 +427,9 @@ pub fn execute_plan(
                 let dest_bytes =
                     dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
                 let mut dest = stream.alloc_zeros::<u8>(dest_bytes.max(1)).context("dest alloc")?;
-                let mut scratch: Option<CudaSlice<u8>> = None;
 
                 for generated in &launches {
                     let func = cache.function(&generated.source)?;
-                    if generated.scratch_bytes > 0 && scratch.is_none() {
-                        scratch = Some(
-                            stream
-                                .alloc_zeros::<u8>(generated.scratch_bytes)
-                                .context("scratch alloc")?,
-                        );
-                    }
                     let n = generated.n as u64;
                     let cfg = LaunchConfig {
                         grid_dim: (((generated.n as u32).max(1) + 255) / 256, 1, 1),
@@ -228,9 +439,6 @@ pub fn execute_plan(
                     let mut builder = stream.launch_builder(&func);
                     for input in &inputs {
                         builder.arg(input);
-                    }
-                    if generated.scratch_bytes > 0 {
-                        builder.arg(scratch.as_mut().unwrap());
                     }
                     builder.arg(&mut dest);
                     builder.arg(&n);
@@ -242,21 +450,23 @@ pub fn execute_plan(
     }
     stream.synchronize().context("stream sync")?;
 
-    // Phase 4: D2H every output-role buffer, keyed by lit.
+    // Phase 4: D2H each output SLOT's backing buffer — the escaped
+    // buffer for a view election, the boundary buffer for a dense one —
+    // keyed by slot index and paired with the binding's layout. (The
+    // declared-but-unused Boundary buffer of an escaped slot never
+    // reaches this plan: buffer DCE dropped it, so Phase 1 never
+    // allocated it; and no free node exists for an escaping buffer.)
     let mut outputs = FxHashMap::default();
     for node in plan.dag.node_weights() {
         if let BufferNode::BufferOutput { slots } = node {
             for slot in slots {
-                let buffer = plan
-                    .buffers
+                let slice = storage
                     .get(&slot.buffer)
-                    .ok_or_else(|| anyhow!("output slot names unknown buffer"))?;
-                let Some(lit) = buffer.lit else { continue };
-                let slice = storage.get(&slot.buffer).unwrap();
+                    .ok_or_else(|| anyhow!("output slot {} names unknown buffer", slot.index))?;
                 let mut host = vec![0u8; slice.len()];
                 stream.memcpy_dtoh(slice, &mut host).context("D2H")?;
                 let (_, dtype) = geometry.get(&slot.buffer).unwrap();
-                outputs.insert(lit, bytes_to_typed(&host, *dtype)?);
+                outputs.insert(slot.index, (bytes_to_typed(&host, *dtype)?, slot.clone()));
             }
         }
     }

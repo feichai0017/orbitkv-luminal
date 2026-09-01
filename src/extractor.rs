@@ -4,7 +4,6 @@ use anyhow::{Context, Result, bail};
 use egraph_serialize::{ClassId, EGraph, Node, NodeId};
 use petgraph::graph::{DiGraph, NodeIndex};
 
-use crate::reference::ops::built_in_matchers;
 use crate::layout_ir::{
     Access, BufferInfo, ExtractedDag, ExtractedEdge, ExtractedGraph, ExtractedNode,
     ExtractionSite, FreedBy, InputNode, LayoutInfo, LayoutIrOp, LayoutTensorInfo, LogicalInfo,
@@ -147,19 +146,7 @@ pub fn extract_layout_ir_with_matchers(
     Extractor::new_with_matchers(egraph, None, None, matchers).extract()
 }
 
-pub fn extract_layout_ir(egraph: &EGraph) -> Result<Option<ExtractedGraph>> {
-    extract_layout_ir_with_ops(egraph, None)
-}
 
-/// [`extract_layout_ir`] restricted to an allow-list of LayoutTensorOp
-/// constructor names — the test/debug lever for exercising a specific
-/// implementation. `None` allows every op; a program not implementable
-/// within the list fails extraction loudly.
-///
-/// Both this and [`extract_layout_ir`] are the DETERMINISTIC FIXTURE
-/// extractor (min-cost, tie-broken) — tooling for fixtures and goldens,
-/// not the selection mechanism. The search path is
-/// [`extract_layout_ir_with_genome`].
 /// A reusable extraction session: the immutable analysis (class maps, op
 /// specs, the runtime-viability fixpoint) is computed ONCE, and genomes
 /// are swapped in per extraction. The implementation search runs dozens
@@ -170,13 +157,6 @@ pub struct ExtractionSession<'a> {
 }
 
 impl<'a> ExtractionSession<'a> {
-    pub fn new(egraph: &'a EGraph, allowed_ops: Option<&[&str]>) -> Self {
-        let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
-        let mut extractor = Extractor::new(egraph, allowed, None);
-        extractor.apply_viability_filter();
-        Self { extractor }
-    }
-
     /// The runtime-owned constructor (ruling 2026-08-17): extraction
     /// over the CALLER's matcher set, intersected with its allow list.
     pub fn new_with_matcher_set(
@@ -429,15 +409,89 @@ impl<'a> ExtractionSession<'a> {
     }
 }
 
-pub fn extract_layout_ir_with_ops(
+/// [`extract_layout_ir_with_matchers`] restricted to an allow-list of
+/// LayoutTensorOp constructor names — the test/debug lever for exercising
+/// a specific implementation. `None` allows every op; a program not
+/// implementable within the list fails extraction loudly.
+///
+/// This is the DETERMINISTIC FIXTURE extractor (min-cost, tie-broken) —
+/// tooling for fixtures and goldens, not the selection mechanism. The
+/// search path is [`extract_layout_ir_with_genome_and_matchers`].
+pub fn extract_layout_ir_with_ops_and_matchers(
     egraph: &EGraph,
     allowed_ops: Option<&[&str]>,
+    matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
 ) -> Result<Option<ExtractedGraph>> {
     let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
-    let mut extractor = Extractor::new(egraph, allowed, None);
+    let mut extractor = Extractor::new_with_matchers(egraph, allowed, None, matchers);
     extractor.extract()
 }
 
+
+/// Build the rendered-layout table for one extracted graph, keyed by
+/// VALUE e-class: enumerate every elected value (pure enumeration — core
+/// never parses a layout spelling) and call the runtime's
+/// [`LayoutRenderer`] hook, reusing `cache` across calls. The cache key
+/// is `(layout class, dtype-of fact)` — exactly the inputs the renderer
+/// contract permits it to read (all spellings of a layout class denote
+/// one function, and the dtype fact is the one extraction-side value
+/// fact a runtime may fold into `L`), so one cache serves every genome.
+/// A renderer error is LOUD and refuses the graph: there is no default
+/// layout.
+///
+/// CALL IT ON THE GRAPH BUFFERIZE WILL SEE — the POST-DPS one. The table
+/// is VALUE-keyed now, and the DPS rewrite mints fresh poison-destination
+/// VALUES, so a pre-DPS table is not total over the post-DPS graph and
+/// `extraction_layouts` refuses it loudly. Rendering post-DPS is free:
+/// each poison clones its tied result's layout class AND dtype fact, so
+/// it hits the `(layout class, dtype)` cache. (Historically the table was
+/// keyed by layout class, and the pre-DPS graph sufficed because
+/// the DPS rewrite's poison destinations clone their tied result's layout,
+/// e-class included, so the table covered them by construction.)
+pub fn rendered_layout_table<L: Clone>(
+    egraph: &EGraph,
+    graph: &ExtractedGraph,
+    renderer: &dyn crate::layout_ir::LayoutRenderer<L>,
+    cache: &mut HashMap<(ClassId, Option<crate::dtype::PlanDtype>), L>,
+) -> Result<HashMap<ClassId, L>> {
+    let mut table: HashMap<ClassId, L> = HashMap::new();
+    let render = |value: &crate::layout_ir::LayoutTensorInfo,
+                      table: &mut HashMap<ClassId, L>,
+                      cache: &mut HashMap<(ClassId, Option<crate::dtype::PlanDtype>), L>|
+     -> Result<()> {
+        if table.contains_key(&value.eclass) {
+            return Ok(());
+        }
+        let key = (value.layout.eclass.clone(), value.dtype_enum);
+        let rendered = match cache.get(&key) {
+            Some(rendered) => rendered.clone(),
+            None => {
+                let rendered = renderer.render_layout(egraph, value).with_context(|| {
+                    format!(
+                        "rendering the layout of value {} (layout class {})",
+                        value.eclass, value.layout.eclass
+                    )
+                })?;
+                cache.insert(key, rendered.clone());
+                rendered
+            }
+        };
+        table.insert(value.eclass.clone(), rendered);
+        Ok(())
+    };
+    for node in graph.dag.node_weights() {
+        match node {
+            ExtractedNode::BufferInput(input) => render(&input.value, &mut table, cache)?,
+            ExtractedNode::LayoutOp(op) => {
+                for output in &op.outputs {
+                    render(output, &mut table, cache)?;
+                }
+            }
+            ExtractedNode::BufferOutput(_) => {}
+        }
+    }
+    Ok(table)
+}
 
 /// One genome choice: the concrete implementation enode that produces the
 /// keyed LayoutTensor class, and which of its output slots carries it.
@@ -459,37 +513,14 @@ pub struct Genome {
     pub choices: HashMap<ClassId, ProducerChoice>,
 }
 
-/// Genome-driven extraction — the selection adapter's walk. Starts from the
-/// binding outputs and instantiates exactly the genome's chosen producer
-/// per demanded class; multi-output instances dedup by enode; output slots
-/// the genome does NOT assign to their instance write anonymous waste
-/// destinations (fresh synthetic values, allocated and freed unread —
-/// waste-allowed, priced by profiling).
-#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
-pub fn extract_layout_ir_with_genome(
-    egraph: &EGraph,
-    genome: &Genome,
-) -> Result<Option<ExtractedGraph>> {
-    extract_layout_ir_with_genome_and_ops(egraph, genome, None)
-}
-
-/// Genome-driven extraction under a backend implementation allow-list (the
-/// genome and the inventory compose: choices must come from allowed ops).
-#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
-pub fn extract_layout_ir_with_genome_and_ops(
-    egraph: &EGraph,
-    genome: &Genome,
-    allowed_ops: Option<&[&str]>,
-) -> Result<Option<ExtractedGraph>> {
-    let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
-    let mut extractor = Extractor::new(egraph, allowed, Some(genome));
-    extractor.apply_viability_filter();
-    extractor.extract()
-}
-
 /// Genome-driven extraction with an EXPLICIT runtime matcher set — the
-/// TestRuntime seam's genome form (ruling 2026-08-13; deletes the
-/// tests-side vendored-source workaround).
+/// selection adapter's walk (ruling 2026-08-13; deletes the tests-side
+/// vendored-source workaround). Starts from the binding outputs and
+/// instantiates exactly the genome's chosen producer per demanded class;
+/// multi-output instances dedup by enode; output slots the genome does
+/// NOT assign to their instance write anonymous waste destinations
+/// (fresh synthetic values, allocated and freed unread — waste-allowed,
+/// priced by profiling).
 pub fn extract_layout_ir_with_genome_and_matchers(
     egraph: &EGraph,
     genome: &Genome,
@@ -500,37 +531,16 @@ pub fn extract_layout_ir_with_genome_and_matchers(
     extractor.extract()
 }
 
-/// [`producer_index`] over an EXPLICIT runtime matcher set (the
-/// TestRuntime seam).
+/// Every LayoutTensor class's candidate producers over an EXPLICIT
+/// runtime matcher set (the TestRuntime seam), as
+/// `(implementation constructor name, choice)` pairs sorted for
+/// determinism — the raw material genome construction and mutation draw
+/// from. Classes with no producers (boundary inputs) are absent.
 pub fn producer_index_with_matchers(
     egraph: &EGraph,
     matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
 ) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
     let mut extractor = Extractor::new_with_matchers(egraph, None, None, matchers);
-    extractor.apply_viability_filter();
-    producer_index_from(&extractor)
-}
-
-/// Every LayoutTensor class's candidate producers, as
-/// `(implementation constructor name, choice)` pairs sorted for
-/// determinism — the raw material genome construction and mutation draw
-/// from. Classes with no producers (boundary inputs) are absent.
-#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
-pub fn producer_index(
-    egraph: &EGraph,
-) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
-    producer_index_with_ops(egraph, None)
-}
-
-/// [`producer_index`] restricted to a backend's implementation allow-list —
-/// the genome space only offers what the executing backend implements.
-#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
-pub fn producer_index_with_ops(
-    egraph: &EGraph,
-    allowed_ops: Option<&[&str]>,
-) -> std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>> {
-    let allowed = allowed_ops.map(|ops| ops.iter().map(|op| op.to_string()).collect());
-    let mut extractor = Extractor::new(egraph, allowed, None);
     extractor.apply_viability_filter();
     producer_index_from(&extractor)
 }
@@ -708,14 +718,6 @@ pub fn plan_fingerprint(graph: &ExtractedGraph) -> u64 {
 }
 
 impl<'a> Extractor<'a> {
-    fn new(
-        egraph: &'a EGraph,
-        allowed_ops: Option<HashSet<String>>,
-        genome: Option<&Genome>,
-    ) -> Self {
-        Self::new_with_matchers(egraph, allowed_ops, genome, built_in_matchers())
-    }
-
     /// The runtime-injectable constructor (the TestRuntime seam, ruling
     /// 2026-08-13): extraction consumes THE GIVEN runtime's matcher set —
     /// the reference registry is just the default caller.

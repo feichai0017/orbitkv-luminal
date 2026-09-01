@@ -42,7 +42,7 @@ impl GraphTensor {
                 .graph()
                 .logical
                 .op(op, &[(id, operand_dims)], out_dims.clone(), self.dtype)
-                .expect("logical reduce insertion failed");
+                .unwrap_or_else(|| crate::graph::unrecorded_value());
             dims = out_dims;
             let axis = axes[dim];
             for ax in &mut axes {

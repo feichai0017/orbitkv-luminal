@@ -17,7 +17,7 @@ pub mod test_ops {
     //! home is a small TestRuntime with simple view/mutation/multi-output
     //! implementations — recorded in the queue, not built yet.
 
-    use crate::layout_ir::{AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, Sharing, ToDps};
+    use crate::layout_ir::{AliasInfo, Bufferizable, LayoutIrOp, Sharing, ToDps};
     use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
 
     /// `AddMulFusedGeneric(lhs, rhs) -> (add_out, mul_out)`
@@ -118,19 +118,65 @@ pub mod test_ops {
 }
 
 use std::collections::HashMap;
-use std::fs;
 
 use egraph_serialize::ClassId;
 use petgraph::graph::NodeIndex;
 
 use crate::buffer_tensor_ir::{BufferTensorIrOp, OpSlotNames};
-use crate::extractor;
 use crate::layout_ir::{
     AliasInfo, BufferInfo, Bufferizable, ExtractedDag, ExtractedEdge,
     Access, ExtractedGraph, ExtractedNode, FreedBy, InputNode, LayoutInfo, LayoutIrOp,
     LayoutTensorInfo,
     LogicalInfo, OpInput, OpNode, OutputNode, OutputSlot, Sharing,
 };
+
+// =============================================================================
+// The mock layout (resident-geometry cleanup: core defines NO layout
+// vocabulary, so the trivial test-only `L` lives here)
+// =============================================================================
+
+/// The trivial TEST layout: transports the layout e-class identity and
+/// nothing else. The bufferizer's bound is `Clone + Debug` only (the
+/// equality join was dropped — layout equality is enforced in the
+/// e-graph); the `PartialEq` derive here is test-assertion convenience,
+/// not a bound the planner uses. Core never constructs one outside test
+/// support; runtimes bring their own rendered types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockLayout(pub ClassId);
+
+/// The mock rendered-layout table for a built graph, keyed by VALUE
+/// e-class (the [`crate::bufferize::bufferize`] contract): every value
+/// maps to the identity of its layout class. Works for hand-built
+/// [`TestGraph`]s and real extractions alike.
+pub fn mock_layout_table(graph: &ExtractedGraph) -> HashMap<ClassId, MockLayout> {
+    let mut table = HashMap::new();
+    let mut record = |value: &LayoutTensorInfo| {
+        table
+            .entry(value.eclass.clone())
+            .or_insert_with(|| MockLayout(value.layout.eclass.clone()));
+    };
+    for node in graph.dag.node_weights() {
+        match node {
+            ExtractedNode::BufferInput(input) => record(&input.value),
+            ExtractedNode::LayoutOp(op) => {
+                for output in &op.outputs {
+                    record(output);
+                }
+            }
+            ExtractedNode::BufferOutput(_) => {}
+        }
+    }
+    table
+}
+
+/// [`crate::bufferize::bufferize`] under the mock table — the test-side
+/// one-argument convenience every suite that does not exercise a real
+/// renderer plans through.
+pub fn bufferize_mock(
+    graph: &ExtractedGraph,
+) -> anyhow::Result<crate::bufferize::BufferIrGraph<MockLayout>> {
+    crate::bufferize::bufferize(graph, &mock_layout_table(graph))
+}
 
 // =============================================================================
 // Mock ops (interface-defined behaviors the real op set cannot express)
@@ -237,6 +283,47 @@ impl crate::layout_ir::ToDps for MockView {
 }
 
 impl LayoutIrOp for MockView {}
+
+/// [`MockView`] carrying a numeric index map — the Phase-3 fold reads it
+/// through `view_index_map` and records it (with the parent's dims) on
+/// every consumer's operand descriptor. Same declared memory effects and
+/// tie as `MockView`; only the map differs.
+#[derive(Debug, Clone)]
+pub struct MockViewWithMap {
+    pub entries: Vec<crate::index_expr::IotaExpr>,
+}
+
+impl OpSlotNames for MockViewWithMap {}
+
+impl BufferTensorIrOp for MockViewWithMap {
+    fn label(&self) -> &str {
+        "MockViewWithMap"
+    }
+
+    fn operand_reads_memory(&self, _operand: usize) -> bool {
+        false // metadata op: no bytes observed
+    }
+    fn result_writes_memory(&self, _result: usize) -> bool {
+        false // metadata op: no bytes produced
+    }
+    fn view_index_map(&self, _result: usize) -> Option<Vec<crate::index_expr::IotaExpr>> {
+        Some(self.entries.clone())
+    }
+}
+
+impl Bufferizable for MockViewWithMap {
+    fn alias_info(&self) -> Vec<AliasInfo> {
+        vec![AliasInfo { operand: 0, result: 0, sharing: Sharing::Must }]
+    }
+}
+
+impl crate::layout_ir::ToDps for MockViewWithMap {
+    fn to_dps(&self) -> Option<Box<dyn crate::layout_ir::LayoutIrOp>> {
+        None // nothing is written: there is no destination to pass
+    }
+}
+
+impl LayoutIrOp for MockViewWithMap {}
 
 /// An alloc-like op (à la `tensor.empty`): its single result is undefined
 /// storage, so reading it is never a conflict.
@@ -469,158 +556,28 @@ impl TestGraph {
     }
 }
 
-// =============================================================================
-// Fixture path: real egglog scripts through the real extractor
-// =============================================================================
-
-/// Run `test_scripts/<script>` through egglog (with the full preamble) and
-/// hand back the serialized e-graph — the selection tooling's raw material.
-pub fn serialize_fixture(script: &str) -> egraph_serialize::EGraph {
-    use egglog::SerializeConfig;
-
-    let preamble = crate::egglog_snippet::assembled_program();
-    let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
-        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
-    let program = format!("{preamble}\n\n{source}");
-
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    egraph
-        .parse_and_run_program(Some(script.to_string()), &program)
-        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
-    egraph.serialize(SerializeConfig::default()).egraph
-}
-
-/// Build a TOTAL genome over a fixture's produced classes: each class takes
-/// the first preference (an implementation constructor name) it can satisfy,
-/// falling back to its first candidate — the producer index is
-/// deterministically sorted, so the same preferences always build the same
-/// genome.
-pub fn genome_preferring(
-    egraph: &egraph_serialize::EGraph,
-    preferences: &[&str],
-) -> extractor::Genome {
-    let index = extractor::producer_index(egraph);
-    let mut genome = extractor::Genome::default();
-    for (class, candidates) in index {
-        let pick = preferences
-            .iter()
-            .find_map(|preferred| {
-                candidates
-                    .iter()
-                    .find(|(name, _)| name.as_str() == *preferred)
-            })
-            .or_else(|| candidates.first())
-            .expect("produced classes have candidates");
-        genome.choices.insert(class, pick.1.clone());
-    }
-    genome
-}
-
-/// Genome-driven fixture extraction (the selection adapter's walk) plus the
-/// plan fingerprint the search dedups on.
-pub fn extract_fixture_with_genome(
-    script: &str,
-    preferences: &[&str],
-) -> (ExtractedGraph, u64) {
-    let egraph = serialize_fixture(script);
-    let genome = genome_preferring(&egraph, preferences);
-    let graph = extractor::extract_layout_ir_with_genome(&egraph, &genome)
-        .expect("genome extraction runs")
-        .expect("genome extraction reaches the boundary");
-    let fingerprint = extractor::plan_fingerprint(&graph);
-    (graph, fingerprint)
-}
-
-/// TESTRUNTIME v0 (ruling 2026-08-13): a small tests-side runtime
-/// vocabulary — the reference registry PLUS the op variants tests need
-/// that the reference runtime deliberately does not implement (today:
-/// the view op; mutating/multi-output variants join it when the
-/// reference registry sheds them for CUDA-lite). Extraction and
-/// program assembly are runtime-injectable, so this is just a matcher
-/// list — no runtime machinery duplicated.
-pub fn test_runtime_matchers() -> Vec<Box<dyn crate::layout_ir::OpMatcher>> {
-    let mut matchers = crate::reference::ops::built_in_matchers();
-    matchers.push(Box::new(crate::reference::ops::IndexMapApplyViewMatcher));
-    matchers
-}
-
-/// [`extract_fixture`] on the TESTRUNTIME's vocabulary.
-pub fn extract_fixture_on_test_runtime(script: &str) -> ExtractedGraph {
-    use egglog::SerializeConfig;
-
-    let preamble = crate::egglog_snippet::assembled_program_for(&crate::test_support::test_runtime_matchers());
-    let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
-        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
-    let program = format!("{preamble}
-
-{source}");
-
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    egraph
-        .parse_and_run_program(Some(script.to_string()), &program)
-        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
-    let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-    extractor::extract_layout_ir_with_matchers(&serialized, crate::test_support::test_runtime_matchers())
-        .expect("extraction succeeds")
-        .unwrap_or_else(|| panic!("fixture {script} produced no extracted graph"))
-}
-
-/// Run `test_scripts/<script>` through egglog (with the full preamble) and the
-/// real extractor, returning the extracted graph. Panics on any failure — these
-/// are test fixtures.
-pub fn extract_fixture(script: &str) -> ExtractedGraph {
-    use egglog::SerializeConfig;
-
-    let preamble = crate::egglog_snippet::assembled_program();
-    let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
-        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
-    let program = format!("{preamble}\n\n{source}");
-
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    egraph
-        .parse_and_run_program(Some(script.to_string()), &program)
-        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
-    let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-    extractor::extract_layout_ir(&serialized)
-        .expect("extraction succeeds")
-        .unwrap_or_else(|| panic!("fixture {script} produced no extracted graph"))
-}
-
-/// [`extract_fixture`] restricted to an allow-list of LayoutTensorOp
-/// constructor names — forces extraction through specific implementations so
-/// a test can exercise one op end to end. Panics if the program is not
-/// implementable within the list; use [`try_extract_fixture_with_ops`] to
-/// assert that failure itself.
-pub fn extract_fixture_with_ops(script: &str, allowed: &[&str]) -> ExtractedGraph {
-    try_extract_fixture_with_ops(script, allowed)
-        .expect("extraction succeeds")
-        .unwrap_or_else(|| panic!("fixture {script} produced no extracted graph"))
-}
-
-/// The fallible form of [`extract_fixture_with_ops`].
-pub fn try_extract_fixture_with_ops(
-    script: &str,
-    allowed: &[&str],
-) -> anyhow::Result<Option<ExtractedGraph>> {
-    use egglog::SerializeConfig;
-
-    let preamble = crate::egglog_snippet::assembled_program();
-    let source = fs::read_to_string(format!("src/egglog/checkpoint_5/test_scripts/{script}"))
-        .unwrap_or_else(|_| panic!("fixture script {script} readable"));
-    let program = format!("{preamble}\n\n{source}");
-
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    egraph
-        .parse_and_run_program(Some(script.to_string()), &program)
-        .unwrap_or_else(|err| panic!("egglog failed on fixture {script}: {err}"));
-    let serialized = egraph.serialize(SerializeConfig::default()).egraph;
-    extractor::extract_layout_ir_with_ops(&serialized, Some(allowed))
-}
+// The fixture path (real egglog scripts through the real extractor) and
+// the run_reference harness moved to `luminal_reference::harness` with the
+// reference registry (Step B, ruling 2026-08-17): they default the matcher
+// set to the reference ops, which core no longer owns. Core keeps only the
+// runtime-neutral pieces: TestGraph/mocks above and harness_search_options.
 
 #[cfg(test)]
 mod harness_tests {
-    use super::*;
-    use crate::bufferize;
+    // DEP-WORLD suite (Step B): fixtures and the reference registry come
+    // through the luminal_reference dev-dependency, so every luminal type
+    // here must come from the `luminal::` build that crate links, never
+    // `crate` — the cyclic dev-dependency's two library builds do not
+    // unify their types.
+    use std::fs;
+
+    use luminal::bufferize;
+    use luminal::layout_ir::Access;
+    use luminal::test_support::*;
+    use luminal_reference::harness::{
+        extract_fixture, extract_fixture_on_test_runtime, extract_fixture_with_ops,
+        serialize_fixture, try_extract_fixture_with_ops,
+    };
 
     /// The builder produces a graph the real pipeline accepts end to end.
     #[test]
@@ -637,7 +594,7 @@ mod harness_tests {
             &[("y", "rm")],
         );
         g.output(&results[0], "B");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
         // Out-of-place: y in a fresh alloc, then a copy into pinned B.
         let summary = plan.summary();
         assert!(summary.contains("MockOp"), "{summary}");
@@ -648,7 +605,7 @@ mod harness_tests {
     #[test]
     fn fixture_extracts_and_bufferizes() {
         let graph = extract_fixture("boundary_pass_through.egg");
-        let plan = bufferize::bufferize(&graph).expect("bufferizes");
+        let plan = bufferize_mock(&graph).expect("bufferizes");
         let summary = plan.summary();
         assert!(summary.contains("ops (0):"), "{summary}");
     }
@@ -658,11 +615,11 @@ mod harness_tests {
     /// carry an Anti edge ordering Exp's read before the copy's write.
     #[test]
     fn war_hazard_gets_anti_edge() {
-        use crate::bufferize::{BufferNode, EdgeKind};
+        use luminal::bufferize::{BufferNode, EdgeKind};
         use petgraph::visit::EdgeRef;
 
         let graph = extract_fixture("boundary_war_hazard.egg");
-        let plan = bufferize::bufferize(&graph).expect("bufferizes");
+        let plan = bufferize_mock(&graph).expect("bufferizes");
 
         let anti: Vec<_> = plan
             .dag
@@ -694,7 +651,7 @@ mod harness_tests {
     /// are unordered by dataflow; the plan must order read-of-B first.
     #[test]
     fn copy_reading_buffer_ordered_before_copy_writing_it() {
-        use crate::bufferize::{BufferNode, EdgeKind};
+        use luminal::bufferize::{BufferNode, EdgeKind};
         use petgraph::visit::EdgeRef;
 
         let mut g = TestGraph::new();
@@ -711,7 +668,7 @@ mod harness_tests {
         .clone();
         g.output(&x, "C"); // copy B -> C (reads B)
         g.output(&y, "B"); // copy alloc -> B (writes B)
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         let anti: Vec<_> = plan
             .dag
@@ -762,7 +719,7 @@ mod harness_tests {
         .clone();
         g.output(&x, "B"); // pass-through: B's final contents promised to be x
         g.output(&y, "B"); // copy alloc -> B: overwrites them
-        let err = bufferize::bufferize(&g.build()).unwrap_err();
+        let err = bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("unsupported program"), "{err}");
         assert!(err.to_string().contains("distinct final values"), "{err}");
     }
@@ -773,7 +730,7 @@ mod harness_tests {
     /// retarget op2's operand to it, and never write x's pinned buffer.
     #[test]
     fn rejected_accumulator_copies_contents_and_retargets() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
         use petgraph::visit::EdgeRef;
 
         let mut g = TestGraph::new();
@@ -801,7 +758,7 @@ mod harness_tests {
         .clone();
         g.output(&y, "C");
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         // Find the accumulator's compute node.
         let (acc_idx, acc_reads, acc_writes) = plan
@@ -829,7 +786,7 @@ mod harness_tests {
             .find(|e| matches!(&plan.dag[e.source()], BufferNode::BufferCopy { .. }))
             .expect("copy feeds the accumulator");
         match &plan.dag[copy_edge.source()] {
-            BufferNode::BufferCopy { src, dst } => {
+            BufferNode::BufferCopy { src, dst, .. } => {
                 assert_eq!(src, &plan.value_buffer[&x]);
                 assert_eq!(dst, &acc_writes[0]);
             }
@@ -842,7 +799,7 @@ mod harness_tests {
     /// irrelevant), and must not share the operand's storage.
     #[test]
     fn rejected_write_only_dest_retargets_without_copy() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let mut g = TestGraph::new();
         // Interior operand: v is another op's result with a sibling reader.
@@ -879,7 +836,7 @@ mod harness_tests {
         .clone();
         g.output(&y, "C");
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         let (reads, writes) = plan
             .dag
@@ -917,7 +874,7 @@ mod harness_tests {
     /// zero copies, every op computing directly into the output storage.
     #[test]
     fn chained_destinations_collapse_onto_the_output_buffer() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let mut g = TestGraph::new();
         let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
@@ -942,7 +899,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r2, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert_eq!(plan.value_buffer[&e], plan.value_buffer[&r1]);
         assert_eq!(plan.value_buffer[&r1], plan.value_buffer[&r2]);
@@ -973,13 +930,13 @@ mod harness_tests {
     /// passes through. Zero copies, zero allocations, no permits involved.
     #[test]
     fn mutating_sqrt_bufferizes_zero_copy_in_place() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_with_ops(
             "boundary_in_place_mutation.egg",
             &["LayoutTensorOpSqrtMutatingGeneric"],
         );
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -1010,13 +967,13 @@ mod harness_tests {
     /// accumulation is zero-copy in the caller's buffer.
     #[test]
     fn alias_safe_add_accumulates_x_plus_x_in_place() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_with_ops(
             "boundary_alias_safe_add.egg",
             &["LayoutTensorOpAddMutatingInputAliasSafeGeneric"],
         );
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -1048,13 +1005,13 @@ mod harness_tests {
     /// missing permit.
     #[test]
     fn plain_mutating_add_on_x_plus_x_degrades_to_copies() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_with_ops(
             "boundary_alias_safe_add.egg",
             &["LayoutTensorOpAddMutatingGeneric"],
         );
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         let allocs = plan
             .buffers
@@ -1093,11 +1050,11 @@ mod harness_tests {
     /// recorded extraction-preference decision.)
     #[test]
     fn boundary_mutation_via_functional_degrades_to_copy() {
-        use crate::bufferize::{BufferId, BufferNode, EdgeKind};
+        use luminal::bufferize::{BufferId, BufferNode, EdgeKind};
         use petgraph::visit::EdgeRef;
 
         let graph = extract_fixture("boundary_in_place_mutation.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         let allocs = plan
             .buffers
@@ -1133,7 +1090,7 @@ mod harness_tests {
     /// slot (E) is served by a copy out of D.
     #[test]
     fn seed_ties_break_to_lowest_slot() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let mut g = TestGraph::new();
         let e = g.op(Box::new(EmptyOp), &[], &[("e", "rm")])[0].clone();
@@ -1149,7 +1106,7 @@ mod harness_tests {
         .clone();
         g.output(&r, "D");
         g.output(&r, "E");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert!(
             matches!(plan.value_buffer[&r], BufferId::Boundary(_)),
@@ -1160,7 +1117,7 @@ mod harness_tests {
             .dag
             .node_indices()
             .filter_map(|idx| match &plan.dag[idx] {
-                BufferNode::BufferCopy { src, dst } => Some((src, dst)),
+                BufferNode::BufferCopy { src, dst, .. } => Some((src, dst)),
                 _ => None,
             })
             .collect();
@@ -1180,7 +1137,7 @@ mod harness_tests {
     /// after the reader.
     #[test]
     fn rejected_seed_degrades_to_copy_with_war_edge() {
-        use crate::bufferize::{BufferId, BufferNode, EdgeKind};
+        use luminal::bufferize::{BufferId, BufferNode, EdgeKind};
         use petgraph::visit::EdgeRef;
 
         let mut g = TestGraph::new();
@@ -1208,7 +1165,7 @@ mod harness_tests {
         .clone();
         g.output(&r, "D"); // seed proposal: e ↦ D — must be rejected
         g.output(&s, "E");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert!(
             matches!(plan.value_buffer[&r], BufferId::Allocated(_)),
@@ -1255,7 +1212,7 @@ mod harness_tests {
         let b = g.input("b", "Q", Access::ReadWrite, "rm");
         g.output(&b, "P"); // copy Q -> P (reads Q, writes P)
         g.output(&a, "Q"); // copy P -> Q (reads P, writes Q)
-        let err = bufferize::bufferize(&g.build()).unwrap_err();
+        let err = bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("unschedulable"), "{err}");
     }
 
@@ -1290,7 +1247,7 @@ mod harness_tests {
         .clone();
         g.output(&y1, "D");
         g.output(&y2, "D"); // same buffer, two distinct computed values
-        let err = bufferize::bufferize(&g.build()).unwrap_err();
+        let err = bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("unsupported program"), "{err}");
         assert!(err.to_string().contains("distinct final values"), "{err}");
     }
@@ -1304,7 +1261,7 @@ mod harness_tests {
     #[test]
     fn aliased_views_in_place_fixture_rejected_as_unsupported() {
         let graph = extract_fixture("boundary_aliased_views_in_place.egg");
-        let err = bufferize::bufferize(&graph).unwrap_err();
+        let err = bufferize_mock(&graph).unwrap_err();
         assert!(err.to_string().contains("unsupported program"), "{err}");
         assert!(err.to_string().contains("pass-throughs"), "{err}");
     }
@@ -1325,7 +1282,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&y, "B"); // materialize a computed value into the Read buffer
-        let err = bufferize::bufferize(&g.build()).unwrap_err();
+        let err = bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("read-only buffer"), "{err}");
     }
 
@@ -1340,7 +1297,7 @@ mod harness_tests {
         let y = g.input("y", "B", Access::ReadWrite, "rm");
         g.output(&x, "B");
         g.output(&y, "B");
-        let err = bufferize::bufferize(&g.build()).unwrap_err();
+        let err = bufferize_mock(&g.build()).unwrap_err();
         assert!(err.to_string().contains("same layout"), "{err}");
         assert!(err.to_string().contains("invalid input program"), "{err}");
     }
@@ -1351,7 +1308,7 @@ mod harness_tests {
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadOnly, "rm");
         g.output(&x, "B");
-        let plan = bufferize::bufferize(&g.build()).expect("pass-through is legal");
+        let plan = bufferize_mock(&g.build()).expect("pass-through is legal");
         assert!(plan.summary().contains("ops (0):"), "{}", plan.summary());
     }
 
@@ -1360,7 +1317,7 @@ mod harness_tests {
     /// ReferenceRuntime sizes its buffers from.
     #[test]
     fn extraction_carries_numeric_dims_and_bits() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
 
         // Retargeted off the retired fused-matmul fixture (non-mutating
         // inventory ruling 2026-08-13): any extracted op output carries
@@ -1413,8 +1370,8 @@ mod harness_tests {
 (let data_layout_tensor (LayoutTensorLit data_logical data_layout))
 (run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
-        let full = format!("{}\n\n{}", crate::egglog_snippet::assembled_program(), body);
-        crate::egglog_snippet::new_egraph()
+        let full = format!("{}\n\n{}", luminal_reference::assembled_program(), body);
+        luminal::egglog_snippet::new_egraph()
             .parse_and_run_program(None, &full)
             .expect("sound div/mod gather program saturates cleanly under the subst range guard");
     }
@@ -1467,7 +1424,7 @@ mod harness_tests {
     fn regenerate_golden_plans() {
         for stem in GOLDEN_SCRIPTS {
             let graph = extract_fixture(&format!("{stem}.egg"));
-            let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect(stem);
+            let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect(stem);
             fs::write(format!("output/{stem}.bufferized.txt"), plan.summary())
                 .expect("golden writes");
         }
@@ -1479,9 +1436,9 @@ mod harness_tests {
     /// values carry the tied result's LAYOUT (the equivalence gate keys on it).
     #[test]
     fn dps_rewrite_appends_tied_poison_destinations() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
         let graph = extract_fixture("boundary_in_place_mutation.egg");
-        let rewritten = crate::dps::dps_rewrite(&graph);
+        let rewritten = luminal::dps::dps_rewrite(&graph);
 
         // The DPS form keeps the base op's label (label policy: IR names are
         // never edited), so DPS-ness is witnessed semantically: among
@@ -1519,7 +1476,7 @@ mod harness_tests {
     /// convention, proven end to end on the boundary_iota fixture.
     #[test]
     fn iota_extracts_as_zero_input_source() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
         let graph = extract_fixture("boundary_iota.egg");
         let extracted = graph
             .dag
@@ -1532,7 +1489,7 @@ mod harness_tests {
         assert!(extracted.inputs.is_empty(), "a source op has no operands");
         assert_eq!(extracted.outputs.len(), 1);
 
-        let rewritten = crate::dps::dps_rewrite(&graph);
+        let rewritten = luminal::dps::dps_rewrite(&graph);
         let dps = rewritten
             .dag
             .node_weights()
@@ -1558,7 +1515,7 @@ mod harness_tests {
     /// that honest outcome; extraction preference is a deferred lever.)
     #[test]
     fn scatter_mutating_updates_the_cache_in_place() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
         let graph = extract_fixture_with_ops(
             "boundary_scatter.egg",
             &["LayoutTensorOpScatterMutatingGeneric", "LayoutTensorOpIotaGeneric"],
@@ -1579,7 +1536,7 @@ mod harness_tests {
         assert_eq!(scatter.inputs[2].port, "coord0");
         assert_eq!(scatter.inputs[3].port, "coord1");
 
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph))
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph))
             .expect("in-place scatter bufferizes");
         let summary = plan.summary();
         assert!(summary.contains("ScatterMutatingGeneric"), "{summary}");
@@ -1595,7 +1552,7 @@ mod harness_tests {
     /// egglog's own merge machinery raises the error.
     #[test]
     fn scatter_with_disagreeing_src_and_coordinate_shapes_dies_in_the_terminal_stratum() {
-        let preamble = crate::egglog_snippet::assembled_program();
+        let preamble = luminal_reference::assembled_program();
         let script = r#"
 (let cache_shape (ShapeLit (IntExprCons (IntLit 6) (IntExprCons (IntLit 4) (IntExprNil)))))
 (let cache (LogicalTensorInputLit (LogicalIdLit "cache") cache_shape (F32)))
@@ -1613,7 +1570,7 @@ mod harness_tests {
         let program = format!("{preamble}
 
 {script}");
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         let err = egraph
             .parse_and_run_program(None, &program)
             .expect_err("the shape lock must collide in the terminal stratum");
@@ -1629,7 +1586,7 @@ mod harness_tests {
     /// DPS rewrite the destination is the trailing operand.
     #[test]
     fn gather_extracts_with_rank_counted_operands() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
         let graph = extract_fixture("boundary_gather.egg");
         let extracted = graph
             .dag
@@ -1644,7 +1601,7 @@ mod harness_tests {
         assert_eq!(extracted.inputs[1].port, "coord0");
         assert_eq!(extracted.inputs[2].port, "coord1");
 
-        let rewritten = crate::dps::dps_rewrite(&graph);
+        let rewritten = luminal::dps::dps_rewrite(&graph);
         let dps = rewritten
             .dag
             .node_weights()
@@ -1661,41 +1618,57 @@ mod harness_tests {
         assert_eq!(dps.inputs[3].port, "dest0");
     }
 
-    /// TYPED-BUFFERS LANDING A PIN (2026-08-11): the serialized
-    /// `dtype-of` rows are readable (op = "dtype-of", children[0] = the
-    /// logical argument, the row's own eclass holds the nullary Dtype
-    /// member — the bounds-row encoding), and they thread through
-    /// extraction onto every plan buffer. The mixed-dtype gather fixture
-    /// exercises F32 data, an Int boundary input, an Int interior iota
-    /// (a planner-allocated buffer), and an F32 output — so both
-    /// boundary and allocated buffers must arrive typed, and the
-    /// dtype/width consistency bail inside `annotate_buffer_geometry`
-    /// has run over all of them by the time bufferize returns Ok.
+    /// TYPED-BUFFERS PIN, RESPELLED FOR THE CORRECTED CONTRACT
+    /// (2026-08-31, correction 1). The serialized `dtype-of` rows are
+    /// still readable (op = "dtype-of", children[0] = the logical
+    /// argument, the row's own eclass holds the nullary Dtype member —
+    /// the bounds-row encoding), but they NO LONGER thread onto plan
+    /// buffers: `PlanDtype` left the plan and bufferizer vocabulary
+    /// entirely. What they thread onto is the RUNTIME'S OWN `L` — here
+    /// `RefLayout { mirror, dtype }` — which the reference renderer folds
+    /// at extraction time and which Option B then carries on each
+    /// assignment entry.
+    ///
+    /// The mixed-dtype gather fixture exercises F32 data, an Int boundary
+    /// input, an Int interior iota (a planner-allocated buffer), and an
+    /// F32 output — so both boundary and allocated buffers must arrive
+    /// with a typed carried layout. There is no width/dtype consistency
+    /// bail any more (the e-graph enforces dtype consistency); the fact
+    /// pinned here is TRANSPORT: every assignment row's `L` carries the
+    /// dtype its own backed tensor was declared with.
     #[test]
-    fn dtype_index_reads_serialized_rows_onto_buffers() {
-        use crate::dtype::PlanDtype;
-        let graph = extract_fixture("boundary_gather.egg");
-        let plan = crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph))
-            .expect("mixed-dtype plan bufferizes");
+    fn dtype_rows_reach_the_runtimes_own_layout_type() {
+        use luminal::dtype::PlanDtype;
+        let egraph = serialize_fixture("boundary_gather.egg");
+        let graph = luminal::dps::dps_rewrite(&extract_fixture("boundary_gather.egg"));
+        let mut cache = std::collections::HashMap::new();
+        let table = luminal::extractor::rendered_layout_table(
+            &egraph,
+            &graph, // the POST-DPS graph: value-keyed tables cover poisons
+            &luminal_reference::ReferenceLayoutRenderer,
+            &mut cache,
+        )
+        .expect("the reference renderer covers every elected value");
+        let plan = bufferize::bufferize(&graph, &table).expect("mixed-dtype plan bufferizes");
 
         let mut by_lit: std::collections::HashMap<i64, PlanDtype> = Default::default();
         let mut allocated_int = 0usize;
         for buffer in plan.buffers.values() {
-            if buffer.element_bits.is_some() {
-                let dtype = buffer.dtype.unwrap_or_else(|| {
-                    panic!("buffer {} has geometry but no dtype", buffer.label)
-                });
-                assert_eq!(
-                    dtype.egglog_bits(),
-                    buffer.element_bits.expect("checked above"),
-                    "buffer {} width disagrees with its dtype",
-                    buffer.label
-                );
-                if let Some(lit) = buffer.lit {
-                    by_lit.insert(lit, dtype);
-                } else if dtype == PlanDtype::Int {
-                    allocated_int += 1;
-                }
+            let dtype = buffer.layout.dtype.unwrap_or_else(|| {
+                panic!("buffer {} carries no dtype fact in its L", buffer.label)
+            });
+            // TRANSPORT, not derivation: the row on the buffer's carried
+            // layout IS the row the renderer put on the BACKED tensor.
+            assert_eq!(
+                Some(&buffer.layout),
+                table.get(&buffer.backs),
+                "buffer {} carries its backed tensor's own rendered layout",
+                buffer.label
+            );
+            if let Some(lit) = buffer.lit {
+                by_lit.insert(lit, dtype);
+            } else if dtype == PlanDtype::Int {
+                allocated_int += 1;
             }
         }
         assert_eq!(by_lit.get(&310), Some(&PlanDtype::F32), "embedding table");
@@ -1717,7 +1690,7 @@ mod harness_tests {
     /// scripts.
     #[test]
     fn gather_with_disagreeing_coordinate_shapes_dies_in_the_terminal_stratum() {
-        let preamble = crate::egglog_snippet::assembled_program();
+        let preamble = luminal_reference::assembled_program();
         let script = r#"
 (let three_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
 (let four_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
@@ -1745,7 +1718,7 @@ mod harness_tests {
 (run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
         let program = format!("{preamble}\n\n{script}");
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         let err = egraph
             .parse_and_run_program(None, &program)
             .expect_err("the shape closure must collide in the terminal stratum");
@@ -1763,7 +1736,7 @@ mod harness_tests {
     /// IntVar — dies there.
     #[test]
     fn iota_with_no_derivable_bounds_dies_in_the_terminal_stratum() {
-        let preamble = crate::egglog_snippet::assembled_program();
+        let preamble = luminal_reference::assembled_program();
         let script = r#"
 (let mystery_var (IntVar "mystery_var"))
 (let unsafe_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
@@ -1773,7 +1746,7 @@ mod harness_tests {
 (check (= ?demanded_upper (upper-bound-of mystery_var)))
 "#;
         let program = format!("{preamble}\n\n{script}");
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         let err = egraph
             .parse_and_run_program(None, &program)
             .expect_err("the constructor-site demand must fail on the absent bound");
@@ -1788,8 +1761,8 @@ mod harness_tests {
     #[test]
     fn dps_rewrite_is_idempotent() {
         let graph = extract_fixture("basic_program.egg");
-        let once = crate::dps::dps_rewrite(&graph);
-        let twice = crate::dps::dps_rewrite(&once);
+        let once = luminal::dps::dps_rewrite(&graph);
+        let twice = luminal::dps::dps_rewrite(&once);
         assert_eq!(once.dag.node_count(), twice.dag.node_count());
         assert_eq!(once.dag.edge_count(), twice.dag.edge_count());
     }
@@ -1798,7 +1771,7 @@ mod harness_tests {
     /// the view op leaves no node in the plan (folded like a poison producer).
     #[test]
     fn view_reads_parent_buffer_with_zero_plan_nodes() {
-        use crate::bufferize::BufferNode;
+        use luminal::bufferize::BufferNode;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -1810,7 +1783,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert_eq!(
             plan.value_buffer[&v], plan.value_buffer[&x],
@@ -1847,7 +1820,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("a view writes nothing — Read is fine");
+        let plan = bufferize_mock(&g.build()).expect("a view writes nothing — Read is fine");
         assert_eq!(plan.value_buffer[&v], plan.value_buffer[&x]);
     }
 
@@ -1858,7 +1831,7 @@ mod harness_tests {
     /// writer yields out-of-place; the view, decided in phase 1, stands.
     #[test]
     fn writer_into_viewed_buffer_yields_out_of_place() {
-        use crate::bufferize::BufferId;
+        use luminal::bufferize::BufferId;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -1872,7 +1845,7 @@ mod harness_tests {
         let r_w = g.op(Box::new(MockOp::write_only_dest()), &[&x], &[("rW", "rm")])[0].clone();
         g.output(&r_w, "D");
         g.output(&s, "E");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert!(
             matches!(plan.value_buffer[&r_w], BufferId::Allocated(_)),
@@ -1896,23 +1869,28 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
         assert_eq!(plan.value_buffer[&v2], plan.value_buffer[&x]);
         assert_eq!(plan.value_buffer[&v1], plan.value_buffer[&x]);
     }
 
-    /// A view bound straight to an output slot on its parent's own buffer is a
-    /// pure pass-through: zero copies, zero allocations, and the final binding
-    /// carries the VIEW's layout (region-aware boundary bookkeeping).
+    /// THE VIEW-OF-INPUT ZERO-COPY PIN (ruling 2026-08-27): a view bound
+    /// straight to an output slot on its parent's own buffer returns
+    /// zero-copy — zero copies, zero allocations — AND the slot's binding
+    /// DISCLOSES the elected layout (the view's fold chain over the input
+    /// buffer). The old silent-dense-misread hazard is closed by the layout
+    /// field, never by refusing: the caller interprets the returned buffer
+    /// under the returned layout.
     #[test]
     fn view_passthrough_to_output_slot() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
         g.output(&v, "B");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let graph = g.build();
+        let plan = bufferize_mock(&graph).expect("bufferizes");
 
         assert!(plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))));
         assert!(
@@ -1922,6 +1900,26 @@ mod harness_tests {
             "pass-through needs no copy:\n{}",
             plan.summary()
         );
+        let slot = plan
+            .dag
+            .node_weights()
+            .find_map(|node| match node {
+                BufferNode::BufferOutput { slots } => Some(slots[0].clone()),
+                _ => None,
+            })
+            .expect("one output slot");
+        assert_eq!(
+            slot.buffer, plan.value_buffer[&x],
+            "the slot is backed by the input buffer:\n{}",
+            plan.summary()
+        );
+        // THE DISCLOSURE (Option B): the binding carries the VIEW value's
+        // own elected layout — a different function from its parent's, over
+        // the same bytes. That is the whole of it: no hop chain, no dims,
+        // no dtype. The caller interprets the returned buffer under it.
+        let table = luminal::test_support::mock_layout_table(&graph);
+        assert_eq!(&slot.layout, &table[&v], "the view's layout, verbatim");
+        assert_ne!(table[&v], table[&x], "the view is not its parent");
     }
 
     /// THE REAL VIEW OP, plan level (Step 3): `IndexMapApplyView` feeding a
@@ -1932,12 +1930,12 @@ mod harness_tests {
     /// fold.
     #[test]
     fn real_view_op_feeds_compute_with_zero_plan_nodes() {
-        use crate::bufferize::BufferNode;
-        use crate::reference::ops::IndexMapApplyView;
+        use luminal::bufferize::BufferNode;
+        use luminal_reference::ops::IndexMapApplyView;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
-        let v = g.op(Box::new(IndexMapApplyView), &[&x], &[("v", "row0")])[0].clone();
+        let v = g.op(Box::new(IndexMapApplyView { entries: None }), &[&x], &[("v", "row0")])[0].clone();
         let r = g.op(
             Box::new(MockOp { reads: vec![true], ..Default::default() }),
             &[&v],
@@ -1945,7 +1943,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         assert_eq!(
             plan.value_buffer[&v], plan.value_buffer[&x],
@@ -1971,48 +1969,61 @@ mod harness_tests {
     }
 
     /// THE REAL VIEW OP bound to an output slot on a DIFFERENT buffer than
-    /// its parent's: the Must tie binds the view into the parent's storage,
-    /// and the boundary promise is honored by exactly one BufferCopy into the
-    /// slot's buffer — the accepted price of returning a view (span-aware
-    /// seeding through views is the recorded future refinement). The view
-    /// itself still contributes no compute node.
+    /// its parent's — the original boundary-flowing spelling, re-pinned
+    /// under ESCAPE-AND-DISCLOSE (ruling 2026-08-27): the view's storage is
+    /// the caller's own input buffer, so the output returns ZERO-COPY —
+    /// the slot is backed by the input buffer, the declared output buffer
+    /// goes unused (DCE'd, never allocated by runtimes), and the binding
+    /// carries the elected layout for the caller to interpret the bytes
+    /// under. (Two prior pins died here: the pre-Phase-5 boundary copy —
+    /// "the accepted price of returning a view" — and the Phase-5b typed
+    /// refusal. Both are rejected by the ruling: "we just return the
+    /// buffer and the user interprets it".)
     #[test]
-    fn real_view_op_to_output_slot_pays_a_boundary_copy() {
-        use crate::bufferize::BufferNode;
-        use crate::reference::ops::IndexMapApplyView;
+    fn real_view_op_to_output_slot_escapes_zero_copy() {
+        use luminal::bufferize::BufferNode;
+        use luminal_reference::ops::IndexMapApplyView;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
-        let v = g.op(Box::new(IndexMapApplyView), &[&x], &[("v", "row0")])[0].clone();
+        let v = g.op(Box::new(IndexMapApplyView { entries: None }), &[&x], &[("v", "row0")])[0].clone();
         g.output(&v, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let graph = g.build();
+        let plan = bufferize_mock(&graph)
+            .expect("a view of an input returns zero-copy under escape semantics");
 
         assert_eq!(
             plan.value_buffer[&v], plan.value_buffer[&x],
             "the view value lives in its parent's buffer:\n{}",
             plan.summary()
         );
-        let copies: Vec<_> = plan
-            .dag
-            .node_indices()
-            .filter_map(|idx| match &plan.dag[idx] {
-                BufferNode::BufferCopy { src, dst } => Some((src.clone(), dst.clone())),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            copies.len(),
-            1,
-            "exactly one boundary copy honors the slot:\n{}",
-            plan.summary()
-        );
-        assert_eq!(copies[0].0, plan.value_buffer[&x], "copied from the parent's buffer");
         assert!(
             plan.dag
                 .node_indices()
-                .all(|idx| !matches!(&plan.dag[idx], BufferNode::Compute { .. })),
-            "no kernel runs — a view plus a transport:\n{}",
+                .all(|idx| !matches!(
+                    &plan.dag[idx],
+                    BufferNode::BufferCopy { .. } | BufferNode::Compute { .. }
+                )),
+            "zero copies, zero kernels — the storage is already the caller's:\n{}",
             plan.summary()
+        );
+        let slot = plan
+            .dag
+            .node_weights()
+            .find_map(|node| match node {
+                BufferNode::BufferOutput { slots } => Some(slots[0].clone()),
+                _ => None,
+            })
+            .expect("one output slot");
+        assert_eq!(
+            slot.buffer, plan.value_buffer[&x],
+            "the slot is backed by the INPUT buffer:\n{}",
+            plan.summary()
+        );
+        let table = luminal::test_support::mock_layout_table(&graph);
+        assert_eq!(
+            &slot.layout, &table[&v],
+            "the binding discloses the elected view layout, verbatim"
         );
     }
 
@@ -2024,10 +2035,10 @@ mod harness_tests {
     /// Zero allocations, zero copies.
     #[test]
     fn view_feeds_compute_fixture_runs_one_kernel_on_the_input_buffer() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_on_test_runtime("boundary_view_feeds_compute.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -2083,10 +2094,10 @@ mod harness_tests {
     /// buffer directly through the folded view.
     #[test]
     fn write_into_viewed_buffer_fixture_degrades_to_copy() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture_on_test_runtime("boundary_write_into_viewed_buffer.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         let launch: Vec<BufferId> = plan
             .dag
@@ -2107,7 +2118,7 @@ mod harness_tests {
         let mut exp_reads = None;
         for idx in plan.dag.node_indices() {
             match &plan.dag[idx] {
-                BufferNode::BufferCopy { src, dst } => copies.push((src.clone(), dst.clone())),
+                BufferNode::BufferCopy { src, dst, .. } => copies.push((src.clone(), dst.clone())),
                 BufferNode::Compute { op, reads, writes, .. } => match op.label() {
                     "SqrtFunctionalGeneric" => sqrt_writes = Some(writes[0].clone()),
                     "ExpFunctionalGeneric" => exp_reads = Some(reads[0].clone()),
@@ -2141,10 +2152,10 @@ mod harness_tests {
     /// and the donated buffer backs no output slot.
     #[test]
     fn donated_input_fixture_frees_the_donated_buffer() {
-        use crate::bufferize::{BufferId, BufferNode};
+        use luminal::bufferize::{BufferId, BufferNode};
 
         let graph = extract_fixture("boundary_donated_input.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         assert!(
             plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))),
@@ -2193,7 +2204,7 @@ mod harness_tests {
     /// anywhere.
     #[test]
     fn extraction_prefers_the_view_op_where_the_layout_is_composed() {
-        use crate::layout_ir::ExtractedNode;
+        use luminal::layout_ir::ExtractedNode;
 
         let graph = extract_fixture_on_test_runtime("basic_program.egg");
         let mut views = 0;
@@ -2231,10 +2242,10 @@ mod harness_tests {
     fn must_alloc_outputs_are_coerced_to_caller_provided_storage() {
         use std::collections::HashSet;
 
-        use crate::bufferize::{BufferId, BufferNode, Owner};
+        use luminal::bufferize::{BufferId, BufferNode, Owner};
 
         let graph = extract_fixture("basic_program.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
 
         // Storage that exists at launch = the buffers backing BufferInput
         // nodes (the extractor admits those from BufferInputLit membership).
@@ -2291,9 +2302,9 @@ mod harness_tests {
     /// every compute node, and Poison producers are folded (no compute node).
     #[test]
     fn dps_destinations_admitted_and_poisons_folded() {
-        use crate::bufferize::BufferNode;
+        use luminal::bufferize::BufferNode;
         let graph = extract_fixture("basic_program.egg");
-        let plan = bufferize::bufferize(&crate::dps::dps_rewrite(&graph)).expect("bufferizes");
+        let plan = bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
         let mut computes = 0;
         for idx in plan.dag.node_indices() {
             if let BufferNode::Compute { op, reads, writes, .. } = &plan.dag[idx] {
@@ -2326,7 +2337,7 @@ mod harness_tests {
     /// only writer, whichever decision order the toposort produces.
     #[test]
     fn unordered_second_writer_of_shared_destination_is_rejected() {
-        use crate::bufferize::BufferNode;
+        use luminal::bufferize::BufferNode;
 
         let mut g = TestGraph::new();
         let p = g.op(Box::new(EmptyOp), &[], &[("p", "rm")])[0].clone();
@@ -2351,7 +2362,7 @@ mod harness_tests {
         )[0]
         .clone();
         g.output(&r1, "D");
-        let plan = bufferize::bufferize(&g.build()).expect("bufferizes");
+        let plan = bufferize_mock(&g.build()).expect("bufferizes");
 
         // The two writers must not share storage: exactly one of the two
         // in-place candidates survives, so r1's buffer has ONE compute writer.
@@ -2383,8 +2394,8 @@ mod harness_tests {
     /// with reads[dest_j] == writes[j] for both.
     #[test]
     fn multi_destination_pairs_get_distinct_allocations() {
-        use crate::bufferize::BufferNode;
-        use crate::test_support::test_ops::AddMulFused;
+        use luminal::bufferize::BufferNode;
+        use luminal::test_support::test_ops::AddMulFused;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2394,8 +2405,8 @@ mod harness_tests {
         g.output(&sum, "D");
         g.output(&prod, "E");
 
-        let rewritten = crate::dps::dps_rewrite(&g.build());
-        let plan = bufferize::bufferize(&rewritten).expect("bufferizes");
+        let rewritten = luminal::dps::dps_rewrite(&g.build());
+        let plan = bufferize_mock(&rewritten).expect("bufferizes");
 
         // Each (poison, result) pair on its own allocation — never shared.
         assert_ne!(
@@ -2426,7 +2437,7 @@ mod harness_tests {
     /// span, and both results must dock at their tie rows' east sides.
     #[test]
     fn slot_tables_render_ties_as_spanning_rows() {
-        use crate::test_support::test_ops::AddMulFused;
+        use luminal::test_support::test_ops::AddMulFused;
 
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -2435,7 +2446,7 @@ mod harness_tests {
         g.output(&results[0], "D");
         g.output(&results[1], "E");
 
-        let rewritten = crate::dps::dps_rewrite(&g.build());
+        let rewritten = luminal::dps::dps_rewrite(&g.build());
         let dot = rewritten.to_dot();
         for span in ["dest0 ↔ out0</TD>", "dest1 ↔ out1</TD>"] {
             assert!(dot.contains(span), "missing tie row {span:?} in:\n{dot}");
@@ -2565,7 +2576,7 @@ mod intcoordvar_probe {
     /// distinct; an identically-written view hash-conses (free CSE).
     #[test]
     fn x_probe_slice_views_today() {
-        let mut full = crate::egglog_snippet::assembled_program().to_string();
+        let mut full = luminal_reference::assembled_program().to_string();
         full.push_str(
             r#"
 (let vec_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprNil))))
@@ -2641,94 +2652,6 @@ pub fn harness_search_options() -> crate::implementation_search::ImplementationS
     }
 }
 
-/// DIAGNOSIS-ONLY (test-extractor exemption): does the plain no-genome
-/// extraction produce an executable plan for this graph? Separates "no
-/// plan exists" (structural gap) from "random genomes cannot find one"
-/// (genome-space density). Never used by the main path — everything real
-/// runs the genetic search.
-pub fn plain_plan_exists(cx: &crate::graph::Graph) -> anyhow::Result<()> {
-    let program = cx
-        .logical
-        .native_program()
-        .map_err(|reason| anyhow::anyhow!("recorder: {reason}"))?;
-    let text = format!(
-        "{}\n\n{}",
-        crate::egglog_snippet::assembled_program(),
-        program.text
-    );
-    let mut egraph = crate::egglog_snippet::new_egraph();
-    let start = std::time::Instant::now();
-    egraph
-        .parse_and_run_program(None, &text)
-        .map_err(|err| anyhow::anyhow!("saturation: {err}"))?;
-    eprintln!("[plain-plan] saturation {:?}", start.elapsed());
-    let start = std::time::Instant::now();
-    let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
-    eprintln!(
-        "[plain-plan] serialize {:?} ({} nodes, {} classes)",
-        start.elapsed(),
-        serialized.nodes.len(),
-        serialized.classes().len()
-    );
-    let allow = crate::reference::reference_allow_list();
-    let start = std::time::Instant::now();
-    let extracted = crate::extractor::extract_layout_ir_with_ops(&serialized, Some(&allow))?
-        .ok_or_else(|| anyhow::anyhow!("no output boundary reached"))?;
-    eprintln!("[plain-plan] extract {:?}", start.elapsed());
-    let start = std::time::Instant::now();
-    crate::bufferize::bufferize(&crate::dps::dps_rewrite(&extracted))?;
-    eprintln!("[plain-plan] dps+bufferize {:?}", start.elapsed());
-    Ok(())
-}
-
-/// M3 Step 4b: the NATIVE test harness — recorder model + reference
-/// binding + dyn pins as tight [n,n] bounds seeds, saturated, then the
-/// GENETIC IMPLEMENTATION SEARCH picks the winning plan (executing every
-/// candidate with the given data), which executes and stays loaded for
-/// output reads. The frontend candle differentials and the reference
-/// differentials both run through here — the same load → bind → search →
-/// execute ladder as the nn module tests, on the harness budget above.
-pub fn run_reference(
-    cx: &crate::graph::Graph,
-    inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
-) -> crate::reference::ReferenceRuntime {
-    run_reference_with_ranges(cx, inputs, &[])
-}
-
-/// [`run_reference`] with VALUE-RANGE ATTESTATIONS (typed-buffers landing D):
-/// plain Int arithmetic is proof-gated, so a graph doing arithmetic
-/// over caller Int data implements only when the caller attests the
-/// data's range — no attestation, no proof, and the search refuses
-/// loudly. `ranges` entries are (tensor, lower, upper), seeded via
-/// `bind_value_range` between load and search.
-pub fn run_reference_with_ranges(
-    cx: &crate::graph::Graph,
-    inputs: &[(petgraph::graph::NodeIndex, crate::buffer_tensor_ir::TypedBuffer)],
-    ranges: &[(petgraph::graph::NodeIndex, i64, i64)],
-) -> crate::reference::ReferenceRuntime {
-    let mut rt = crate::reference::ReferenceRuntime::load(cx)
-        .expect("recorder clean for a covered graph");
-    let mut vars: Vec<_> = cx.dyn_map.iter().collect();
-    vars.sort();
-    for (var, value) in vars {
-        rt.bind_dyn_range(*var, *value as u64, *value as u64)
-            .expect("dyn pin binds");
-    }
-    for (tensor, lower, upper) in ranges {
-        rt.bind_value_range(*tensor, *lower, *upper)
-            .expect("value range binds");
-    }
-    let data: rustc_hash::FxHashMap<_, _> = inputs.iter().cloned().collect();
-    rt.search(&data, &harness_search_options())
-        .expect("search finds a plan");
-    for (node, values) in inputs {
-        rt.set_data(*node, values.clone());
-    }
-    rt.execute().expect("winner executes");
-    rt
-}
-
-
 #[cfg(test)]
 mod stage4b_probes {
 
@@ -2745,10 +2668,10 @@ mod stage4b_probes {
     /// aliasing/donation design).
     #[test]
     fn pinned_pure_identity_output() {
-        let mut cx = crate::graph::Graph::new();
+        let mut cx = luminal::graph::Graph::new();
         let a = cx.tensor(2);
         let b = a.output();
-        let rt = crate::test_support::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
+        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0].into())]);
         let got = rt.get_f32(b.id).unwrap();
         assert_eq!(got, &vec![1.0, 2.0]);
     }
@@ -2760,7 +2683,7 @@ mod stage4b_probes {
     /// consumer resolves for itself.
     #[test]
     fn chain_strides_destructure_contract() {
-        use crate::extractor::{chain_strides, ChainStride};
+        use luminal::extractor::{chain_strides, ChainStride};
         let body = r#"
 (let psh (ShapeLit (IntExprCons (IntLit 2) (IntExprCons (IntLit 3) (IntExprNil)))))
 (let p (RightMajorContiguousElementLayoutLit psh (bits-of (F32))))
@@ -2772,8 +2695,8 @@ mod stage4b_probes {
 (let d (RightMajorContiguousElementLayoutLit dsh (bits-of (F32))))
 (run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
-        let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         egraph.parse_and_run_program(None, &full).expect("program runs");
         let serialized = egraph.serialize(egglog::SerializeConfig::default()).egraph;
 
@@ -2827,84 +2750,9 @@ mod stage4b_probes {
         assert_eq!(v[2], Some(ChainStride::Unit), "{v:?}");
     }
 
-    /// THE SCRIPT CORPUS GATE (restored 2026-08-14 for the subst-
-    /// primitive experiment): every test_scripts/*.egg is self-driving
-    /// (carries its own run-schedule and checks), so each runs verbatim
-    /// against the assembled program on a fresh e-graph. This is the
-    /// merge-tree home of the old prototype's `cargo run corpus` gate;
-    /// subst_example P1-P9 and subst_range_guard_example live here and
-    /// pin the substitution guard semantics.
-    #[test]
-    fn corpus_scripts_all_green() {
-        let dir = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/egglog/checkpoint_5/test_scripts"
-        );
-        let mut scripts: Vec<_> = std::fs::read_dir(dir)
-            .expect("test_scripts dir")
-            .filter_map(|entry| {
-                let name = entry.ok()?.file_name().into_string().ok()?;
-                name.ends_with(".egg").then_some(name)
-            })
-            .collect();
-        scripts.sort();
-        // CORPUS_ONLY=a.egg,b.egg filters to a subset — the targeted-run
-        // knob for diagnosing a single script without the whole sweep.
-        if let Ok(only) = std::env::var("CORPUS_ONLY") {
-            let keep: std::collections::HashSet<&str> = only.split(',').collect();
-            scripts.retain(|s| keep.contains(s.as_str()));
-        }
-        assert!(!scripts.is_empty(), "corpus found no scripts");
-        // Bit-rotted scripts, skipped LOUDLY: foldr_example references
-        // element-to-strided-demand, deleted by the affine migration
-        // (2026-08-05); nothing ran the corpus in the merge tree until
-        // this gate existed, so the rot went unnoticed. Deletion or
-        // rewrite is a ruling.
-        const STALE_SCRIPTS: &[&str] = &["foldr_example.egg"];
-        // The corpus assembles against the TESTRUNTIME matcher set (the
-        // superset: built-ins + view + test-only ops) — the assembly the
-        // view-dependent boundary scripts actually run under in the lib
-        // suite, and the shape of the old prototype's corpus runner.
-        let program_head = crate::egglog_snippet::assembled_program_for(&crate::test_support::test_runtime_matchers());
-        let mut failures = Vec::new();
-        for script in &scripts {
-            if STALE_SCRIPTS.contains(&script.as_str()) {
-                eprintln!("[corpus] SKIPPING stale script {script} (see STALE_SCRIPTS)");
-                continue;
-            }
-            let started = std::time::Instant::now();
-            eprintln!("[corpus] running {script}");
-            let source = std::fs::read_to_string(format!("{dir}/{script}"))
-                .expect("script readable");
-            let program = format!("{program_head}\n\n{source}");
-            let mut egraph = crate::egglog_snippet::new_egraph();
-            if let Err(err) = egraph.parse_and_run_program(Some(script.clone()), &program)
-            {
-                failures.push(format!("{script}: {err}"));
-            }
-            eprintln!("[corpus]   {script} done in {:.1}s", started.elapsed().as_secs_f64());
-        }
-        assert!(
-            failures.is_empty(),
-            "corpus scripts failed ({}/{}):\n  {}",
-            failures.len(),
-            scripts.len(),
-            failures.join("\n  ")
-        );
-        eprintln!("[corpus] {} scripts green", scripts.len());
-    }
-
-    /// Dump THE assembled program (core preamble + spliced op snippets —
-    /// exactly what every run executes) to target/assembled_program.egg.
-    /// Run: cargo test --release dump_assembled_program -- --ignored --nocapture
-    #[test]
-    #[ignore = "utility — run explicitly by name"]
-    fn dump_assembled_program() {
-        let program = crate::egglog_snippet::assembled_program();
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/target/assembled_program.egg");
-        std::fs::write(path, program).expect("dump written");
-        eprintln!("[dump] {} lines -> {path}", program.lines().count());
-    }
+    // (The script-corpus gate and the assembled-program dump moved to
+    // crates/luminal_reference/tests/corpus.rs with the reference registry
+    // in Step B — they run the reference/testruntime assembly.)
 
     /// REJOIN-DIVERGENCE ROUND DRIVER (2026-08-10): the two sick mini
     /// graphs (full-anatomy gemma3: 5.8GB in 12s; MiniDit: 10+ min in
@@ -2921,16 +2769,16 @@ mod stage4b_probes {
     fn rejoin_divergence_probe() {
         for lead in [1usize, 2usize] {
         eprintln!("[rejoin-probe] ===== lead extent {lead} =====");
-        let mut cx = crate::graph::Graph::new();
+        let mut cx = luminal::graph::Graph::new();
         let x = cx.tensor((lead, 8usize));
         let heads = x.split_dims(1, 4);
         let x1 = heads.slice_along(0..2, 2);
         let x2 = heads.slice_along(2..4, 2);
         let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
         let (pre, _inputs, _outputs, _post, _labeled) =
-            cx.logical.native_parts().expect("recorder clean");
-        let full = format!("{}\n\n{pre}", crate::egglog_snippet::assembled_program());
-        let mut egraph = crate::egglog_snippet::new_egraph();
+            cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+        let full = format!("{}\n\n{pre}", luminal_reference::assembled_program());
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         egraph.parse_and_run_program(None, &full).expect("body loads");
         let sizes = |egraph: &mut egglog::EGraph| -> std::collections::HashMap<String, isize> {
             let out = egraph
@@ -3081,19 +2929,19 @@ mod stage4b_probes {
     #[test]
     #[ignore = "diagnostic — run explicitly by name"]
     fn specimen_1235_full_schedule() {
-        let mut cx = crate::graph::Graph::new();
+        let mut cx = luminal::graph::Graph::new();
         let a = cx.tensor((1usize, 2usize, 3usize));
         let b = cx.tensor((3usize, 5usize));
         let _out = a.matmul(b).output();
         let (pre, _is, _os, post, _labeled) =
-            cx.logical.native_parts().expect("recorder clean");
+            cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
         let program = format!(
             "{}\n\n{pre}{}{post}",
-            crate::egglog_snippet::assembled_program(),
-            crate::reference_binding::SCHEDULE
+            luminal_reference::assembled_program(),
+            luminal_reference::ReferenceBindings::SCHEDULE
         );
         let start = std::time::Instant::now();
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         egraph
             .parse_and_run_program(None, &program)
             .expect("specimen saturates");
@@ -3112,53 +2960,53 @@ mod stage4b_probes {
     fn saturation_ab_report() {
         let specimens: Vec<(&str, String)> = vec![
             ("slice_pad(27x10)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((27usize, 10usize));
                 let _out = a
                     .slice((2..6, 7..10))
                     .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
                     .output();
                 let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.native_parts().expect("recorder clean");
+                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
                 pre
             }),
             ("batch_matmul(2,3,4)x(4,5)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((2usize, 3usize, 4usize));
                 let b = cx.tensor((4usize, 5usize));
                 let _out = a.matmul(b).output();
                 let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.native_parts().expect("recorder clean");
+                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
                 pre
             }),
             ("specimen(1,2,3)x(3,5)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((1usize, 2usize, 3usize));
                 let b = cx.tensor((3usize, 5usize));
                 let _out = a.matmul(b).output();
                 let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.native_parts().expect("recorder clean");
+                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
                 pre
             }),
             ("rejoin_lead1(1,8)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let x = cx.tensor((1usize, 8usize));
                 let heads = x.split_dims(1, 4);
                 let x1 = heads.slice_along(0..2, 2);
                 let x2 = heads.slice_along(2..4, 2);
                 let _out = x2.concat_along(x1, 2).merge_dims(1, 2).output();
                 let (pre, _is, _os, _post, _labeled) =
-                    cx.logical.native_parts().expect("recorder clean");
+                    cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
                 pre
             }),
         ];
         for (name, pre) in &specimens {
-            let mut egraph = crate::egglog_snippet::new_egraph();
-            let body = format!("{}\n\n{pre}", crate::egglog_snippet::assembled_program());
+            let mut egraph = luminal::egglog_snippet::new_egraph();
+            let body = format!("{}\n\n{pre}", luminal_reference::assembled_program());
             egraph.parse_and_run_program(None, &body).expect("body loads");
             let start = std::time::Instant::now();
             egraph
-                .parse_and_run_program(None, crate::reference_binding::SCHEDULE)
+                .parse_and_run_program(None, luminal_reference::ReferenceBindings::SCHEDULE)
                 .expect("schedule saturates");
             let sat = start.elapsed().as_secs_f64();
             let out = egraph
@@ -3205,29 +3053,29 @@ mod stage4b_probes {
     fn rrx_profile() {
         let specimens: Vec<(&str, String)> = vec![
             ("slice_pad(27x10)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((27usize, 10usize));
                 let _out = a
                     .slice((2..6, 7..10))
                     .pad(((1usize, 2usize), (1usize, 0usize)), 0.)
                     .output();
-                let (pre, _is, _os, post, _labeled) = cx.logical.native_parts().expect("recorder clean");
-                format!("{pre}{}{post}", crate::reference_binding::SCHEDULE)
+                let (pre, _is, _os, post, _labeled) = cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                format!("{pre}{}{post}", luminal_reference::ReferenceBindings::SCHEDULE)
             }),
             ("batch_matmul(2,3,4,5)", {
-                let mut cx = crate::graph::Graph::new();
+                let mut cx = luminal::graph::Graph::new();
                 let a = cx.tensor((2usize, 3usize, 4usize));
                 let b = cx.tensor((4usize, 5usize));
                 let _out = a.matmul(b).output();
-                let (pre, _is, _os, post, _labeled) = cx.logical.native_parts().expect("recorder clean");
-                format!("{pre}{}{post}", crate::reference_binding::SCHEDULE)
+                let (pre, _is, _os, post, _labeled) = cx.logical.bound_parts(&luminal_reference::ReferenceBindings).expect("recorder clean");
+                format!("{pre}{}{post}", luminal_reference::ReferenceBindings::SCHEDULE)
             }),
         ];
         // The fixed floor: parse + declare the assembled preamble alone.
         {
-            let preamble = crate::egglog_snippet::assembled_program();
+            let preamble = luminal_reference::assembled_program();
             let start = std::time::Instant::now();
-            let mut egraph = crate::egglog_snippet::new_egraph();
+            let mut egraph = luminal::egglog_snippet::new_egraph();
             egraph.parse_and_run_program(None, &preamble).expect("preamble loads");
             eprintln!(
                 "[prof] ===== preamble only (parse+declare, no body/schedule): {:.2}s, {} lines =====",
@@ -3236,8 +3084,8 @@ mod stage4b_probes {
             );
         }
         for (name, body) in specimens {
-            let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
-            let mut egraph = crate::egglog_snippet::new_egraph();
+            let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
+            let mut egraph = luminal::egglog_snippet::new_egraph();
             let start = std::time::Instant::now();
             let outputs = egraph.parse_and_run_program(None, &full).expect("program runs");
             let wall = start.elapsed().as_secs_f64();
@@ -3307,8 +3155,8 @@ mod stage4b_probes {
 (let v (LogicalIndexMapApply plog (IndexMapLit (IntExprCons (CoordVar osh 1) (IntExprCons (CoordVar osh 0) (IntExprNil))) psh) osh))
 (run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
 "#;
-        let full = format!("{}\n\n{body}", crate::egglog_snippet::assembled_program());
-        let err = crate::egglog_snippet::new_egraph()
+        let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
+        let err = luminal::egglog_snippet::new_egraph()
             .parse_and_run_program(None, &full)
             .expect_err("out-of-range map over a degenerate axis must panic");
         assert!(
@@ -3325,10 +3173,10 @@ mod stage4b_probes {
     /// with every tripwire live.
     #[test]
     fn degenerate_broadcast_runs_clean() {
-        let mut cx = crate::graph::Graph::new();
+        let mut cx = luminal::graph::Graph::new();
         let a = cx.tensor(1);
         let b = (a * 2.0).output();
-        let rt = crate::test_support::run_reference(&cx, &[(a.id, vec![0.5f32].into())]);
+        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, vec![0.5f32].into())]);
         let got = rt.get_f32(b.id).unwrap();
         assert!((got[0] - 1.0).abs() < 1e-6, "{got:?}");
     }
@@ -3432,7 +3280,7 @@ mod subst_guard_study {
     }
 
     fn run_verdict(text: &str) -> &'static str {
-        let mut egraph = crate::egglog_snippet::new_egraph();
+        let mut egraph = luminal::egglog_snippet::new_egraph();
         match egraph.parse_and_run_program(None, text) {
             Ok(_) => "ok",
             Err(err) => {
@@ -3470,7 +3318,7 @@ mod subst_guard_study {
             ("legacy", "sg4_admits", "ok"),
             ("legacy", "sg4_tighten", "panic-crossed-bounds"),
         ];
-        let base = crate::egglog_snippet::assembled_program();
+        let base = luminal_reference::assembled_program();
         for var_name in ["landed", "legacy"] {
             let varied = variant(&base, var_name);
             for (scen_name, tail) in scenarios() {
@@ -3495,7 +3343,7 @@ mod subst_guard_study {
     /// poison the graph loudly.
     #[test]
     fn interface_specs_report_pristine_labels_and_named_outputs() {
-        use crate::prelude::{DType, Graph};
+        use luminal::prelude::{DType, Graph};
         let mut cx = Graph::default();
         let a = cx.named_tensor("blocks.0.wq.weight", (2usize, 3usize));
         let b = cx.tensor((2usize, 3usize));
@@ -3553,8 +3401,8 @@ mod subst_guard_study {
     /// unify through the bounds lattice, no ring axioms involved.
     #[test]
     fn compound_dim_extents_record_saturate_and_run() {
-        use crate::prelude::{DType, Graph};
-        use crate::shape::IntExpr;
+        use luminal::prelude::{DType, Graph};
+        use luminal::shape::IntExpr;
         let mut cx = Graph::default();
         cx.set_dim('a', 2);
         cx.set_dim('b', 3);
@@ -3571,7 +3419,7 @@ mod subst_guard_study {
 
         let x_vals = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let y_vals = vec![2.0f32, 3.0, 4.0, 5.0, 6.0];
-        let rt = crate::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[(x.id, x_vals.clone().into()), (y.id, y_vals.clone().into())],
         );
@@ -3595,28 +3443,28 @@ mod subst_guard_study {
     /// discharges it; a [2,2] pin refuses at saturation.
     #[test]
     fn squeeze_contract_discharges_at_one_and_refuses_otherwise() {
-        use crate::prelude::{DType, Graph};
+        use luminal::prelude::{DType, Graph};
         let mut cx = Graph::default();
         cx.set_dim('s', 1);
         let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
         let out = (x.squeeze(0) * 2.0).output();
-        let rt = crate::test_support::run_reference(&cx, &[(x.id, vec![1.0f32, 2.0, 3.0].into())]);
+        let rt = luminal_reference::harness::run_reference(&cx, &[(x.id, vec![1.0f32, 2.0, 3.0].into())]);
         assert_eq!(rt.get_f32(out.id).unwrap(), &[2.0, 4.0, 6.0]);
 
         let mut cx = Graph::default();
         cx.set_dim('s', 2);
         let x = cx.named_tensor_dtyped("x", ('s', 3usize), DType::F32);
         let _ = (x.squeeze(0) * 2.0).output();
-        let mut rt = crate::reference::ReferenceRuntime::load(&cx).expect("records + loads");
+        let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("records + loads");
         let data: rustc_hash::FxHashMap<_, _> =
-            [(x.id, crate::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 6]))]
+            [(x.id, luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 6]))]
                 .into_iter()
                 .collect();
         rt.bind_dyn_range('s', 2, 2).expect("bind");
         let err = rt
             .search(
                 &data,
-                &crate::implementation_search::ImplementationSearchOptions::default(),
+                &luminal::implementation_search::ImplementationSearchOptions::default(),
             )
             .expect_err("extent 2 violates the squeeze contract");
         assert!(
@@ -3629,7 +3477,7 @@ mod subst_guard_study {
     /// proving test): both record, saturate under pins, and execute.
     #[test]
     fn symbolic_pad_and_concat_record_and_run() {
-        use crate::prelude::{DType, Graph};
+        use luminal::prelude::{DType, Graph};
         let mut cx = Graph::default();
         cx.set_dim('s', 3);
         cx.set_dim('t', 2);
@@ -3637,7 +3485,7 @@ mod subst_guard_study {
         let y = cx.named_tensor_dtyped("y", ('t',), DType::F32);
         let padded = x.pad_along(1, 1, 0, 0.0).output();
         let joined = x.concat_along(y, 0).output();
-        let rt = crate::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (x.id, vec![1.0f32, 2.0, 3.0].into()),
@@ -3653,12 +3501,12 @@ mod subst_guard_study {
     /// refuses with the NAMED door.
     #[test]
     fn unfold_window_contract_discharges_and_names_its_door() {
-        use crate::prelude::{DType, Graph};
+        use luminal::prelude::{DType, Graph};
         let mut cx = Graph::default();
         cx.set_dim('s', 5);
         let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
         let out = x.unfold((3usize,), (1usize,), (1usize,)).sum(1).output();
-        let rt = crate::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[(x.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0].into())],
         );
@@ -3668,16 +3516,16 @@ mod subst_guard_study {
         cx.set_dim('s', 2);
         let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
         let _ = x.unfold((3usize,), (1usize,), (1usize,)).sum(1).output();
-        let mut rt = crate::reference::ReferenceRuntime::load(&cx).expect("records + loads");
+        let mut rt = luminal_reference::ReferenceRuntime::load(&cx).expect("records + loads");
         let data: rustc_hash::FxHashMap<_, _> =
-            [(x.id, crate::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 2]))]
+            [(x.id, luminal::buffer_tensor_ir::TypedBuffer::from(vec![0.0f32; 2]))]
                 .into_iter()
                 .collect();
         rt.bind_dyn_range('s', 2, 2).expect("bind");
         let err = rt
             .search(
                 &data,
-                &crate::implementation_search::ImplementationSearchOptions::default(),
+                &luminal::implementation_search::ImplementationSearchOptions::default(),
             )
             .expect_err("kernel 3 cannot fit in extent 2");
         assert!(
@@ -3686,4 +3534,747 @@ mod subst_guard_study {
         );
     }
 
+}
+
+/// RING IGNITION BATTERY — the G2 fence's permanent regression suite
+/// (Austin ruling 2026-08-27: "put the G2 patch in, and we can add the
+/// battery as a regression suite").
+///
+/// THE RING: the core preamble's Int arithmetic rewrite family —
+/// commutativity, the G2/certificate-guarded associativity and
+/// distributivity, literal folds, and the bounds lattice whose [n,n]
+/// pin-collapse rule folds point-bound classes to literals.
+///
+/// THE IGNITION PREDICATE (P1–P4), from the Ring Ignition analysis
+/// (raw-spelling repro clone + battery logs, 2026-08-27). A spelling
+/// ignites the ring when ALL FOUR hold:
+///   P1  a NESTED sum/product spelling is present RAW in the egraph
+///       (e.g. (s-3)+1 as IntAdd(IntAdd(s, IntMul(-1,3)), 1)) — not
+///       pre-folded by the frontend;
+///   P2  the inner node's leaves are point-bound ([n,n] seeds), so the
+///       pin-collapse rule folds the inner class to a literal;
+///   P3  the pinned literal's value COLLIDES with another resident
+///       atom's class (a leaf var's pin, a literal operand, or the
+///       root's own fold — the value-coincidence D group);
+///   P4  an associativity/distributivity rule can regroup THROUGH the
+///       collided constant class — each regroup feeds the fold, the
+///       fold re-pins, the pin re-collides: the orbit that minted fresh
+///       literal atoms every round (pre-fence: 300k–4.4M tuples by
+///       r11–r15, battery.log).
+/// The G2 fence starves P4: three premises ((= ?x_lower
+/// (lower-bound-of ?x)) (= ?x_upper (upper-bound-of ?x)) (< ?x_lower
+/// ?x_upper)) on Assoc-IntAdd, Assoc-IntMul, and Distributivity-expand
+/// refuse point-bound matched inner classes — a known constant is owned
+/// by the fold/pin machinery, and associativity is equivalence
+/// discovery for UNKNOWNS.
+///
+/// EVERY test is HARD-BOUNDED: a round cap, a tuple ceiling checked
+/// after every single round, and a per-round wall-clock bail. If the
+/// fence is ever weakened, the igniter configs cross their tuple
+/// ceilings within ~12 rounds and the tests FAIL LOUDLY (never hang).
+/// That is this suite's whole purpose.
+///
+/// RAW SPELLINGS BY HAND: this tree's frontend simplify folds
+/// recorder-built extents ((s-3)+1 arrives as s-2), so recorder-built
+/// fixtures would exercise the SHIELD (the fold), not the RING. Every
+/// fixture below injects hand-authored egglog text; `drive` asserts the
+/// injected spelling reaches the program verbatim.
+#[cfg(test)]
+mod ring_ignition_battery {
+    /// All function-table sizes (`(print-size)`), both engine print
+    /// formats parsed.
+    fn table_sizes(egraph: &mut egglog::EGraph) -> std::collections::BTreeMap<String, isize> {
+        let out = egraph
+            .parse_and_run_program(None, "(print-size)")
+            .expect("sizes");
+        let mut map = std::collections::BTreeMap::new();
+        for chunk in &out {
+            let text = chunk.to_string();
+            for fragment in text.split('(') {
+                let fragment = fragment.trim().trim_end_matches(')');
+                if let Some((n, c)) = fragment.rsplit_once(' ') {
+                    if let Ok(c) = c.trim().parse::<isize>() {
+                        map.insert(n.trim().to_string(), c);
+                    }
+                }
+            }
+            for line in text.lines() {
+                if let Some((n, c)) = line.rsplit_once(": ") {
+                    if let Ok(c) = c.trim().parse::<isize>() {
+                        map.insert(n.trim().to_string(), c);
+                    }
+                }
+            }
+        }
+        map
+    }
+
+
+    const RING_ONLY: &str = "(run 1)";
+    const RING_AND_SUBST: &str = "(run 1) (run subst-walk 1)";
+
+    /// Hard per-round wall-clock bail: a healthy round on this suite is
+    /// milliseconds; one slow round means the ring is burning.
+    const ROUND_WALL_SECS: u64 = 30;
+
+    enum Verdict {
+        /// Delta hit zero (after round 3) under the ceiling.
+        Quiesce { rounds: usize, tuples: isize },
+        /// Round cap reached without quiescing — still under the
+        /// ceiling (legal only for pinned residual growers).
+        NoQuiesce { tuples: isize, last_delta: isize },
+    }
+
+    /// Bounded round driver. PANICS (loudly, boundedly) if the tuple
+    /// ceiling is crossed or a round exceeds the wall clock — those are
+    /// the ignition signatures. Never hangs: at most `max_rounds`
+    /// rounds, each individually walled.
+    fn drive(
+        label: &str,
+        body: &str,
+        schedule: &str,
+        max_rounds: usize,
+        tuple_ceiling: isize,
+    ) -> Verdict {
+        let full = format!("{}\n\n{body}", luminal_reference::assembled_program());
+        // Raw-spelling verification: the hand-authored fixture text must
+        // reach the egraph verbatim (nothing folded it en route).
+        for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            assert!(
+                full.contains(line),
+                "[{label}] fixture line did not reach the program raw: {line}"
+            );
+        }
+        let mut egraph = luminal::egglog_snippet::new_egraph();
+        egraph
+            .parse_and_run_program(None, &full)
+            .unwrap_or_else(|e| panic!("[{label}] body loads: {e}"));
+        let trace = std::env::var_os("G2_BATTERY_TRACE").is_some();
+        let mut prev_sizes = table_sizes(&mut egraph);
+        let mut prev: isize = prev_sizes.values().sum();
+        let mut last_delta = 0isize;
+        for round in 1..=max_rounds {
+            let start = std::time::Instant::now();
+            egraph
+                .parse_and_run_program(None, schedule)
+                .unwrap_or_else(|e| panic!("[{label}] round {round}: {e}"));
+            let sizes = table_sizes(&mut egraph);
+            let total: isize = sizes.values().sum();
+            last_delta = total - prev;
+            if trace {
+                let deltas: Vec<String> = sizes
+                    .iter()
+                    .filter_map(|(n, &c)| {
+                        let d = c - prev_sizes.get(n).copied().unwrap_or(0);
+                        (d != 0).then(|| format!("{n} {d:+}"))
+                    })
+                    .collect();
+                eprintln!(
+                    "[g2-trace:{label}] r{round}: total {total} ({last_delta:+}) | {}",
+                    deltas.join(", ")
+                );
+            }
+            prev_sizes = sizes;
+            assert!(
+                total <= tuple_ceiling,
+                "[{label}] RING IGNITION: {total} tuples > ceiling {tuple_ceiling} at round \
+                 {round} (last delta {last_delta:+}) — the G2 fence (egglog_preamble.egg, \
+                 Assoc-IntAdd / Assoc-IntMul / Distributivity-expand) has been weakened, or a \
+                 new rule feeds the pin-collapse orbit"
+            );
+            assert!(
+                start.elapsed().as_secs() <= ROUND_WALL_SECS,
+                "[{label}] RING IGNITION (slow round): round {round} took \
+                 {:.1}s at {total} tuples — bailing before the hang",
+                start.elapsed().as_secs_f64()
+            );
+            if last_delta == 0 && round > 3 {
+                return Verdict::Quiesce {
+                    rounds: round,
+                    tuples: total,
+                };
+            }
+            prev = total;
+        }
+        Verdict::NoQuiesce {
+            tuples: prev,
+            last_delta,
+        }
+    }
+
+    /// Assert a fixture quiesces within the round cap at or under the
+    /// pinned fixed-point ceiling.
+    fn assert_quiesce(
+        label: &str,
+        body: &str,
+        schedule: &str,
+        max_rounds: usize,
+        tuple_ceiling: isize,
+    ) {
+        match drive(label, body, schedule, max_rounds, tuple_ceiling) {
+            Verdict::Quiesce { rounds, tuples } => {
+                eprintln!("[g2-battery:{label}] QUIESCE r{rounds}, {tuples} tuples");
+            }
+            Verdict::NoQuiesce { tuples, last_delta } => panic!(
+                "[{label}] did not quiesce in {max_rounds} rounds ({tuples} tuples, last \
+                 delta {last_delta:+}) — a quiescing config regressed; suspect the G2 fence \
+                 or a new ring rule"
+            ),
+        }
+    }
+
+    const S5: &str = "(set (lower-bound-of (IntVar \"s\")) (bigint 5))\n(set (upper-bound-of (IntVar \"s\")) (bigint 5))\n";
+    const T2: &str = "(set (lower-bound-of (IntVar \"t\")) (bigint 2))\n(set (upper-bound-of (IntVar \"t\")) (bigint 2))\n";
+
+    fn seeds(pairs: &[(&str, i64, i64)]) -> String {
+        pairs
+            .iter()
+            .map(|(v, lo, hi)| {
+                format!(
+                    "(set (lower-bound-of (IntVar \"{v}\")) (bigint {lo}))\n(set (upper-bound-of (IntVar \"{v}\")) (bigint {hi}))\n"
+                )
+            })
+            .collect()
+    }
+
+    fn e(expr: &str, seeds: &str) -> String {
+        format!("(let e_root {expr})\n{seeds}")
+    }
+
+    /// Fixed-point ceiling for the bare-spelling configs: clone
+    /// measurements post-fence were 69–203 tuples; main measures in the
+    /// same band. Slack is deliberately wide — the pre-fence igniters
+    /// cross 300k, so anything under this ceiling is unambiguous.
+    const BARE_QUIESCE_CEILING: isize = 2_000;
+    const BARE_MAX_ROUNDS: usize = 20;
+
+    fn assert_group(entries: &[(&str, String)]) {
+        for (label, body) in entries {
+            assert_quiesce(label, body, RING_ONLY, BARE_MAX_ROUNDS, BARE_QUIESCE_CEILING);
+        }
+    }
+
+    /// Group A: controls + the original raw window-count spellings.
+    /// A3 is THE flagship igniter — (s-3)+1 with s pinned [5,5] ignited
+    /// pre-fence at r14 with 2.6M tuples (battery.log 2026-08-27).
+    #[test]
+    fn group_a_controls_and_flagship_igniter_quiesce() {
+        assert_group(&[
+            ("A1_add_st", e(r#"(IntAdd (IntVar "s") (IntVar "t"))"#, &format!("{S5}{T2}"))),
+            ("A2_sub_s3", e(r#"(IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3)))"#, S5)),
+            ("A3_sub_s3_p1_flagship", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, S5)),
+            ("A4_add_st_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntVar "t")) (IntLit 1))"#, &format!("{S5}{T2}"))),
+            ("A5_sub_st", e(r#"(IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t")))"#, &format!("{S5}{T2}"))),
+            ("A6_sub_st_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#, &format!("{S5}{T2}"))),
+            ("A7_mul_s2_p1", e(r#"(IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntLit 1))"#, S5)),
+            ("A8_mul_s2_pt", e(r#"(IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntVar "t"))"#, &format!("{S5}{T2}"))),
+            ("A9_div_s2_p1", e(r#"(IntAdd (IntTruncDiv (IntVar "s") (IntLit 2)) (IntLit 1))"#, S5)),
+            ("A10_win_full", e(r#"(IntAdd (IntTruncDiv (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 2)) (IntLit 1))"#, S5)),
+        ]);
+    }
+
+    /// Group B: predicate discriminators (which shapes carry P1–P4).
+    /// Pre-fence igniters here: B3, B4, B6, B8. B5 is pinned separately
+    /// below as the known residual grower.
+    #[test]
+    fn group_b_predicate_discriminators_quiesce() {
+        assert_group(&[
+            ("B1_add_s3_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 3)) (IntLit 1))"#, S5)),
+            ("B2_sublit_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit -3)) (IntLit 1))"#, S5)),
+            ("B3_sub_s3_pt", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntVar "t"))"#, &format!("{S5}{T2}"))),
+            ("B4_deep", e(r#"(IntAdd (IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1)) (IntLit 1))"#, S5)),
+            ("B6_lit_first", e(r#"(IntAdd (IntAdd (IntLit 3) (IntMul (IntLit -1) (IntVar "s"))) (IntLit 1))"#, S5)),
+            ("B7_mulvar_p1", e(r#"(IntAdd (IntMul (IntVar "s") (IntVar "t")) (IntLit 1))"#, &format!("{S5}{T2}"))),
+            ("B8_sub_s1_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 1))) (IntLit 1))"#, S5)),
+            ("B9_pad_out", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 1)) (IntLit 1))"#, S5)),
+            ("B10_two_prods", e(r#"(IntAdd (IntAdd (IntMul (IntVar "s") (IntLit 2)) (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, S5)),
+            ("B11_prodpair", e(r#"(IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3)))"#, S5)),
+            ("B12_prodpair_p1", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3))) (IntLit 1))"#, S5)),
+        ]);
+    }
+
+    /// B5 (s-(t-3))+1: in the analysis clone this was the one RESIDUAL
+    /// GROWER post-fence (NOQ30, 37k tuples — a literal div-fold /
+    /// backward-distributivity family). ON MAIN IT QUIESCES (r7, 120
+    /// tuples, measured 2026-08-27) — main's tree closes the family the
+    /// clone left open. Pinned as quiescing; pre-fence this config
+    /// IGNITED at r11 with 474k tuples, so the ceiling discriminates
+    /// the fence hard either way.
+    #[test]
+    fn group_b5_clone_residual_grower_quiesces_on_main() {
+        let body = e(
+            r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntAdd (IntVar "t") (IntMul (IntLit -1) (IntLit 3))))) (IntLit 1))"#,
+            &format!("{S5}{T2}"),
+        );
+        assert_quiesce("B5_sub_nest_t", &body, RING_ONLY, BARE_MAX_ROUNDS, BARE_QUIESCE_CEILING);
+    }
+
+    /// Group C: bounds variants of the flagship igniter — wide ranges
+    /// and zero-crossing ranges must not ignite (P2 fails: no pin).
+    #[test]
+    fn group_c_bounds_variants_quiesce() {
+        assert_group(&[
+            ("C1_ign_wide", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 4, 100)]))),
+            ("C2_ign_zerox", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 1, 100)]))),
+            ("C3_ign_zerox0", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 0, 10)]))),
+            ("C4_ign_nobounds", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, "")),
+        ]);
+    }
+
+    /// Groups D/E: value-coincidence discriminators (same spellings,
+    /// different point bindings — P3 probes) + the symbolic-kernel
+    /// unfold window-count spellings.
+    #[test]
+    fn group_d_e_value_coincidence_and_symbolic_window_quiesce() {
+        let sub_s3_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#;
+        let sub_st_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#;
+        let lit_first = r#"(IntAdd (IntAdd (IntLit 3) (IntMul (IntLit -1) (IntVar "s"))) (IntLit 1))"#;
+        let sub_s1_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 1))) (IntLit 1))"#;
+        let sub_s3_p3 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 3))"#;
+        let sub_s2_p1 = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 2))) (IntLit 1))"#;
+        let dividend = r#"(IntAdd (IntVar "d") (IntMul (IntLit -1) (IntAdd (IntMul (IntVar "l") (IntAdd (IntVar "k") (IntMul (IntLit -1) (IntLit 1)))) (IntLit 1))))"#;
+        let win_sym = format!(r#"(IntAdd (IntTruncDiv {dividend} (IntLit 2)) (IntLit 1))"#);
+        assert_group(&[
+            ("D1_s6", e(sub_s3_p1, &seeds(&[("s", 6, 6)]))),
+            ("D2_s4", e(sub_s3_p1, &seeds(&[("s", 4, 4)]))),
+            ("D3_s8", e(sub_s3_p1, &seeds(&[("s", 8, 8)]))),
+            ("D4_s7t3", e(sub_st_p1, &seeds(&[("s", 7, 7), ("t", 3, 3)]))),
+            ("D5_s5t4", e(sub_st_p1, &seeds(&[("s", 5, 5), ("t", 4, 4)]))),
+            ("D6_s3t2", e(sub_st_p1, &seeds(&[("s", 3, 3), ("t", 2, 2)]))),
+            ("D7_B6_s6", e(lit_first, &seeds(&[("s", 6, 6)]))),
+            ("D8_B8_s7", e(sub_s1_p1, &seeds(&[("s", 7, 7)]))),
+            ("D9_s5", e(sub_s3_p3, &seeds(&[("s", 5, 5)]))),
+            ("D10_s9", e(sub_s2_p1, &seeds(&[("s", 9, 9)]))),
+            ("E1_dividend", e(dividend, &seeds(&[("d", 16, 16), ("k", 3, 3), ("l", 2, 2)]))),
+            ("E2_win_sym", e(&win_sym, &seeds(&[("d", 16, 16), ("k", 3, 3), ("l", 2, 2)]))),
+            ("E3_win_sym", e(&win_sym, &seeds(&[("d", 17, 17), ("k", 4, 4), ("l", 1, 1)]))),
+        ]);
+    }
+
+    /// Group F: predicate boundary predictions, constructed before the
+    /// fence landed to falsify the collision predicate (P3 probes with
+    /// tail-sum/leaf/operand collisions).
+    #[test]
+    fn group_f_predicate_boundaries_quiesce() {
+        assert_group(&[
+            ("F1_tail_hits_var", e(r#"(IntAdd (IntAdd (IntVar "s") (IntVar "t")) (IntLit 1))"#, &seeds(&[("s", 5, 5), ("t", 4, 4)]))),
+            ("F2_tail_hits_op", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit 2) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 2, 2)]))),
+            ("F3_diag_no_prod", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 1, 1)]))),
+            ("F4_no_coll", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 6, 6)]))),
+            ("F5_var_is_leaf", e(r#"(IntAdd (IntAdd (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 2, 2)]))),
+        ]);
+    }
+
+
+    /// Group M: nested-PRODUCT shapes against the Assoc-IntMul fence
+    /// premise. Probed 2026-08-27 with that premise ABLATED: none of
+    /// these ignite — no known product detonator exists (the premise is
+    /// prophylactic symmetry with the add fence; products lack the
+    /// like-term/tail-sum collision fuel). Kept as coverage so any
+    /// future ring rule that makes products detonable is caught here;
+    /// the premise itself is pinned textually by
+    /// `g2_fence_text_is_intact` below.
+    #[test]
+    fn group_m_nested_products_quiesce() {
+        assert_group(&[
+            ("M1_s5_x3_x2", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 3)) (IntLit 2))"#, S5)),
+            ("M2_s3_x2_x3", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 3, 3)]))),
+            ("M3_st_x2", e(r#"(IntMul (IntMul (IntVar "s") (IntVar "t")) (IntLit 2))"#, &seeds(&[("s", 3, 3), ("t", 2, 2)]))),
+            ("M4_s2_x2_x2", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 2))"#, &seeds(&[("s", 2, 2)]))),
+            ("M5_s7_x2_x3_nocoll", e(r#"(IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3))"#, &seeds(&[("s", 7, 7)]))),
+            ("M6_deep_mul", e(r#"(IntMul (IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3)) (IntLit 2))"#, &seeds(&[("s", 2, 2)]))),
+            ("M7_mul_of_sub", e(r#"(IntMul (IntMul (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 2)) (IntLit 3))"#, S5)),
+            ("M8_mixed_addroot", e(r#"(IntAdd (IntMul (IntMul (IntVar "s") (IntLit 2)) (IntLit 3)) (IntLit 1))"#, &seeds(&[("s", 3, 3)]))),
+            ("M9_win_times", e(r#"(IntMul (IntMul (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 3)) (IntLit 2))"#, S5)),
+        ]);
+    }
+
+    /// THE FENCE TEXT TRIPWIRE (repo precedent: subst_guard_study's
+    /// guard anchors). The Assoc-IntMul G2 premise has no known
+    /// behavioral detonator, so behavior tests alone cannot catch its
+    /// removal — the fence is ALSO pinned textually: each of the three
+    /// guarded rules must appear verbatim in the assembled program, and
+    /// each rule action exactly once (no unguarded twin beside a
+    /// guarded original).
+    #[test]
+    fn g2_fence_text_is_intact() {
+        const ASSOC_INTADD: &str = "(rule\n  (\n    (= ?expr (IntAdd ?inner ?outer))\n    (= ?inner (IntAdd ?lhs ?rhs))\n    (provably-cannot-union-with-zero ?inner)\n    (= ?inner_lower (lower-bound-of ?inner))\n    (= ?inner_upper (upper-bound-of ?inner))\n    (< ?inner_lower ?inner_upper)\n  )\n  ((union ?expr (IntAdd ?lhs (IntAdd ?rhs ?outer))))\n)";
+        const ASSOC_INTMUL: &str = "(rule\n  (\n    (= ?expr (IntMul ?inner ?outer))\n    (= ?inner (IntMul ?lhs ?rhs))\n    (provably-cannot-union-with-zero ?inner)\n    (= ?inner_lower (lower-bound-of ?inner))\n    (= ?inner_upper (upper-bound-of ?inner))\n    (< ?inner_lower ?inner_upper)\n  )\n  ((union ?expr (IntMul ?lhs (IntMul ?rhs ?outer))))\n)";
+        const DIST_EXPAND: &str = "(rule\n  (\n    (= ?expr (IntMul ?summands ?factor))\n    (= ?summands (IntAdd ?lhs ?rhs))\n    (provably-cannot-union-with-zero ?expr)\n    (provably-cannot-union-with-zero ?lhs)\n    (provably-cannot-union-with-zero ?rhs)\n    (provably-cannot-union-with-zero ?factor)\n    (= ?summands_lower (lower-bound-of ?summands))\n    (= ?summands_upper (upper-bound-of ?summands))\n    (< ?summands_lower ?summands_upper)\n  )\n  ((union ?expr (IntAdd (IntMul ?lhs ?factor) (IntMul ?rhs ?factor))))\n)";
+        let program = luminal_reference::assembled_program();
+        for (name, rule, action) in [
+            ("Assoc-IntAdd", ASSOC_INTADD, "((union ?expr (IntAdd ?lhs (IntAdd ?rhs ?outer))))"),
+            ("Assoc-IntMul", ASSOC_INTMUL, "((union ?expr (IntMul ?lhs (IntMul ?rhs ?outer))))"),
+            ("Distributivity-expand", DIST_EXPAND, "((union ?expr (IntAdd (IntMul ?lhs ?factor) (IntMul ?rhs ?factor))))"),
+        ] {
+            assert!(
+                program.contains(rule),
+                "G2 fence drifted: the guarded {name} rule text is not in the preamble \
+                 (egglog_preamble.egg — if the change is intentional, re-prove with this \
+                 battery and re-pin)"
+            );
+            assert_eq!(
+                program.matches(action).count(),
+                1,
+                "G2 fence bypassed: {name}'s action appears more than once — an unguarded \
+                 twin rule beside the guarded original"
+            );
+        }
+    }
+
+    /// Group G: mixed static/dynamic bounds — wide var with a pinned
+    /// literal tail (the shipping symbolic-dim shape).
+    #[test]
+    fn group_g_mixed_bounds_quiesce() {
+        assert_group(&[
+            ("G1_wide_s_lit2", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 2))) (IntLit 1))"#, &seeds(&[("s", 4, 100)]))),
+            ("G2_wide_s_pt_t", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntVar "t"))) (IntLit 1))"#, &seeds(&[("s", 4, 100), ("t", 2, 2)]))),
+            ("G3_wide_s_lit3", e(r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#, &seeds(&[("s", 4, 100)]))),
+        ]);
+    }
+
+    /// USER-DIM END-TO-END: the raw (s-t)+1 dim spelling inside real
+    /// shape/layout context (LogicalTensorInputLit + right-major
+    /// layout), hand-authored to mirror the clone recorder's output
+    /// byte-for-byte at the extent (this tree's frontend would fold it —
+    /// the shield the battery must bypass). Pre-fence this IGNITED at
+    /// r15 with 683k tuples (exposure.log).
+    #[test]
+    fn user_dim_raw_spelling_in_layout_context_quiesces() {
+        let body = "\
+(let g2ud_shape (ShapeLit (IntExprCons (IntAdd (IntAdd (IntVar \"s\") (IntMul (IntLit -1) (IntVar \"t\"))) (IntLit 1)) (IntExprNil))))
+(let g2ud_x (LogicalTensorInputLit (LogicalIdLit \"g2ud_x\") g2ud_shape (F32)))
+(let g2ud_layout (RightMajorContiguousElementLayoutLit g2ud_shape (bits-of (F32))))
+(set (lower-bound-of (IntVar \"s\")) (bigint 5))
+(set (upper-bound-of (IntVar \"s\")) (bigint 5))
+(set (lower-bound-of (IntVar \"t\")) (bigint 2))
+(set (upper-bound-of (IntVar \"t\")) (bigint 2))
+";
+        assert_quiesce("user_dim_raw", body, RING_AND_SUBST, 40, 5_000);
+    }
+
+    /// SUBST-COMPOSITION (coord entry): the walk substitutes a
+    /// crop/flip-style negative-offset map entry into a flat outer
+    /// IntAdd, minting the nested spelling AT SATURATION — rewrites can
+    /// build the igniter from flat parts, so the fence must hold on
+    /// rule-minted (not just seeded) spellings.
+    #[test]
+    fn subst_composition_minted_nesting_quiesces() {
+        let body = r#"
+(let ext_e (IntVar "e"))
+(set (lower-bound-of ext_e) (bigint 5))
+(set (upper-bound-of ext_e) (bigint 5))
+(let src_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let out_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let c_src (CoordVar src_shape 0))
+(let c_out (CoordVar out_shape 0))
+(let entry (IntAdd (IntAdd ext_e (IntMul (IntLit -1) (IntLit 3))) c_out))
+(let map (IndexMapLit (IntExprCons entry (IntExprNil)) src_shape))
+(let outer_expr (IntAdd c_src (IntLit 1)))
+(int-subst-demand outer_expr map)
+"#;
+        assert_quiesce("subst_comp", body, RING_AND_SUBST, 25, 5_000);
+    }
+
+    /// SUBST-COMPOSITION (coord-free entry, pure dim offset e-3): the
+    /// walk mints IntAdd(IntAdd(e, -1*3), 1) — the A3 flagship — at
+    /// saturation.
+    #[test]
+    fn subst_composition_coordfree_mints_flagship_quiesces() {
+        let body = r#"
+(let ext_e (IntVar "e"))
+(set (lower-bound-of ext_e) (bigint 5))
+(set (upper-bound-of ext_e) (bigint 5))
+(let src_shape (ShapeLit (IntExprCons (IntLit 4) (IntExprNil))))
+(let c_src (CoordVar src_shape 0))
+(let entry (IntAdd ext_e (IntMul (IntLit -1) (IntLit 3))))
+(let map (IndexMapLit (IntExprCons entry (IntExprNil)) src_shape))
+(let outer_expr (IntAdd c_src (IntLit 1)))
+(int-subst-demand outer_expr map)
+"#;
+        assert_quiesce("subst_comp_coordfree", body, RING_AND_SUBST, 25, 5_000);
+    }
+
+    /// THE ORIGINAL RAW-UNFOLD DRIVER: a real recorded unfold graph
+    /// (this tree's recorder folds the window count — verified below)
+    /// PLUS the raw window-count spelling injected beside it, so the
+    /// ring sees the raw atom inside full graph/subst-walk context.
+    #[test]
+    fn unfold_graph_with_raw_window_count_quiesces() {
+        use luminal::prelude::{DType, Graph};
+        let mut cx = Graph::new();
+        cx.set_dim('s', 5);
+        let x = cx.named_tensor_dtyped("x", ('s',), DType::F32);
+        let _out = x.unfold((3usize,), (1usize,), (1usize,)).sum(1).output();
+        let (pre, _inputs, _outputs, _post, _labeled) = cx
+            .logical
+            .bound_parts(&luminal_reference::ReferenceBindings)
+            .expect("recorder clean");
+        let raw_window = r#"(IntAdd (IntAdd (IntVar "s") (IntMul (IntLit -1) (IntLit 3))) (IntLit 1))"#;
+        // The shield check: this tree's frontend simplify must have
+        // folded the recorder's window count — if the raw nested
+        // spelling ever starts arriving from the recorder, the fixture
+        // double-covers and should be revisited.
+        eprintln!(
+            "[g2-battery:unfold] recorder emits raw spelling: {}",
+            pre.contains(raw_window)
+        );
+        let body = format!(
+            "{pre}\n(let g2_raw_window {raw_window})\n{S5}"
+        );
+        assert_quiesce("unfold_raw_window", &body, RING_AND_SUBST, 60, 10_000);
+    }
+}
+
+#[cfg(test)]
+mod escape_execution_tests {
+    //! THE HAND-BUILT-PLAN FIXTURE — where Option B's carried `L` is load
+    //! bearing (correction 7). A live runtime knows every layout before it
+    //! calls `bufferize`, so the plan tells it nothing new. These plans
+    //! have NO such runtime behind them: they are the surface `load_plan`
+    //! accepts, built by hand, with no e-graph, no recorder and no
+    //! rendered table anywhere. Under Option B they need no companion
+    //! argument, because the boundary/layout knowledge a live runtime
+    //! would have had rides the plan itself: `Buffer::layout` sizes every
+    //! allocation and `OutputBinding::layout` describes every delivery.
+    //!
+    //! They also prove the escape path end to end: the fetch returns the
+    //! BACKING buffer's bytes plus the elected layout, elements are read
+    //! by evaluating that layout, and the executor guard refuses
+    //! minted-non-escaping storage backing an output slot. Same dep-world
+    //! discipline as `harness_tests`: every luminal type comes from the
+    //! `luminal::` build luminal_reference links.
+    use egraph_serialize::ClassId;
+    use luminal::buffer_tensor_ir::TypedBuffer;
+    use luminal::bufferize::{
+        Buffer, BufferEdge, BufferId, BufferIrGraph, BufferNode, EdgeKind, InputBinding,
+        OutputBinding, Owner,
+    };
+    use luminal::layout_ir::{Access, FreedBy};
+    use luminal::prelude::petgraph::graph::DiGraph;
+    use luminal_reference::{RefLayout, ReferenceRuntime};
+
+    /// A hand-built plan's carried layout. THE ONLY SIZING INPUT: the
+    /// executor allocates span-of-layout elements in the layout's dtype —
+    /// no dims field, no walk, no vote.
+    fn rm_layout(dims: &[i64]) -> RefLayout {
+        // Dep-world discipline: `luminal::layouts`, never `crate::layouts` —
+        // RefLayout is the plain `luminal` build's MirrorLayout, and the
+        // cfg(test) build's types do not unify with it.
+        use luminal::layouts::{
+            BitWidthTerm, IntExprTerm, MirrorLayout, RightMajorContiguousElementLayout, ShapeTerm,
+        };
+        RefLayout {
+            mirror: MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
+                shape: ShapeTerm(dims.iter().map(|&d| IntExprTerm::Lit(d)).collect()),
+                width: BitWidthTerm(32),
+            }),
+            dtype: Some(luminal::dtype::PlanDtype::F32),
+        }
+    }
+
+    /// PROTOTYPE (Option B): the transpose view's COMPOSED layout — the
+    /// `L` the e-graph would mint for the view value (shape `[3,2]`,
+    /// reading its dense `[2,3]` parent): element (i,j) at parent flat
+    /// j*3 + i, spelled as the strided chain from-end [coord0*3, coord1].
+    fn transpose_strided_layout() -> RefLayout {
+        use luminal::layouts::{
+            BitWidthTerm, IntExprTerm, MirrorLayout, ShapeTerm, StridedElementLayout,
+        };
+        let coord = |axis_from_end: i64| IntExprTerm::Coord { axis_from_end };
+        RefLayout {
+            mirror: MirrorLayout::Strided(StridedElementLayout {
+                shape: ShapeTerm(vec![IntExprTerm::Lit(3), IntExprTerm::Lit(2)]),
+                chain: vec![
+                    IntExprTerm::Mul(Box::new(coord(0)), Box::new(IntExprTerm::Lit(3))),
+                    coord(1),
+                ],
+                width: BitWidthTerm(32),
+            }),
+            dtype: Some(luminal::dtype::PlanDtype::F32),
+        }
+    }
+
+    /// A minimal escaped-output plan: input x `[2,3]` (BufferLit 7) is
+    /// base-copied into minted buffer A (the stand-in for a kernel
+    /// producing the parent there), and the output slot binds the
+    /// TRANSPOSE VIEW of that parent — backed by A, `freed_by` flipped to
+    /// the escape cell.
+    fn escaped_plan(freed_by: FreedBy) -> BufferIrGraph<RefLayout> {
+        let x = ClassId::from("val$x");
+        let v = ClassId::from("val$v");
+        let input_id = BufferId::Boundary(ClassId::from("buf$B"));
+        let escaped_id = BufferId::Allocated(0);
+        let mut buffers = std::collections::HashMap::new();
+        buffers.insert(
+            input_id.clone(),
+            Buffer {
+                id: input_id.clone(),
+                access: Access::ReadOnly,
+                freed_by: FreedBy::Caller,
+                owner: Owner::Caller,
+                label: "B".to_string(),
+                lit: Some(7),
+                backs: x.clone(),
+                layout: rm_layout(&[2, 3]),
+            },
+        );
+        buffers.insert(
+            escaped_id.clone(),
+            Buffer {
+                id: escaped_id.clone(),
+                access: Access::ReadWrite,
+                freed_by,
+                owner: Owner::System,
+                label: "escaped".to_string(),
+                lit: None,
+                // THE ASSIGNMENT: this storage holds the PARENT's bytes
+                // (the base copy landed them), so it backs x and is sized
+                // by x's layout — parent-sized, not view-sized.
+                backs: x.clone(),
+                layout: rm_layout(&[2, 3]),
+            },
+        );
+        let mut dag: DiGraph<BufferNode<RefLayout>, BufferEdge> = DiGraph::new();
+        let input = dag.add_node(BufferNode::BufferInput {
+            slots: vec![InputBinding { value: x.clone(), buffer: input_id.clone() }],
+        });
+        // The copy carries ONLY {src, dst} — a dumb exact-size whole-buffer
+        // copy (both buffers are the parent's 6 f32s). Ordering is this
+        // fixture's own obligation, discharged by the data edges below.
+        let copy = dag.add_node(BufferNode::BufferCopy {
+            src: input_id.clone(),
+            dst: escaped_id.clone(),
+        });
+        let out = dag.add_node(BufferNode::BufferOutput {
+            slots: vec![OutputBinding {
+                index: 0,
+                value: v.clone(),
+                buffer: escaped_id.clone(),
+                // A VIEW OUTPUT, fulfilled STRUCTURALLY: the slot's buffer
+                // IS the parent's storage (zero-copy by construction), and
+                // the carried layout — the view's composed strided form —
+                // is how the caller reads it. No dims, no dtype, no hop
+                // chain: the layout is the whole disclosure.
+                layout: transpose_strided_layout(),
+            }],
+        });
+        dag.add_edge(
+            input,
+            copy,
+            BufferEdge { buffer: input_id, port: "in".to_string(), kind: EdgeKind::Data },
+        );
+        dag.add_edge(
+            copy,
+            out,
+            BufferEdge {
+                buffer: escaped_id,
+                port: "out 0".to_string(),
+                kind: EdgeKind::Data,
+            },
+        );
+        let mut value_buffer = std::collections::BTreeMap::new();
+        value_buffer.insert(x, BufferId::Allocated(0));
+        BufferIrGraph { dag, buffers, value_buffer, outputs: vec![out] }
+    }
+
+    /// PROBE 1, the executed-bytes half — OPTION B RESTRUCTURE: the
+    /// escaped slot's fetch returns the backing buffer's bytes plus the
+    /// slot's HELD LAYOUT (`binding.layout`, verbatim), and elements are
+    /// read by EVALUATING the mirror layout's own expressions — no core
+    /// walker (`walk_layout_index` left core; the canonical test-equality
+    /// utility lives in the testing crate `test_runtime::test_equality`,
+    /// duplicated minimally here because core's own dev-tests cannot
+    /// depend on the testing crate without a dev-cycle).
+    #[test]
+    fn escaped_output_executes_and_reads_through_the_held_layout() {
+        let mut rt = ReferenceRuntime::default();
+        rt.load_plan(escaped_plan(FreedBy::Caller));
+        let staged: Vec<f32> = (0..6).map(|n| n as f32 * 10.0).collect();
+        rt.set_data_buffer(7, staged.clone());
+        rt.execute().expect("an escaping output executes");
+
+        let (data, binding) = rt.output_slot(0).expect("the universal fetch");
+        let bytes = data.as_f32().expect("f32 backing bytes");
+        assert_eq!(bytes.len(), 6, "the BACKING buffer is parent-sized");
+        // The value's shape comes from the CARRIED LAYOUT's domain — there
+        // is no dims field to read.
+        use luminal::layouts::{IntExprTerm, MirrorLayout};
+        assert_eq!(binding.layout.mirror.literal_extents(), Some(vec![3, 2]));
+        let MirrorLayout::Strided(strided) = &binding.layout.mirror else {
+            panic!("the disclosed layout is the composed strided form");
+        };
+        // Evaluate one chain summand at concrete coords (from-end axes).
+        fn eval(expr: &IntExprTerm, coords: &[usize]) -> i64 {
+            match expr {
+                IntExprTerm::Lit(v) => *v,
+                IntExprTerm::Coord { axis_from_end } => {
+                    let rank = coords.len();
+                    coords[rank - 1 - *axis_from_end as usize] as i64
+                }
+                IntExprTerm::Add(a, b) => eval(a, coords) + eval(b, coords),
+                IntExprTerm::Mul(a, b) => eval(a, coords) * eval(b, coords),
+                other => panic!("fixture layout uses no {other:?}"),
+            }
+        }
+        for i in 0..3usize {
+            for j in 0..2usize {
+                let coords = [i, j];
+                let flat: i64 = strided.chain.iter().map(|s| eval(s, &coords)).sum();
+                assert_eq!(
+                    bytes[flat as usize],
+                    staged[j * 3 + i],
+                    "v[{i},{j}] must be x[{j},{i}]"
+                );
+            }
+        }
+        // The layout accessor alone agrees with the fetch.
+        let layout = rt.output_layout(0).expect("layout accessor");
+        assert_eq!(layout.buffer, BufferId::Allocated(0));
+    }
+
+    /// PROBE 5, reference side: a hand-built plan whose output slot is
+    /// backed by minted NON-ESCAPING storage (Owner::System +
+    /// FreedBy::Program) must be refused loudly at execute — the caller
+    /// would receive bytes the program destroys. (The cuda-lite executor
+    /// carries the same guard in `device::execute_plan`, ahead of any
+    /// device work; it is feature-gated on `device` and compile-checked
+    /// here.)
+    #[test]
+    fn executor_refuses_minted_non_escaping_output_backing() {
+        let mut rt = ReferenceRuntime::default();
+        rt.load_plan(escaped_plan(FreedBy::Program));
+        rt.set_data_buffer(7, vec![0.0f32; 6]);
+        let err = rt.execute().expect_err("the escape guard must refuse");
+        assert!(
+            err.to_string().contains("NON-ESCAPING"),
+            "the guard names the violation: {err:#}"
+        );
+    }
+
+    /// PROBE 5b: DONATED boundary storage (Owner::Caller +
+    /// FreedBy::Program) backing an output slot is refused the same way —
+    /// the guard keys on FreedBy alone, so donation status cannot slip
+    /// past the owner check (validate()'s donated arm forbids exactly
+    /// this plan shape; the executor re-checks for loaded plans).
+    #[test]
+    fn executor_refuses_donated_boundary_output_backing() {
+        let mut plan = escaped_plan(FreedBy::Caller);
+        let input_id = BufferId::Boundary(ClassId::from("buf$B"));
+        plan.buffers.get_mut(&input_id).unwrap().freed_by = FreedBy::Program;
+        for node in plan.dag.node_weights_mut() {
+            if let BufferNode::BufferOutput { slots } = node {
+                slots[0].buffer = input_id.clone();
+                slots[0].layout = rm_layout(&[2, 3]);
+            }
+        }
+        let mut rt = ReferenceRuntime::default();
+        rt.load_plan(plan);
+        rt.set_data_buffer(7, vec![0.0f32; 6]);
+        let err = rt.execute().expect_err("the escape guard must refuse donated backing");
+        assert!(
+            err.to_string().contains("NON-ESCAPING") && err.to_string().contains("Caller"),
+            "the guard names the violation and the owner: {err:#}"
+        );
+    }
 }

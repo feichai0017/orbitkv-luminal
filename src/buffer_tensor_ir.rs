@@ -16,14 +16,14 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 
 use anyhow::Result;
 use egraph_serialize::ClassId;
 use petgraph::graph::{DiGraph, NodeIndex};
 
-use crate::bufferize::{Analysis, Buffer, BufferId, Bufferizer};
+use crate::bufferize::{Analysis, Buffer, BufferId, Bufferizer, PlanLayout};
 use crate::layout_ir::{Access, ExtractedGraph, ExtractedNode};
 
 // =============================================================================
@@ -420,7 +420,7 @@ impl<T: 'static> AsAnyOp for T {
 }
 
 pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + AsAnyOp + Debug {
-    /// The op's IR name (see the label policy in [`crate::reference::ops`]).
+    /// The op's IR name (see the label policy in `luminal_reference::ops`).
     fn label(&self) -> &str;
 
     /// Is this operand's buffer read? (Inputs are read.)
@@ -442,6 +442,24 @@ pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + AsAnyOp + Debu
     /// destination seeding and plan folding — never data anyone may consume.
     fn result_is_undefined(&self, _result: usize) -> bool {
         false
+    }
+
+    /// The view's index map, numerically: one expression tree per PARENT
+    /// axis (outermost inward), evaluated at the RESULT's coordinates —
+    /// the same entry vocabulary the materialize ops carry, parsed
+    /// extraction-side (enode-anchored, never from class spellings).
+    /// Implemented by metadata-view ops (no reads, no writes, result tied).
+    ///
+    /// PLAN-SIDE CONSUMPTION IS GONE (corrected contract, 2026-08-31):
+    /// the bufferizer no longer records a folded access on consumer slot
+    /// descriptors — the e-graph mints every view value's COMPOSED layout
+    /// at view creation, and the runtime's rendered `L` for that value is
+    /// the read path. This hook survives as OP-RECORD business: what an
+    /// op remembers from its claimed site, for its own matcher/kernel to
+    /// use. `None` (the default) = no numeric map available; consumers
+    /// that need one refuse loudly, never guess.
+    fn view_index_map(&self, _result: usize) -> Option<Vec<crate::index_expr::IotaExpr>> {
+        None
     }
 }
 
@@ -588,15 +606,17 @@ pub enum BtEdge {
 /// decision explicit, nothing yet forgotten. `lower` (in `bufferize`) erases
 /// it into the executable [`crate::bufferize::BufferIrGraph`].
 #[derive(Debug, Clone)]
-pub struct BufferTensorIrGraph {
+pub struct BufferTensorIrGraph<L: PlanLayout> {
     pub dag: DiGraph<BtNode, BtEdge>,
     /// Every distinct buffer, by id (interned during assignment).
-    pub buffers: HashMap<BufferId, Buffer>,
+    pub buffers: HashMap<BufferId, Buffer<L>>,
     /// The buffer holding each value (values collapse onto buffers via reuse).
-    pub value_buffer: HashMap<ClassId, BufferId>,
+    /// A `BTreeMap` so every iteration over it is value-ordered and
+    /// deterministic (see [`crate::bufferize::BufferIrGraph::value_buffer`]).
+    pub value_buffer: BTreeMap<ClassId, BufferId>,
 }
 
-impl BufferTensorIrGraph {
+impl<L: PlanLayout> BufferTensorIrGraph<L> {
     fn buffer_name(&self, id: &BufferId) -> String {
         let label = self
             .buffers
@@ -902,21 +922,44 @@ impl BufferTensorIrGraph {
 /// The producer map is keyed on the (value, buffer) PAIR: after a transport,
 /// a value has two residences with different producers, and every consumer
 /// names the residence it actually uses.
-pub(crate) fn build_buffer_tensor_ir(
+pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
     graph: &ExtractedGraph,
     order: &[NodeIndex],
-    assignment: Bufferizer,
+    assignment: Bufferizer<L>,
     analysis: &Analysis,
-) -> Result<BufferTensorIrGraph> {
+    value_layouts: &HashMap<ClassId, L>,
+) -> Result<BufferTensorIrGraph<L>> {
+    // The mint-time assignment seed for repair buffers (same contract as
+    // assignment's: the landed value is the tensor the buffer BACKS and
+    // supplies its layout; a table miss is a planner bug).
+    let layout_of = |value: &ClassId| -> Result<L> {
+        value_layouts.get(value).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "value {value} has no rendered layout — every graph \
+                 value records one before BufferTensor construction"
+            )
+        })
+    };
     let Bufferizer {
-        buffers,
+        mut buffers,
         value_buffer,
+        mut next_alloc,
         ..
     } = assignment;
     let buffer_of = |value: &ClassId| value_buffer[value].clone();
 
     let mut dag: DiGraph<BtNode, BtEdge> = DiGraph::new();
     let mut producer: HashMap<(ClassId, BufferId), NodeIndex> = HashMap::new();
+    // Each view-produced value's fold ROOT — the non-view value whose bytes
+    // the view chain ultimately addresses. Recognized STRUCTURALLY from
+    // declared effects (the same view-shaped predicate the lowering folds
+    // by), so the residence split and repair arms below never dispatch on
+    // op identity.
+    let mut view_root: HashMap<ClassId, ClassId> = HashMap::new();
+    // Donated residences already repaired for output escape: one escaping
+    // buffer (and ONE base-storage copy) serves every view of that base —
+    // slots sharing a base legally share the escaping buffer.
+    let mut escape_repairs: HashMap<BufferId, BufferId> = HashMap::new();
     // The single Input node, created lazily at the first boundary binding;
     // subsequent bindings append slots in walk order.
     let mut input_node: Option<NodeIndex> = None;
@@ -959,6 +1002,48 @@ pub(crate) fn build_buffer_tensor_ir(
 
                 let ties = crate::layout_ir::must_ties(op.op.as_ref());
 
+                // Track view-produced values and their fold roots (the
+                // view-shaped predicate, structural): consumed by the
+                // repair arm below (a folded operand's copy is
+                // parent-shaped) and by the output residence split.
+                {
+                    let derives = |result: usize| {
+                        ties.iter().find(|(_, r)| *r == result).map(|(o, _)| *o)
+                    };
+                    let is_view = !op.inputs.is_empty()
+                        && !op.outputs.is_empty()
+                        && (0..op.inputs.len()).all(|o| !op.op.operand_reads_memory(o))
+                        && (0..op.outputs.len())
+                            .all(|r| !op.op.result_writes_memory(r) && derives(r).is_some());
+                    if is_view {
+                        for (result, output) in op.outputs.iter().enumerate() {
+                            let parent =
+                                &op.inputs[derives(result).expect("checked by is_view")].value;
+                            let root = view_root
+                                .get(parent)
+                                .cloned()
+                                .unwrap_or_else(|| parent.clone());
+                            view_root.insert(output.eclass.clone(), root);
+                        }
+                    } else {
+                        // HYBRID TRIPWIRE: a non-writing TIED result on an op
+                        // that is not all-view would reach the repair arm's
+                        // parent-shaped base copy WITHOUT a view_root entry —
+                        // downstream would read root-shaped bytes dense,
+                        // silent mistranslation. No such op exists; refuse
+                        // the shape loudly if one ever does.
+                        for r in 0..op.outputs.len() {
+                            anyhow::ensure!(
+                                op.op.result_writes_memory(r) || derives(r).is_none(),
+                                "{} result {r} is tied but writes no memory on a \
+                                 non-view op — the hybrid view/compute shape has \
+                                 no sound repair path",
+                                op.op.label(),
+                            );
+                        }
+                    }
+                }
+
                 let results: Vec<BufferTensor> = op
                     .outputs
                     .iter()
@@ -987,15 +1072,71 @@ pub(crate) fn build_buffer_tensor_ir(
                     if analysis.in_place.get(&(position, operand)) == Some(&true) {
                         continue;
                     }
-                    let target = results[result].buffer.clone();
+                    let mut target = results[result].buffer.clone();
                     let needs_bytes = op.op.operand_reads_memory(operand)
                         || !op.op.result_writes_memory(result);
                     if needs_bytes {
+                        // REPAIR DESTINATIONS ARE FRESH SINGLE-WRITER
+                        // BUFFERS (ruling 2026-08-27) when the operand is a
+                        // FOLDED view: its repair copy lowers to a
+                        // base-storage copy of the fold ROOT — PARENT-shaped
+                        // — while this op writes its RESULT-shaped bytes,
+                        // and the two extents cannot cohabit one buffer
+                        // (the writer-identity dims join is an equality
+                        // lattice and bails loudly, by design — it stays
+                        // the planner-bug tripwire). The copy targets a
+                        // freshly minted buffer whose sole writer it is;
+                        // the operand re-roots onto it and reads through
+                        // its unchanged hop chain. A non-folded operand
+                        // keeps the MLIR resolveConflicts shape (copy into
+                        // the tied result's buffer, overwritten in place),
+                        // as does a rejected VIEW tie (the op writes
+                        // nothing — the parent copy IS the view's
+                        // initializing write, and view and copy must share
+                        // storage).
+                        if let Some(root) = view_root.get(&operands[operand].value).cloned()
+                        {
+                            if op.op.result_writes_memory(result) {
+                                let id = BufferId::Allocated(next_alloc);
+                                next_alloc += 1;
+                                buffers.insert(
+                                    id.clone(),
+                                    Buffer {
+                                        id: id.clone(),
+                                        access: Access::ReadWrite,
+                                        freed_by: crate::layout_ir::FreedBy::Program,
+                                        owner: crate::bufferize::Owner::System,
+                                        label: "view-repair".to_string(),
+                                        lit: None,
+                                        // The base-storage copy lands the
+                                        // fold ROOT's bytes here: the
+                                        // buffer backs the root, whose
+                                        // layout sizes it (parent-shaped).
+                                        backs: root.clone(),
+                                        layout: layout_of(&root)?,
+                                    },
+                                );
+                                target = id;
+                            }
+                        }
                         let src = operands[operand].clone();
                         let dst = BufferTensor {
                             value: src.value.clone(),
                             buffer: target.clone(),
                         };
+                        // MINT SITE — CAUSE 1: RESIDENCE CONFLICT REPAIR.
+                        // The conflict engine rejected this operand's
+                        // in-place tie, so the result took fresh storage and
+                        // the operand's bytes must be there before the
+                        // kernel reads them. THE CONTRACT (stated on
+                        // [`crate::bufferize::BufferNode::BufferCopy`]): a
+                        // DUMB EXACT-SIZE WHOLE-BUFFER copy — `target` was
+                        // minted to back exactly this value (or, for a
+                        // folded operand, its fold ROOT), so src and dst are
+                        // the same size by construction. ORDERING IS THE
+                        // RUNTIME'S OBLIGATION: all we emit is the
+                        // dependency structure (the `link` below, and the
+                        // WAR anti-edges the rewrite adds later).
                         let copy = dag.add_node(BtNode::Op {
                             op: Box::new(BufferCopy),
                             operands: vec![src.clone()],
@@ -1061,10 +1202,155 @@ pub(crate) fn build_buffer_tensor_ir(
                 for slot in &output.slots {
                     let dest = BufferId::Boundary(slot.buffer.id_eclass.clone());
                     let src_buffer = buffer_of(&slot.value);
+                    // THE RESIDENCE SPLIT (ruling 2026-08-27,
+                    // escape-and-disclose): an elected VIEW output is
+                    // returned AS the buffer its bytes already live in,
+                    // plus the layout the caller interprets it under —
+                    // never through a boundary transport (a BufferCopy is
+                    // a dumb whole-buffer memcpy; a parent-shaped copy
+                    // cannot land in the output-shaped declared buffer).
+                    // The slot's DECLARED Boundary output buffer goes
+                    // UNUSED: nothing touches it, buffer DCE drops it, and
+                    // runtimes never allocate it. Dense-resident outputs
+                    // keep today's transport byte-for-byte below.
+                    if let Some(root) = view_root.get(&slot.value).cloned() {
+                        let backing = match &src_buffer {
+                            // Program-minted residence ESCAPES IN PLACE:
+                            // flip to FreedBy::Caller (the escape cell) —
+                            // optimize mints its alloc and NO free, and the
+                            // caller takes the storage over. Zero-copy;
+                            // views sharing one base share the flip.
+                            BufferId::Allocated(_) => {
+                                let record =
+                                    buffers.get_mut(&src_buffer).unwrap_or_else(|| {
+                                        unreachable!(
+                                            "assignment interned every minted buffer"
+                                        )
+                                    });
+                                record.freed_by = crate::layout_ir::FreedBy::Caller;
+                                src_buffer.clone()
+                            }
+                            BufferId::Boundary(_) => {
+                                // A missing record would make the donation
+                                // status of the residence unknowable — that
+                                // must never fail open into a zero-copy
+                                // escape of storage that may die with the
+                                // call.
+                                let freed_by = buffers
+                                    .get(&src_buffer)
+                                    .unwrap_or_else(|| {
+                                        unreachable!(
+                                            "assignment interned every boundary buffer"
+                                        )
+                                    })
+                                    .freed_by;
+                                match freed_by {
+                                    // Caller-owned residence (an input
+                                    // buffer, or the slot's own seeded
+                                    // destination): the storage is already
+                                    // the caller's — return it zero-copy
+                                    // (liveness keeps output values live to
+                                    // END_OF_PROGRAM).
+                                    crate::layout_ir::FreedBy::Caller => src_buffer.clone(),
+                                    // DONATED residence is the one forced
+                                    // repair: the storage dies with the
+                                    // call, so the fold's BASE is copied
+                                    // whole — the ROOT value; copying the
+                                    // base buffer counts as delivery — into
+                                    // a fresh ESCAPING buffer the fold
+                                    // re-roots onto at lowering. ONE copy
+                                    // and one escaping buffer serve every
+                                    // view of this base. The donated buffer
+                                    // backs no slot, satisfying the
+                                    // donated-never-backs-an-output
+                                    // certificate arm by construction.
+                                    crate::layout_ir::FreedBy::Program => {
+                                        if let Some(existing) =
+                                            escape_repairs.get(&src_buffer)
+                                        {
+                                            existing.clone()
+                                        } else {
+                                            let id = BufferId::Allocated(next_alloc);
+                                            next_alloc += 1;
+                                            buffers.insert(
+                                                id.clone(),
+                                                Buffer {
+                                                    id: id.clone(),
+                                                    access: Access::ReadWrite,
+                                                    freed_by:
+                                                        crate::layout_ir::FreedBy::Caller,
+                                                    owner: crate::bufferize::Owner::System,
+                                                    label: "escape-repair".to_string(),
+                                                    lit: None,
+                                                    // The fold ROOT is the
+                                                    // value the base-storage
+                                                    // copy lands here: the
+                                                    // buffer backs it.
+                                                    backs: root.clone(),
+                                                    layout: layout_of(&root)?,
+                                                },
+                                            );
+                                            let src = BufferTensor {
+                                                value: root.clone(),
+                                                buffer: src_buffer.clone(),
+                                            };
+                                            let dst = BufferTensor {
+                                                value: root.clone(),
+                                                buffer: id.clone(),
+                                            };
+                                            // MINT SITE — CAUSE 3: LIFETIME
+                                            // REPAIR. The value must outlive
+                                            // the storage it occupies (it
+                                            // escapes to the caller, but its
+                                            // current residence is
+                                            // FreedBy::Program or otherwise
+                                            // wrongly-lived), so it is
+                                            // relocated into storage with
+                                            // the right lifetime. Same
+                                            // contract as every copy: dumb,
+                                            // EXACT-SIZE (both buffers back
+                                            // the fold ROOT, parent-shaped),
+                                            // whole-buffer; ORDERING IS THE
+                                            // RUNTIME'S OBLIGATION — we emit
+                                            // dependency structure only.
+                                            let copy = dag.add_node(BtNode::Op {
+                                                op: Box::new(BufferCopy),
+                                                operands: vec![src.clone()],
+                                                results: vec![dst.clone()],
+                                                ties: Vec::new(),
+                                            });
+                                            link(&mut dag, &producer, &src, copy);
+                                            producer.insert(
+                                                (dst.value.clone(), dst.buffer.clone()),
+                                                copy,
+                                            );
+                                            escape_repairs
+                                                .insert(src_buffer.clone(), id.clone());
+                                            id
+                                        }
+                                    }
+                                }
+                            }
+                        };
+                        slots.push(BufferTensor {
+                            value: slot.value.clone(),
+                            buffer: backing,
+                        });
+                        continue;
+                    }
                     if src_buffer != dest {
-                        // Materialize-into-destination: a boundary transport.
-                        // (A producer pinned to write `dest` directly makes
-                        // src == dest and skips this.)
+                        // MINT SITE — CAUSE 2: BOUNDARY PLACEMENT. This
+                        // tensor is bound to a SPECIFIC caller buffer
+                        // (`dest`) whose producing residence is elsewhere
+                        // (`src_buffer`), so the bytes move into the
+                        // caller's storage. (A producer pinned to write
+                        // `dest` directly makes src == dest and skips this.)
+                        // THE CONTRACT (stated on
+                        // [`crate::bufferize::BufferNode::BufferCopy`]): a
+                        // DUMB EXACT-SIZE WHOLE-BUFFER copy — the caller's
+                        // buffer is declared for exactly this tensor, so the
+                        // sizes agree by the boundary declaration. ORDERING
+                        // IS THE RUNTIME'S OBLIGATION.
                         if buffers.get(&dest).is_some_and(|b| b.access == Access::ReadOnly) {
                             anyhow::bail!(
                                 "output slot {} requires materializing a value into \
@@ -1101,7 +1387,28 @@ pub(crate) fn build_buffer_tensor_ir(
                     slots: slots.clone(),
                 });
                 for tensor in &slots {
-                    link(&mut dag, &producer, tensor, out);
+                    if producer.contains_key(&(tensor.value.clone(), tensor.buffer.clone())) {
+                        link(&mut dag, &producer, tensor, out);
+                        continue;
+                    }
+                    // A repaired escape slot's bytes are its fold ROOT's,
+                    // landed by the base-storage copy — the boundary read
+                    // hangs off that copy (the view itself has no residence
+                    // node in the escaping buffer; the fold re-roots at
+                    // lowering).
+                    if let Some(root) = view_root.get(&tensor.value) {
+                        if let Some(&from) =
+                            producer.get(&(root.clone(), tensor.buffer.clone()))
+                        {
+                            dag.add_edge(
+                                from,
+                                out,
+                                BtEdge::Data {
+                                    value: tensor.value.clone(),
+                                },
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1142,14 +1449,17 @@ pub(crate) fn build_buffer_tensor_ir(
 ///    poison-flows-to-its-overwriter shape as a DPS dest edge, minus the
 ///    named slot.
 ///  * FREE INSERTION (eager): every buffer whose deallocation is the
-///    program's responsibility (`FreedBy::Program` — all minted buffers, and
-///    donated boundary buffers) gets one [`BufferFree`] consuming the
+///    program's responsibility (`FreedBy::Program` — minted buffers except
+///    ESCAPING ones, and donated boundary buffers) gets one [`BufferFree`]
+///    consuming the
 ///    buffer's final written resident (or its Input-installed resident, if
 ///    nothing writes it), placed after the buffer's last toucher. Every
 ///    toucher not already ordered before the free gets an Anti edge into it
 ///    — and NOTHING ever points out of a free (out-degree zero, by
 ///    invariant), so later placement passes may move frees as freely as
-///    their in-edges allow.
+///    their in-edges allow. An ESCAPING minted buffer (`FreedBy::Caller`,
+///    flipped by the output residence split — ruling 2026-08-27) gets its
+///    alloc and NO free: the caller manages the storage from return on.
 ///
 /// The VIEW fold deliberately does NOT live here: a view is a value-level
 /// distinction with no storage-level content, so "a view is nothing" only
@@ -1158,7 +1468,7 @@ pub(crate) fn build_buffer_tensor_ir(
 /// The rebuild preserves node order (allocs and frees slot in at their
 /// placement points), so the lowering's emission order — and with it the
 /// plan's printed schedule — reads allocate → use → free.
-pub(crate) fn optimize(bt: BufferTensorIrGraph) -> BufferTensorIrGraph {
+pub(crate) fn optimize<L: PlanLayout>(bt: BufferTensorIrGraph<L>) -> Result<BufferTensorIrGraph<L>> {
     use petgraph::visit::EdgeRef;
     let BufferTensorIrGraph {
         dag,
@@ -1348,10 +1658,19 @@ pub(crate) fn optimize(bt: BufferTensorIrGraph) -> BufferTensorIrGraph {
         }
         // Frees for buffers last touched here.
         for buffer in frees_after.get(&index).cloned().unwrap_or_default() {
-            let (resident, producer_index) = final_resident
-                .get(&buffer)
-                .expect("a freed buffer has a final resident")
-                .clone();
+            let Some((resident, producer_index)) = final_resident.get(&buffer).cloned()
+            else {
+                // Never a panic: a freed buffer with no final written resident
+                // means a value chain reached the free stage with no producer
+                // (e.g. undefined contents routed through views past an
+                // incomplete validation). Reject the plan loudly instead of
+                // aborting the process. (Ruling 2026-08-26.)
+                anyhow::bail!(
+                    "buffer-tensor plan inconsistent: buffer {:?} is scheduled \
+                     to be freed but has no final written resident",
+                    buffer,
+                );
+            };
             let free = out.add_node(BtNode::Op {
                 op: Box::new(BufferFree),
                 operands: vec![resident.clone()],
@@ -1414,11 +1733,11 @@ pub(crate) fn optimize(bt: BufferTensorIrGraph) -> BufferTensorIrGraph {
         }
     }
 
-    BufferTensorIrGraph {
+    Ok(BufferTensorIrGraph {
         dag: out,
         buffers,
         value_buffer,
-    }
+    })
 }
 
 // =============================================================================
@@ -1448,7 +1767,7 @@ pub(crate) fn optimize(bt: BufferTensorIrGraph) -> BufferTensorIrGraph {
 /// converting a genuinely unschedulable plan into a silent wrong-answer
 /// schedule. Against the frozen graph the swap gets both edges and fails
 /// loudly at the lowering's schedulability check.
-pub(crate) fn install_anti_edges(bt: &mut BufferTensorIrGraph) {
+pub(crate) fn install_anti_edges<L: PlanLayout>(bt: &mut BufferTensorIrGraph<L>) {
     let frozen = bt.dag.clone();
     let mut writers: Vec<(NodeIndex, BufferId)> = Vec::new();
     for index in frozen.node_indices() {
@@ -1524,7 +1843,12 @@ pub(crate) fn install_anti_edges(bt: &mut BufferTensorIrGraph) {
 /// STRUCTURALLY from declared effects (never by label) — alloc-shaped = no
 /// operands, every result undefined; free-shaped = operands, no results.
 /// The certified rows:
-///   * minted (Allocated) buffer — exactly one alloc and exactly one free;
+///   * minted (Allocated) + FreedBy::Program — exactly one alloc, exactly
+///     one free, and NO output slot backed (storage handed to the caller
+///     must escape, or the caller receives destroyed bytes);
+///   * minted + FreedBy::Caller (ESCAPING, ruling 2026-08-27) — exactly
+///     one alloc, ZERO frees, and at least one output slot backed (an
+///     escape nobody receives is a leak);
 ///   * boundary + FreedBy::Program (donated) — no alloc, exactly one free,
 ///     and the buffer must not back an output slot (donated storage does
 ///     not outlive the call);
@@ -1540,7 +1864,7 @@ pub(crate) fn install_anti_edges(bt: &mut BufferTensorIrGraph) {
 ///
 /// MLIR has no analogue: One-Shot Bufferization's guards all live inside the
 /// per-candidate analysis query, and nothing re-checks committed decisions.
-pub(crate) fn validate(bt: &BufferTensorIrGraph) -> Result<()> {
+pub(crate) fn validate<L: PlanLayout>(bt: &BufferTensorIrGraph<L>) -> Result<()> {
     let mut producer: HashMap<(ClassId, BufferId), NodeIndex> = HashMap::new();
     for index in bt.dag.node_indices() {
         match &bt.dag[index] {
@@ -1555,6 +1879,37 @@ pub(crate) fn validate(bt: &BufferTensorIrGraph) -> Result<()> {
                 }
             }
             BtNode::Output { .. } => {}
+        }
+    }
+
+    // Fold roots, recognized structurally (the view-shaped predicate): a
+    // view value's bytes in buffer B are its ROOT's bytes in B, so a
+    // consumed residence with no producer of its own — an escape-repaired
+    // output slot, whose base-storage copy transports the root — resolves
+    // to the root's producer.
+    let mut view_root: HashMap<ClassId, ClassId> = HashMap::new();
+    for index in bt.dag.node_indices() {
+        let BtNode::Op {
+            op,
+            operands,
+            results,
+            ties,
+        } = &bt.dag[index]
+        else {
+            continue;
+        };
+        let derives = |result: usize| ties.iter().find(|(_, r)| *r == result).map(|(o, _)| *o);
+        let is_view = !operands.is_empty()
+            && !results.is_empty()
+            && (0..operands.len()).all(|o| !op.operand_reads_memory(o))
+            && (0..results.len()).all(|r| !op.result_writes_memory(r) && derives(r).is_some());
+        if !is_view {
+            continue;
+        }
+        for (result, tensor) in results.iter().enumerate() {
+            let parent = &operands[derives(result).expect("checked by is_view")].value;
+            let root = view_root.get(parent).cloned().unwrap_or_else(|| parent.clone());
+            view_root.insert(tensor.value.clone(), root);
         }
     }
 
@@ -1598,7 +1953,17 @@ pub(crate) fn validate(bt: &BufferTensorIrGraph) -> Result<()> {
 
     let mut space = petgraph::algo::DfsSpace::new(&bt.dag);
     for (reader, tensor) in &consumers {
-        let Some(&def) = producer.get(&(tensor.value.clone(), tensor.buffer.clone())) else {
+        let def = producer
+            .get(&(tensor.value.clone(), tensor.buffer.clone()))
+            .or_else(|| {
+                // The escape re-root: a folded value resides wherever its
+                // fold root's bytes reside.
+                view_root
+                    .get(&tensor.value)
+                    .and_then(|root| producer.get(&(root.clone(), tensor.buffer.clone())))
+            })
+            .copied();
+        let Some(def) = def else {
             anyhow::bail!(
                 "plan validation failed: {} consumes value {} in buffer {:?} \
                  which has no producer — every consumed residence is defined \
@@ -1726,15 +2091,60 @@ pub(crate) fn validate(bt: &BufferTensorIrGraph) -> Result<()> {
                         buffer_allocs.len(),
                     );
                 }
-                if buffer_frees.len() != 1 {
-                    anyhow::bail!(
-                        "plan validation failed: minted buffer {:?} has {} \
-                         frees — planner-minted storage is destroyed exactly \
-                         once (minted implies FreedBy::Program; leaks and \
-                         double-frees are both errors)",
-                        buffer,
-                        buffer_frees.len(),
-                    );
+                // The escape split (ruling 2026-08-27): minted storage is
+                // either program-freed (one free, never backing an output
+                // slot) or ESCAPING (`FreedBy::Caller` — zero frees, and it
+                // must back at least one output slot: an escape nobody
+                // receives is a leak). A missing record certifies as
+                // program-freed, the pre-escape default.
+                let freed_by = bt
+                    .buffers
+                    .get(buffer)
+                    .map(|record| record.freed_by)
+                    .unwrap_or(crate::layout_ir::FreedBy::Program);
+                match freed_by {
+                    crate::layout_ir::FreedBy::Program => {
+                        if buffer_frees.len() != 1 {
+                            anyhow::bail!(
+                                "plan validation failed: minted buffer {:?} has {} \
+                                 frees — program-freed minted storage is destroyed \
+                                 exactly once (leaks and double-frees are both \
+                                 errors)",
+                                buffer,
+                                buffer_frees.len(),
+                            );
+                        }
+                        if output_bound.contains_key(buffer) {
+                            anyhow::bail!(
+                                "plan validation failed: minted buffer {:?} \
+                                 (FreedBy::Program) backs an output slot — storage \
+                                 handed to the caller must ESCAPE (FreedBy::Caller, \
+                                 no free), or the caller receives bytes the program \
+                                 destroys",
+                                buffer,
+                            );
+                        }
+                    }
+                    crate::layout_ir::FreedBy::Caller => {
+                        if let Some(&free) = buffer_frees.first() {
+                            anyhow::bail!(
+                                "plan validation failed: escaping minted buffer \
+                                 {:?} (FreedBy::Caller) is freed by {} — escaped \
+                                 storage is the caller's to manage; the program \
+                                 must never destroy it",
+                                buffer,
+                                describe(free),
+                            );
+                        }
+                        if !output_bound.contains_key(buffer) {
+                            anyhow::bail!(
+                                "plan validation failed: escaping minted buffer \
+                                 {:?} (FreedBy::Caller) backs no output slot — an \
+                                 escape nobody receives is a leak",
+                                buffer,
+                            );
+                        }
+                    }
                 }
             }
             BufferId::Boundary(_) => {
@@ -1833,7 +2243,12 @@ pub(crate) fn validate(bt: &BufferTensorIrGraph) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::MockOp;
+    use crate::test_support::{MockLayout, MockOp};
+
+    /// Hand-built graphs transport the mock layout.
+    fn mock_layout() -> MockLayout {
+        MockLayout(cid("layout$mock"))
+    }
 
     fn cid(s: &str) -> ClassId {
         ClassId::from(s)
@@ -1862,11 +2277,11 @@ mod tests {
     fn data(dag: &mut DiGraph<BtNode, BtEdge>, from: NodeIndex, to: NodeIndex, value: &str) {
         dag.add_edge(from, to, BtEdge::Data { value: cid(value) });
     }
-    fn graph(dag: DiGraph<BtNode, BtEdge>) -> BufferTensorIrGraph {
+    fn graph(dag: DiGraph<BtNode, BtEdge>) -> BufferTensorIrGraph<MockLayout> {
         BufferTensorIrGraph {
             dag,
             buffers: HashMap::new(),
-            value_buffer: HashMap::new(),
+            value_buffer: BTreeMap::new(),
         }
     }
 
@@ -1989,7 +2404,7 @@ mod tests {
     fn graph_with_records(
         dag: DiGraph<BtNode, BtEdge>,
         records: Vec<(&str, crate::layout_ir::FreedBy)>,
-    ) -> BufferTensorIrGraph {
+    ) -> BufferTensorIrGraph<MockLayout> {
         let mut buffers = HashMap::new();
         for (name, freed_by) in records {
             let id = vbuf(name);
@@ -2001,17 +2416,20 @@ mod tests {
                     freed_by,
                     owner: crate::bufferize::Owner::Caller,
                     label: name.to_string(),
-                    dims: None,
-                    element_bits: None,
-                    dtype: None,
                     lit: None,
+                    // THE ASSIGNMENT (corrected contract): a hand-built
+                    // boundary buffer backs the same-named tensor. There
+                    // is no dims/bits/dtype row to fill any more — sizing
+                    // is span-of-`layout`, which the runtime owns.
+                    backs: cid(name),
+                    layout: mock_layout(),
                 },
             );
         }
         BufferTensorIrGraph {
             dag,
             buffers,
-            value_buffer: HashMap::new(),
+            value_buffer: BTreeMap::new(),
         }
     }
 
@@ -2130,6 +2548,118 @@ mod tests {
         let err = validate(&graph_with_records(
             dag,
             vec![("D", crate::layout_ir::FreedBy::Program)],
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("backs an output slot"), "{err}");
+    }
+
+    /// A minted-buffer record with the given `freed_by` (the escape-cell
+    /// arms need the record; hand-built graphs without one certify under
+    /// the pre-escape default, Program-freed).
+    fn graph_with_minted_record(
+        dag: DiGraph<BtNode, BtEdge>,
+        buffer: u32,
+        freed_by: crate::layout_ir::FreedBy,
+    ) -> BufferTensorIrGraph<MockLayout> {
+        let id = BufferId::Allocated(buffer);
+        let mut buffers = HashMap::new();
+        buffers.insert(
+            id.clone(),
+            Buffer {
+                id,
+                access: Access::ReadWrite,
+                freed_by,
+                owner: crate::bufferize::Owner::System,
+                label: format!("alloc{buffer}"),
+                lit: None,
+                backs: cid(&format!("alloc{buffer}")),
+                layout: mock_layout(),
+            },
+        );
+        BufferTensorIrGraph {
+            dag,
+            buffers,
+            value_buffer: BTreeMap::new(),
+        }
+    }
+
+    /// THE ESCAPE ROW, green (ruling 2026-08-27): an escaping minted
+    /// buffer — one alloc, ZERO frees, backing an output slot — certifies.
+    #[test]
+    fn lifetime_admits_escaping_minted_buffer_backing_an_output() {
+        let mut dag = DiGraph::new();
+        let a = alloc(&mut dag, abt("p", 7));
+        let w = writer(&mut dag, abt("v", 7));
+        let o = out(&mut dag, vec![abt("v", 7)]);
+        data(&mut dag, a, w, "p");
+        data(&mut dag, w, o, "v");
+        validate(&graph_with_minted_record(
+            dag,
+            7,
+            crate::layout_ir::FreedBy::Caller,
+        ))
+        .expect("the escape row certifies: alloc, no free, slot backed");
+    }
+
+    /// Escaped storage is the caller's to manage: a free of an escaping
+    /// minted buffer is a program destroying storage it handed over.
+    #[test]
+    fn lifetime_rejects_free_of_escaping_minted_buffer() {
+        let mut dag = DiGraph::new();
+        let a = alloc(&mut dag, abt("p", 7));
+        let w = writer(&mut dag, abt("v", 7));
+        let f = free_node(&mut dag, abt("v", 7));
+        let o = out(&mut dag, vec![abt("v", 7)]);
+        data(&mut dag, a, w, "p");
+        data(&mut dag, w, f, "v");
+        data(&mut dag, w, o, "v");
+        let err = validate(&graph_with_minted_record(
+            dag,
+            7,
+            crate::layout_ir::FreedBy::Caller,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("escaping minted buffer"), "{err}");
+        assert!(err.to_string().contains("is freed by"), "{err}");
+    }
+
+    /// An escape nobody receives is a leak: escaping minted storage must
+    /// back at least one output slot.
+    #[test]
+    fn lifetime_rejects_escaping_minted_buffer_backing_no_output() {
+        let mut dag = DiGraph::new();
+        let a = alloc(&mut dag, abt("p", 7));
+        let w = writer(&mut dag, abt("v", 7));
+        let r = reader(&mut dag, abt("v", 7), bt("r", "R"));
+        data(&mut dag, a, w, "p");
+        data(&mut dag, w, r, "v");
+        let err = validate(&graph_with_minted_record(
+            dag,
+            7,
+            crate::layout_ir::FreedBy::Caller,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("backs no output slot"), "{err}");
+    }
+
+    /// THE CONVERSE ARM (the minted-backs-output hole, patched): minted
+    /// NON-escaping storage backing an output slot hands the caller bytes
+    /// the program destroys.
+    #[test]
+    fn lifetime_rejects_non_escaping_minted_buffer_backing_an_output() {
+        let mut dag = DiGraph::new();
+        let a = alloc(&mut dag, abt("p", 7));
+        let w = writer(&mut dag, abt("v", 7));
+        let f = free_node(&mut dag, abt("v", 7));
+        let o = out(&mut dag, vec![abt("v", 7)]);
+        data(&mut dag, a, w, "p");
+        data(&mut dag, w, f, "v");
+        data(&mut dag, w, o, "v");
+        // o -> f ordering irrelevance: the count/backing arms fire first.
+        let err = validate(&graph_with_minted_record(
+            dag,
+            7,
+            crate::layout_ir::FreedBy::Program,
         ))
         .unwrap_err();
         assert!(err.to_string().contains("backs an output slot"), "{err}");

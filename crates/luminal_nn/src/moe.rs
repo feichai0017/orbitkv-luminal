@@ -36,6 +36,7 @@ impl MoE {
             let mut acc = IntExpr::from(0);
             for i in (0..n - 1).rev() {
                 acc = acc + c[i] * stride;
+                // Frontend simplification restored (revert ruling 2026-08-27).
                 stride = (stride * idx_dims[i]).simplify();
             }
             acc
@@ -52,30 +53,29 @@ impl MoE {
             .graph()
             .iota((in_size, out_size), |c| c[0] * out_size + c[1]); // [in, out] (Int)
 
-        // Expand base to [batch.., k, in, out]
-        let n_base = base.dims().len();
-        let exp_base = base
-            .expand_dim(n_base, in_size)
-            .expand_dim(n_base + 1, out_size);
+        // Expand base to [batch.., k, in, out] — ONE apply (2026-08-26).
+        let exp_base = base.expand_rhs((in_size, out_size));
 
-        // Expand within to [batch.., k, in, out]
-        let mut exp_within = within;
-        for (i, dim) in base.dims().iter().enumerate() {
-            exp_within = exp_within.expand_dim(i, *dim);
-        }
+        // Expand within to [batch.., k, in, out] — ONE apply.
+        let exp_within = within.expand_lhs(base.dims());
 
         let expert_flat_idx = exp_base + exp_within;
         let gathered = self.expert_weights.gather1d(expert_flat_idx); // [batch.., k, in, out]
 
         // 5. Batched matmul: [batch.., k, 1, in] @ [batch.., k, in, out] → [batch.., k, out]
         let expanded_act = activations
+            .view()
             .expand_dim(n - 1, self.k) // [batch.., k, in]
-            .unsqueeze(n); // [batch.., k, 1, in]
+            .unsqueeze(n) // [batch.., k, 1, in]
+            .finish();
         let expert_out = expanded_act.matmul(gathered).squeeze(n); // [batch.., k, out]
 
         // 6. Weighted sum over experts: [batch.., k, out] * [batch.., k, 1] → sum(k) → [batch.., out]
-        let mut weights_exp = top_k_values.unsqueeze(top_k_values.dims().len()); // [batch.., k, 1]
-        let weights_exp = weights_exp.expand(expert_out.dims());
+        let weights_exp = top_k_values
+            .view()
+            .unsqueeze(top_k_values.dims().len()) // [batch.., k, 1]
+            .expand(expert_out.dims())
+            .finish();
         (expert_out * weights_exp).sum(n - 1)
     }
 }
@@ -142,7 +142,7 @@ mod tests {
             }
         }
 
-        let rt = luminal::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (x.id, x_vals.into()),
@@ -254,13 +254,13 @@ impl MoETopK {
         let weights = picked / denom;
 
         // 3. Fetch the selected experts' gate_up matrices: (s, k, 2I, H).
-        let e4 = idx.expand_dim(2, i2).expand_dim(3, h);
+        let e4 = idx.expand_rhs((i2, h)); // ONE apply (2026-08-26)
         let r4 = cx.iota((s, k, i2, h), |c| c[2]);
         let c4 = cx.iota((s, k, i2, h), |c| c[3]);
         let gate_up = self.gate_up.gather(&[e4, r4, c4]);
 
         // 4. Per-expert projection: (s,k,1,H) @ (s,k,H,2I) → (s,k,2I).
-        let x_e = x.expand_dim(1, k).expand_dim(2, 1);
+        let x_e = x.view().expand_dim(1, k).expand_dim(2, 1).finish(); // (s,k,1,H)
         let projected = x_e.matmul(gate_up.permute((0, 1, 3, 2))).squeeze(2);
 
         // 5. SwiGLU on the fused halves (slices of a compute output).
@@ -269,7 +269,7 @@ impl MoETopK {
         let hidden_states = gate.silu() * up; // (s, k, I)
 
         // 6. Down projection: (s,k,1,I) @ (s,k,I,H) → (s,k,H).
-        let e_down = idx.expand_dim(2, h).expand_dim(3, self.intermediate);
+        let e_down = idx.expand_rhs((h, self.intermediate)); // ONE apply
         let r_down = cx.iota((s, k, h, self.intermediate), |c| c[2]);
         let c_down = cx.iota((s, k, h, self.intermediate), |c| c[3]);
         let down = self.down.gather(&[e_down, r_down, c_down]); // (s,k,H,I)
@@ -352,7 +352,7 @@ mod topk_tests {
             }
         }
 
-        let rt = luminal::test_support::run_reference(
+        let rt = luminal_reference::harness::run_reference(
             &cx,
             &[
                 (x.id, x_vals.into()),
@@ -449,7 +449,7 @@ mod topk_tests {
             pairs.push((up.id, fused[I * H..].to_vec().into()));
             pairs.push((down.id, down_vals[e * H * I..(e + 1) * H * I].to_vec().into()));
         }
-        let rt = luminal::test_support::run_reference(&cx, &pairs);
+        let rt = luminal_reference::harness::run_reference(&cx, &pairs);
         assert_close(rt.get_f32(out.id).expect("moe out"), &expected);
     }
 }

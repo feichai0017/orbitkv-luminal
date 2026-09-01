@@ -14,7 +14,8 @@ use luminal::layout_ir::{
 use luminal::prelude::egraph_serialize;
 
 use crate::kernels::{
-    coord_prelude, cuda_type, lower_expr, numel, strides_of, CodegenCtx, KernelSource,
+    coord_prelude, cuda_type, layout_read_index, lower_expr, numel, CodegenCtx, Coords,
+    KernelSource,
 };
 use anyhow::{bail, Result};
 
@@ -49,7 +50,9 @@ impl Bufferizable for IndexMapApplyMaterialize {}
 
 impl ToDps for IndexMapApplyMaterialize {
     fn to_dps(&self) -> Option<Box<dyn LayoutIrOp>> {
-        Some(Box::new(IndexMapApplyMaterializeDps { entries: self.entries.clone() }))
+        Some(Box::new(IndexMapApplyMaterializeDps {
+            entries: self.entries.clone(),
+        }))
     }
 }
 
@@ -85,7 +88,11 @@ impl BufferTensorIrOp for IndexMapApplyMaterializeDps {
 
 impl Bufferizable for IndexMapApplyMaterializeDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: 1, result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: 1,
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -97,41 +104,66 @@ impl ToDps for IndexMapApplyMaterializeDps {
 
 impl LayoutIrOp for IndexMapApplyMaterializeDps {}
 
-/// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+/// The CUDA lowering, colocated with its op. A layout whose read does
+/// not simplify to the identity, on
+/// operand 0, is a view folded onto the materialize's input — the op's
+/// own map application produces the input VALUE's coordinates, and the
+/// slot's carried layout then reads ON TOP of them (via
+/// [`crate::kernels::layout_read_index`]) down to the residence
+/// actually read. The WRITE side (dest0) is no longer fenced here — see
+/// the write-fence record in
+/// [`crate::kernels::CodegenCtx::from_descriptors`].
+pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     let Some(mat) = op.as_any().downcast_ref::<IndexMapApplyMaterializeDps>() else {
         bail!("materialize codegen reached with a non-Materialize op");
     };
+    // The dest operand slot is not fenced — see the write-fence record in
+    // `kernels::CodegenCtx::from_descriptors`.
     let Some(entries) = &mat.entries else {
         bail!("index map beyond the parsed expression subset (fail-closed, as the reference)");
     };
     let parent_dims = &ctx.operand_dims[0];
     let out_dims = &ctx.operand_dims[1];
     if entries.len() != parent_dims.len() {
-        bail!("index map arity {} vs parent rank {}", entries.len(), parent_dims.len());
+        bail!(
+            "index map arity {} vs parent rank {}",
+            entries.len(),
+            parent_dims.len()
+        );
     }
     let t = cuda_type(ctx.operand_dtypes[0])?;
     let to = cuda_type(ctx.dest_dtypes[0])?;
     let n = numel(out_dims);
     let prelude = coord_prelude(out_dims);
-    let parent_strides = strides_of(parent_dims);
-    let mut body = String::from("    long long pflat = 0;\n    long long idx;\n");
+    // ONE body: the op's map lands on the input VALUE's coordinates
+    // (`parent_c*`), then the slot's carried layout carries them to the
+    // residence. Those coordinates are MAP OUTPUTS, not `i` decomposed,
+    // so the parent read is `Coords::Bound` and never simplifies to `i`
+    // — for a dense parent it is the row-major sum over `parent_c*`, the
+    // same address the hand-written `pflat` accumulator used to compute.
+    //
+    // Each mapped coordinate was once checked against the parent extent
+    // here; no longer — see the NO RUNTIME BOUNDS TRAPS note in
+    // `crate::kernels`.
+    let mut body = String::from("    long long idx;\n");
     for (k, entry) in entries.iter().enumerate() {
         let value = lower_expr(entry, out_dims.len())?;
         body.push_str(&format!(
-            "    idx = {value};\n    if (idx < 0 || idx >= {ext}LL) __trap();\n    pflat += idx * {stride}LL;\n",
-            ext = parent_dims[k],
-            stride = parent_strides[k]
+            "    idx = {value};\n    long long parent_c{k} = idx;\n"
         ));
     }
+    let (chain, pidx) = layout_read_index(
+        "parent",
+        ctx.operand_layout(0),
+        parent_dims,
+        Coords::Bound { prefix: "parent_c" },
+    )?;
+    body.push_str(&chain);
     let source = format!(
         r#"extern "C" __global__ void k(const {t}* parent, {to}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-{prelude}{body}    out[i] = parent[pflat];
+{prelude}{body}    out[i] = parent[{pidx}];
 }}"#
     );
     Ok(vec![KernelSource::plain(source, n)])
@@ -166,7 +198,9 @@ impl OpMatcher for IndexMapApplyMaterializeMatcher {
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(IndexMapApplyMaterialize { entries: parse_map_entries(site) })
+        Box::new(IndexMapApplyMaterialize {
+            entries: parse_map_entries(site),
+        })
     }
 }
 
@@ -186,7 +220,9 @@ fn parse_map_entries(site: &ExtractionSite<'_>) -> Option<Vec<IotaExpr>> {
     let out_shape = site.child_class(2);
     let mut memo = std::collections::HashMap::new();
     for map_node in site.nodes_in_class_value(&map_class, "IndexMapLit") {
-        let Some(head) = site.class_of_child(map_node, 0) else { continue };
+        let Some(head) = site.class_of_child(map_node, 0) else {
+            continue;
+        };
         if let Some(entries) = parse_entry_list(site, &head, 64, &out_shape, &mut memo) {
             return Some(entries);
         }
@@ -204,12 +240,20 @@ fn parse_entry_list(
     if depth == 0 {
         return None;
     }
-    if site.nodes_in_class_value(class, "IntExprNil").next().is_some() {
+    if site
+        .nodes_in_class_value(class, "IntExprNil")
+        .next()
+        .is_some()
+    {
         return Some(Vec::new());
     }
     for cons in site.nodes_in_class_value(class, "IntExprCons") {
-        let Some(element) = site.class_of_child(cons, 0) else { continue };
-        let Some(tail) = site.class_of_child(cons, 1) else { continue };
+        let Some(element) = site.class_of_child(cons, 0) else {
+            continue;
+        };
+        let Some(tail) = site.class_of_child(cons, 1) else {
+            continue;
+        };
         let Some(expr) = parse_int_expr_memo(site, &element, 64, Some(out_shape), memo) else {
             continue;
         };

@@ -29,7 +29,7 @@ fn genome_fused_choice_dedups_one_instance_claiming_both_slots() {
         .filter(|node| matches!(node, ExtractedNode::LayoutOp(_)))
         .count();
     assert_eq!(computes, 1, "instance dedup across both claimed slots");
-    let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+    let plan = luminal::test_support::bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
     let allocs = plan
         .buffers
         .keys()
@@ -61,7 +61,7 @@ fn genome_mixed_choice_mints_a_waste_destination() {
         .filter(|node| matches!(node, ExtractedNode::LayoutOp(_)))
         .count();
     assert_eq!(computes, 2, "fused kernel + standalone mul");
-    let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
+    let plan = luminal::test_support::bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("bufferizes");
     let summary = plan.summary();
     assert!(summary.contains("AddMulFusedGeneric"), "{summary}");
     assert!(summary.contains("MulFunctionalGeneric"), "{summary}");
@@ -112,7 +112,7 @@ fn genome_plan_fingerprints_identify_plans() {
 fn golden_plans_are_pinned() {
     let golden_path = "golden/add_mul_fused.bufferized.txt";
     let graph = test_runtime::extract_fixture(ADD_MUL_FUSED);
-    let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("add_mul_fused");
+    let plan = luminal::test_support::bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("add_mul_fused");
     let golden = fs::read_to_string(golden_path)
         .unwrap_or_else(|_| panic!("{golden_path} missing — run regenerate_golden_plans by name"));
     assert_eq!(
@@ -130,6 +130,6 @@ fn golden_plans_are_pinned() {
 #[ignore = "golden regenerator — run explicitly by name"]
 fn regenerate_golden_plans() {
     let graph = test_runtime::extract_fixture(ADD_MUL_FUSED);
-    let plan = bufferize::bufferize(&luminal::dps::dps_rewrite(&graph)).expect("add_mul_fused");
+    let plan = luminal::test_support::bufferize_mock(&luminal::dps::dps_rewrite(&graph)).expect("add_mul_fused");
     fs::write("golden/add_mul_fused.bufferized.txt", plan.summary()).expect("golden writes");
 }

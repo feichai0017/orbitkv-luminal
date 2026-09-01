@@ -29,8 +29,10 @@ impl MiniConvNet {
     pub fn forward(&self, x: GraphTensor) -> GraphTensor {
         let x = self.conv1.forward(x).relu(); // (1, c1, 3, 3)
         let x = self.conv2.forward(x).relu(); // (1, c2, 1, 1)
-        let flat = x.flatten(); // (c2,)
-        let logits = self.head.forward(flat.expand_lhs(1)); // (1, classes)
+        // Flatten features keeping the batch axis — ONE construct, ONE
+        // apply (ruling 2026-08-26): (1, c2, 1, 1) → (1, c2).
+        let features = x.view().merge_dims(2, 3).merge_dims(1, 2).finish();
+        let logits = self.head.forward(features); // (1, classes)
         let _ = self.classes;
         logits.squeeze(0)
     }

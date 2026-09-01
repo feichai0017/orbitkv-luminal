@@ -83,6 +83,6 @@ fn main() {
         (model.single_qnorm.id, weights(HD, 529).into()),
         (model.single_knorm.id, weights(HD, 530).into()),
     ];
-    let rt = luminal::test_support::run_reference(&cx, &pairs);
+    let rt = luminal_reference::harness::run_reference(&cx, &pairs);
     println!("velocity: {:?}", rt.get_f32(velocity.id).unwrap());
 }

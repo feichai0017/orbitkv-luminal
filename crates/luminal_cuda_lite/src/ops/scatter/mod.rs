@@ -16,7 +16,10 @@ use luminal::layout_ir::{
     AliasInfo, Bufferizable, ExtractionSite, LayoutIrOp, OpMatcher, Sharing, ToDps,
 };
 
-use crate::kernels::{cuda_type, numel, strides_of, CodegenCtx, KernelSource};
+use crate::kernels::{
+    coord_prelude, cuda_type, layout_read_index, numel, strides_of, CodegenCtx, Coords,
+    KernelSource,
+};
 use anyhow::{bail, Result};
 
 /// Walk the LayoutTensorCons spine at `child` counting elements — the
@@ -135,7 +138,11 @@ impl BufferTensorIrOp for ScatterFunctionalDps {
 
 impl Bufferizable for ScatterFunctionalDps {
     fn alias_info(&self) -> Vec<AliasInfo> {
-        vec![AliasInfo { operand: self.dest_index(), result: 0, sharing: Sharing::Must }]
+        vec![AliasInfo {
+            operand: self.dest_index(),
+            result: 0,
+            sharing: Sharing::Must,
+        }]
     }
 }
 
@@ -147,22 +154,30 @@ impl ToDps for ScatterFunctionalDps {
 
 impl LayoutIrOp for ScatterFunctionalDps {}
 
-/// The CUDA lowering, colocated with its op.
-pub(crate) fn codegen(
-    op: &dyn BufferTensorIrOp,
-    ctx: &CodegenCtx,
-) -> Result<Vec<KernelSource>> {
+/// The CUDA lowering, colocated with its op. The READ-side operands
+/// (init, src, coordinates) may arrive with a layout whose read does
+/// not simplify to the identity; each such operand then
+/// lowers into that operand's read index via
+/// [`crate::kernels::layout_read_index`]. The WRITE side (dest0)
+/// is no longer fenced here (see the write-fence record in
+/// [`crate::kernels::CodegenCtx::from_descriptors`]), and the injectivity
+/// flags are untouched: the write address arithmetic is identical.
+pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec<KernelSource>> {
     let Some(scatter) = op.as_any().downcast_ref::<ScatterFunctionalDps>() else {
         bail!("scatter codegen reached with a non-Scatter op");
     };
     let rank = scatter.rank;
+    // The dest operand slot is not fenced — see the write-fence record in
+    // `kernels::CodegenCtx::from_descriptors`.
     let init_dims = &ctx.operand_dims[0];
     if init_dims.len() != rank {
         bail!("scatter init rank {} vs op rank {rank}", init_dims.len());
     }
     let t = cuda_type(ctx.operand_dtypes[0])?;
-    let dest_n = numel(&ctx.dest_dims[0]);
-    let src_n = numel(&ctx.operand_dims[1]);
+    let dest_dims = &ctx.dest_dims[0];
+    let dest_n = numel(dest_dims);
+    let src_dims = &ctx.operand_dims[1];
+    let src_n = numel(src_dims);
     let strides = strides_of(init_dims);
     // Every launch in the sequence shares the op's full signature so
     // the executor pushes one uniform argument list.
@@ -170,36 +185,122 @@ pub(crate) fn codegen(
     for axis in 0..rank {
         sig.push_str(&format!(", const int* coord{axis}"));
     }
-    // Launch 1: dest = copy(init), over dest numel.
-    let copy_src = format!(
-        r#"extern "C" __global__ void k({sig}, unsigned int* flags, {t}* out, unsigned long long n) {{
+    // Launch 1: dest = copy(init), over dest numel. The init is read
+    // through its own layout at the DEST coordinates.
+    //
+    // The init value spans the dest space by construction — asked
+    // unconditionally, not only of a folded init (asking it inside the
+    // folded arm is how the elementwise coherence check became
+    // spelling-dependent).
+    if init_dims != dest_dims {
+        bail!(
+            "operand init value extents {init_dims:?} differ from dest extents \
+             {dest_dims:?} — the scatter copy iterates the dest"
+        );
+    }
+    // The copy's `i` IS the dest coordinates decomposed, so a dense init
+    // simplifies back to `init[i]` and emits no prelude at all.
+    let (init_chain, init_idx) = layout_read_index(
+        "init",
+        ctx.operand_layout(0),
+        dest_dims,
+        Coords::FlatIndex { prefix: "c" },
+    )?;
+    let copy_src = if init_chain.is_empty() {
+        format!(
+            r#"extern "C" __global__ void k({sig}, {t}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) out[i] = init[i];
+    if (i < n) out[i] = init[{init_idx}];
 }}"#
-    );
-    // Launch 2: scattered writes over src numel, with the injectivity
-    // check (checked-scatter ruling): an already-set flag is a
-    // conflicting write and traps loudly.
-    let mut body = String::from("    long long flat = 0;\n    long long coord;\n");
+        )
+    } else {
+        let prelude = coord_prelude(dest_dims);
+        format!(
+            r#"extern "C" __global__ void k({sig}, {t}* out, unsigned long long n) {{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+{prelude}{init_chain}    out[i] = init[{init_idx}];
+}}"#
+        )
+    };
+    // Launch 2: scattered writes over src numel. Folded src/coordinate
+    // operands read through their chains at the SRC coordinates (the
+    // launch's iteration space); the WRITE address stays the flat
+    // coordinate-built one.
+    //
+    // UNCHECKED SCATTER (ruling 2026-08-31, see the NO RUNTIME BOUNDS
+    // TRAPS note in `crate::kernels`). Two checks used to live in this
+    // launch: each coordinate against the destination axis extent, and
+    // injectivity via `atomicExch(&flags[flat],1u) != 0u` over a zeroed
+    // `flags` scratch buffer, which caught two source elements landing
+    // on one destination element. Both are gone, and with them the
+    // `flags` buffer: the injectivity trap was its ONLY reader, so the
+    // dest-sized `unsigned int` scratch allocation and its zeroing were
+    // pure cost once the check went. Consequently a scatter with
+    // duplicate coordinates now races (last writer wins, nondeterminis-
+    // tically) instead of faulting, and an out-of-range coordinate
+    // writes out of bounds.
+    // Every read in this launch is evaluated at the SRC coordinates,
+    // which ARE this launch's `i` decomposed — so all of them are
+    // `Coords::FlatIndex` and a dense operand simplifies back to
+    // `name[i]`. The WRITE address `flat` is coordinate-built from the
+    // scattered coordinate VALUES: that is the op's semantics, not a
+    // layout read, and it is unaffected by any of this.
+    let mut reads = String::new();
+    let mut any_chain = false;
     for axis in 0..rank {
-        body.push_str(&format!(
-            "    coord = (long long)coord{axis}[i];\n    if (coord < 0 || coord >= {ext}LL) __trap();\n    flat += coord * {stride}LL;\n",
-            ext = init_dims[axis],
+        // The coordinate value's own extents must be src's for the
+        // prelude's `c*` to be its coordinates: refuse a mismatch,
+        // never reinterpret (the elementwise contract). Asked of EVERY
+        // coordinate operand, whatever its layout spells.
+        if &ctx.operand_dims[axis + 2] != src_dims {
+            bail!(
+                "operand coord{axis} value extents {:?} differ from src extents \
+                 {src_dims:?} — the scatter write launch \
+                 iterates src",
+                ctx.operand_dims[axis + 2]
+            );
+        }
+        let name = format!("coord{axis}");
+        let (chain, idx) = layout_read_index(
+            &name,
+            ctx.operand_layout(axis + 2),
+            src_dims,
+            Coords::FlatIndex { prefix: "c" },
+        )?;
+        any_chain |= !chain.is_empty();
+        reads.push_str(&chain);
+        reads.push_str(&format!("    coord = (long long){name}[{idx}];\n"));
+        reads.push_str(&format!(
+            "    flat += coord * {stride}LL;\n",
             stride = strides[axis]
         ));
     }
+    let (src_chain, src_idx) = layout_read_index(
+        "src",
+        ctx.operand_layout(1),
+        src_dims,
+        Coords::FlatIndex { prefix: "c" },
+    )?;
+    any_chain |= !src_chain.is_empty();
+    let mut body = String::new();
+    if any_chain {
+        body.push_str(&coord_prelude(src_dims));
+    }
+    body.push_str("    long long flat = 0;\n    long long coord;\n");
+    body.push_str(&reads);
+    body.push_str(&src_chain);
+    let src_read = format!("src[{src_idx}]");
     let scatter_src = format!(
-        r#"extern "C" __global__ void k({sig}, unsigned int* flags, {t}* out, unsigned long long n) {{
+        r#"extern "C" __global__ void k({sig}, {t}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-{body}    if (atomicExch(&flags[flat], 1u) != 0u) __trap();
-    out[flat] = src[i];
+{body}    out[flat] = {src_read};
 }}"#
     );
-    let flags_bytes = dest_n * std::mem::size_of::<u32>();
     Ok(vec![
-        KernelSource { source: copy_src, n: dest_n, scratch_bytes: flags_bytes },
-        KernelSource { source: scatter_src, n: src_n, scratch_bytes: flags_bytes },
+        KernelSource::plain(copy_src, dest_n),
+        KernelSource::plain(scatter_src, src_n),
     ])
 }
 
@@ -234,6 +335,8 @@ impl OpMatcher for ScatterFunctionalMatcher {
     }
 
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp> {
-        Box::new(ScatterFunctional { rank: coordinate_rank(site, 2) })
+        Box::new(ScatterFunctional {
+            rank: coordinate_rank(site, 2),
+        })
     }
 }
