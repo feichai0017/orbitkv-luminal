@@ -11,6 +11,14 @@
 ;
 ; Deliberately NO injectivity premise: a view writes nothing, and reads
 ; through non-injective layouts (broadcast views, stride 0) are legal.
+;
+; Deliberately EXEMPT from the write-capability guard (ruling 2026-09-01,
+; "only do the code gen'd kernels"): every codegen'd kernel match requires
+; a right-major contiguous out spelling because its kernel writes `out[i]`
+; — but a view IS NOT a kernel. It writes nothing; its out layout is
+; REQUIRED above to be the composed bit-offset spelling, the exact
+; opposite constraint, and that is what makes the reinterpretation
+; faithful.
 (rule
   (
     (= ?out_logical (LogicalIndexMapApply ?in_logical ?index_map ?out_shape))

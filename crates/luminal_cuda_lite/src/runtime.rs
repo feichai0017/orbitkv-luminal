@@ -301,9 +301,12 @@ impl CudaRuntime {
     /// ouputs or something, we should not have it in the codebase here.
     /// delete it. same with the get_f32 path."
     ///
-    /// THE GAP. That egglog output-layout constraint IS NOT WRITTEN YET
-    /// (frozen estate, shape unruled). Until it lands, a view-elected
-    /// output is handed over here SILENTLY: the backing of a same-numel
+    /// WHAT THE LANDED EGGLOG CONSTRAINT DOES AND DOES NOT COVER. The
+    /// write-capability guard (same day) makes non-dense KERNEL
+    /// destinations unelectable. It deliberately does NOT constrain
+    /// output slots: a view remains electable as an output
+    /// (escape-and-disclose), and on such an output this dense-shaped
+    /// signature hands over the BACKING bytes silently — a same-numel
     /// weld such as a transpose has the right LENGTH and the wrong
     /// ORDER, so the caller reads plausible, wrong numbers. The
     /// escape-and-disclose path ([`Self::fetch`] under

@@ -143,15 +143,16 @@ fn audit(
                         .mirror
                         .literal_extents()
                         .expect("elected slot layouts are literal in these fixtures");
-                    // THE DELETED WRITE FENCE, RESTATED AS A CORPUS
-                    // OBSERVATION. The backend no longer checks this
-                    // (ruling 2026-09-01: the constraint belongs in
-                    // egglog, matching only right-major-contiguous
-                    // outputs). Until that egglog constraint is written,
-                    // a non-dense elected result would CORRUPT rather
-                    // than refuse — so this assertion is the standing
-                    // evidence that no election in the corpus actually
-                    // produces one. If it ever fires, the gap is live.
+                    // THE WRITE-CAPABILITY CONSTRAINT'S REGRESSION
+                    // TEST. The backend does not check this (ruling
+                    // 2026-09-01); the constraint lives in egglog —
+                    // every codegen'd kernel's match rule fires only on
+                    // a right-major-contiguous out class
+                    // (ops/*/match_functional.egg). If this assertion
+                    // ever fires, that guard has a hole, and the
+                    // consequence is silent corruption (kernels write
+                    // out[i] unconditionally), so treat a failure here
+                    // as a wrong-bytes bug, not a test nit.
                     let flat = luminal_cuda_lite::kernels::layout_read_index(
                         "probe",
                         &info.layout,
