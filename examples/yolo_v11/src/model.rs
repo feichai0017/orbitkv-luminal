@@ -28,7 +28,7 @@ pub fn make_contiguous(t: GraphTensor) -> GraphTensor {
 
 pub const NC: usize = 80;
 pub const REG_MAX: usize = 16;
-pub const NO: usize = NC + REG_MAX * 4; // 84
+pub const NO: usize = NC + REG_MAX * 4; // 144 raw head channels before DFL
 pub const STRIDES: [usize; 3] = [8, 16, 32];
 pub const IMG_SIZE: usize = 640;
 
@@ -40,7 +40,8 @@ pub const C3: usize = 128; // 512*0.25
 pub const C4: usize = 256; // 1024*0.25
 
 /// Conv2d (with bias) + optional SiLU activation. Operates on (1, C, H, W).
-/// Weight has shape (c_out, c_in*k*k) flattened from PyTorch's (c_out, c_in, k, k).
+/// The named weight input keeps PyTorch's checkpoint-native
+/// `(c_out, c_in, k, k)` shape and is viewed as `(c_out, c_in*k*k)` here.
 pub struct Conv {
     pub weight: GraphTensor,
     pub bias: GraphTensor,
@@ -61,7 +62,10 @@ impl Conv {
         p: usize,
         cx: &mut Graph,
     ) -> Self {
-        let weight = cx.named_tensor(format!("{name}.weight"), (c_out, c_in * k * k));
+        let weight = cx
+            .named_tensor(format!("{name}.weight"), (c_out, c_in, k, k))
+            .merge_dims(1, 2)
+            .merge_dims(1, 2);
         let bias = cx.named_tensor(format!("{name}.bias"), c_out);
         Self {
             weight,
@@ -176,7 +180,8 @@ impl Conv {
 }
 
 /// Depth-wise convolution (groups = in_channels = out_channels).
-/// Weight has shape (C, K*K) when flattened from PyTorch's (C, 1, K, K).
+/// The named weight input keeps PyTorch's checkpoint-native `(C, 1, K, K)`
+/// shape and is viewed as `(C, K*K)` here.
 pub struct DwConv {
     pub weight: GraphTensor,
     pub bias: GraphTensor,
@@ -188,7 +193,10 @@ pub struct DwConv {
 
 impl DwConv {
     pub fn new(name: &str, c: usize, k: usize, s: usize, p: usize, cx: &mut Graph) -> Self {
-        let weight = cx.named_tensor(format!("{name}.weight"), (c, k * k));
+        let weight = cx
+            .named_tensor(format!("{name}.weight"), (c, 1usize, k, k))
+            .merge_dims(1, 2)
+            .merge_dims(1, 2);
         let bias = cx.named_tensor(format!("{name}.bias"), c);
         Self {
             weight,
@@ -783,7 +791,12 @@ impl Detect {
                 )
             })
             .collect();
-        let dfl_weight = cx.named_tensor(format!("{name}.dfl.conv.weight"), REG_MAX);
+        let dfl_weight = cx
+            .named_tensor(
+                format!("{name}.dfl.conv.weight"),
+                (1usize, REG_MAX, 1usize, 1usize),
+            )
+            .flatten();
 
         // Anchors and strides aren't in the safetensors — fed as inputs,
         // PER SCALE (the per-scale DFL respelling below never concats

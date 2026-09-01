@@ -9,7 +9,7 @@
 //! per-head RMS norm on every layer; q/k take learned QK-norms.
 //! Attention scale is 1.0 (none). Seven learned norms per layer wrap a
 //! PARALLEL dense+MoE FF stage; the whole residual stream multiplies a
-//! learned per-layer scalar. The MoE router reads the RAW residual
+//! checkpoint per-layer scalar. The MoE router reads the RAW residual
 //! (std-normed × router.scale × 1/√hidden) while experts read the
 //! pre_ff_2-normed stream; top-8 weights renormalize then multiply the
 //! learned per_expert_scale. Gating is the tanh-approx GELU in sigmoid
@@ -67,28 +67,7 @@ impl Gemma4Dims {
         }
     }
 
-    pub fn tiny() -> Self {
-        Self {
-            vocab: 23,
-            hidden: 8,
-            dense_intermediate: 6,
-            moe_intermediate: 4,
-            experts: 4,
-            top_k: 2,
-            n_heads: 2,
-            layers: 2, // layer 0 sliding, layer 1 full (pattern 2)
-            sliding_pattern: 2,
-            window: 3,
-            sliding_head_dim: 4,
-            sliding_kv_heads: 2,
-            full_head_dim: 8,
-            full_kv_heads: 1,
-            full_partial_rotary: 0.25,
-            rms_eps: 1e-6,
-            logit_softcap: 30.0,
-        }
-    }
-
+    #[allow(clippy::manual_is_multiple_of)] // Keep rust-version 1.85 compatibility.
     pub fn is_sliding(&self, layer: usize) -> bool {
         (layer + 1) % self.sliding_pattern != 0
     }
@@ -136,7 +115,7 @@ pub struct Gemma4MoeFfn {
 impl Gemma4MoeFfn {
     fn new(ns: &Ns, d: &Gemma4Dims, cx: &mut Graph) -> Self {
         let router = ns.child("router");
-        let mlp = ns.child("mlp");
+        let experts = ns.child("experts");
         Self {
             router_proj: Linear::new_permuted(
                 d.hidden,
@@ -148,11 +127,11 @@ impl Gemma4MoeFfn {
             router_scale: cx.named_tensor(router.leaf("scale"), d.hidden),
             per_expert_scale: cx.named_tensor(router.leaf("per_expert_scale"), d.experts),
             gate_up: cx.named_tensor(
-                mlp.leaf("gate_up_weights"),
+                experts.leaf("gate_up_proj"),
                 (d.experts, 2 * d.moe_intermediate, d.hidden),
             ),
             down: cx.named_tensor(
-                mlp.leaf("down_weights"),
+                experts.leaf("down_proj"),
                 (d.experts, d.hidden, d.moe_intermediate),
             ),
             hidden: d.hidden,
@@ -204,6 +183,7 @@ impl Gemma4MoeFfn {
 }
 
 /// The tanh-approx GELU in sigmoid form (fewer e-graph nodes).
+#[allow(clippy::excessive_precision)] // Literal matches the checkpoint formula.
 fn gemma_gelu(x: GraphTensor) -> GraphTensor {
     x * (x * 1.595_769_1 * (x * x * 0.044715 + 1.0)).sigmoid()
 }
@@ -240,7 +220,11 @@ impl Gemma4Block {
         let kv_heads = d.kv_heads(l);
         let q_dim = d.n_heads * head_dim;
         let kv_dim = head_dim * kv_heads;
-        let ns = Ns::root().child("model").child("layers").index(l);
+        let ns = Ns::root()
+            .child("model")
+            .child("language_model")
+            .child("layers")
+            .index(l);
         let attn = ns.child("self_attn");
         let mlp = ns.child("mlp");
         let rms = |segment: &str, cx: &mut Graph| {
@@ -262,7 +246,7 @@ impl Gemma4Block {
             post_ff_norm_1: rms("post_feedforward_layernorm_1", cx),
             pre_ff_norm_2: rms("pre_feedforward_layernorm_2", cx),
             post_ff_norm_2: rms("post_feedforward_layernorm_2", cx),
-            layer_scalar: cx.named_tensor(ns.leaf("layer_scalar"), d.hidden),
+            layer_scalar: cx.named_tensor(ns.leaf("layer_scalar"), 1),
             wq: Linear::new_permuted(d.hidden, q_dim, false, &attn.child("q_proj"), cx),
             wk: Linear::new_permuted(d.hidden, kv_dim, false, &attn.child("k_proj"), cx),
             wv: sliding
@@ -360,7 +344,13 @@ impl Gemma4Block {
         let moe = self.post_ff_norm_2.forward(moe);
         let ff_out = self.post_ff_norm.forward(dense + moe);
         let x = x + ff_out;
-        let scalar = self.layer_scalar.expand_lhs(&x.dims()[..1]);
+        // The released checkpoint stores one scalar per layer (`[1]`). Add
+        // the sequence axis, then explicitly broadcast that singleton across
+        // hidden width; elementwise ops do not imply broadcasting.
+        let scalar = self
+            .layer_scalar
+            .expand_lhs(&x.dims()[..1])
+            .expand(x.dims());
         (x * scalar, k_cache, v_cache)
     }
 }
@@ -374,17 +364,13 @@ pub struct Gemma4Moe {
 
 impl Gemma4Moe {
     pub fn init(cx: &mut Graph, dims: &Gemma4Dims) -> Self {
+        let text = Ns::root().child("model").child("language_model");
         let blocks = (0..dims.layers)
             .map(|l| Gemma4Block::new(l, dims, cx))
             .collect();
         Self {
             dims: dims.clone(),
-            embed: Embedding::new(
-                dims.vocab,
-                dims.hidden,
-                &Ns::root().child("model").child("embed_tokens"),
-                cx,
-            ),
+            embed: Embedding::new(dims.vocab, dims.hidden, &text.child("embed_tokens"), cx),
             blocks,
             final_norm: LayerNorm::new(
                 dims.hidden,
@@ -392,7 +378,7 @@ impl Gemma4Moe {
                 false,
                 false,
                 dims.rms_eps,
-                &Ns::root().child("model").child("norm"),
+                &text.child("norm"),
                 cx,
             ),
         }

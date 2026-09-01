@@ -1,7 +1,4 @@
-//! MiniQwen3 (llama-3 skeleton + per-head QK RMSNorm, one decode step)
-//! on CUDA-lite: reference run vs device run on identical seeded
-//! inputs, compared through the disclosed layout. Canonical dims from
-//! `examples/mini/qwen3/src/bin/measure_plan.rs`.
+//! The complete Qwen3-4B model on CUDA Lite.
 //!
 //! Run: cargo run -p luminal_cuda_lite --example qwen3 --features device
 
@@ -14,50 +11,65 @@ fn main() {
 
 #[cfg(feature = "device")]
 fn main() {
-    use luminal::prelude::*;
-    use luminal::shape::IntExpr;
-    use mini_qwen3::MiniQwen3;
-    use support::weights;
-
-    const VOCAB: usize = 5;
-    const D: usize = 8;
-    const HD: usize = 2; // head_dim = D / n_heads
-    let mut cx = Graph::new();
-    let model = MiniQwen3::new(VOCAB, D, 12, 4, 2, 1, &mut cx);
-    let ids = cx.tensor_dtyped(1, DType::Int);
-    let k_cache = cx.tensor((4, 4));
-    let v_cache = cx.tensor((4, 4));
-    let gather_idx = cx.tensor_dtyped(2, DType::Int);
-    let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-    let caches = vec![(k_cache, v_cache)];
-    let (logits, _caches_out) =
-        model.forward(ids, &caches, gather_idx, scatter_idx, IntExpr::from(1usize));
-    let logits = logits.output();
-
-    let block = &model.blocks[0];
-    let (q_norm, k_norm) = block.qk_norm.expect("qwen3 block carries QK-norm");
-    let pairs: Vec<(NodeIndex, TypedBuffer)> = vec![
-        (ids.id, vec![3i32].into()),
-        (model.embed.weight.id, weights(VOCAB * D, 1).into()),
-        (block.wq.weight.id, weights(D * D, 2).into()),
-        (block.wk.weight.id, weights(D * 4, 3).into()),
-        (block.wv.weight.id, weights(D * 4, 4).into()),
-        (block.wo.weight.id, weights(D * D, 5).into()),
-        (block.gate.weight.id, weights(D * 12, 6).into()),
-        (block.up.weight.id, weights(D * 12, 7).into()),
-        (block.down.weight.id, weights(12 * D, 8).into()),
-        (q_norm.id, weights(HD, 11).into()),
-        (k_norm.id, weights(HD, 12).into()),
-        (k_cache.id, weights(16, 9).into()),
-        (v_cache.id, weights(16, 10).into()),
-        (gather_idx.id, vec![0i32, 1].into()),
-        (scatter_idx.id, vec![1i32].into()),
-    ];
-
-    if let Err(e) =
-        support::device::run_differential("qwen3", &cx, &pairs, &[("logits", logits.id)])
-    {
-        eprintln!("qwen3: FAIL: {e:#}");
+    if let Err(error) = run() {
+        eprintln!("qwen3: FAIL: {error:#}");
         std::process::exit(1);
     }
+}
+
+#[cfg(feature = "device")]
+fn run() -> anyhow::Result<()> {
+    use luminal::prelude::*;
+    use luminal_nn::{rope_pairing_matrix, rope_tables_split_half, KvCachePool};
+    use qwen3::{Qwen, QwenDims};
+
+    const SLOTS: usize = 4;
+    let dims = QwenDims::qwen3_4b();
+    let mut cx = Graph::new();
+    let model = Qwen::init(&mut cx, &dims);
+    let token = cx.tensor_dtyped(1, DType::Int);
+    let q_pos = cx.tensor_dtyped(1, DType::Int);
+    let rope_cos = cx.tensor((1, dims.head_dim));
+    let rope_sin = cx.tensor((1, dims.head_dim));
+    let rope_rot = cx.tensor((dims.head_dim, dims.head_dim));
+    let gather_idx = cx.tensor_dtyped(SLOTS, DType::Int);
+    let scatter_idx = cx.tensor_dtyped(1, DType::Int);
+    let pool = KvCachePool::new(
+        &mut cx,
+        dims.layers,
+        SLOTS,
+        dims.kv_dim(),
+        &Ns::root().child("cache"),
+    );
+    let (logits, _) = model.forward(
+        token,
+        q_pos,
+        rope_cos,
+        rope_sin,
+        rope_rot,
+        &pool.layers,
+        gather_idx,
+        scatter_idx,
+    );
+    let logits = logits.output();
+
+    let (cos, sin) = rope_tables_split_half(&[1.0], dims.head_dim, dims.rope_theta, 1.0);
+    let mut runtime_inputs = vec![
+        (token.id, vec![3i32].into()),
+        (q_pos.id, vec![1i32].into()),
+        (rope_cos.id, cos.into()),
+        (rope_sin.id, sin.into()),
+        (
+            rope_rot.id,
+            rope_pairing_matrix(dims.head_dim, false).into(),
+        ),
+        (gather_idx.id, (0..SLOTS as i32).collect::<Vec<_>>().into()),
+        (scatter_idx.id, vec![1i32].into()),
+    ];
+    for (k, v) in &pool.layers {
+        runtime_inputs.push((k.id, vec![0.0f32; SLOTS * dims.kv_dim()].into()));
+        runtime_inputs.push((v.id, vec![0.0f32; SLOTS * dims.kv_dim()].into()));
+    }
+    let pairs = support::device::seeded_graph_inputs(&cx, runtime_inputs)?;
+    support::device::run_cuda("qwen3", &cx, pairs, &[("logits", logits.id)])
 }

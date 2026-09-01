@@ -1,9 +1,4 @@
-//! MiniGemma3 (FULL gemma anatomy: sandwich norms, decoupled head_dim,
-//! QK-norm, in-graph dual-theta split-half RoPE, sliding-window local
-//! layer + global layer, GeGLU, sqrt(d) embedding scaling — one decode
-//! step) on CUDA-lite: reference run vs device run on identical seeded
-//! inputs, compared through the disclosed layout. Canonical dims from
-//! `examples/mini/gemma3/src/bin/measure_plan.rs`.
+//! The complete Gemma 3 4B text tower on CUDA Lite.
 //!
 //! Run: cargo run -p luminal_cuda_lite --example gemma3 --features device
 
@@ -16,104 +11,71 @@ fn main() {
 
 #[cfg(feature = "device")]
 fn main() {
+    if let Err(error) = run() {
+        eprintln!("gemma3: FAIL: {error:#}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(feature = "device")]
+fn run() -> anyhow::Result<()> {
+    use gemma3::{Gemma3, Gemma3Dims};
     use luminal::prelude::*;
-    use luminal::shape::IntExpr;
-    use luminal_nn::{rope_pairing_matrix, rope_tables_split_half};
-    use mini_gemma3::MiniGemma3;
-    use support::weights;
+    use luminal_nn::{rope_pairing_matrix, rope_tables_split_half, KvCachePool};
 
-    const VOCAB: usize = 5;
-    const D: usize = 6;
-    const FF: usize = 8;
-    const NH: usize = 2;
-    const NKV: usize = 1;
-    const HD: usize = 4; // q_dim = 8 != d = 6 — decoupled head_dim
-    const Q_DIM: usize = NH * HD;
-    const KV_DIM: usize = NKV * HD;
     const SLOTS: usize = 4;
-    const LAYERS: usize = 2;
-
+    let dims = Gemma3Dims::gemma3_4b();
     let mut cx = Graph::new();
-    let ids = cx.tensor_dtyped(1, DType::Int);
-    let caches: Vec<_> = (0..LAYERS)
-        .map(|_| (cx.tensor((SLOTS, KV_DIM)), cx.tensor((SLOTS, KV_DIM))))
-        .collect();
-    let gather_idx = cx.tensor_dtyped(2, DType::Int);
+    let model = Gemma3::init(&mut cx, &dims);
+    let token = cx.tensor_dtyped(1, DType::Int);
+    let q_pos = cx.tensor_dtyped(1, DType::Int);
+    let local_cos = cx.tensor((1, dims.head_dim));
+    let local_sin = cx.tensor((1, dims.head_dim));
+    let global_cos = cx.tensor((1, dims.head_dim));
+    let global_sin = cx.tensor((1, dims.head_dim));
+    let rope_rot = cx.tensor((dims.head_dim, dims.head_dim));
+    let gather_idx = cx.tensor_dtyped(SLOTS, DType::Int);
     let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-    let rope_inputs: Vec<_> = (0..LAYERS)
-        .map(|_| (cx.tensor((1, HD)), cx.tensor((1, HD))))
-        .collect();
-    let rope_rot = cx.tensor((HD, HD));
-    let model = MiniGemma3::new(VOCAB, D, FF, NH, NKV, HD, LAYERS, 1, 2, &mut cx);
-    let (logits, _caches_out) = model.forward(
-        ids,
-        &caches,
+    let pool = KvCachePool::new(
+        &mut cx,
+        dims.layers,
+        SLOTS,
+        dims.kv_dim(),
+        &Ns::root().child("cache"),
+    );
+    let (logits, _) = model.forward(
+        token,
+        q_pos,
+        (local_cos, local_sin),
+        (global_cos, global_sin),
+        rope_rot,
+        &pool,
         gather_idx,
         scatter_idx,
-        IntExpr::from(1usize),
-        &rope_inputs,
-        rope_rot,
     );
     let logits = logits.output();
 
-    let mut pairs: Vec<(NodeIndex, TypedBuffer)> = vec![
-        (ids.id, vec![3i32].into()),
-        (model.embed.weight.id, weights(VOCAB * D, 199).into()),
-        (gather_idx.id, vec![0i32, 1].into()),
-        (scatter_idx.id, vec![1i32].into()),
-        (rope_rot.id, rope_pairing_matrix(HD, false).into()),
+    let (local_c, local_s) = rope_tables_split_half(&[1.0], dims.head_dim, 10_000.0, 1.0);
+    let (global_c, global_s) =
+        rope_tables_split_half(&[1.0], dims.head_dim, 1_000_000.0, 1.0 / 8.0);
+    let mut runtime_inputs = vec![
+        (token.id, vec![3i32].into()),
+        (q_pos.id, vec![1i32].into()),
+        (local_cos.id, local_c.into()),
+        (local_sin.id, local_s.into()),
+        (global_cos.id, global_c.into()),
+        (global_sin.id, global_s.into()),
         (
-            model.final_norm.weight.expect("weighted").id,
-            weights(D, 660).into(),
+            rope_rot.id,
+            rope_pairing_matrix(dims.head_dim, false).into(),
         ),
+        (gather_idx.id, (0..SLOTS as i32).collect::<Vec<_>>().into()),
+        (scatter_idx.id, vec![1i32].into()),
     ];
-    for (layer, block) in model.blocks.iter().enumerate() {
-        let (cos_table, sin_table) =
-            rope_tables_split_half(&[1.0], HD, block.rope_theta, block.pos_scale);
-        pairs.push((rope_inputs[layer].0.id, cos_table.into()));
-        pairs.push((rope_inputs[layer].1.id, sin_table.into()));
+    for (k, v) in &pool.layers {
+        runtime_inputs.push((k.id, vec![0.0f32; SLOTS * dims.kv_dim()].into()));
+        runtime_inputs.push((v.id, vec![0.0f32; SLOTS * dims.kv_dim()].into()));
     }
-    for (layer, block) in model.blocks.iter().enumerate() {
-        let seed = |slot: usize| 600 + layer * 20 + slot;
-        pairs.push((block.wq.weight.id, weights(D * Q_DIM, seed(0)).into()));
-        pairs.push((block.wk.weight.id, weights(D * KV_DIM, seed(1)).into()));
-        pairs.push((block.wv.weight.id, weights(D * KV_DIM, seed(2)).into()));
-        pairs.push((block.wo.weight.id, weights(Q_DIM * D, seed(3)).into()));
-        pairs.push((block.gate.weight.id, weights(D * FF, seed(4)).into()));
-        pairs.push((block.up.weight.id, weights(D * FF, seed(5)).into()));
-        pairs.push((block.down.weight.id, weights(FF * D, seed(6)).into()));
-        pairs.push((
-            block.input_norm.weight.expect("weighted").id,
-            weights(D, seed(7)).into(),
-        ));
-        pairs.push((
-            block.post_attn_norm.weight.expect("weighted").id,
-            weights(D, seed(8)).into(),
-        ));
-        pairs.push((
-            block.pre_ff_norm.weight.expect("weighted").id,
-            weights(D, seed(9)).into(),
-        ));
-        pairs.push((
-            block.post_ff_norm.weight.expect("weighted").id,
-            weights(D, seed(10)).into(),
-        ));
-        pairs.push((block.q_norm.id, weights(HD, seed(11)).into()));
-        pairs.push((block.k_norm.id, weights(HD, seed(12)).into()));
-        pairs.push((
-            caches[layer].0.id,
-            weights(SLOTS * KV_DIM, 300 + layer).into(),
-        ));
-        pairs.push((
-            caches[layer].1.id,
-            weights(SLOTS * KV_DIM, 320 + layer).into(),
-        ));
-    }
-
-    if let Err(e) =
-        support::device::run_differential("gemma3", &cx, &pairs, &[("logits", logits.id)])
-    {
-        eprintln!("gemma3: FAIL: {e:#}");
-        std::process::exit(1);
-    }
+    let pairs = support::device::seeded_graph_inputs(&cx, runtime_inputs)?;
+    support::device::run_cuda("gemma3", &cx, pairs, &[("logits", logits.id)])
 }

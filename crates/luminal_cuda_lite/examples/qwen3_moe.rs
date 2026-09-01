@@ -1,7 +1,4 @@
-//! MiniQwen3Moe (MoE decoder, one decode step) on CUDA-lite: reference
-//! run vs device run on identical seeded inputs, compared through the
-//! disclosed layout. Canonical dims from
-//! `examples/mini/qwen3_moe/src/bin/measure_plan.rs`.
+//! The complete Qwen3-30B-A3B model on CUDA Lite.
 //!
 //! Run: cargo run -p luminal_cuda_lite --example qwen3_moe --features device
 
@@ -14,48 +11,65 @@ fn main() {
 
 #[cfg(feature = "device")]
 fn main() {
-    use luminal::prelude::*;
-    use luminal::shape::IntExpr;
-    use luminal_nn::FeedForward;
-    use mini_qwen3_moe::MiniQwen3Moe;
-    use support::weights;
-
-    const VOCAB: usize = 5;
-    const D: usize = 4;
-    let mut cx = Graph::new();
-    let model = MiniQwen3Moe::new(VOCAB, D, 2, 1, 2, 1, &mut cx);
-    let ids = cx.tensor_dtyped(1, DType::Int);
-    let k_cache = cx.tensor((4, D));
-    let v_cache = cx.tensor((4, D));
-    let gather_idx = cx.tensor_dtyped(2, DType::Int);
-    let scatter_idx = cx.tensor_dtyped(1, DType::Int);
-    let caches = vec![(k_cache, v_cache)];
-    let (logits, _) = model.forward(ids, &caches, gather_idx, scatter_idx, IntExpr::from(1usize));
-    let logits = logits.output();
-
-    let block = &model.blocks[0];
-    let FeedForward::Moe(moe) = &block.ff else {
-        unreachable!()
-    };
-    let pairs: Vec<(NodeIndex, TypedBuffer)> = vec![
-        (ids.id, vec![2i32].into()),
-        (model.embed.weight.id, weights(VOCAB * D, 1).into()),
-        (block.wq.weight.id, weights(D * D, 2).into()),
-        (block.wk.weight.id, weights(D * D, 3).into()),
-        (block.wv.weight.id, weights(D * D, 4).into()),
-        (block.wo.weight.id, weights(D * D, 5).into()),
-        (moe.router.id, weights(D * 2, 6).into()),
-        (moe.expert_weights.id, weights(2 * D * D, 7).into()),
-        (k_cache.id, weights(4 * D, 8).into()),
-        (v_cache.id, weights(4 * D, 9).into()),
-        (gather_idx.id, vec![0i32, 1].into()),
-        (scatter_idx.id, vec![1i32].into()),
-    ];
-
-    if let Err(e) =
-        support::device::run_differential("qwen3_moe", &cx, &pairs, &[("logits", logits.id)])
-    {
-        eprintln!("qwen3_moe: FAIL: {e:#}");
+    if let Err(error) = run() {
+        eprintln!("qwen3_moe: FAIL: {error:#}");
         std::process::exit(1);
     }
+}
+
+#[cfg(feature = "device")]
+fn run() -> anyhow::Result<()> {
+    use luminal::prelude::*;
+    use luminal_nn::{rope_pairing_matrix, rope_tables_split_half, KvCachePool};
+    use qwen3_moe::{Qwen3Moe, Qwen3MoeDims};
+
+    const SLOTS: usize = 4;
+    let dims = Qwen3MoeDims::qwen3_30b_a3b();
+    let mut cx = Graph::new();
+    let model = Qwen3Moe::init(&mut cx, &dims);
+    let token = cx.tensor_dtyped(1, DType::Int);
+    let q_pos = cx.tensor_dtyped(1, DType::Int);
+    let rope_cos = cx.tensor((1, dims.head_dim));
+    let rope_sin = cx.tensor((1, dims.head_dim));
+    let rope_rot = cx.tensor((dims.head_dim, dims.head_dim));
+    let gather_idx = cx.tensor_dtyped(SLOTS, DType::Int);
+    let scatter_idx = cx.tensor_dtyped(1, DType::Int);
+    let pool = KvCachePool::new(
+        &mut cx,
+        dims.layers,
+        SLOTS,
+        dims.kv_dim(),
+        &Ns::root().child("cache"),
+    );
+    let (logits, _) = model.forward(
+        token,
+        q_pos,
+        rope_cos,
+        rope_sin,
+        rope_rot,
+        &pool,
+        gather_idx,
+        scatter_idx,
+    );
+    let logits = logits.output();
+
+    let (cos, sin) = rope_tables_split_half(&[1.0], dims.head_dim, dims.rope_theta, 1.0);
+    let mut runtime_inputs = vec![
+        (token.id, vec![3i32].into()),
+        (q_pos.id, vec![1i32].into()),
+        (rope_cos.id, cos.into()),
+        (rope_sin.id, sin.into()),
+        (
+            rope_rot.id,
+            rope_pairing_matrix(dims.head_dim, false).into(),
+        ),
+        (gather_idx.id, (0..SLOTS as i32).collect::<Vec<_>>().into()),
+        (scatter_idx.id, vec![1i32].into()),
+    ];
+    for (k, v) in &pool.layers {
+        runtime_inputs.push((k.id, vec![0.0f32; SLOTS * dims.kv_dim()].into()));
+        runtime_inputs.push((v.id, vec![0.0f32; SLOTS * dims.kv_dim()].into()));
+    }
+    let pairs = support::device::seeded_graph_inputs(&cx, runtime_inputs)?;
+    support::device::run_cuda("qwen3_moe", &cx, pairs, &[("logits", logits.id)])
 }

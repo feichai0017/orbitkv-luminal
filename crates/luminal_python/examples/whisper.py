@@ -1,16 +1,15 @@
 """Whisper transcription demo using the luminal torch.compile backend.
 
 Implements a small PyTorch port of ``openai/whisper-tiny.en`` that mirrors the
-luminal Rust example (``examples/whisper`` in the workspace), loads the official
-HuggingFace weights, and runs greedy decoding through the luminal backend via
-``torch.compile``.
+logical Whisper model, loads the official HuggingFace weights, and runs greedy
+decoding through the luminal backend via ``torch.compile``.
 
 Usage::
 
     uv run python examples/whisper.py [path/to/audio.wav]
 
-If no path is provided, falls back to the JFK sample bundled with the Rust
-``examples/whisper`` crate.
+If no path is provided, falls back to the JFK sample bundled beside this
+runtime example.
 """
 
 from __future__ import annotations
@@ -394,8 +393,7 @@ def greedy_decode(logits_row: torch.Tensor, suppress_first_eot: bool) -> int:
 
 def find_default_audio() -> Optional[Path]:
     here = Path(__file__).resolve()
-    workspace_root = here.parents[3]
-    candidate = workspace_root / "examples" / "whisper" / "assets" / "jfk.wav"
+    candidate = here.parent / "assets" / "jfk.wav"
     return candidate if candidate.exists() else None
 
 

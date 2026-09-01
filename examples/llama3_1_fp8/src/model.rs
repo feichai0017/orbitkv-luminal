@@ -52,24 +52,6 @@ impl Fp8Dims {
         }
     }
 
-    pub fn tiny() -> Self {
-        Self {
-            vocab: 29,
-            hidden: 16,
-            intermediate: 24,
-            head_dim: 4,
-            n_heads: 4,
-            n_kv_heads: 2,
-            layers: 2,
-            rope_theta: 10_000.0,
-            rope_factor: 8.0,
-            rope_low_freq_factor: 1.0,
-            rope_high_freq_factor: 4.0,
-            rope_original_max: 16.0,
-            rms_eps: 1e-5,
-        }
-    }
-
     pub fn q_dim(&self) -> usize {
         self.n_heads * self.head_dim
     }

@@ -43,22 +43,6 @@ impl Qwen3MoeDims {
         }
     }
 
-    pub fn tiny() -> Self {
-        Self {
-            vocab: 23,
-            hidden: 8,
-            moe_intermediate: 6,
-            head_dim: 4,
-            n_heads: 2,
-            n_kv_heads: 1,
-            layers: 2,
-            experts: 4,
-            top_k: 2,
-            rope_theta: 10_000.0,
-            rms_eps: 1e-6,
-        }
-    }
-
     pub fn q_dim(&self) -> usize {
         self.n_heads * self.head_dim
     }

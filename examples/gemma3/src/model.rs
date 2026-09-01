@@ -48,25 +48,11 @@ impl Gemma3Dims {
         }
     }
 
-    pub fn tiny() -> Self {
-        Self {
-            vocab: 31,
-            hidden: 16,
-            intermediate: 24,
-            head_dim: 4,
-            n_heads: 4,
-            n_kv_heads: 2,
-            layers: 2, // layer 0 local, layer 1 global (pattern 2)
-            window: 3,
-            sliding_pattern: 2,
-            rms_eps: 1e-6,
-        }
-    }
-
     pub fn kv_dim(&self) -> usize {
         self.n_kv_heads * self.head_dim
     }
 
+    #[allow(clippy::manual_is_multiple_of)] // Keep rust-version 1.85 compatibility.
     pub fn is_local(&self, layer: usize) -> bool {
         (layer + 1) % self.sliding_pattern != 0
     }
@@ -81,15 +67,11 @@ pub struct Gemma3 {
 
 impl Gemma3 {
     pub fn init(cx: &mut Graph, dims: &Gemma3Dims) -> Self {
+        let text = Ns::root().child("language_model").child("model");
         let blocks = (0..dims.layers).map(|l| Self::block(l, dims, cx)).collect();
         Self {
             dims: dims.clone(),
-            embed: Embedding::new(
-                dims.vocab,
-                dims.hidden,
-                &Ns::root().child("model").child("embed_tokens"),
-                cx,
-            ),
+            embed: Embedding::new(dims.vocab, dims.hidden, &text.child("embed_tokens"), cx),
             blocks,
             final_norm: LayerNorm::new(
                 dims.hidden,
@@ -97,7 +79,7 @@ impl Gemma3 {
                 false,
                 false,
                 dims.rms_eps,
-                &Ns::root().child("model").child("norm"),
+                &text.child("norm"),
                 cx,
             )
             .with_unit_offset(),
@@ -106,7 +88,11 @@ impl Gemma3 {
 
     fn block(l: usize, d: &Gemma3Dims, cx: &mut Graph) -> GemmaBlock {
         let local = d.is_local(l);
-        let ns = Ns::root().child("model").child("layers").index(l);
+        let ns = Ns::root()
+            .child("language_model")
+            .child("model")
+            .child("layers")
+            .index(l);
         let attn = ns.child("self_attn");
         let mlp = ns.child("mlp");
         let rms = |ns: &Ns, cx: &mut Graph| {

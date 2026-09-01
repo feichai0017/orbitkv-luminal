@@ -1,7 +1,4 @@
-//! MiniWhisper (encoder + cross-attention decoder) on CUDA-lite:
-//! reference run vs device run on identical seeded inputs, compared
-//! through the disclosed layout. Canonical dims from
-//! `examples/mini/whisper/src/bin/measure_plan.rs`.
+//! The complete Whisper tiny.en model on CUDA Lite.
 //!
 //! Run: cargo run -p luminal_cuda_lite --example whisper --features device
 
@@ -14,36 +11,54 @@ fn main() {
 
 #[cfg(feature = "device")]
 fn main() {
-    use luminal::prelude::*;
-    use mini_whisper::MiniWhisper;
-    use support::weights;
-
-    const D: usize = 4;
-    const FF: usize = 6;
-    let mut cx = Graph::new();
-    let model = MiniWhisper::new(D, FF, 2, &mut cx);
-    let audio = cx.tensor((2, D));
-    let tokens = cx.tensor((1, D));
-    let out = model.forward(audio, tokens).output();
-    let pairs: Vec<(NodeIndex, TypedBuffer)> = vec![
-        (audio.id, weights(2 * D, 1).into()),
-        (tokens.id, weights(D, 2).into()),
-        (model.enc_wq.weight.id, weights(D * D, 3).into()),
-        (model.enc_wk.weight.id, weights(D * D, 4).into()),
-        (model.enc_wv.weight.id, weights(D * D, 5).into()),
-        (model.enc_wo.weight.id, weights(D * D, 6).into()),
-        (model.enc_up.weight.id, weights(D * FF, 7).into()),
-        (model.enc_down.weight.id, weights(FF * D, 8).into()),
-        (model.dec_wq.weight.id, weights(D * D, 9).into()),
-        (model.dec_wk.weight.id, weights(D * D, 10).into()),
-        (model.dec_wv.weight.id, weights(D * D, 11).into()),
-        (model.dec_wo.weight.id, weights(D * D, 12).into()),
-        (model.dec_up.weight.id, weights(D * FF, 13).into()),
-        (model.dec_down.weight.id, weights(FF * D, 14).into()),
-    ];
-
-    if let Err(e) = support::device::run_differential("whisper", &cx, &pairs, &[("out", out.id)]) {
-        eprintln!("whisper: FAIL: {e:#}");
+    if let Err(error) = run() {
+        eprintln!("whisper: FAIL: {error:#}");
         std::process::exit(1);
     }
+}
+
+#[cfg(feature = "device")]
+fn run() -> anyhow::Result<()> {
+    use luminal::prelude::*;
+    use luminal_nn::KvCachePool;
+    use whisper::{Whisper, WhisperDims};
+
+    let dims = WhisperDims::whisper_tiny_en();
+    let mut cx = Graph::new();
+    let model = Whisper::init(&mut cx, &dims);
+    let mel = cx.tensor((dims.n_mels, dims.mel_frames()));
+    let token = cx.tensor_dtyped(1, DType::Int);
+    let q_pos = cx.tensor_dtyped(1, DType::Int);
+    let gather_idx = cx.tensor_dtyped(dims.text_ctx, DType::Int);
+    let scatter_idx = cx.tensor_dtyped(1, DType::Int);
+    let pool = KvCachePool::new(
+        &mut cx,
+        dims.text_layers,
+        dims.text_ctx,
+        dims.state,
+        &Ns::root().child("cache"),
+    );
+    let encoded = model.encode(mel);
+    let (logits, _) = model.decode_step(token, q_pos, encoded, &pool, gather_idx, scatter_idx);
+    let logits = logits.output();
+
+    let mut runtime_inputs = vec![
+        (
+            mel.id,
+            support::weights(dims.n_mels * dims.mel_frames(), 900).into(),
+        ),
+        (token.id, vec![3i32].into()),
+        (q_pos.id, vec![1i32].into()),
+        (
+            gather_idx.id,
+            (0..dims.text_ctx as i32).collect::<Vec<_>>().into(),
+        ),
+        (scatter_idx.id, vec![1i32].into()),
+    ];
+    for (k, v) in &pool.layers {
+        runtime_inputs.push((k.id, vec![0.0f32; dims.text_ctx * dims.state].into()));
+        runtime_inputs.push((v.id, vec![0.0f32; dims.text_ctx * dims.state].into()));
+    }
+    let pairs = support::device::seeded_graph_inputs(&cx, runtime_inputs)?;
+    support::device::run_cuda("whisper", &cx, pairs, &[("logits", logits.id)])
 }

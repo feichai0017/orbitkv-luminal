@@ -47,22 +47,6 @@ impl Llama3Dims {
         }
     }
 
-    /// Same anatomy (GQA, learned norms, untied head, SwiGLU) at
-    /// smoke-test scale.
-    pub fn tiny() -> Self {
-        Self {
-            vocab: 29,
-            hidden: 16,
-            intermediate: 24,
-            head_dim: 4,
-            n_heads: 4,
-            n_kv_heads: 2,
-            layers: 2,
-            rope_theta: 10_000.0,
-            rms_eps: 1e-5,
-        }
-    }
-
     pub fn q_dim(&self) -> usize {
         self.n_heads * self.head_dim
     }

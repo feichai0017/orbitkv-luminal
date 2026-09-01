@@ -1,4 +1,4 @@
-//! Flux2Transformer2DModel — the diffusion transformer / DiT — in pure HLIR.
+//! FLUX.2-dev's diffusion transformer expressed as logical operations.
 //!
 //! Mirrors the diffusers reference (`diffusers.models.transformers.transformer_flux2`)
 //! op-for-op. Architecture summary:
@@ -72,31 +72,16 @@
 //! - **Numerical validation: not yet done.** The transformer hasn't been run
 //!   end-to-end against the diffusers reference — that requires downloading
 //!   60+ GB of weights and is the next step.
-//! - **Test coverage:** the FFN, modulation split, and 4D RoPE construction
-//!   are unit-tested against a Rust scalar reference in the test module at
-//!   the bottom of this file.
+//! - **Test coverage:** released dimensions and block counts are pinned by the
+//!   crate's specification test; the mini FLUX fixture owns smoke/fidelity
+//!   coverage.
 
 use luminal::{dtype::DType, graph::Graph, prelude::*};
 
 // ── architecture constants for `black-forest-labs/FLUX.2-dev` ───────────────
 //
-// `FLUX2_NUM_LAYERS` / `FLUX2_NUM_SINGLE_LAYERS` env vars override the
-// counts at runtime. Reducing them is useful for end-to-end pipeline
-// validation with a much smaller compile-time cost — at the full
-// 8 + 48 layer count the egglog egraph for the transformer can blow
-// past 200 GB of CPU RAM.
-pub fn num_layers() -> usize {
-    std::env::var("FLUX2_NUM_LAYERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8)
-}
-pub fn num_single_layers() -> usize {
-    std::env::var("FLUX2_NUM_SINGLE_LAYERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(48)
-}
+pub const NUM_LAYERS: usize = 8;
+pub const NUM_SINGLE_LAYERS: usize = 48;
 pub const NUM_HEADS: usize = 48;
 pub const HEAD_DIM: usize = 128;
 pub const HIDDEN: usize = NUM_HEADS * HEAD_DIM; // 6144
@@ -110,10 +95,9 @@ pub const RMS_NORM_HEAD_EPS: f32 = 1e-6;
 pub const ROPE_THETA: f32 = 2000.0;
 pub const ROPE_AXES: [usize; 4] = [32, 32, 32, 32];
 
-/// Storage dtype for transformer weights. The Flux 2 checkpoint ships in
-/// BF16; we keep it that way and cast to F32 only at the points where the
-/// numerics matter (matmul accumulation, normalization).
-pub const WEIGHT_DTYPE: DType = DType::Bf16;
+/// Logical parameter dtype. Checkpoint residency (BF16 in the released
+/// weights) is a runtime binding decision, not part of the model graph.
+pub const WEIGHT_DTYPE: DType = DType::F32;
 
 // =============================================================================
 // Small helpers
@@ -294,12 +278,16 @@ struct FeedForward {
 impl FeedForward {
     fn new(prefix: &str, dim: usize, mlp_hidden: usize, cx: &mut Graph) -> Self {
         Self {
-            linear_in: cx
-                .named_tensor_dtyped(format!("{prefix}.linear_in.weight"), (mlp_hidden * 2, dim), WEIGHT_DTYPE)
-                .persist(),
-            linear_out: cx
-                .named_tensor_dtyped(format!("{prefix}.linear_out.weight"), (dim, mlp_hidden), WEIGHT_DTYPE)
-                .persist(),
+            linear_in: cx.named_tensor_dtyped(
+                format!("{prefix}.linear_in.weight"),
+                (mlp_hidden * 2, dim),
+                WEIGHT_DTYPE,
+            ),
+            linear_out: cx.named_tensor_dtyped(
+                format!("{prefix}.linear_out.weight"),
+                (dim, mlp_hidden),
+                WEIGHT_DTYPE,
+            ),
         }
     }
 
@@ -333,7 +321,6 @@ impl DoubleStreamAttn {
     fn new(prefix: &str, cx: &mut Graph) -> Self {
         let lin = |n: &str, cx: &mut Graph| -> GraphTensor {
             cx.named_tensor_dtyped(format!("{prefix}.{n}"), (HIDDEN, HIDDEN), WEIGHT_DTYPE)
-                .persist()
         };
         Self {
             to_q: lin("to_q.weight", cx),
@@ -342,18 +329,26 @@ impl DoubleStreamAttn {
             add_q_proj: lin("add_q_proj.weight", cx),
             add_k_proj: lin("add_k_proj.weight", cx),
             add_v_proj: lin("add_v_proj.weight", cx),
-            norm_q: cx
-                .named_tensor_dtyped(format!("{prefix}.norm_q.weight"), HEAD_DIM, WEIGHT_DTYPE)
-                .persist(),
-            norm_k: cx
-                .named_tensor_dtyped(format!("{prefix}.norm_k.weight"), HEAD_DIM, WEIGHT_DTYPE)
-                .persist(),
-            norm_added_q: cx
-                .named_tensor_dtyped(format!("{prefix}.norm_added_q.weight"), HEAD_DIM, WEIGHT_DTYPE)
-                .persist(),
-            norm_added_k: cx
-                .named_tensor_dtyped(format!("{prefix}.norm_added_k.weight"), HEAD_DIM, WEIGHT_DTYPE)
-                .persist(),
+            norm_q: cx.named_tensor_dtyped(
+                format!("{prefix}.norm_q.weight"),
+                HEAD_DIM,
+                WEIGHT_DTYPE,
+            ),
+            norm_k: cx.named_tensor_dtyped(
+                format!("{prefix}.norm_k.weight"),
+                HEAD_DIM,
+                WEIGHT_DTYPE,
+            ),
+            norm_added_q: cx.named_tensor_dtyped(
+                format!("{prefix}.norm_added_q.weight"),
+                HEAD_DIM,
+                WEIGHT_DTYPE,
+            ),
+            norm_added_k: cx.named_tensor_dtyped(
+                format!("{prefix}.norm_added_k.weight"),
+                HEAD_DIM,
+                WEIGHT_DTYPE,
+            ),
             to_out: lin("to_out.0.weight", cx),
             to_add_out: lin("to_add_out.weight", cx),
         }
@@ -441,22 +436,26 @@ impl SingleStreamAttn {
     fn new(prefix: &str, cx: &mut Graph) -> Self {
         let qkv_mlp_out = 3 * HIDDEN + 2 * MLP_HIDDEN; // 18432 + 36864 = 55296
         Self {
-            to_qkv_mlp_proj: cx
-                .named_tensor_dtyped(
-                    format!("{prefix}.to_qkv_mlp_proj.weight"),
-                    (qkv_mlp_out, HIDDEN), WEIGHT_DTYPE)
-                .persist(),
-            norm_q: cx
-                .named_tensor_dtyped(format!("{prefix}.norm_q.weight"), HEAD_DIM, WEIGHT_DTYPE)
-                .persist(),
-            norm_k: cx
-                .named_tensor_dtyped(format!("{prefix}.norm_k.weight"), HEAD_DIM, WEIGHT_DTYPE)
-                .persist(),
-            to_out: cx
-                .named_tensor_dtyped(
-                    format!("{prefix}.to_out.weight"),
-                    (HIDDEN, HIDDEN + MLP_HIDDEN), WEIGHT_DTYPE)
-                .persist(),
+            to_qkv_mlp_proj: cx.named_tensor_dtyped(
+                format!("{prefix}.to_qkv_mlp_proj.weight"),
+                (qkv_mlp_out, HIDDEN),
+                WEIGHT_DTYPE,
+            ),
+            norm_q: cx.named_tensor_dtyped(
+                format!("{prefix}.norm_q.weight"),
+                HEAD_DIM,
+                WEIGHT_DTYPE,
+            ),
+            norm_k: cx.named_tensor_dtyped(
+                format!("{prefix}.norm_k.weight"),
+                HEAD_DIM,
+                WEIGHT_DTYPE,
+            ),
+            to_out: cx.named_tensor_dtyped(
+                format!("{prefix}.to_out.weight"),
+                (HIDDEN, HIDDEN + MLP_HIDDEN),
+                WEIGHT_DTYPE,
+            ),
         }
     }
 
@@ -717,13 +716,12 @@ pub struct Flux2Transformer {
 }
 
 impl Flux2Transformer {
+    /// The complete black-forest-labs/FLUX.2-dev transformer: 8 double-stream
+    /// blocks followed by 48 single-stream blocks.
     pub fn init(cx: &mut Graph) -> Self {
         let bf16 = WEIGHT_DTYPE;
         let mk = |name: &str, shape: (usize, usize), cx: &mut Graph| -> GraphTensor {
-            cx.named_tensor_dtyped(name, shape, bf16).persist()
-        };
-        let mk1 = |name: &str, n: usize, cx: &mut Graph| -> GraphTensor {
-            cx.named_tensor_dtyped(name, n, bf16).persist()
+            cx.named_tensor_dtyped(name, shape, bf16)
         };
 
         let x_embedder = mk("x_embedder.weight", (HIDDEN, IN_CHANNELS), cx);
@@ -773,14 +771,13 @@ impl Flux2Transformer {
             cx,
         );
 
-        let transformer_blocks = (0..num_layers())
+        let transformer_blocks = (0..NUM_LAYERS)
             .map(|i| DoubleStreamBlock::new(i, cx))
             .collect();
-        let single_transformer_blocks = (0..num_single_layers())
+        let single_transformer_blocks = (0..NUM_SINGLE_LAYERS)
             .map(|i| SingleStreamBlock::new(i, cx))
             .collect();
 
-        let _ = mk1; // kept for parity if extra biases get added later
         Self {
             x_embedder,
             context_embedder,
@@ -879,49 +876,5 @@ impl Flux2Transformer {
         let modulated = ada_modulate(normed, scale, shift);
 
         linear_no_bias(modulated, self.proj_out)
-    }
-}
-
-// =============================================================================
-// Tests
-// =============================================================================
-
-#[cfg(test)]
-mod tests {
-    use luminal::hlir::CustomOpKind;
-
-    use super::*;
-
-    fn assert_no_custom_ops(cx: &Graph) {
-        assert!(
-            cx.custom_ops.is_empty(),
-            "Flux2 transformer helpers should use pure HLIR, not registered CustomOp wrappers"
-        );
-        let custom_nodes: Vec<_> = cx
-            .graph
-            .node_indices()
-            .filter(|&node| cx.try_get_op::<CustomOpKind>(node).is_some())
-            .collect();
-        assert!(
-            custom_nodes.is_empty(),
-            "Flux2 transformer graph contains CustomOpKind nodes: {custom_nodes:?}"
-        );
-    }
-
-    #[test]
-    fn transformer_helpers_use_no_custom_ops() {
-        let mut cx = Graph::default();
-
-        let x = cx.named_tensor("x", (3usize, 4usize));
-        let w = cx
-            .named_tensor_dtyped("w", (5usize, 4usize), WEIGHT_DTYPE);
-        let _ = linear_no_bias(x, w).output();
-
-        let q = cx.named_tensor("q", (2usize, 3usize, 4usize));
-        let k = cx.named_tensor("k", (2usize, 3usize, 4usize));
-        let v = cx.named_tensor("v", (2usize, 3usize, 4usize));
-        let _ = sdpa(q, k, v).output();
-
-        assert_no_custom_ops(&cx);
     }
 }

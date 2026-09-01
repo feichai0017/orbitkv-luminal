@@ -46,21 +46,6 @@ impl WhisperDims {
         }
     }
 
-    pub fn tiny() -> Self {
-        Self {
-            n_mels: 4,
-            audio_ctx: 6,
-            state: 8,
-            heads: 2,
-            audio_layers: 2,
-            text_layers: 2,
-            text_ctx: 8,
-            vocab: 19,
-            ff: 12,
-            eps: 1e-5,
-        }
-    }
-
     pub fn head_dim(&self) -> usize {
         self.state / self.heads
     }
@@ -230,9 +215,19 @@ impl Whisper {
             .collect();
         Self {
             dims: d.clone(),
-            conv1_w: cx.named_tensor(enc.child("conv1").leaf("weight"), (d.state, d.n_mels * 3)),
+            conv1_w: cx
+                .named_tensor(
+                    enc.child("conv1").leaf("weight"),
+                    (d.state, d.n_mels, 3usize),
+                )
+                .merge_dims(1, 2),
             conv1_b: cx.named_tensor(enc.child("conv1").leaf("bias"), d.state),
-            conv2_w: cx.named_tensor(enc.child("conv2").leaf("weight"), (d.state, d.state * 3)),
+            conv2_w: cx
+                .named_tensor(
+                    enc.child("conv2").leaf("weight"),
+                    (d.state, d.state, 3usize),
+                )
+                .merge_dims(1, 2),
             conv2_b: cx.named_tensor(enc.child("conv2").leaf("bias"), d.state),
             enc_pos: cx.named_tensor(
                 enc.child("embed_positions").leaf("weight"),
@@ -260,7 +255,7 @@ impl Whisper {
                 .attn
                 .bidirectional(layer.attn_norm.forward(x), layer.attn_norm.forward(x));
             let ff_in = layer.ff_norm.forward(x);
-            x = x + layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
+            x += layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
         }
         self.enc_final_norm.forward(x)
     }
@@ -291,13 +286,13 @@ impl Whisper {
                 scatter_idx,
                 q_pos,
             );
-            x = x + attn;
+            x += attn;
             caches_out.push((k_cache, v_cache));
             x = x + layer
                 .cross_attn
                 .bidirectional(layer.cross_norm.forward(x), xa);
             let ff_in = layer.ff_norm.forward(x);
-            x = x + layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
+            x += layer.fc2.forward(layer.fc1.forward(ff_in).gelu());
         }
         let x = self.dec_final_norm.forward(x);
         (self.embed.reverse(x), caches_out)

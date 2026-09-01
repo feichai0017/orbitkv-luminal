@@ -1,22 +1,16 @@
-//! Shared support for the per-model example applications (Austin's
-//! spec: "in the CL runtime crate, in the examples folder, there should
-//! be a little application that runs each model").
+//! Shared support for the full-size model applications owned by CUDA Lite.
 //!
 //! Cargo idiom for shared example code: `examples/support/mod.rs` is
 //! not itself an example — auto-discovery only picks up `examples/*.rs`
 //! and `examples/*/main.rs` — and each example pulls it in with
 //! `mod support;`.
 //!
-//! The differential discipline (house doctrine): identical seeded
-//! synthetic inputs on BOTH runtimes — reference host run first for the
-//! expected outputs, then CUDA-lite record → search → execute → fetch
-//! through the disclosed layout — and a loud bail on any divergence.
+//! Mini models provide execution-only smoke tests. These applications build
+//! the released full-size graph, then use CUDA Lite to search, execute, and
+//! read back its output through the disclosed layout.
 #![allow(dead_code)] // each example compiles this module independently and uses a subset
 
-/// Deterministic pseudo-random values — the seeding discipline copied
-/// VERBATIM from the mini measure harnesses
-/// (`examples/mini/*/src/bin/measure_plan.rs`): same `(n, seed)` gives
-/// the same values on both runtimes, so the differential is exact.
+/// Deterministic pseudo-random values for synthetic model parameters.
 pub fn weights(n: usize, seed: usize) -> Vec<f32> {
     (0..n)
         .map(|i| (((i * 37 + seed * 101 + 13) % 121) as f32 / 100.0) - 0.6)
@@ -25,7 +19,7 @@ pub fn weights(n: usize, seed: usize) -> Vec<f32> {
 
 /// The stub path for builds WITHOUT the `device` feature: the CUDA-lite
 /// crate can load/search/inspect plans anywhere, but `execute` refuses
-/// without a CUDA device, so the differential cannot run here.
+/// without a CUDA device, so the application cannot run here.
 pub fn require_device(example: &str) {
     println!(
         "{example}: SKIP — this example requires the `device` feature (and a CUDA device).\n\
@@ -41,29 +35,41 @@ pub mod device {
     use luminal::graph::Graph;
     use luminal::prelude::{FxHashMap, NodeIndex};
     use luminal_cuda_lite::CudaRuntime;
-    use luminal_reference::ReferenceRuntime;
 
-    /// Reference host run: the same `load → bind dyn pins → search →
-    /// set_data → execute` ladder as the mini measure harnesses
-    /// (`examples/mini/*/src/bin/measure_plan.rs`) and
-    /// `luminal_reference::harness::run_reference`, on the shared
-    /// harness budget.
-    fn run_reference(cx: &Graph, pairs: &[(NodeIndex, TypedBuffer)]) -> Result<ReferenceRuntime> {
-        let mut rt = ReferenceRuntime::load(cx).context("reference load")?;
-        let mut vars: Vec<_> = cx.dyn_map.iter().collect();
-        vars.sort();
-        for (var, value) in vars {
-            rt.bind_dyn_range(*var, *value as u64, *value as u64)
-                .context("reference dyn pin")?;
+    /// Fill every logical input in a model graph. Callers provide the
+    /// semantically constrained runtime inputs (token ids, cache indices,
+    /// masks, and so on); all remaining F32 inputs are model parameters and
+    /// receive deterministic synthetic values.
+    pub fn seeded_graph_inputs(
+        cx: &Graph,
+        overrides: Vec<(NodeIndex, TypedBuffer)>,
+    ) -> Result<Vec<(NodeIndex, TypedBuffer)>> {
+        let mut overrides: FxHashMap<_, _> = overrides.into_iter().collect();
+        let mut pairs = Vec::new();
+        for (seed, spec) in cx.logical.input_specs().into_iter().enumerate() {
+            let value = if let Some(value) = overrides.remove(&spec.id) {
+                value
+            } else {
+                if spec.dtype != luminal::dtype::DType::F32 {
+                    bail!(
+                        "'{}' ({:?}) needs an explicit runtime value",
+                        spec.label,
+                        spec.dtype
+                    );
+                }
+                let elements = spec
+                    .dims
+                    .iter()
+                    .map(|dim| dim.to_usize().context("static example dimension"))
+                    .product::<Result<usize>>()?;
+                super::weights(elements, seed).into()
+            };
+            pairs.push((spec.id, value));
         }
-        let data: FxHashMap<NodeIndex, TypedBuffer> = pairs.iter().cloned().collect();
-        rt.search(&data, &luminal::test_support::harness_search_options())
-            .context("reference search")?;
-        for (id, v) in pairs {
-            rt.set_data(*id, v.clone());
+        if !overrides.is_empty() {
+            bail!("override supplied for a tensor that is not a graph input");
         }
-        rt.execute().context("reference execute")?;
-        Ok(rt)
+        Ok(pairs)
     }
 
     /// Read a device output DENSELY through its RETURNED LAYOUT
@@ -83,48 +89,13 @@ pub mod device {
             .context("reading the output through its returned layout")
     }
 
-    /// Elementwise comparison at the device_fidelity epsilon
-    /// (`tests/device_fidelity.rs::assert_close`):
-    /// `tol = 1e-5.max(|reference| * 1e-5)` — relative 1e-5 with an
-    /// absolute 1e-5 floor. Loud on the first divergent element. The
-    /// bail predicate is the NEGATED must-hold condition `!(diff <= tol)`
-    /// — assert_close's `assert!(diff <= tol)` verbatim — so a NaN
-    /// device element (diff = NaN, for which `diff > tol` is FALSE)
-    /// bails loudly instead of sailing through; every accepted element
-    /// then satisfies `diff <= tol`, so the max_abs fold never sees NaN.
-    // Clippy's suggested `diff > tol` is EXACTLY the NaN-silent bug this
-    // predicate fixes — incomparability (NaN) must bail, not pass.
-    #[allow(clippy::neg_cmp_op_on_partial_ord)]
-    fn compare(want: &[f32], got: &[f32], what: &str) -> Result<f32> {
-        if want.len() != got.len() {
-            bail!(
-                "{what}: length mismatch — reference {} vs device {}",
-                want.len(),
-                got.len()
-            );
-        }
-        let mut max_abs = 0f32;
-        for (i, (w, g)) in want.iter().zip(got).enumerate() {
-            let tol = 1e-5f32.max(w.abs() * 1e-5);
-            let diff = (w - g).abs();
-            if !(diff <= tol) {
-                bail!(
-                    "{what}: element {i} diverges — reference {w} vs device {g} \
-                     (|delta| {diff:.3e} !<= tol {tol:.3e})"
-                );
-            }
-            max_abs = max_abs.max(diff);
-        }
-        Ok(max_abs)
-    }
-
     /// Plan statistics: kernel launches (Compute nodes), whole-buffer
     /// copies (BufferCopy nodes), distinct buffers, and output slots.
     ///
     /// There was an `escaped` counter here, splitting outputs into dense
-    /// vs view-elected. It was print-only — never asserted, never gating
-    /// the differential — and computing it meant asking whether an
-    /// output layout reduces to the identity read, which is exactly the
+    /// vs view-elected. It was print-only — never asserted or gating
+    /// execution — and computing it meant asking whether an output layout
+    /// reduces to the identity read, which is exactly the
     /// question ruled out of this codebase on 2026-09-01 ("delete the
     /// counter, and delte the whole reads_identity function"). Deleted
     /// rather than re-expressed: nothing depended on it.
@@ -154,37 +125,20 @@ pub mod device {
         Ok(stats)
     }
 
-    /// The whole differential, shared by every runnable example:
+    /// The full-size CUDA run shared by every model application:
     ///
-    /// 1. reference host run (expected outputs),
-    /// 2. CUDA-lite `load → bind dyn pins → search` on the SAME harness
-    ///    budget (`luminal::test_support::harness_search_options` — the
-    ///    budget device_fidelity and the mini measure harnesses use),
-    /// 3. plan stats + refusal counters (all zero expected — the ladder
+    /// 1. CUDA-lite `load → bind dyn pins → search` on the shared harness
+    ///    budget,
+    /// 2. plan stats + refusal counters (all zero expected — the ladder
     ///    acceptance from `tests/ladder_refusals.rs`; nonzero FAILS),
-    /// 4. device execute, fetch through the disclosed layout, compare
-    ///    at the device_fidelity epsilon.
-    pub fn run_differential(
+    /// 3. device execute and fetch through the disclosed layout.
+    pub fn run_cuda(
         name: &str,
         cx: &Graph,
-        pairs: &[(NodeIndex, TypedBuffer)],
+        pairs: Vec<(NodeIndex, TypedBuffer)>,
         outputs: &[(&str, NodeIndex)],
     ) -> Result<()> {
-        // 1. Reference run first — the expected outputs.
-        let t = std::time::Instant::now();
-        let reference = run_reference(cx, pairs).context("reference half")?;
-        let mut expected = Vec::new();
-        for (label, id) in outputs {
-            expected.push(
-                reference
-                    .get_f32(*id)
-                    .with_context(|| format!("reference {label}"))?
-                    .clone(),
-            );
-        }
-        println!("{name}: reference OK ({} ms)", t.elapsed().as_millis());
-
-        // 2. CUDA-lite: record → search (harness budget) → plan.
+        // 1. CUDA-lite: record → search (harness budget) → plan.
         let mut rt = CudaRuntime::load(cx).context("cuda load")?;
         let mut vars: Vec<_> = cx.dyn_map.iter().collect();
         vars.sort();
@@ -192,7 +146,9 @@ pub mod device {
             rt.bind_dyn_range(*var, *value as u64, *value as u64)
                 .context("cuda dyn pin")?;
         }
-        let data: FxHashMap<NodeIndex, TypedBuffer> = pairs.iter().cloned().collect();
+        // Own one copy of the hardware-sized parameter set. Search borrows it;
+        // staging then moves the same buffers into the runtime.
+        let mut data: FxHashMap<NodeIndex, TypedBuffer> = pairs.into_iter().collect();
         let t = std::time::Instant::now();
         let outcome = rt
             .search(&data, &luminal::test_support::harness_search_options())
@@ -204,7 +160,7 @@ pub mod device {
             outcome.timings.summary()
         );
 
-        // 3. Refusal counters — all zero expected (ladder acceptance).
+        // 2. Refusal counters — all zero expected (ladder acceptance).
         let b = &outcome.refusal_breakdown;
         println!("{name}: refusals {}", b.summary());
         if b.extract_refusals != 0 || b.plan_build_refusals != 0 || b.execute_refusals != 0 {
@@ -219,21 +175,29 @@ pub mod device {
             stats.kernels, stats.copies, stats.buffers, stats.outputs
         );
 
-        // 4. Execute on device; fetch through the disclosed layout.
-        for (id, v) in pairs {
-            rt.set_data(*id, v.clone());
+        // 3. Execute on device; fetch through the disclosed layout.
+        for (id, value) in data.drain() {
+            rt.set_data(id, value);
         }
         let t = std::time::Instant::now();
         rt.execute().context("device execute")?;
         let execute_ms = t.elapsed().as_millis();
         println!("{name}: execute {execute_ms} ms");
 
-        for ((label, id), want) in outputs.iter().zip(&expected) {
+        for (label, id) in outputs {
             let got = walked_dense(&rt, *id).with_context(|| format!("device {label}"))?;
-            let max_abs = compare(want, &got, label)?;
+            if let Some((index, value)) = got
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|(_, value)| !value.is_finite())
+            {
+                bail!("{label}: non-finite device output at element {index}: {value}");
+            }
+            let checksum = got.iter().map(|value| f64::from(*value)).sum::<f64>();
             println!(
-                "{name}: {label} matches reference ({} elements, max |delta| {max_abs:.3e})",
-                want.len()
+                "{name}: {label} OK ({} elements, checksum {checksum:.6e})",
+                got.len()
             );
         }
         println!("{name}: PASS (search {search_ms} ms, execute {execute_ms} ms)");

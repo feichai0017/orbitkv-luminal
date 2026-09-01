@@ -182,9 +182,9 @@ impl<'a> Translator<'a> {
     ///
     /// The per-group volume is flattened into ONE axis before normalizing rather than
     /// reducing over multiple axes: the multi-axis reduction form is dropped by the
-    /// e-graph during cleanup when composed into deep conv chains (see the note in
-    /// `examples/flux2/src/vae.rs`). Reshapes use `IntExpr` extents throughout, so
-    /// dynamic batch and dynamic spatial dims are preserved.
+    /// e-graph during cleanup when composed into deep convolution chains. Reshapes
+    /// use `IntExpr` extents throughout, so dynamic batch and dynamic spatial dims
+    /// are preserved.
     pub(crate) fn translate_group_norm(&mut self, node: &Node) -> Result<GraphTensor> {
         let input = self.get_input_tensor(node, 0)?;
         let num_groups = self.get_int_arg(node, 6)? as usize;

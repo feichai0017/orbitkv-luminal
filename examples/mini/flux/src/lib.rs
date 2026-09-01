@@ -1,8 +1,6 @@
-//! MiniDit — the flux2 family mini MODEL DEFINITION (relocated out of
-//! luminal_nn 2026-08-13: model definitions live in their example
-//! crates; luminal_nn keeps only the building blocks). The runner in
-//! src/main.rs drives one denoising velocity prediction; the scalar
-//! fidelity test lives in tests/fidelity.rs.
+//! MiniDit — the backend-neutral FLUX.2 family model definition.
+//!
+//! Runtime applications and execution smoke tests live in runtime crates.
 
 use luminal::prelude::*;
 use luminal_nn::{scatter_rows, LayerNorm, Linear};
