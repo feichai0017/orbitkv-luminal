@@ -94,14 +94,19 @@ impl CodegenCtx {
         // HOME is the rewrite that elects the destination layout, not a
         // re-check in the backend after the fact.
         //
-        // THE GAP, STATED PLAINLY. That egglog constraint IS NOT WRITTEN
-        // YET — the estate is frozen and the shape has not been ruled on
-        // (op-match side vs a separate guard rule). Until it lands, a
-        // non-dense elected destination is UNGUARDED: it does not refuse,
-        // it CORRUPTS. Every kernel still writes `out[i]`, so the bytes
-        // land at the wrong addresses silently, and no test here will say
-        // so. This is the one deletion in this change whose failure mode
-        // is wrong answers rather than slow ones.
+        // THE CONSTRAINT LANDED same day (ruling: op-match side, "only
+        // do the code gen'd kernels"). Every codegen'd kernel's egglog
+        // match rule now fires only when the out class carries the
+        // right-major contiguous spelling —
+        // `(= ?out_layout (RightMajorContiguousElementLayoutLit ...))`
+        // in every `ops/*/match_functional.egg` — so a non-dense
+        // destination is UNELECTABLE, not merely unfenced. Exempt by
+        // ruling: the view op (writes nothing; its out layout is
+        // required to be the composed spelling) and cuBLASLt ("that has
+        // their own rules"; `bind_destination` refuses loudly at the
+        // host-call layer). `tests/view_admission.rs` asserts of every
+        // elected compute result that its layout IS the flat index —
+        // that assertion is this constraint's regression test.
         //
         // Reading the plan's elected destination layout to re-check it
         // here is exactly what was ruled out; do not reintroduce it.

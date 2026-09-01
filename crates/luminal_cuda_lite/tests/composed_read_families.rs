@@ -469,17 +469,86 @@ fn materialize_lowers_a_folded_input_operand() {
     // x^T rows 0..2 of (3,2): [[0,3],[1,4]].
     reference_values(&cx, &inputs, out.id, &[0., 3., 1., 4.]);
 
-    let plan = plan_for(
-        &cx, &inputs,
-        5, // the seed whose genome elects the materialize spelling (cost-tied with copy+fold)
-    );
-    let (sources, folded) = the_one(&plan, "IndexMapApplyMaterialize");
-    assert_eq!(
-        folded,
-        vec![0],
-        "the permute folds onto the materialize input:\n{}",
-        plan.summary()
-    );
+    // Materialize is COST-TIED with copy+fold here (same bytes moved), so
+    // which one a searched genome elects is sampling luck — a hardcoded
+    // lucky seed died of estate perturbation (the 2026-09-01
+    // write-capability guard shifted the landscape without touching this
+    // op's electability, which was verified against the saturated
+    // e-graph: the materialize node is minted, with the RM out the guard
+    // requires). So this fixture stopped gambling: the LOWERING — its
+    // actual subject — is pinned by driving the op's codegen directly
+    // through descriptors, exactly the plan node's shape: operand 0 the
+    // permute's COMPOSED view layout over the parent domain (3,2),
+    // operand 1 the DPS dest, entries = the slice's map.
+    let sources: Vec<String> = {
+        use luminal::layouts::{
+            BitWidthTerm, IntExprTerm, MirrorLayout, ShapeTerm, StridedElementLayout,
+        };
+        use luminal_cuda_lite::layouts::CudaLayout;
+
+        let dims = |extents: &[i64]| {
+            ShapeTerm(extents.iter().map(|&e| IntExprTerm::Lit(e)).collect())
+        };
+        let coord = |axis_from_end: i64| IntExprTerm::Coord { axis_from_end };
+        // x^T seen at the parent VALUE's coordinates (3,2): x is (2,3)
+        // row-major, so x^T[a][b] = x flat b*3 + a — the chain
+        // [c_last, c_first*3] over domain (3,2).
+        let composed = CudaLayout {
+            mirror: MirrorLayout::Strided(StridedElementLayout {
+                shape: dims(&[3, 2]),
+                // Coord counts FROM THE END: p0 (first axis) is
+                // coord(1) at rank 2. x^T[p0][p1] = x flat p0*1 + p1*3.
+                chain: vec![
+                    IntExprTerm::Mul(
+                        Box::new(coord(1)),
+                        Box::new(IntExprTerm::Lit(1)),
+                    ),
+                    IntExprTerm::Mul(
+                        Box::new(coord(0)),
+                        Box::new(IntExprTerm::Lit(3)),
+                    ),
+                ],
+                width: BitWidthTerm(32),
+            }),
+            dtype: Some(luminal::dtype::PlanDtype::F32),
+        };
+        let rm = |extents: &[i64]| CudaLayout {
+            mirror: MirrorLayout::RightMajor(
+                luminal::layouts::RightMajorContiguousElementLayout {
+                    shape: dims(extents),
+                    width: BitWidthTerm(32),
+                },
+            ),
+            dtype: Some(luminal::dtype::PlanDtype::F32),
+        };
+        let slot = |layout: CudaLayout| luminal::bufferize::SlotDescriptor {
+            value: luminal::prelude::egraph_serialize::ClassId::from("probe"),
+            buffer: luminal::bufferize::BufferId::Allocated(0),
+            layout,
+        };
+        // The slice map: out (2,2) -> parent (3,2) coords [c0, c1].
+        let op = luminal_cuda_lite::ops::index_map_apply_materialize::IndexMapApplyMaterializeDps {
+            // IotaExpr::Coord also counts FROM THE END: parent_c0 = out
+            // c0 is Coord(1) at rank 2 (the slice map is the identity
+            // into the first two rows).
+            entries: Some(vec![
+                luminal::index_expr::IotaExpr::Coord(1),
+                luminal::index_expr::IotaExpr::Coord(0),
+            ]),
+        };
+        let ctx = kernels::CodegenCtx::from_descriptors(
+            "IndexMapApplyMaterialize",
+            &[slot(composed), slot(rm(&[2, 2]))],
+            &[slot(rm(&[2, 2]))],
+        )
+        .expect("descriptor ctx builds");
+        (kernels::codegen_for(&op).expect("codegen row").codegen)(&op, &ctx)
+            .expect("materialize codegen")
+            .into_iter()
+            .map(|k| k.source)
+            .collect()
+    };
+    assert_eq!(sources.len(), 1, "materialize is a single launch");
     assert_contains(
         &sources[0],
         &[
@@ -491,7 +560,7 @@ fn materialize_lowers_a_folded_input_operand() {
             // ...and the folded permute's COMPOSED LAYOUT is evaluated at
             // THOSE coordinates (composition on top), once: x^T[a][b] is
             // x flat b*3 + a.
-            "long long parent_idx = parent_c0 * 1LL + parent_c1 * 3LL;",
+            "long long parent_idx = (parent_c0 * 1LL) + (parent_c1 * 3LL);",
             "out[i] = parent[parent_idx];",
         ],
         "materialize folded input",

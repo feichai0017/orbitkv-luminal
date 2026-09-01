@@ -5,6 +5,11 @@
   (
     (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?in_layout))
     (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    ; WRITE CAPABILITY (ruling 2026-09-01): this backend's kernels write
+    ; `out[i]`, so the rewrite fires only when the out class carries the
+    ; right-major contiguous spelling. The e-graph joins equivalent
+    ; spellings; the matcher matches the hardware's literal one.
+    (= ?out_layout (RightMajorContiguousElementLayoutLit ?out_rm_shape ?out_rm_bits))
     (= ?out_logical (LogicalReduceSum ?in_logical ?reduction_dim))
     (= ?value_dtype (dtype-of ?out_logical))
     (!= ?value_dtype (Int))
@@ -30,6 +35,11 @@
   (
     (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?in_layout))
     (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    ; WRITE CAPABILITY (ruling 2026-09-01): this backend's kernels write
+    ; `out[i]`, so the rewrite fires only when the out class carries the
+    ; right-major contiguous spelling. The e-graph joins equivalent
+    ; spellings; the matcher matches the hardware's literal one.
+    (= ?out_layout (RightMajorContiguousElementLayoutLit ?out_rm_shape ?out_rm_bits))
     (= ?out_logical (LogicalReduceSum ?in_logical ?reduction_dim))
     (= (dtype-of ?out_logical) (Int))
     (= ?value_lower (value-lower-bound-of ?out_logical))
@@ -57,6 +67,11 @@
   (
     (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?in_layout))
     (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    ; WRITE CAPABILITY (ruling 2026-09-01): this backend's kernels write
+    ; `out[i]`, so the rewrite fires only when the out class carries the
+    ; right-major contiguous spelling. The e-graph joins equivalent
+    ; spellings; the matcher matches the hardware's literal one.
+    (= ?out_layout (RightMajorContiguousElementLayoutLit ?out_rm_shape ?out_rm_bits))
     (= ?out_logical (LogicalReduceSum ?in_logical ?reduction_dim))
     (= (dtype-of ?out_logical) (Int64))
     (= ?value_lower (value-lower-bound-of ?out_logical))
