@@ -63,30 +63,32 @@ impl Neg for GraphTensor {
 impl GraphTensor {
     /// Base 2 log
     pub fn log2(self) -> GraphTensor {
-        let new_id = self.graph().mint_id();
-        let logical = self.graph().logical.op(
-            new_id.index(),
-            "LogicalLog2",
-            &[(self.logical_value, self.dims())],
-            "",
-            self.dims(),
-            self.dtype,
-        );
-        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype).with_logical(logical)
+        let new_id = self
+            .graph()
+            .logical
+            .op(
+                LogicalOp::Log2,
+                &[(self.id, self.dims())],
+                self.dims(),
+                self.dtype,
+            )
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
+        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 
     /// Base 2 exp
     pub fn exp2(self) -> GraphTensor {
-        let new_id = self.graph().mint_id();
-        let logical = self.graph().logical.op(
-            new_id.index(),
-            "LogicalExp2",
-            &[(self.logical_value, self.dims())],
-            "",
-            self.dims(),
-            self.dtype,
-        );
-        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype).with_logical(logical)
+        let new_id = self
+            .graph()
+            .logical
+            .op(
+                LogicalOp::Exp2,
+                &[(self.id, self.dims())],
+                self.dims(),
+                self.dtype,
+            )
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
+        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 
     /// Natural exp
@@ -101,30 +103,32 @@ impl GraphTensor {
 
     /// Take the reciprocal of each element
     pub fn reciprocal(self) -> GraphTensor {
-        let new_id = self.graph().mint_id();
-        let logical = self.graph().logical.op(
-            new_id.index(),
-            "LogicalRecip",
-            &[(self.logical_value, self.dims())],
-            "",
-            self.dims(),
-            self.dtype,
-        );
-        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype).with_logical(logical)
+        let new_id = self
+            .graph()
+            .logical
+            .op(
+                LogicalOp::Recip,
+                &[(self.id, self.dims())],
+                self.dims(),
+                self.dtype,
+            )
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
+        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 
     /// The sin(x) function
     pub fn sin(self) -> GraphTensor {
-        let new_id = self.graph().mint_id();
-        let logical = self.graph().logical.op(
-            new_id.index(),
-            "LogicalSin",
-            &[(self.logical_value, self.dims())],
-            "",
-            self.dims(),
-            self.dtype,
-        );
-        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype).with_logical(logical)
+        let new_id = self
+            .graph()
+            .logical
+            .op(
+                LogicalOp::Sin,
+                &[(self.id, self.dims())],
+                self.dims(),
+                self.dtype,
+            )
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
+        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 
     /// The cos(x) function
@@ -139,16 +143,17 @@ impl GraphTensor {
 
     /// The square root function
     pub fn sqrt(self) -> GraphTensor {
-        let new_id = self.graph().mint_id();
-        let logical = self.graph().logical.op(
-            new_id.index(),
-            "LogicalSqrt",
-            &[(self.logical_value, self.dims())],
-            "",
-            self.dims(),
-            self.dtype,
-        );
-        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype).with_logical(logical)
+        let new_id = self
+            .graph()
+            .logical
+            .op(
+                LogicalOp::Sqrt,
+                &[(self.id, self.dims())],
+                self.dims(),
+                self.dtype,
+            )
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
+        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 
     /// Scale so std is 1.0

@@ -15,11 +15,11 @@ fn base_program() -> String {
 /// Probe (i): does the EGGLOG side accept a null LayoutTensor term, and
 /// does any rule derive facts (injectivity, shape) for it?
 ///
-/// Row ids below track the RECORDED matmul spelling: the transparent
-/// recorder (fold-2 removed) numbers rows densely — v0/v1 inputs,
-/// v2/v4... broadcast applies, and the output ReduceSum lands on v5
-/// (the old recorder skipped an id for a folded intermediate, putting
-/// it on v6). Setup, not subject: the site refs just have to bind.
+/// Row ids below track the RECORDED matmul spelling (v0/v1 inputs, the
+/// output ReduceSum on v5). The OUTPUT STEM is DERIVED from the program
+/// text rather than tracked by hand — it is keyed by the output node's
+/// id, which has already shifted twice (fold-2 removal; PR #423's
+/// petgraph numbering). Setup, not subject: the refs just have to bind.
 #[test]
 fn nulltensor_probe_egglog_side() {
     let base = base_program();
@@ -57,9 +57,19 @@ fn nulltensor_probe_egglog_side() {
 /// Probe (ii): a fixed-arity Lit [a, b, null] unioned into the real op
 /// class — what do the cost layer / operand walk do with an input that has
 /// no producer and no buffer?
+/// The recorded output stem (`natout{K}`), read off the program text —
+/// K is the output NODE's id and shifts whenever recorder numbering
+/// does; hardcoding it is how this probe has broken twice.
+fn output_stem(base: &str) -> String {
+    let start = base.find("natout").expect("bound program has an output stem");
+    let digits: String = base[start + 6..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    format!("natout{digits}")
+}
+
 #[test]
 fn nulltensor_probe_extraction_side() {
     let base = base_program();
+    let stem = output_stem(&base);
     let fx = format!(
         r#"{base}
 (constructor CublasLtNullTensor (CublasLtLogicalSite) LayoutTensor)
@@ -69,14 +79,14 @@ fn nulltensor_probe_extraction_side() {
   (CublasLtOperationN)))
 (let probe_desc_b (CublasLtOperandBDescriptor probe_site nat0_layout_tensor
   (CublasLtOperationN)))
-(let probe_desc_d (CublasLtOutputDDescriptor probe_site natout3_layout_tensor))
+(let probe_desc_d (CublasLtOutputDDescriptor probe_site {stem}_layout_tensor))
 (let probe_op (LayoutTensorOpCublasLt probe_site probe_desc_a probe_desc_b probe_desc_d
   (CublasLtEpilogueDefault)))
 (let probe_lit (LayoutTensorOpLit
   (LayoutTensorCons nat0_layout_tensor
     (LayoutTensorCons nat1_layout_tensor
       (LayoutTensorCons probe_null (LayoutTensorNil))))
-  (LayoutTensorCons natout3_layout_tensor (LayoutTensorNil))))
+  (LayoutTensorCons {stem}_layout_tensor (LayoutTensorNil))))
 (union probe_lit probe_op)
 "#
     );

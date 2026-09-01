@@ -4,24 +4,20 @@ impl Graph {
     /// A scalar expression constant
     pub fn constant(&mut self, i: impl Into<IntExpr>) -> GraphTensor {
         let expr = i.into();
-        let id = self.mint_id();
-        let tensor = GraphTensor::from_id(id, (), self, DType::Int);
-        let logical = self.logical.record_iota(id.index(), &expr, &[]);
-        tensor.with_logical(logical)
+        let id = self
+            .logical
+            .record_iota(&expr, &[])
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
+        GraphTensor::from_id(id, (), self, DType::Int)
     }
 
     /// A scalar float constant
     pub fn constant_float(&mut self, i: f32) -> GraphTensor {
-        let id = self.mint_id();
-        let tensor = GraphTensor::from_id(id, (), self, DType::F32);
-        let logical = self.logical.source_op(
-            id.index(),
-            "LogicalConstant",
-            &format!("{:?}", i as f64),
-            Vec::new(),
-            DType::F32,
-        );
-        tensor.with_logical(logical)
+        let id = self
+            .logical
+            .op(LogicalOp::Constant(i as f64), &[], Vec::new(), DType::F32)
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
+        GraphTensor::from_id(id, (), self, DType::F32)
     }
 
     /// Iota as a TRUE COORDINATE FUNCTION (P1 ruling 2026-08-07): the
@@ -47,10 +43,11 @@ impl Graph {
         // 2026-08-27): the recorded value expression is
         // construction-simplified, as pre-R-C.
         let expr = f(&coords).simplify();
-        let id = self.mint_id();
-        let tensor = GraphTensor::from_id(id, sh.clone(), self, DType::Int);
-        let logical = self.logical.record_iota(id.index(), &expr, &sh);
-        tensor.with_logical(logical)
+        let id = self
+            .logical
+            .record_iota(&expr, &sh)
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
+        GraphTensor::from_id(id, sh, self, DType::Int)
     }
 
     /// ARange from 0 to N
@@ -137,21 +134,15 @@ impl GraphTensor {
             let zero_f32 = self.graph().constant_float(0.0).expand_rhs(self.dims());
             return zero_f32.lt(sum);
         }
-        let id = self.graph().mint_id();
-        let operand = (self.logical_value, self.dims());
+        let operand = (self.id, self.dims());
         let out_dims = self.dims();
-        let logical = self.graph().logical.op(
-            id.index(),
-            "LogicalCast",
-            &[operand],
-            &format!("({dtype:?})"),
-            out_dims,
-            dtype,
-        );
-        GraphTensor::from_id(id, self.dims(), self.graph_ref, dtype).with_logical(logical)
+        let id = self
+            .graph()
+            .logical
+            .op(LogicalOp::Cast(dtype), &[operand], out_dims, dtype)
+            .unwrap_or_else(|| crate::graph::unrecorded_value());
+        GraphTensor::from_id(id, self.dims(), self.graph_ref, dtype)
     }
-
-
 }
 
 #[cfg(test)]

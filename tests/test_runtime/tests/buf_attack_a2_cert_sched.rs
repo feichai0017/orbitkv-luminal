@@ -157,13 +157,17 @@ fn a2_view_fanout() {
 }
 
 /// Same matmul value bound to two slots: direct + through a transpose view.
-/// FINDING (2026-08-26): this configuration is unreachable through the
-/// native recorder — both outputs mint `natout3_layout` with conflicting
-/// shapes ((3,4) vs (4,3)) and egglog rejects the shadowing before the
-/// planner runs. The advocate's case (c) is therefore cold via this
-/// frontend spelling; pinned as a should_panic.
+/// FINDING (2026-08-26): under the shared-handle-id recorder both outputs
+/// minted ONE `natout` stem with conflicting shapes and egglog rejected
+/// the shadowing before the planner ran — pinned then as should_panic
+/// ("the advocate's case (c) is cold via this frontend spelling").
+/// RE-FOUND (2026-09-01, PR #423): `GraphTensor.id` is the canonical SSA
+/// identity, so the transpose view and the direct binding are DIFFERENT
+/// nodes with distinct stems — the configuration is now reachable and
+/// well-formed. The pin flips: it must build cleanly and plan two
+/// distinct output slots (the advocate's case (c) is live; this board
+/// now covers it for real).
 #[test]
-#[should_panic(expected = "Shadowing")]
 fn a2_two_slots_same_value() {
     let text = {
         let mut cx = Graph::new();

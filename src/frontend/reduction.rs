@@ -3,24 +3,22 @@ use crate::prelude::*;
 impl GraphTensor {
     /// Reduce a dimension of the tensor by summing all elements along that axis.
     pub fn sum(self, axes: impl ToAxes) -> GraphTensor {
-        self.reduce("LogicalReduceSum", axes)
+        self.reduce(false, axes)
     }
 
     /// Reduce a dimension of the tensor by taking the maximum of all elements along that axis.
     pub fn max(self, axes: impl ToAxes) -> GraphTensor {
-        self.reduce("LogicalReduceMax", axes)
+        self.reduce(true, axes)
     }
 
     /// One recorded reduce per axis; the operand for the FIRST reduce is
     /// self's value, later reduces consume the previous reduce's result.
-    fn reduce(self, constructor: &str, axes: impl ToAxes) -> GraphTensor {
+    fn reduce(self, is_max: bool, axes: impl ToAxes) -> GraphTensor {
         let (mut dims, mut id) = (self.dims(), self.id);
         let mut axes = axes.to_axes();
-        let mut operand_value = self.logical_value;
         for dim in 0..axes.len() {
             let operand_dims = dims.clone();
-            id = self.graph().mint_id();
-            if constructor == "LogicalReduceMax" {
+            if is_max {
                 // The empty max has no value (extent-0 ruling
                 // 2026-08-13): the reduced axis contracts to >= 1 —
                 // static extents discharge trivially; symbolic ones
@@ -35,14 +33,16 @@ impl GraphTensor {
             let axis_from_end = rank - 1 - axes[dim];
             let mut out_dims = operand_dims.clone();
             out_dims.remove(axes[dim]);
-            operand_value = self.graph().logical.op(
-                id.index(),
-                constructor,
-                &[(operand_value, operand_dims)],
-                &axis_from_end.to_string(),
-                out_dims.clone(),
-                self.dtype,
-            );
+            let op = if is_max {
+                LogicalOp::ReduceMax { axis_from_end }
+            } else {
+                LogicalOp::ReduceSum { axis_from_end }
+            };
+            id = self
+                .graph()
+                .logical
+                .op(op, &[(id, operand_dims)], out_dims.clone(), self.dtype)
+                .unwrap_or_else(|| crate::graph::unrecorded_value());
             dims = out_dims;
             let axis = axes[dim];
             for ax in &mut axes {
@@ -51,7 +51,7 @@ impl GraphTensor {
                 }
             }
         }
-        GraphTensor::from_id(id, dims, self.graph_ref, self.dtype).with_logical(operand_value)
+        GraphTensor::from_id(id, dims, self.graph_ref, self.dtype)
     }
 
     /// Reduce a dimension of the tensor by taking the minimum of all elements along that axis.

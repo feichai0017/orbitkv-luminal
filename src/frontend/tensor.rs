@@ -29,9 +29,6 @@ pub struct GraphTensor {
     /// `with_logical` after every record call — never hand-maintained.
     pub(crate) dims: ArrayVec<[IntExpr; 10]>,
     pub dtype: DType,
-    /// The SSA value this handle names in the logical graph (M3 Step 4a).
-    /// `None` = unrecorded (a poisoned/uncovered path).
-    pub logical_value: Option<crate::graph::ValueId>,
 }
 
 impl From<&GraphTensor> for GraphTensor {
@@ -51,31 +48,30 @@ impl GraphTensor {
         Self {
             id,
             graph_ref,
-            logical_value: None,
             dims: shape.to_shape().into_iter().collect(),
             dtype,
         }
     }
 
-    /// Attach the recorded logical value to this handle AND derive the
-    /// dims field from it (R-D ruling 2026-08-26: the recorder's stored
-    /// `Value.dims` are THE dims; this field is their cache for the
-    /// current value — no frontend method keeps parallel dims
-    /// arithmetic). `None` (poisoned/unrecorded) keeps the current dims
-    /// so reads stay panic-free; the graph fails at `native_program`
-    /// with the poison reason.
+    /// Adopt the recorded logical value: the handle's id BECOMES the
+    /// value (`GraphTensor.id` is the canonical SSA identity, PR #423)
+    /// AND the dims derive from the recorder (R-D ruling 2026-08-26,
+    /// reasserted 2026-09-01: the recorder's dims are THE dims; no
+    /// frontend method keeps parallel dims arithmetic). `None`
+    /// (poisoned/unrecorded) keeps the current id and dims so reads
+    /// stay panic-free; the graph fails at load with the poison reason.
     pub(crate) fn with_logical(
         mut self,
         value: Option<crate::graph::ValueId>,
     ) -> Self {
-        self.logical_value = value;
         if let Some(id) = value {
+            self.id = id;
             self.dims = self
                 .graph()
                 .logical
                 .value_dims(id)
                 .iter()
-                .copied()
+                .cloned()
                 .collect();
         }
         self
@@ -99,12 +95,7 @@ impl GraphTensor {
     pub fn output(&self) -> GraphTensor {
         let source = *self;
         let dims = source.dims();
-        self.graph().logical.output(
-            source.id.index(),
-            &(source.logical_value, dims),
-            source.id.index(),
-            None,
-        );
+        self.graph().logical.output(&(source.id, dims), None);
         source
     }
 
@@ -114,12 +105,7 @@ impl GraphTensor {
     pub fn output_named(&self, name: &str) -> GraphTensor {
         let source = *self;
         let dims = source.dims();
-        self.graph().logical.output(
-            source.id.index(),
-            &(source.logical_value, dims),
-            source.id.index(),
-            Some(name),
-        );
+        self.graph().logical.output(&(source.id, dims), Some(name));
         source
     }
 
@@ -134,10 +120,7 @@ impl GraphTensor {
     /// authoring surface must know it, not panic on spelling).
     pub(crate) fn dims_agree(&self, rhs: &GraphTensor) -> bool {
         let (a, b) = (self.dims(), rhs.dims());
-        a.len() == b.len()
-            && a.iter()
-                .zip(&b)
-                .all(|(x, y)| x == y || x.egglog_equal(y))
+        a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x == y || x.egglog_equal(y))
     }
 
     /// The tensor's rank — the public shape surface is dims()/rank()
