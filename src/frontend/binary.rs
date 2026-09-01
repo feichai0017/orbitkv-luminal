@@ -16,19 +16,17 @@ impl Add for GraphTensor {
             "Dtypes must match to add tensors. Got {:?} and {:?}",
             self.dtype, rhs.dtype
         );
-        let new_id = self.graph().mint_id();
-        let logical = self.graph().logical.op(
-            new_id.index(),
-            "LogicalAdd",
-            &[
-                (self.logical_value, self.dims()),
-                (rhs.logical_value, rhs.dims()),
-            ],
-            "",
-            self.dims(),
-            self.dtype,
-        );
-        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype).with_logical(logical)
+        let new_id = self
+            .graph()
+            .logical
+            .op(
+                LogicalOp::Add,
+                &[(self.id, self.dims()), (rhs.id, rhs.dims())],
+                self.dims(),
+                self.dtype,
+            )
+            .expect("logical op insertion failed");
+        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 }
 
@@ -87,19 +85,17 @@ impl Mul for GraphTensor {
             "Dtypes must match to multiply tensors. Got {:?} and {:?}",
             self.dtype, rhs.dtype
         );
-        let new_id = self.graph().mint_id();
-        let logical = self.graph().logical.op(
-            new_id.index(),
-            "LogicalMul",
-            &[
-                (self.logical_value, self.dims()),
-                (rhs.logical_value, rhs.dims()),
-            ],
-            "",
-            self.dims(),
-            self.dtype,
-        );
-        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype).with_logical(logical)
+        let new_id = self
+            .graph()
+            .logical
+            .op(
+                LogicalOp::Mul,
+                &[(self.id, self.dims()), (rhs.id, rhs.dims())],
+                self.dims(),
+                self.dtype,
+            )
+            .expect("logical op insertion failed");
+        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 }
 
@@ -157,19 +153,17 @@ impl Rem<GraphTensor> for GraphTensor {
             "Dtypes must match to mod tensors. Got {:?} and {:?}",
             self.dtype, rhs.dtype
         );
-        let new_id = self.graph().mint_id();
-        let logical = self.graph().logical.op(
-            new_id.index(),
-            "LogicalMod",
-            &[
-                (self.logical_value, self.dims()),
-                (rhs.logical_value, rhs.dims()),
-            ],
-            "",
-            self.dims(),
-            self.dtype,
-        );
-        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype).with_logical(logical)
+        let new_id = self
+            .graph()
+            .logical
+            .op(
+                LogicalOp::Mod,
+                &[(self.id, self.dims()), (rhs.id, rhs.dims())],
+                self.dims(),
+                self.dtype,
+            )
+            .expect("logical op insertion failed");
+        GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 }
 
@@ -306,7 +300,8 @@ impl<S: Into<IntExpr>> Rem<S> for GraphTensor {
 // Comparisons, all redurn bools (based on https://github.com/tinygrad/tinygrad/blob/3e0c2d256fe9f4f5f85cd3e4d8733a51d7b4a984/tinygrad/tensor.py#L653)
 impl GraphTensor {
     /// One strict/trunc binary op recording (typed-buffers landing D).
-    fn int_binary(self, rhs: GraphTensor, constructor: &str) -> GraphTensor {
+    fn int_binary(self, rhs: GraphTensor, op: LogicalOp) -> GraphTensor {
+        let constructor = op.constructor();
         assert_eq!(self.dims(), rhs.dims(), "{constructor}: dims must match");
         assert_eq!(
             self.dtype, rhs.dtype,
@@ -317,32 +312,29 @@ impl GraphTensor {
             "{constructor} is an INTEGER op (got {:?})",
             self.dtype
         );
-        let new_id = self.graph().mint_id();
-        let logical = self.graph().logical.op(
-            new_id.index(),
-            constructor,
-            &[
-                (self.logical_value, self.dims()),
-                (rhs.logical_value, rhs.dims()),
-            ],
-            "",
-            self.dims(),
-            self.dtype,
-        );
+        let new_id = self
+            .graph()
+            .logical
+            .op(
+                op,
+                &[(self.id, self.dims()), (rhs.id, rhs.dims())],
+                self.dims(),
+                self.dtype,
+            )
+            .expect("logical op insertion failed");
         GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
-            .with_logical(logical)
     }
 
     /// Integer truncated division (toward zero) — proof-gated: implements
     /// only where the divisor's value bounds exclude zero (declare input
     /// ranges with `bind_value_range` when the divisor is caller data).
     pub fn trunc_div(self, rhs: GraphTensor) -> GraphTensor {
-        self.int_binary(rhs, "LogicalTruncDiv")
+        self.int_binary(rhs, LogicalOp::TruncDiv)
     }
 
     /// Integer truncated remainder; see [`Self::trunc_div`].
     pub fn trunc_rem(self, rhs: GraphTensor) -> GraphTensor {
-        self.int_binary(rhs, "LogicalTruncRem")
+        self.int_binary(rhs, LogicalOp::TruncRem)
     }
 
     /// Less than comparison
@@ -353,21 +345,18 @@ impl GraphTensor {
             "Dtypes must match to compare tensors. Got {:?} and {:?}",
             self.dtype, rhs.dtype
         );
-        let new_id = self.graph().mint_id();
-        let logical = self.graph().logical.op(
-            new_id.index(),
-            "LogicalLessThan",
-            &[
-                (self.logical_value, self.dims()),
-                (rhs.logical_value, rhs.dims()),
-            ],
-            "",
-            self.dims(),
-            DType::Bool,
-        );
+        let new_id = self
+            .graph()
+            .logical
+            .op(
+                LogicalOp::LessThan,
+                &[(self.id, self.dims()), (rhs.id, rhs.dims())],
+                self.dims(),
+                DType::Bool,
+            )
+            .expect("logical op insertion failed");
         // Comparison operations always output Bool
         GraphTensor::from_id(new_id, self.dims(), self.graph_ref, DType::Bool)
-            .with_logical(logical)
     }
 
     /// Greater than comparison
@@ -518,7 +507,10 @@ pub(super) mod tests {
         let rhs_values = rhs_transform(random_vec(b_shape.iter().copied().product()));
         let rt = crate::test_support::run_reference(
             &cx,
-            &[(a.id, lhs_values.clone().into()), (b.id, rhs_values.clone().into())],
+            &[
+                (a.id, lhs_values.clone().into()),
+                (b.id, rhs_values.clone().into()),
+            ],
         );
 
         // Reference

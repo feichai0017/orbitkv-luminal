@@ -13,11 +13,14 @@ impl GraphTensor {
             self.rank()
         );
         let current_dims = self.dims();
-        self.logical_value = self.graph().logical.apply_movement(
-            self.id.index(),
-            &(self.logical_value, current_dims),
-            crate::graph::Movement::Permute(axes.clone()),
-        );
+        self.id = self
+            .graph()
+            .logical
+            .apply_movement(
+                &(self.id, current_dims),
+                crate::graph::Movement::Permute(axes.clone()),
+            )
+            .expect("logical movement insertion failed");
         self.dims = axes.iter().map(|i| self.dims[*i]).collect();
         self
     }
@@ -44,14 +47,17 @@ impl GraphTensor {
     pub fn expand_dim(mut self, axis: usize, size: impl Into<IntExpr>) -> GraphTensor {
         let size = size.into();
         let current_dims = self.dims();
-        self.logical_value = self.graph().logical.apply_movement(
-            self.id.index(),
-            &(self.logical_value, current_dims),
-            crate::graph::Movement::ExpandDim {
-                axis,
-                size: size.clone(),
-            },
-        );
+        self.id = self
+            .graph()
+            .logical
+            .apply_movement(
+                &(self.id, current_dims),
+                crate::graph::Movement::ExpandDim {
+                    axis,
+                    size: size.clone(),
+                },
+            )
+            .expect("logical movement insertion failed");
         self.dims.insert(axis, size);
         self
     }
@@ -76,11 +82,14 @@ impl GraphTensor {
             self.rank()
         );
         let current_dims = self.dims();
-        self.logical_value = self.graph().logical.apply_movement(
-            self.id.index(),
-            &(self.logical_value, current_dims),
-            crate::graph::Movement::Repeat(repeats.clone()),
-        );
+        self.id = self
+            .graph()
+            .logical
+            .apply_movement(
+                &(self.id, current_dims),
+                crate::graph::Movement::Repeat(repeats.clone()),
+            )
+            .expect("logical movement insertion failed");
         for (dim, repeat) in self.dims.iter_mut().zip(repeats) {
             if repeat == IntExpr::from(1) {
                 continue;
@@ -137,11 +146,14 @@ impl GraphTensor {
     pub fn merge_dims(mut self, axis1: usize, axis2: usize) -> GraphTensor {
         assert!(axis1 < axis2, "axis1 must be less than axis2");
         let current_dims = self.dims();
-        self.logical_value = self.graph().logical.apply_movement(
-            self.id.index(),
-            &(self.logical_value, current_dims),
-            crate::graph::Movement::MergeDims { axis1, axis2 },
-        );
+        self.id = self
+            .graph()
+            .logical
+            .apply_movement(
+                &(self.id, current_dims),
+                crate::graph::Movement::MergeDims { axis1, axis2 },
+            )
+            .expect("logical movement insertion failed");
         // Move axis2 next to axis1 if not adjacent, then fold it in.
         if axis2 != axis1 + 1 {
             let dim = self.dims.remove(axis2);
@@ -176,14 +188,17 @@ impl GraphTensor {
             "split_dims requires the old dimension ({old_dim}) to be exactly divisible by the inner dimension ({new_dim_size})"
         );
         let current_dims = self.dims();
-        self.logical_value = self.graph().logical.apply_movement(
-            self.id.index(),
-            &(self.logical_value, current_dims),
-            crate::graph::Movement::SplitDims {
-                axis,
-                inner: new_dim_size,
-            },
-        );
+        self.id = self
+            .graph()
+            .logical
+            .apply_movement(
+                &(self.id, current_dims),
+                crate::graph::Movement::SplitDims {
+                    axis,
+                    inner: new_dim_size,
+                },
+            )
+            .expect("logical movement insertion failed");
         self.dims[axis] = outer_dim;
         self.dims.insert(axis + 1, new_dim_size);
         self
@@ -214,11 +229,14 @@ impl GraphTensor {
             }
         }
         let current_dims = self.dims();
-        self.logical_value = self.graph().logical.apply_movement(
-            self.id.index(),
-            &(self.logical_value, current_dims),
-            crate::graph::Movement::RemoveDim { axis },
-        );
+        self.id = self
+            .graph()
+            .logical
+            .apply_movement(
+                &(self.id, current_dims),
+                crate::graph::Movement::RemoveDim { axis },
+            )
+            .expect("logical movement insertion failed");
         self.dims.remove(axis);
         self
     }
@@ -416,35 +434,36 @@ impl GraphTensor {
         }
         let flat_base = flat_base.unwrap();
 
-        let mut full_flat_dest = if trailing_shape.is_empty() || trailing_numel.to_usize() == Some(1) {
-            flat_base
-        } else {
-            // Expand flat_base to [batch_numel, trailing_numel]
-            let mut base_expanded = flat_base.expand_dim(1, trailing_numel);
+        let mut full_flat_dest =
+            if trailing_shape.is_empty() || trailing_numel.to_usize() == Some(1) {
+                flat_base
+            } else {
+                // Expand flat_base to [batch_numel, trailing_numel]
+                let mut base_expanded = flat_base.expand_dim(1, trailing_numel);
 
-            let trailing_rank = trailing_shape.len();
-            for (ti, d) in (k..data_rank).enumerate() {
-                let ar = self.graph().arange(data_dims[d]);
-                let mut ar_shaped = ar;
-                for _ in ti + 1..trailing_rank {
-                    let n = ar_shaped.dims().len();
-                    ar_shaped = ar_shaped.expand_dim(n, 1);
-                }
-                for _ in 0..ti {
-                    ar_shaped = ar_shaped.expand_dim(0, 1);
-                }
-                ar_shaped = ar_shaped.expand(trailing_shape.clone());
-                // Flatten trailing dims with recorded merges, then broadcast
-                let ar_flat = ar_shaped.flatten().expand_dim(0, batch_numel);
+                let trailing_rank = trailing_shape.len();
+                for (ti, d) in (k..data_rank).enumerate() {
+                    let ar = self.graph().arange(data_dims[d]);
+                    let mut ar_shaped = ar;
+                    for _ in ti + 1..trailing_rank {
+                        let n = ar_shaped.dims().len();
+                        ar_shaped = ar_shaped.expand_dim(n, 1);
+                    }
+                    for _ in 0..ti {
+                        ar_shaped = ar_shaped.expand_dim(0, 1);
+                    }
+                    ar_shaped = ar_shaped.expand(trailing_shape.clone());
+                    // Flatten trailing dims with recorded merges, then broadcast
+                    let ar_flat = ar_shaped.flatten().expand_dim(0, batch_numel);
 
-                let stride_tensor = self
-                    .graph()
-                    .constant(data_strides[d])
-                    .expand_rhs(ar_flat.dims());
-                base_expanded = base_expanded + ar_flat * stride_tensor;
-            }
-            base_expanded
-        };
+                    let stride_tensor = self
+                        .graph()
+                        .constant(data_strides[d])
+                        .expand_rhs(ar_flat.dims());
+                    base_expanded = base_expanded + ar_flat * stride_tensor;
+                }
+                base_expanded
+            };
 
         full_flat_dest = full_flat_dest.flatten();
 
@@ -474,23 +493,24 @@ impl GraphTensor {
         let out_dims = coords[0].dims();
         for coord in coords {
             assert_eq!(coord.dtype, DType::Int, "gather coordinates must be Int");
-            assert_eq!(coord.dims(), out_dims, "gather coordinates share the out shape");
+            assert_eq!(
+                coord.dims(),
+                out_dims,
+                "gather coordinates share the out shape"
+            );
         }
         let dims = self.dims();
-        let id = self.graph().mint_id();
-        let data_operand = (self.logical_value, dims);
+        let data_operand = (self.id, dims);
         let coord_operands: Vec<_> = coords
             .iter()
-            .map(|coord| (coord.logical_value, coord.dims()))
+            .map(|coord| (coord.id, coord.dims()))
             .collect();
-        let logical = self.graph().logical.record_gather(
-            id.index(),
-            &data_operand,
-            &coord_operands,
-            out_dims.clone(),
-            self.dtype,
-        );
-        GraphTensor::from_id(id, out_dims, self.graph_ref, self.dtype).with_logical(logical)
+        let id = self
+            .graph()
+            .logical
+            .record_gather(&data_operand, &coord_operands, out_dims.clone(), self.dtype)
+            .expect("logical gather insertion failed");
+        GraphTensor::from_id(id, out_dims, self.graph_ref, self.dtype)
     }
 
     /// COORDINATE-FORM scatter — THE primary (ruling 2026-07-31): self is
@@ -507,25 +527,31 @@ impl GraphTensor {
         let index_dims = src.dims();
         for coord in coords {
             assert_eq!(coord.dtype, DType::Int, "scatter coordinates must be Int");
-            assert_eq!(coord.dims(), index_dims, "scatter coordinates share src's shape");
+            assert_eq!(
+                coord.dims(),
+                index_dims,
+                "scatter coordinates share src's shape"
+            );
         }
         let dims = self.dims();
-        let id = self.graph().mint_id();
-        let init_operand = (self.logical_value, dims.clone());
-        let src_operand = (src.logical_value, index_dims);
+        let init_operand = (self.id, dims.clone());
+        let src_operand = (src.id, index_dims);
         let coord_operands: Vec<_> = coords
             .iter()
-            .map(|coord| (coord.logical_value, coord.dims()))
+            .map(|coord| (coord.id, coord.dims()))
             .collect();
-        let logical = self.graph().logical.record_scatter(
-            id.index(),
-            &init_operand,
-            &coord_operands,
-            &src_operand,
-            dims.clone(),
-            self.dtype,
-        );
-        GraphTensor::from_id(id, dims, self.graph_ref, self.dtype).with_logical(logical)
+        let id = self
+            .graph()
+            .logical
+            .record_scatter(
+                &init_operand,
+                &coord_operands,
+                &src_operand,
+                dims.clone(),
+                self.dtype,
+            )
+            .expect("logical scatter insertion failed");
+        GraphTensor::from_id(id, dims, self.graph_ref, self.dtype)
     }
 
     /// Rebuild a multi-dim shape from a flat tensor with recorded splits
@@ -572,9 +598,7 @@ impl GraphTensor {
             "scatter1d: indexes and src (self) share a shape"
         );
         let out_dims = dest.dims();
-        let flat = dest
-            .flatten()
-            .scatter(&[indexes.flatten()], self.flatten());
+        let flat = dest.flatten().scatter(&[indexes.flatten()], self.flatten());
         flat.unflatten_to(&out_dims)
     }
 
@@ -585,7 +609,6 @@ impl GraphTensor {
         strides: impl ToShape,
         dilation: impl ToShape,
     ) -> GraphTensor {
-
         let (kernel, strides, dilation) =
             (kernel.to_shape(), strides.to_shape(), dilation.to_shape());
 
@@ -630,24 +653,23 @@ impl GraphTensor {
         // structure stays first-class; UnfoldView::to_egglog reproduces the
         // legacy flat iota+gather lowering for the existing pipeline.
         let window_counts = final_shape[..n].to_vec();
-        let id = self.graph().mint_id();
         // WINDOW CONTRACTS (ruling 2026-08-13, same rail as squeeze):
         // a symbolic window count must reach 1 — the kernel fits within
         // dim + padding, or the binding's bucket refuses with the named
         // door. Static counts are checked right here, loudly.
         for (axis, count) in window_counts.iter().enumerate() {
             match count.to_usize() {
-                Some(0) => panic!(
-                    "unfold axis {axis}: kernel does not fit (window count 0)"
-                ),
+                Some(0) => panic!("unfold axis {axis}: kernel does not fit (window count 0)"),
                 Some(_) => {}
                 None => {
-                    let at = id.index();
+                    let at = self.id.index();
                     self.graph().logical.require_extent_at_least(
                         at,
                         count,
                         1,
-                        &format!("unfold window on axis {axis} (kernel must fit within dim + padding)"),
+                        &format!(
+                            "unfold window on axis {axis} (kernel must fit within dim + padding)"
+                        ),
                     );
                 }
             }
@@ -676,15 +698,13 @@ impl GraphTensor {
                 )
             })
             .collect();
-        let operand = (self.logical_value, self.dims());
-        let logical = self.graph().logical.view_op(
-            id.index(),
-            &operand,
-            &entries,
-            final_shape.clone(),
-            self.dtype,
-        );
-        GraphTensor::from_id(id, final_shape, self.graph_ref, self.dtype).with_logical(logical)
+        let operand = (self.id, self.dims());
+        let id = self
+            .graph()
+            .logical
+            .view_op(&operand, &entries, final_shape.clone(), self.dtype)
+            .expect("logical view insertion failed");
+        GraphTensor::from_id(id, final_shape, self.graph_ref, self.dtype)
     }
 
     /// Take a slice of a tensor along multiple dimensions.
@@ -715,7 +735,6 @@ impl GraphTensor {
                 starts.push(start);
                 new_dims.push(dim.min(end) - start);
             }
-            let id = self.graph().mint_id();
             // The seam node's own parameters ARE the view: parent axis p
             // reads out coordinate p plus its start.
             let rank = new_dims.len();
@@ -735,15 +754,13 @@ impl GraphTensor {
                     }
                 })
                 .collect();
-            let operand = (self.logical_value, self.dims());
-            let logical = self.graph().logical.view_op(
-                id.index(),
-                &operand,
-                &entries,
-                new_dims.clone(),
-                self.dtype,
-            );
-            GraphTensor::from_id(id, new_dims, self.graph_ref, self.dtype).with_logical(logical)
+            let operand = (self.id, self.dims());
+            let id = self
+                .graph()
+                .logical
+                .view_op(&operand, &entries, new_dims.clone(), self.dtype)
+                .expect("logical view insertion failed");
+            GraphTensor::from_id(id, new_dims, self.graph_ref, self.dtype)
         } else {
             // No start slices so no iota needed, just reduce the shape down
             let mut new_dims = self.dims();
@@ -751,13 +768,16 @@ impl GraphTensor {
                 *sh = sh.min(*end);
             }
             let current_dims = self.dims();
-            self.logical_value = self.graph().logical.apply_movement(
-                self.id.index(),
-                &(self.logical_value, current_dims),
-                crate::graph::Movement::Shrink {
-                    new_dims: new_dims.clone(),
-                },
-            );
+            self.id = self
+                .graph()
+                .logical
+                .apply_movement(
+                    &(self.id, current_dims),
+                    crate::graph::Movement::Shrink {
+                        new_dims: new_dims.clone(),
+                    },
+                )
+                .expect("logical movement insertion failed");
             for (sh, new_dim) in self.dims.iter_mut().zip(new_dims) {
                 *sh = new_dim;
             }
@@ -800,11 +820,10 @@ impl GraphTensor {
             .map(|(d, (s, e))| (*d + *s + *e).simplify())
             .collect();
 
-        let clamped_id = self.graph().mint_id();
         // Pad's read half recorded as the TOTAL clamped view — per parent
         // axis min(max(c - before, 0), dim - 1), clamp sides only where
         // padding exists.
-        let clamp_logical;
+        let clamped_id;
         {
             let rank = dims.len();
             let entries: Vec<crate::graph::MapEntry> = (0..rank)
@@ -828,39 +847,29 @@ impl GraphTensor {
                     if afters[k] != IntExpr::from(0) {
                         entry = crate::graph::MapEntry::Min(
                             Box::new(entry),
-                            Box::new(crate::graph::MapEntry::Lit(
-                                (dims[k] - 1).simplify(),
-                            )),
+                            Box::new(crate::graph::MapEntry::Lit((dims[k] - 1).simplify())),
                         );
                     }
                     entry
                 })
                 .collect();
-            let operand = (self.logical_value, dims.clone());
-            clamp_logical = self.graph().logical.view_op(
-                clamped_id.index(),
-                &operand,
-                &entries,
-                out_dims.clone(),
-                self.dtype,
-            );
+            let operand = (self.id, dims.clone());
+            clamped_id = self
+                .graph()
+                .logical
+                .view_op(&operand, &entries, out_dims.clone(), self.dtype)
+                .expect("logical view insertion failed");
         }
-        let clamped = GraphTensor::from_id(
-            clamped_id,
-            out_dims.clone(),
-            self.graph_ref,
-            self.dtype,
-        )
-        .with_logical(clamp_logical);
+        let clamped =
+            GraphTensor::from_id(clamped_id, out_dims.clone(), self.graph_ref, self.dtype);
 
-        let mask_id = self.graph().mint_id();
-        let mask_logical = self
+        let mask_id = self
             .graph()
             .logical
-            .record_mask_iota(mask_id.index(), &befores, &afters, &dims);
-        let mask = GraphTensor::from_id(mask_id, out_dims, self.graph_ref, DType::Int)
-            .with_logical(mask_logical)
-            .cast(self.dtype);
+            .record_mask_iota(&befores, &afters, &dims)
+            .expect("logical mask iota insertion failed");
+        let mask =
+            GraphTensor::from_id(mask_id, out_dims, self.graph_ref, DType::Int).cast(self.dtype);
 
         let masked = clamped * mask;
         if elem == 0.0 {
@@ -1171,7 +1180,11 @@ mod tests {
         // `* 1.0` materializes: a bare squeeze is a pure-VIEW output, and
         // view-only outputs share the input's buffer id — the 4d binding
         // gap (see stage4b_probes::pinned_pure_identity_output).
-        test_unary((2, 1, 3), |a| a.squeeze(1) * 1.0, |a| a.reshape((2, 3)).unwrap());
+        test_unary(
+            (2, 1, 3),
+            |a| a.squeeze(1) * 1.0,
+            |a| a.reshape((2, 3)).unwrap(),
+        );
         // Bare squeeze — a pure-VIEW output, no materializing op. The
         // delivery-copy fix (2026-08-05) materializes it at the boundary.
         test_unary((2, 1, 3), |a| a.squeeze(1), |a| a.reshape((2, 3)).unwrap());
@@ -1218,7 +1231,16 @@ mod tests {
         let a = cx.tensor((2, 3));
         let repeated = a.repeat((2, 2));
 
-        assert_eq!(repeated.id, a.id);
+        assert_ne!(
+            repeated.id, a.id,
+            "a logical view is its own SSA value even when it requires no materialization"
+        );
+        let graph = cx.logical.petgraph();
+        assert!(matches!(
+            graph[repeated.id].op,
+            LogicalOp::IndexMapApply { .. }
+        ));
+        assert!(graph.find_edge(a.id, repeated.id).is_some());
         assert_eq!(
             repeated.dims(),
             vec![IntExpr::from(4usize), IntExpr::from(6usize)]
@@ -1231,7 +1253,10 @@ mod tests {
         let a = cx.tensor((2, 3));
         let repeated = (a.repeat((2, 2)) * 1.0).output();
 
-        let rt = crate::test_support::run_reference(&cx, &[(a.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].into())]);
+        let rt = crate::test_support::run_reference(
+            &cx,
+            &[(a.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].into())],
+        );
 
         assert_exact(
             rt.get_f32(repeated.id).unwrap(),

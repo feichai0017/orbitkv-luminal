@@ -1,11 +1,15 @@
 //! The graph a model is authored into: dynamic-dim assumptions plus the
-//! LOGICAL structure the recorder captures (M3 Step 4b: their HLIR
-//! petgraph, e-graph search spaces, and compile ladder are DELETED — the
-//! recorder is the only path to the e-graph, and runtimes own
-//! load/bind/with_ops/search).
+//! LOGICAL structure the recorder captures. The old layout-bearing HLIR
+//! graph and compile ladder are gone; this module owns the petgraph-backed
+//! logical SSA that feeds the e-graph, while runtimes own
+//! load/bind/with_ops/search.
 
-use petgraph::stable_graph::NodeIndex;
-use rustc_hash::FxHashMap;
+use petgraph::{
+    stable_graph::{NodeIndex, StableDiGraph},
+    visit::EdgeRef,
+    Direction,
+};
+use rustc_hash::FxHashSet;
 
 use crate::dtype::DType;
 use crate::frontend::GraphTensor;
@@ -66,23 +70,12 @@ pub struct Graph {
     /// logical ops here; it IS the graph (absorbed into this struct at
     /// M3 Step 4e).
     pub logical: crate::graph::LogicalGraph,
-    /// The tensor-id mint. Ids are plain sequence numbers (the NodeIndex
-    /// type is kept as the id vocabulary; the petgraph it once indexed is
-    /// gone) — they key recorder rows, binding slots, and set_data.
-    next_id: u32,
 }
 
 impl Graph {
     /// Create a new graph
     pub fn new() -> Graph {
         Graph::default()
-    }
-
-    /// Mint a fresh tensor id.
-    pub(crate) fn mint_id(&mut self) -> NodeIndex {
-        let id = NodeIndex::new(self.next_id as usize);
-        self.next_id += 1;
-        id
     }
 
     pub fn set_dim(&mut self, dimension: impl Into<crate::shape::Symbol>, val: usize) {
@@ -114,18 +107,12 @@ impl Graph {
         dtype: DType,
     ) -> GraphTensor {
         let name = name.to_string();
-        let id = self.mint_id();
-        let tensor = GraphTensor {
-            id,
-            graph_ref: self,
-            dims: shape.to_shape().into_iter().collect(),
-            dtype,
-            logical_value: None,
-        };
-        let logical = self
+        let dims = shape.to_shape();
+        let id = self
             .logical
-            .input(id.index(), &name, &tensor.dims(), tensor.dtype);
-        tensor.with_logical(logical)
+            .input(&name, &dims, dtype)
+            .expect("logical input insertion failed");
+        GraphTensor::from_id(id, dims, self, dtype)
     }
 }
 
@@ -136,16 +123,14 @@ impl Graph {
 // ---------------------------------------------------------------------
 // The LOGICAL GRAPH — the model the frontend actually builds (renamed
 // from logical_recorder, ruling 2026-07-31: this IS the durable thing;
-// absorbed into this module at Step 4e; the HLIR StableGraph it once
-// stood beside is deleted).
+// absorbed into this module at Step 4e; the layout-bearing HLIR graph it
+// once stood beside remains deleted).
 //
-// GraphTensor methods emit their LOGICAL ops here as the graph is built,
-// beside their HLIR emission — the two worlds coexist until the interim
-// translator retires family by family (each retirement gated by the
-// certification test asserting recorder ≡ translator at the e-class
-// level). The deep point (ruling 2026-07-30): movement methods emit
-// `IndexMapApply` views DIRECTLY from their own parameters, at the source
-// of truth — replacing tracker-lift reconstruction entirely.
+// GraphTensor methods insert typed logical nodes and numbered operand
+// edges here as the graph is built. There is no parallel tensor-id or
+// HLIR-node keyspace. Movement methods emit `IndexMapApply` views DIRECTLY
+// from their own parameters, at the source of truth — replacing
+// tracker-lift reconstruction entirely.
 //
 // Model/binding split (M3 Step 1): the recorder emits MODEL text only —
 // input declarations, ops, output naming, signature lists. Boundary
@@ -161,14 +146,8 @@ impl Graph {
 // frontend method can bypass the movement API) poisons instead of
 // silently mistranslating.
 
-
 use crate::shape::{IntExpr, Term};
 use anyhow::{bail, Result as AnyResult};
-
-/// Handle to a tracker-level view value. Lives on `GraphTensor` (`Copy`);
-/// `None` means "my logical value is the recorder's value for my node id".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ViewId(pub u32);
 
 /// One index-map entry, in-memory. Movement composition happens on this
 /// tree — substituting our OWN just-emitted terms, never reconstructing
@@ -177,7 +156,10 @@ pub struct ViewId(pub u32);
 pub enum MapEntry {
     /// The consuming view's coordinate, zero-based FROM THE END (the
     /// de Bruijn house convention), with its extent.
-    Coord { from_end: usize, extent: IntExpr },
+    Coord {
+        from_end: usize,
+        extent: IntExpr,
+    },
     /// A dim-expression literal (a number or a symbolic dim var).
     Lit(IntExpr),
     Add(Box<MapEntry>, Box<MapEntry>),
@@ -193,9 +175,7 @@ impl MapEntry {
     /// replacement in the new out space — the movement-composition step.
     fn substitute(&self, replacement: &[MapEntry], prev_rank: usize) -> MapEntry {
         match self {
-            MapEntry::Coord { from_end, .. } => {
-                replacement[prev_rank - 1 - from_end].clone()
-            }
+            MapEntry::Coord { from_end, .. } => replacement[prev_rank - 1 - from_end].clone(),
             MapEntry::Lit(value) => MapEntry::Lit(value.clone()),
             MapEntry::Add(a, b) => MapEntry::Add(
                 Box::new(a.substitute(replacement, prev_rank)),
@@ -254,19 +234,110 @@ pub enum Movement {
     Shrink { new_dims: Vec<IntExpr> },
 }
 
-/// A logical VALUE id — the SSA identity every tensor handle carries
-/// (M3 Step 4a: LogicalGraph mints its own ids; HLIR node indices remain
-/// only as transitional binding-slot keys).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ValueId(pub u32);
+/// The logical SSA identity. A tensor names the node that produces its
+/// value; there is no parallel frontend-id keyspace.
+pub type ValueId = NodeIndex;
 
 /// An operand as a record call sees it: the handle's value plus its
 /// tracker dims (the divergence tripwire input).
-pub type Operand = (Option<ValueId>, Vec<IntExpr>);
+pub type Operand = (ValueId, Vec<IntExpr>);
 
-/// How a value renders: SSA rows are vocabulary-thin (constructor string
-/// + operand ids + aux text), but two constructors wrap some operands in
-/// a LogicalTensorList.
+/// Logical operation carried by an SSA node. Rendering details remain at
+/// the Egglog boundary; the graph itself stores a closed operation
+/// vocabulary rather than free-form constructor strings.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogicalOp {
+    Input { label: String },
+    Constant(f64),
+    Iota { value_expr: String },
+    Cast(DType),
+    Sqrt,
+    Exp,
+    Exp2,
+    Log2,
+    Sin,
+    Recip,
+    Add,
+    Mul,
+    Div,
+    Mod,
+    LessThan,
+    TruncDiv,
+    TruncRem,
+    ReduceSum { axis_from_end: usize },
+    ReduceMax { axis_from_end: usize },
+    Gather,
+    Scatter,
+    IndexMapApply { entries: Vec<MapEntry> },
+}
+
+impl LogicalOp {
+    pub fn constructor(&self) -> &'static str {
+        match self {
+            Self::Input { .. } => "LogicalTensorInputLit",
+            Self::Constant(_) => "LogicalConstant",
+            Self::Iota { .. } => "LogicalIota",
+            Self::Cast(_) => "LogicalCast",
+            Self::Sqrt => "LogicalSqrt",
+            Self::Exp => "LogicalExp",
+            Self::Exp2 => "LogicalExp2",
+            Self::Log2 => "LogicalLog2",
+            Self::Sin => "LogicalSin",
+            Self::Recip => "LogicalRecip",
+            Self::Add => "LogicalAdd",
+            Self::Mul => "LogicalMul",
+            Self::Div => "LogicalDiv",
+            Self::Mod => "LogicalMod",
+            Self::LessThan => "LogicalLessThan",
+            Self::TruncDiv => "LogicalTruncDiv",
+            Self::TruncRem => "LogicalTruncRem",
+            Self::ReduceSum { .. } => "LogicalReduceSum",
+            Self::ReduceMax { .. } => "LogicalReduceMax",
+            Self::Gather => "LogicalGather",
+            Self::Scatter => "LogicalScatter",
+            Self::IndexMapApply { .. } => "LogicalIndexMapApply",
+        }
+    }
+
+    fn render_form(&self) -> RenderForm {
+        match self {
+            Self::Gather => RenderForm::GatherList,
+            Self::Scatter => RenderForm::ScatterList,
+            _ => RenderForm::Plain,
+        }
+    }
+
+    fn fixed_arity(&self) -> Option<usize> {
+        Some(match self {
+            Self::Input { .. } | Self::Constant(_) | Self::Iota { .. } => 0,
+            Self::Cast(_)
+            | Self::Sqrt
+            | Self::Exp
+            | Self::Exp2
+            | Self::Log2
+            | Self::Sin
+            | Self::Recip
+            | Self::ReduceSum { .. }
+            | Self::ReduceMax { .. }
+            | Self::IndexMapApply { .. } => 1,
+            Self::Add
+            | Self::Mul
+            | Self::Div
+            | Self::Mod
+            | Self::LessThan
+            | Self::TruncDiv
+            | Self::TruncRem => 2,
+            Self::Gather | Self::Scatter => return None,
+        })
+    }
+}
+
+/// Operand position is graph structure, not edge insertion order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InputPort(pub usize);
+
+/// Egglog rendering form. Gather and scatter wrap coordinate operands in
+/// a `LogicalTensorList`; every other typed node uses the plain form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenderForm {
     /// ({constructor} {operands...} {aux})
@@ -277,41 +348,20 @@ enum RenderForm {
     ScatterList,
 }
 
-/// One SSA value: an op applied to operand values. Views are ORDINARY
-/// values (constructor = LogicalIndexMapApply) that additionally keep
-/// their map entries STRUCTURED so movement composition works on trees,
-/// never on text.
+/// One SSA value. Operands live exclusively on incoming graph edges;
+/// views keep their map entries structured in the operation payload so
+/// movement composition works on trees, never on rendered text.
 #[derive(Debug, Clone)]
-struct Value {
-    constructor: String,
-    operands: Vec<ValueId>,
-    /// Rendered trailing arguments (axis numbers, dtype terms, iota
-    /// expr+shape, map+shape for views...).
-    aux: String,
-    form: RenderForm,
-    /// Structured map entries — present exactly on movement-composed
-    /// views, consumed by apply_movement composition.
-    entries: Option<Vec<MapEntry>>,
-    dims: Vec<IntExpr>,
-    #[allow(dead_code)]
-    dtype: DType,
-    /// For inputs: the transitional binding-slot key (HLIR node index —
-    /// their set_data keying; dies with the HLIR pipeline).
-    input_slot: Option<usize>,
-    /// The PRISTINE input label — exactly the string the caller passed
-    /// to `named_tensor*` (ruling 2026-08-12: canonical labels are
-    /// stored as data, never re-derived from the rendered
-    /// "{label}_{slot}" identity string).
-    input_label: Option<String>,
+pub struct LogicalNode {
+    pub op: LogicalOp,
+    pub dims: Vec<IntExpr>,
+    pub dtype: DType,
 }
 
-/// One `.output()` designation: the value, the numeric key (the
-/// frontend tensor id — the readback handle), and the optional
-/// authored name.
+/// One `.output()` designation: the value and optional authored name.
 #[derive(Debug)]
 struct OutputRecord {
     value: ValueId,
-    key: usize,
     label: Option<String>,
 }
 
@@ -336,7 +386,7 @@ pub struct OutputSpec {
 
 #[derive(Debug, Default)]
 pub struct LogicalGraph {
-    values: Vec<Value>,
+    graph: StableDiGraph<LogicalNode, InputPort>,
     /// Output designations in .output() order.
     outputs: Vec<OutputRecord>,
     /// Anonymous-input counter — mints "arg.{k}" labels (Stage 3).
@@ -363,26 +413,25 @@ impl LogicalGraph {
         self.poisoned.as_deref()
     }
 
-    /// Read-only rows for visualization, one per value in ValueId order:
-    /// (constructor, operand ids, dims, dtype, input label).
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn viz_rows(
-        &self,
-    ) -> impl Iterator<Item = (&str, &[ValueId], &[IntExpr], DType, Option<&str>)> {
-        self.values.iter().map(|value| {
-            (
-                value.constructor.as_str(),
-                value.operands.as_slice(),
-                value.dims.as_slice(),
-                value.dtype,
-                value.input_label.as_deref(),
-            )
-        })
+    /// The backing petgraph. Nodes are logical SSA values and incoming
+    /// edges are explicitly numbered operand ports.
+    pub fn petgraph(&self) -> &StableDiGraph<LogicalNode, InputPort> {
+        &self.graph
+    }
+
+    pub(crate) fn viz_nodes(&self) -> impl Iterator<Item = (ValueId, &LogicalNode)> {
+        self.graph.node_indices().map(|id| (id, &self.graph[id]))
+    }
+
+    pub(crate) fn viz_operands(&self, id: ValueId) -> Vec<(usize, ValueId)> {
+        self.operand_edges(id)
     }
 
     /// The recorded output designations, in .output() order.
     pub(crate) fn viz_outputs(&self) -> impl Iterator<Item = (ValueId, usize)> + '_ {
-        self.outputs.iter().map(|record| (record.value, record.key))
+        self.outputs
+            .iter()
+            .map(|record| (record.value, record.value.index()))
     }
 
     fn dim_term(expr: &IntExpr) -> Result<String, String> {
@@ -420,7 +469,10 @@ impl LogicalGraph {
     /// dims).
     fn entry_term(entry: &MapEntry, owner_shape: &str) -> Result<String, String> {
         Ok(match entry {
-            MapEntry::Coord { from_end, extent: _ } => {
+            MapEntry::Coord {
+                from_end,
+                extent: _,
+            } => {
                 format!("(CoordVar {owner_shape} {from_end})")
             }
             MapEntry::Lit(value) => Self::dim_term(value)?,
@@ -430,7 +482,11 @@ impl LogicalGraph {
                 Self::entry_term(b, owner_shape)?
             ),
             MapEntry::Mul(a, e) => {
-                format!("(IntMul {} {})", Self::entry_term(a, owner_shape)?, Self::dim_term(e)?)
+                format!(
+                    "(IntMul {} {})",
+                    Self::entry_term(a, owner_shape)?,
+                    Self::dim_term(e)?
+                )
             }
             MapEntry::Div(a, e) => format!(
                 "(IntTruncDiv {} {})",
@@ -455,21 +511,59 @@ impl LogicalGraph {
         })
     }
 
-    fn push(&mut self, value: Value) -> ValueId {
-        let id = ValueId(self.values.len() as u32);
-        self.values.push(value);
+    fn push(
+        &mut self,
+        op: LogicalOp,
+        operands: &[ValueId],
+        dims: Vec<IntExpr>,
+        dtype: DType,
+    ) -> ValueId {
+        if let Some(expected) = op.fixed_arity() {
+            debug_assert_eq!(
+                operands.len(),
+                expected,
+                "{} has the wrong operand count",
+                op.constructor()
+            );
+        }
+        let id = self.graph.add_node(LogicalNode { op, dims, dtype });
+        for (port, operand) in operands.iter().copied().enumerate() {
+            debug_assert!(
+                self.graph.node_weight(operand).is_some(),
+                "logical operand {operand:?} is not in the graph"
+            );
+            self.graph.add_edge(operand, id, InputPort(port));
+        }
         id
+    }
+
+    fn operand_edges(&self, id: ValueId) -> Vec<(usize, ValueId)> {
+        let mut operands: Vec<_> = self
+            .graph
+            .edges_directed(id, Direction::Incoming)
+            .map(|edge| (edge.weight().0, edge.source()))
+            .collect();
+        operands.sort_unstable_by_key(|(port, _)| *port);
+        debug_assert!(operands.iter().enumerate().all(|(i, (port, _))| i == *port));
+        operands
+    }
+
+    fn operands(&self, id: ValueId) -> Vec<ValueId> {
+        self.operand_edges(id)
+            .into_iter()
+            .map(|(_, operand)| operand)
+            .collect()
     }
 
     /// Resolve an operand: it must carry a value, and its tracker dims
     /// must agree with the recorded dims — the tripwire for tracker
     /// mutations the graph never saw.
     fn resolve(&mut self, operand: &Operand, at: &str) -> Result<ValueId, String> {
-        let (value, tracker_dims) = operand;
-        let Some(id) = value else {
-            return Err(format!("{at}: operand has no recorded logical value"));
+        let (id, tracker_dims) = operand;
+        let Some(value) = self.graph.node_weight(*id) else {
+            return Err(format!("{at}: operand {id:?} is not in the logical graph"));
         };
-        let dims = &self.values[id.0 as usize].dims;
+        let dims = &value.dims;
         if dims.len() != tracker_dims.len()
             || dims.iter().zip(tracker_dims).any(|(a, b)| {
                 // Static: value equality. Symbolic: structural equality
@@ -488,25 +582,17 @@ impl LogicalGraph {
         Ok(*id)
     }
 
-    /// Record an input declaration. Label keys keep the transitional
-    /// HLIR-node-index convention (their set_data keying).
-    pub fn input(
-        &mut self,
-        slot: usize,
-        label: &str,
-        dims: &[IntExpr],
-        dtype: DType,
-    ) -> Option<ValueId> {
+    /// Record an input declaration. The returned graph node is both its
+    /// SSA identity and its staging key.
+    pub fn input(&mut self, label: &str, dims: &[IntExpr], dtype: DType) -> Option<ValueId> {
         if self.poisoned.is_some() {
             return None;
         }
-        let shape = match Self::shape_term(dims) {
-            Ok(shape) => shape,
-            Err(reason) => {
-                self.poison(format!("input t{slot}: {reason}"));
-                return None;
-            }
-        };
+        let at = self.graph.node_count();
+        if let Err(reason) = Self::shape_term(dims) {
+            self.poison(format!("input t{at}: {reason}"));
+            return None;
+        }
         // STAGE 3 (rulings 2026-08-13): every input has a unique
         // pristine label. Anonymous inputs auto-name "arg.{k}" in
         // declaration order (the ExportedProgram/ONNX convention for
@@ -523,48 +609,16 @@ impl LogicalGraph {
         } else {
             label.to_string()
         };
-        if self
-            .values
-            .iter()
-            .any(|value| value.input_label.as_deref() == Some(&label))
-        {
+        if self.graph.node_weights().any(
+            |node| matches!(&node.op, LogicalOp::Input { label: existing } if existing == &label),
+        ) {
             self.poison(format!("duplicate input label \"{label}\""));
-            return None;
+            // Keep the authored graph structurally complete even after a
+            // fail-closed interface error. `model_text` will refuse this
+            // graph, but the returned tensor still has a real SSA node.
+            return Some(self.push(LogicalOp::Input { label }, &[], dims.to_vec(), dtype));
         }
-        // Boolean inputs cross the boundary as Bool8 (the Bool8 ruling:
-        // models compute in 1-bit Bool; bindings state the byte
-        // representation). Outputs get their boundary cast from the
-        // binding generator; INPUTS get it here — the wire tensor is
-        // declared Bool8 and a LogicalCast hands the model its Bool
-        // value, so the boundary buffer's dtype-of row (Bool8) agrees
-        // with its 8-bit layout (typed-buffers landing B, 2026-08-11).
-        let wire_dtype_term = match dtype {
-            DType::Bool => "(Bool8)".to_string(),
-            other => Self::dtype_term(other),
-        };
-        let aux = format!("(LogicalIdLit \"{label}\") {shape} {wire_dtype_term}");
-        let lit = self.push(Value {
-            constructor: "LogicalTensorInputLit".to_string(),
-            operands: Vec::new(),
-            aux,
-            form: RenderForm::Plain,
-            entries: None,
-            dims: dims.to_vec(),
-            dtype,
-            input_slot: Some(slot),
-            input_label: Some(label),
-        });
-        if dtype == DType::Bool {
-            return self.op(
-                slot,
-                "LogicalCast",
-                &[(Some(lit), dims.to_vec())],
-                "(Bool)",
-                dims.to_vec(),
-                DType::Bool,
-            );
-        }
-        Some(lit)
+        Some(self.push(LogicalOp::Input { label }, &[], dims.to_vec(), dtype))
     }
 
     /// Every bound input, in declaration order — the model's input
@@ -573,13 +627,16 @@ impl LogicalGraph {
     /// `id`). Labels are stored pristine; label uniqueness is an
     /// authoring obligation until the namespace tripwire lands.
     pub fn input_specs(&self) -> Vec<InputSpec> {
-        self.values
-            .iter()
-            .filter_map(|value| {
-                let slot = value.input_slot?;
+        self.graph
+            .node_indices()
+            .filter_map(|id| {
+                let value = &self.graph[id];
+                let LogicalOp::Input { label } = &value.op else {
+                    return None;
+                };
                 Some(InputSpec {
-                    label: value.input_label.clone()?,
-                    id: petgraph::graph::NodeIndex::new(slot),
+                    label: label.clone(),
+                    id,
                     dims: value.dims.clone(),
                     dtype: value.dtype,
                 })
@@ -595,8 +652,8 @@ impl LogicalGraph {
                 label: record
                     .label
                     .clone()
-                    .unwrap_or_else(|| format!("out_{}", record.key)),
-                id: petgraph::graph::NodeIndex::new(record.key),
+                    .unwrap_or_else(|| format!("out_{}", record.value.index())),
+                id: record.value,
             })
             .collect()
     }
@@ -604,15 +661,24 @@ impl LogicalGraph {
     /// Record an op over operand values.
     pub fn op(
         &mut self,
-        at: usize,
-        constructor: &str,
+        op: LogicalOp,
         operands: &[Operand],
-        extra: &str,
         out_dims: Vec<IntExpr>,
         out_dtype: DType,
     ) -> Option<ValueId> {
         if self.poisoned.is_some() {
             return None;
+        }
+        let constructor = op.constructor();
+        let at = self.graph.node_count();
+        if let Some(expected) = op.fixed_arity() {
+            if operands.len() != expected {
+                self.poison(format!(
+                    "{constructor} at t{at}: expected {expected} operands, got {}",
+                    operands.len()
+                ));
+                return None;
+            }
         }
         let mut ids = Vec::with_capacity(operands.len());
         for operand in operands {
@@ -624,24 +690,13 @@ impl LogicalGraph {
                 }
             }
         }
-        Some(self.push(Value {
-            constructor: constructor.to_string(),
-            operands: ids,
-            aux: extra.to_string(),
-            form: RenderForm::Plain,
-            entries: None,
-            dims: out_dims,
-            dtype: out_dtype,
-            input_slot: None,
-            input_label: None,
-        }))
+        Some(self.push(op, &ids, out_dims, out_dtype))
     }
 
     /// Record a seam-node view: an IndexMapApply of the operand through
     /// entries built from the seam's own parameters.
     pub fn view_op(
         &mut self,
-        at: usize,
         operand: &Operand,
         entries: &[MapEntry],
         out_dims: Vec<IntExpr>,
@@ -650,6 +705,7 @@ impl LogicalGraph {
         if self.poisoned.is_some() {
             return None;
         }
+        let at = self.graph.node_count();
         let base = match self.resolve(operand, &format!("view op at t{at}")) {
             Ok(id) => id,
             Err(reason) => {
@@ -657,17 +713,17 @@ impl LogicalGraph {
                 return None;
             }
         };
-        self.push_view(at, base, entries.to_vec(), out_dims, out_dtype)
+        self.push_view(base, entries.to_vec(), out_dims, out_dtype)
     }
 
     fn push_view(
         &mut self,
-        at: usize,
         base: ValueId,
         entries: Vec<MapEntry>,
         out_dims: Vec<IntExpr>,
         out_dtype: DType,
     ) -> Option<ValueId> {
+        let at = self.graph.node_count();
         let shape = match Self::shape_term(&out_dims) {
             Ok(shape) => shape,
             Err(reason) => {
@@ -679,7 +735,7 @@ impl LogicalGraph {
         // carries the source shape it substitutes into — the parent's
         // own dims, written here at the single mint site so the
         // apply/map coherence tripwire can never fire on recorder output.
-        let source_dims = self.values[base.0 as usize].dims.clone();
+        let source_dims = self.graph[base].dims.clone();
         let source_shape = match Self::shape_term(&source_dims) {
             Ok(term) => term,
             Err(reason) => {
@@ -697,42 +753,14 @@ impl LogicalGraph {
                 }
             }
         }
-        Some(self.push(Value {
-            constructor: "LogicalIndexMapApply".to_string(),
-            operands: vec![base],
-            aux: format!("(IndexMapLit {entries_term} {source_shape}) {shape}"),
-            form: RenderForm::Plain,
-            entries: Some(entries),
-            dims: out_dims,
-            dtype: out_dtype,
-            input_slot: None,
-            input_label: None,
-        }))
-    }
-
-    /// Record a source op (no operands) with pre-rendered argument text.
-    pub fn source_op(
-        &mut self,
-        _at: usize,
-        constructor: &str,
-        args: &str,
-        out_dims: Vec<IntExpr>,
-        out_dtype: DType,
-    ) -> Option<ValueId> {
-        if self.poisoned.is_some() {
-            return None;
-        }
-        Some(self.push(Value {
-            constructor: constructor.to_string(),
-            operands: Vec::new(),
-            aux: args.to_string(),
-            form: RenderForm::Plain,
-            entries: None,
-            dims: out_dims,
-            dtype: out_dtype,
-            input_slot: None,
-            input_label: None,
-        }))
+        // Validate all structured render inputs at the insertion boundary.
+        let _ = (shape, source_shape, entries_term);
+        Some(self.push(
+            LogicalOp::IndexMapApply { entries },
+            &[base],
+            out_dims,
+            out_dtype,
+        ))
     }
 
     /// Record a pad-mask indicator iota (see the pad seam): per padded
@@ -759,15 +787,11 @@ impl LogicalGraph {
     /// coordinate is identically zero); a `Coord(k)` with `k >= rank` is
     /// a leaked atom and poisons loudly. The authoring-contract bounds
     /// pair rides every iota.
-    pub fn record_iota(
-        &mut self,
-        at: usize,
-        expr: &IntExpr,
-        dims: &[IntExpr],
-    ) -> Option<ValueId> {
+    pub fn record_iota(&mut self, expr: &IntExpr, dims: &[IntExpr]) -> Option<ValueId> {
         if self.poisoned.is_some() {
             return None;
         }
+        let at = self.graph.node_count();
         let shape = match Self::shape_term(dims) {
             Ok(term) => term,
             Err(reason) => {
@@ -785,34 +809,33 @@ impl LogicalGraph {
                 }
             })
             .collect();
-        let value_expr = match int_expr_term(
-            expr,
-            &coord_terms,
-            &format!("recorder iota t{at}"),
-        ) {
+        let value_expr = match int_expr_term(expr, &coord_terms, &format!("recorder iota t{at}")) {
             Ok(text) => text,
             Err(err) => {
                 self.poison(format!("iota at t{at}: {err}"));
                 return None;
             }
         };
-        let logical = self.source_op(
-            at,
-            "LogicalIota",
-            &format!("{value_expr} {shape}"),
+        let logical = Some(self.push(
+            LogicalOp::Iota {
+                value_expr: value_expr.clone(),
+            },
+            &[],
             dims.to_vec(),
             DType::Int,
-        );
-        self.post_check(format!("iota value-bounds contract at t{at}"), &format!(
-            "(check (= ?reclo{at} (lower-bound-of {value_expr})))\n\
-             (check (= ?rechi{at} (upper-bound-of {value_expr})))\n"
         ));
+        self.post_check(
+            format!("iota value-bounds contract at t{at}"),
+            &format!(
+                "(check (= ?reclo{at} (lower-bound-of {value_expr})))\n\
+             (check (= ?rechi{at} (upper-bound-of {value_expr})))\n"
+            ),
+        );
         logical
     }
 
     pub fn record_mask_iota(
         &mut self,
-        at: usize,
         befores: &[IntExpr],
         afters: &[IntExpr],
         in_dims: &[IntExpr],
@@ -820,6 +843,7 @@ impl LogicalGraph {
         if self.poisoned.is_some() {
             return None;
         }
+        let at = self.graph.node_count();
         let rank = in_dims.len();
         let mut out_dims = Vec::with_capacity(rank);
         let mut out_terms = Vec::with_capacity(rank);
@@ -868,29 +892,30 @@ impl LogicalGraph {
         for factor in factors {
             expr = format!("(IntMul {factor} {expr})");
         }
-        let shape = match Self::shape_term(&out_dims) {
-            Ok(shape) => shape,
-            Err(reason) => {
-                self.poison(format!("mask iota at t{at}: {reason}"));
-                return None;
-            }
-        };
-        let logical =
-            self.source_op(at, "LogicalIota", &format!("{expr} {shape}"), out_dims, DType::Int);
+        let logical = Some(self.push(
+            LogicalOp::Iota {
+                value_expr: expr.clone(),
+            },
+            &[],
+            out_dims,
+            DType::Int,
+        ));
         // The authoring-contract bounds pair — uniform with record_iota
         // (Design A fold-in, 2026-08-06): every recorded iota's value
         // expression must have derivable bounds, or the fixpoint refuses.
-        self.post_check(format!("iota value-bounds contract at t{at}"), &format!(
-            "(check (= ?reclo{at} (lower-bound-of {expr})))\n\
+        self.post_check(
+            format!("iota value-bounds contract at t{at}"),
+            &format!(
+                "(check (= ?reclo{at} (lower-bound-of {expr})))\n\
              (check (= ?rechi{at} (upper-bound-of {expr})))\n"
-        ));
+            ),
+        );
         logical
     }
 
     /// Record a coordinate-form gather.
     pub fn record_gather(
         &mut self,
-        at: usize,
         data: &Operand,
         coords: &[Operand],
         out_dims: Vec<IntExpr>,
@@ -899,6 +924,7 @@ impl LogicalGraph {
         if self.poisoned.is_some() {
             return None;
         }
+        let at = self.graph.node_count();
         let mut ids = Vec::with_capacity(coords.len() + 1);
         match self.resolve(data, &format!("gather at t{at}")) {
             Ok(id) => ids.push(id),
@@ -916,23 +942,12 @@ impl LogicalGraph {
                 }
             }
         }
-        Some(self.push(Value {
-            constructor: "LogicalGather".to_string(),
-            operands: ids,
-            aux: String::new(),
-            form: RenderForm::GatherList,
-            entries: None,
-            dims: out_dims,
-            dtype: out_dtype,
-            input_slot: None,
-            input_label: None,
-        }))
+        Some(self.push(LogicalOp::Gather, &ids, out_dims, out_dtype))
     }
 
     /// Record a coordinate-form scatter (operands: init, coords..., src).
     pub fn record_scatter(
         &mut self,
-        at: usize,
         init: &Operand,
         coords: &[Operand],
         src: &Operand,
@@ -942,6 +957,7 @@ impl LogicalGraph {
         if self.poisoned.is_some() {
             return None;
         }
+        let at = self.graph.node_count();
         let mut ids = Vec::with_capacity(coords.len() + 2);
         match self.resolve(init, &format!("scatter at t{at}")) {
             Ok(id) => ids.push(id),
@@ -966,17 +982,7 @@ impl LogicalGraph {
                 return None;
             }
         }
-        Some(self.push(Value {
-            constructor: "LogicalScatter".to_string(),
-            operands: ids,
-            aux: String::new(),
-            form: RenderForm::ScatterList,
-            entries: None,
-            dims: out_dims,
-            dtype: out_dtype,
-            input_slot: None,
-            input_label: None,
-        }))
+        Some(self.push(LogicalOp::Scatter, &ids, out_dims, out_dtype))
     }
 
     /// Identity entries: parent axis p reads the like-positioned coord.
@@ -993,15 +999,11 @@ impl LogicalGraph {
     /// Apply a movement: composes onto an existing view value (a new
     /// value over the SAME base — the intermediate view goes dead and is
     /// elided at render) or wraps identity entries over a plain value.
-    pub fn apply_movement(
-        &mut self,
-        at: usize,
-        current: &Operand,
-        movement: Movement,
-    ) -> Option<ValueId> {
+    pub fn apply_movement(&mut self, current: &Operand, movement: Movement) -> Option<ValueId> {
         if self.poisoned.is_some() {
             return None;
         }
+        let at = self.graph.node_count();
         let current_id = match self.resolve(current, &format!("movement at t{at}")) {
             Ok(id) => id,
             Err(reason) => {
@@ -1009,14 +1011,14 @@ impl LogicalGraph {
                 return None;
             }
         };
-        let value = &self.values[current_id.0 as usize];
-        let (base, entries, prev_dims) = match &value.entries {
-            Some(entries) => (
-                value.operands[0],
+        let value = &self.graph[current_id];
+        let (base, entries, prev_dims) = match &value.op {
+            LogicalOp::IndexMapApply { entries } => (
+                self.operands(current_id)[0],
                 entries.clone(),
                 value.dims.clone(),
             ),
-            None => (
+            _ => (
                 current_id,
                 Self::identity_entries(&value.dims),
                 value.dims.clone(),
@@ -1156,7 +1158,10 @@ impl LogicalGraph {
             }
             Movement::Repeat(repeats) => {
                 if repeats.len() != prev_rank {
-                    self.poison(format!("repeat arity {} vs rank {prev_rank}", repeats.len()));
+                    self.poison(format!(
+                        "repeat arity {} vs rank {prev_rank}",
+                        repeats.len()
+                    ));
                     return None;
                 }
                 let replacement = (0..prev_rank)
@@ -1187,7 +1192,10 @@ impl LogicalGraph {
             }
             Movement::Shrink { new_dims } => {
                 if new_dims.len() != prev_rank {
-                    self.poison(format!("shrink arity {} vs rank {prev_rank}", new_dims.len()));
+                    self.poison(format!(
+                        "shrink arity {} vs rank {prev_rank}",
+                        new_dims.len()
+                    ));
                     return None;
                 }
                 let replacement = (0..prev_rank)
@@ -1204,7 +1212,7 @@ impl LogicalGraph {
             .iter()
             .map(|entry| entry.substitute(&replacement, prev_rank))
             .collect();
-        self.push_view(at, base, composed, new_dims, out_dtype)
+        self.push_view(base, composed, new_dims, out_dtype)
     }
 
     /// Append post-schedule authoring checks (iota bounds pairs).
@@ -1249,7 +1257,7 @@ impl LogicalGraph {
         }
     }
 
-    pub fn output(&mut self, at: usize, operand: &Operand, key: usize, label: Option<&str>) {
+    pub fn output(&mut self, operand: &Operand, label: Option<&str>) {
         if self.poisoned.is_some() {
             return;
         }
@@ -1262,7 +1270,7 @@ impl LogicalGraph {
                 return self.poison(format!("duplicate output name \"{name}\""));
             }
         }
-        let id = match self.resolve(operand, &format!("output of t{at}")) {
+        let id = match self.resolve(operand, "output") {
             Ok(id) => id,
             Err(reason) => return self.poison(reason),
         };
@@ -1272,62 +1280,114 @@ impl LogicalGraph {
         // materialize path — already poisons via its gather1d.)
         self.outputs.push(OutputRecord {
             value: id,
-            key,
             label: label.map(str::to_string),
         });
     }
 
     /// The live set: every value transitively reachable from the outputs,
     /// plus every input declaration (bindings enumerate all inputs).
-    pub(crate) fn live_set(&self) -> Vec<bool> {
-        let mut live = vec![false; self.values.len()];
+    pub(crate) fn live_set(&self) -> FxHashSet<ValueId> {
+        let mut live = FxHashSet::default();
         let mut stack: Vec<ValueId> = self.outputs.iter().map(|record| record.value).collect();
-        for (index, value) in self.values.iter().enumerate() {
-            if value.input_slot.is_some() {
-                stack.push(ValueId(index as u32));
+        for id in self.graph.node_indices() {
+            if matches!(self.graph[id].op, LogicalOp::Input { .. }) {
+                stack.push(id);
             }
         }
         while let Some(id) = stack.pop() {
-            let index = id.0 as usize;
-            if live[index] {
+            if !live.insert(id) {
                 continue;
             }
-            live[index] = true;
-            stack.extend(self.values[index].operands.iter().copied());
+            stack.extend(self.operands(id));
         }
         live
     }
 
-    fn render_value(&self, id: ValueId) -> String {
-        let value = &self.values[id.0 as usize];
-        let name = |id: &ValueId| format!("v{}", id.0);
-        match value.form {
+    fn render_value(&self, id: ValueId) -> Result<String, String> {
+        let value = &self.graph[id];
+        let operands = self.operands(id);
+        let name = |id: &ValueId| format!("v{}", id.index());
+        let shape = Self::shape_term(&value.dims)?;
+
+        if let LogicalOp::Input { label } = &value.op {
+            let wire_dtype = if value.dtype == DType::Bool {
+                "(Bool8)".to_string()
+            } else {
+                Self::dtype_term(value.dtype)
+            };
+            let literal =
+                format!("(LogicalTensorInputLit (LogicalIdLit \"{label}\") {shape} {wire_dtype})");
+            return if value.dtype == DType::Bool {
+                Ok(format!(
+                    "(let input_wire_v{} {literal})\n(let v{} (LogicalCast input_wire_v{} (Bool)))\n",
+                    id.index(),
+                    id.index(),
+                    id.index()
+                ))
+            } else {
+                Ok(format!("(let v{} {literal})\n", id.index()))
+            };
+        }
+
+        match value.op.render_form() {
             RenderForm::Plain => {
-                let mut parts: Vec<String> = value.operands.iter().map(name).collect();
-                if !value.aux.is_empty() {
-                    parts.push(value.aux.clone());
+                let mut parts: Vec<String> = operands.iter().map(name).collect();
+                match &value.op {
+                    LogicalOp::Constant(constant) => parts.push(format!("{constant:?}")),
+                    LogicalOp::Iota { value_expr } => {
+                        parts.push(value_expr.clone());
+                        parts.push(shape);
+                    }
+                    LogicalOp::Cast(dtype) => parts.push(Self::dtype_term(*dtype)),
+                    LogicalOp::ReduceSum { axis_from_end }
+                    | LogicalOp::ReduceMax { axis_from_end } => {
+                        parts.push(axis_from_end.to_string());
+                    }
+                    LogicalOp::IndexMapApply { entries } => {
+                        let source_shape = Self::shape_term(&self.graph[operands[0]].dims)?;
+                        let mut entries_term = "(IntExprNil)".to_string();
+                        for entry in entries.iter().rev() {
+                            entries_term = format!(
+                                "(IntExprCons {} {entries_term})",
+                                Self::entry_term(entry, &shape)?
+                            );
+                        }
+                        parts.push(format!("(IndexMapLit {entries_term} {source_shape})"));
+                        parts.push(shape);
+                    }
+                    _ => {}
                 }
-                format!("(let v{} ({} {}))\n", id.0, value.constructor, parts.join(" "))
+                Ok(format!(
+                    "(let v{} ({} {}))\n",
+                    id.index(),
+                    value.op.constructor(),
+                    parts.join(" ")
+                ))
             }
             RenderForm::GatherList => {
-                let data = name(&value.operands[0]);
+                let data = name(&operands[0]);
                 let mut list = "(LogicalTensorNil)".to_string();
-                for coord in value.operands[1..].iter().rev() {
+                for coord in operands[1..].iter().rev() {
                     list = format!("(LogicalTensorCons {} {list})", name(coord));
                 }
-                format!("(let v{} ({} {data} {list}))\n", id.0, value.constructor)
+                Ok(format!(
+                    "(let v{} ({} {data} {list}))\n",
+                    id.index(),
+                    value.op.constructor()
+                ))
             }
             RenderForm::ScatterList => {
-                let init = name(&value.operands[0]);
-                let src = name(value.operands.last().unwrap());
+                let init = name(&operands[0]);
+                let src = name(operands.last().unwrap());
                 let mut list = "(LogicalTensorNil)".to_string();
-                for coord in value.operands[1..value.operands.len() - 1].iter().rev() {
+                for coord in operands[1..operands.len() - 1].iter().rev() {
                     list = format!("(LogicalTensorCons {} {list})", name(coord));
                 }
-                format!(
+                Ok(format!(
                     "(let v{} ({} {init} {list} {src}))\n",
-                    id.0, value.constructor
-                )
+                    id.index(),
+                    value.op.constructor()
+                ))
             }
         }
     }
@@ -1341,19 +1401,19 @@ impl LogicalGraph {
         }
         let live = self.live_set();
         let mut text = String::new();
-        for index in 0..self.values.len() {
-            if live[index] {
-                text.push_str(&self.render_value(ValueId(index as u32)));
+        for id in self.graph.node_indices() {
+            if live.contains(&id) {
+                text.push_str(&self.render_value(id)?);
             }
         }
         for record in &self.outputs {
             let name = match &record.label {
                 Some(label) => label.clone(),
-                None => format!("out_{}", record.key),
+                None => format!("out_{}", record.value.index()),
             };
             text.push_str(&format!(
                 "(union v{} (LogicalTensorNamed (LogicalIdLit \"{name}\")))\n",
-                record.value.0
+                record.value.index()
             ));
         }
         Ok(text)
@@ -1389,32 +1449,42 @@ impl LogicalGraph {
         let mut input_slots = Vec::new();
         let mut input_buffer_tensors = Vec::new();
         let mut next_buffer: i64 = 0;
-        for (index, value) in self.values.iter().enumerate() {
-            let Some(slot) = value.input_slot else { continue };
+        for id in self.graph.node_indices() {
+            let value = &self.graph[id];
+            let LogicalOp::Input { .. } = &value.op else {
+                continue;
+            };
+            let slot = id.index();
             let shape = Self::shape_term(&value.dims)?;
             let stem = format!("nat{slot}");
             let buffer = next_buffer;
             next_buffer += 1;
+            let value_name = if value.dtype == DType::Bool {
+                format!("input_wire_v{}", id.index())
+            } else {
+                format!("v{}", id.index())
+            };
             text.push_str(&crate::reference_binding::input_binding(
                 &stem,
                 buffer as usize,
-                &format!("v{index}"),
+                &value_name,
                 &shape,
                 &crate::reference_binding::width_term(value.dtype),
             ));
             input_buffer_tensors.push(format!("{stem}_buffer_tensor"));
             input_slots.push(InputSlot {
-                tensor: petgraph::graph::NodeIndex::new(slot),
+                tensor: id,
                 buffer,
                 size: slot as u64,
-                value_name: format!("v{index}"),
+                value_name,
             });
         }
         let mut output_slots = Vec::new();
         let mut output_buffer_tensors = Vec::new();
         for record in &self.outputs {
-            let (id, key) = (record.value, record.key);
-            let value = &self.values[id.0 as usize];
+            let id = record.value;
+            let key = id.index();
+            let value = &self.graph[id];
             let shape = Self::shape_term(&value.dims)?;
             let stem = format!("natout{key}");
             let buffer = next_buffer;
@@ -1422,13 +1492,13 @@ impl LogicalGraph {
             text.push_str(&crate::reference_binding::output_binding(
                 &stem,
                 buffer as usize,
-                &format!("v{}", id.0),
+                &format!("v{}", id.index()),
                 &shape,
                 value.dtype,
             ));
             output_buffer_tensors.push(format!("{stem}_buffer_tensor"));
             output_slots.push(OutputSlot {
-                tensor: petgraph::graph::NodeIndex::new(key),
+                tensor: id,
                 buffer,
                 size: key as u64,
             });
@@ -1439,7 +1509,13 @@ impl LogicalGraph {
             "nat_input_boundary",
             "nat_output_boundary",
         ));
-        Ok((text, input_slots, output_slots, self.post_checks.clone(), self.labeled_checks.clone()))
+        Ok((
+            text,
+            input_slots,
+            output_slots,
+            self.post_checks.clone(),
+            self.labeled_checks.clone(),
+        ))
     }
 
     /// The assembled native program (model + reference-binding defaults).
@@ -1496,11 +1572,7 @@ pub struct LogicalProgram {
 /// replaced by the given coordinate term and dyn vars resolved via the
 /// pins. Add/Mul only for now (their slice path is affine); anything else
 /// bails loudly.
-pub(crate) fn int_expr_term(
-    expr: &IntExpr,
-    coord_terms: &[String],
-    at: &str,
-) -> AnyResult<String> {
+pub(crate) fn int_expr_term(expr: &IntExpr, coord_terms: &[String], at: &str) -> AnyResult<String> {
     let mut stack: Vec<String> = Vec::new();
     for term in expr.terms.read().iter() {
         match term {
@@ -1521,8 +1593,15 @@ pub(crate) fn int_expr_term(
                     coord_terms.len()
                 ),
             },
-            Term::Add | Term::Mul | Term::Sub | Term::Div | Term::Mod | Term::Min
-            | Term::Max | Term::Gte | Term::Lt => {
+            Term::Add
+            | Term::Mul
+            | Term::Sub
+            | Term::Div
+            | Term::Mod
+            | Term::Min
+            | Term::Max
+            | Term::Gte
+            | Term::Lt => {
                 // Their builders emit RHS terms first, so the stack TOP is
                 // the LEFT operand (verified against as_op + the Sub impl).
                 let (Some(left), Some(right)) = (stack.pop(), stack.pop()) else {
@@ -1550,13 +1629,53 @@ pub(crate) fn int_expr_term(
                 };
                 stack.push(rendered);
             }
-            other => bail!(
-                "hlir_to_logical: index-expression term {other:?} at {at} — later slice"
-            ),
+            other => {
+                bail!("hlir_to_logical: index-expression term {other:?} at {at} — later slice")
+            }
         }
     }
     match (stack.pop(), stack.is_empty()) {
         (Some(result), true) => Ok(result),
         _ => bail!("hlir_to_logical: malformed index expression at {at}"),
+    }
+}
+
+#[cfg(test)]
+mod logical_petgraph_tests {
+    use super::*;
+
+    #[test]
+    fn tensor_ids_are_petgraph_values_with_ported_operand_edges() {
+        let mut cx = Graph::new();
+        let lhs = cx.named_tensor("lhs", (2usize, 3usize));
+        let rhs = cx.named_tensor("rhs", (2usize, 3usize));
+        let sum = lhs + rhs;
+        let viewed = sum.expand_dim(0, 4usize).output();
+
+        let graph = cx.logical.petgraph();
+        assert_eq!(graph.node_count(), 4);
+        assert!(matches!(graph[lhs.id].op, LogicalOp::Input { .. }));
+        assert!(matches!(graph[rhs.id].op, LogicalOp::Input { .. }));
+        assert!(matches!(graph[sum.id].op, LogicalOp::Add));
+        assert!(matches!(
+            graph[viewed.id].op,
+            LogicalOp::IndexMapApply { .. }
+        ));
+
+        let mut add_inputs: Vec<_> = graph
+            .edges_directed(sum.id, Direction::Incoming)
+            .map(|edge| (edge.weight().0, edge.source()))
+            .collect();
+        add_inputs.sort_unstable_by_key(|(port, _)| *port);
+        assert_eq!(add_inputs, vec![(0, lhs.id), (1, rhs.id)]);
+
+        let view_input: Vec<_> = graph
+            .edges_directed(viewed.id, Direction::Incoming)
+            .map(|edge| (edge.weight().0, edge.source()))
+            .collect();
+        assert_eq!(view_input, vec![(0, sum.id)]);
+
+        assert_eq!(cx.logical.input_specs()[0].id, lhs.id);
+        assert_eq!(cx.logical.output_specs()[0].id, viewed.id);
     }
 }
