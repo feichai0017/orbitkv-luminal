@@ -14,7 +14,7 @@ use luminal::layout_ir::{
 use luminal::prelude::egraph_serialize;
 
 use crate::kernels::{
-    composed_read_index_pref, coord_prelude, cuda_type, lower_expr, numel, strides_of, CodegenCtx,
+    coord_prelude, cuda_type, layout_read_index, lower_expr, numel, strides_of, CodegenCtx,
     KernelSource,
 };
 use anyhow::{bail, Result};
@@ -98,13 +98,12 @@ impl ToDps for IndexMapApplyMaterializeDps {
 
 impl LayoutIrOp for IndexMapApplyMaterializeDps {}
 
-/// The CUDA lowering, colocated with its op. Train-2B: a composed
-/// access on operand 0 is a view chain folded onto the materialize's
-/// input — the op's own map application produces the input VALUE's
-/// coordinates, and the folded chain then composes ON TOP of them
-/// (via [`crate::kernels::composed_read_index_pref`]) down to the
-/// residence actually read. The WRITE side (dest0) stays fail-closed
-/// (CL-4b).
+/// The CUDA lowering, colocated with its op. A non-direct layout on
+/// operand 0 is a view folded onto the materialize's input — the op's
+/// own map application produces the input VALUE's coordinates, and the
+/// slot's carried layout then reads ON TOP of them (via
+/// [`crate::kernels::layout_read_index`]) down to the residence
+/// actually read. The WRITE side (dest0) stays fail-closed (CL-4b).
 pub(crate) fn codegen(
     op: &dyn BufferTensorIrOp,
     ctx: &CodegenCtx,
@@ -112,9 +111,9 @@ pub(crate) fn codegen(
     let Some(mat) = op.as_any().downcast_ref::<IndexMapApplyMaterializeDps>() else {
         bail!("materialize codegen reached with a non-Materialize op");
     };
-    if ctx.composed_access.get(1).is_some_and(Option::is_some) {
+    if ctx.non_direct_operand(1).is_some() {
         bail!(
-            "dest operand slot 1 carries a composed access: strided writes \
+            "dest operand slot 1 carries a non-direct layout: strided writes \
              are not lowered (dests stay dense out-of-place; CL-4b)"
         );
     }
@@ -130,11 +129,11 @@ pub(crate) fn codegen(
     let to = cuda_type(ctx.dest_dtypes[0])?;
     let n = numel(out_dims);
     let prelude = coord_prelude(out_dims);
-    if let Some(access) = ctx.composed_access[0].as_ref() {
+    if let Some(layout) = ctx.non_direct_operand(0) {
         // The strided branch: the op's map lands on the input VALUE's
         // coordinates (`parent_c*`, trapped against the value extents —
-        // the map's own checked contract), then the folded chain
-        // carries them to the residence.
+        // the map's own checked contract), then the slot's carried
+        // layout carries them to the residence.
         let mut body = String::from("    long long idx;\n");
         for (k, entry) in entries.iter().enumerate() {
             let value = lower_expr(entry, out_dims.len())?;
@@ -143,8 +142,7 @@ pub(crate) fn codegen(
                 ext = parent_dims[k]
             ));
         }
-        let (chain, pidx) =
-            composed_read_index_pref("parent", access, parent_dims.len(), "parent_c")?;
+        let (chain, pidx) = layout_read_index("parent", layout, parent_dims, "parent_c")?;
         body.push_str(&chain);
         let source = format!(
             r#"extern "C" __global__ void k(const {t}* parent, {to}* out, unsigned long long n) {{

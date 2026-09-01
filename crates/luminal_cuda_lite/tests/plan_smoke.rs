@@ -149,12 +149,27 @@ fn codegen_emits_wellformed_sources() {
     // String-level check on a representative binary kernel: generate
     // Add over (2,3) f32 and eyeball the load-bearing pieces.
     use luminal::dtype::PlanDtype;
+    use luminal::layouts::{
+        BitWidthTerm, IntExprTerm, MirrorLayout, RightMajorContiguousElementLayout, ShapeTerm,
+    };
+    fn rm_layout(dims: &[i64]) -> luminal_cuda_lite::layouts::CudaLayout {
+        luminal_cuda_lite::layouts::CudaLayout {
+            mirror: MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
+                shape: ShapeTerm(dims.iter().map(|&d| IntExprTerm::Lit(d)).collect()),
+                width: BitWidthTerm(32),
+            }),
+            dtype: Some(PlanDtype::F32),
+        }
+    }
     let ctx = kernels::CodegenCtx {
         operand_dims: vec![vec![2, 3], vec![2, 3], vec![2, 3]],
         operand_dtypes: vec![PlanDtype::F32, PlanDtype::F32, PlanDtype::F32],
         dest_dims: vec![vec![2, 3]],
         dest_dtypes: vec![PlanDtype::F32],
-        composed_access: vec![None, None, None],
+        // The slot layouts ARE the read paths (the hop chain is retired):
+        // all three are the direct row-major form, so the flat fast path
+        // holds and the emitted source is the pre-Option-B text.
+        operand_layouts: vec![rm_layout(&[2, 3]), rm_layout(&[2, 3]), rm_layout(&[2, 3])],
     };
     let add = luminal_cuda_lite::ops::add::AddFunctionalDps;
     let kernel = kernels::codegen_for(&add).expect("add has a row");

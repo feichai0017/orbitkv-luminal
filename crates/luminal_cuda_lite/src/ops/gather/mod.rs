@@ -14,7 +14,7 @@ use luminal::layout_ir::{
 };
 
 use crate::kernels::{
-    composed_read_index, composed_read_index_pref, coord_prelude, cuda_type, numel, strides_of,
+    coord_prelude, cuda_type, layout_read_index, numel, strides_of,
     CodegenCtx, KernelSource,
 };
 use anyhow::{bail, Result};
@@ -106,10 +106,10 @@ impl ToDps for GatherDps {
 
 impl LayoutIrOp for GatherDps {}
 
-/// The CUDA lowering, colocated with its op. Train-2B: every READ
-/// operand (data AND coordinates) may carry a [`ComposedAccess`] — the
-/// hop chain composes into that operand's read index exactly as
-/// [`crate::kernels::composed_read_index`] does for the elementwise
+/// The CUDA lowering, colocated with its op. Every READ operand (data
+/// AND coordinates) may arrive with a non-direct layout — the slot's
+/// own carried layout lowers into that operand's read index exactly as
+/// [`crate::kernels::layout_read_index`] does for the elementwise
 /// templates. The WRITE side (dest0) stays fail-closed (CL-4b).
 pub(crate) fn codegen(
     op: &dyn BufferTensorIrOp,
@@ -119,9 +119,9 @@ pub(crate) fn codegen(
         bail!("gather codegen reached with a non-Gather op");
     };
     let rank = gather.rank;
-    if ctx.composed_access.get(gather.dest_index()).is_some_and(Option::is_some) {
+    if ctx.non_direct_operand(gather.dest_index()).is_some() {
         bail!(
-            "dest operand slot {} carries a composed access: strided writes \
+            "dest operand slot {} carries a non-direct layout: strided writes \
              are not lowered (dests stay dense out-of-place; CL-4b)",
             gather.dest_index()
         );
@@ -139,7 +139,7 @@ pub(crate) fn codegen(
     for axis in 0..rank {
         sig.push_str(&format!(", const int* coord{axis}"));
     }
-    if ctx.composed_access.iter().all(Option::is_none) {
+    if (0..ctx.operand_layouts.len()).all(|k| ctx.non_direct_operand(k).is_none()) {
         // The flat fast path, byte-identical to pre-Train-2B codegen.
         let mut body = String::from("    long long flat = 0;\n    long long coord;\n");
         for axis in 0..rank {
@@ -166,32 +166,31 @@ pub(crate) fn codegen(
     // themselves: they are bound as `data_c{axis}` and the data chain
     // is evaluated at THOSE (the gather's own indirection composes ON
     // TOP of the folded chain).
-    let coord_folded =
-        (1..=rank).any(|slot| ctx.composed_access.get(slot).is_some_and(Option::is_some));
-    let data_access = ctx.composed_access[0].as_ref();
+    let coord_folded = (1..=rank).any(|slot| ctx.non_direct_operand(slot).is_some());
+    let data_layout = ctx.non_direct_operand(0);
     let mut body = String::new();
     if coord_folded {
         body.push_str(&coord_prelude(out_dims));
     }
-    if data_access.is_none() {
+    if data_layout.is_none() {
         body.push_str("    long long flat = 0;\n");
     }
     body.push_str("    long long coord;\n");
     for axis in 0..rank {
-        if let Some(access) = ctx.composed_access.get(axis + 1).and_then(|a| a.as_ref()) {
+        if let Some(layout) = ctx.non_direct_operand(axis + 1) {
             // The coordinate value's own extents must be the out
             // extents for `c*` to be its coordinates: refuse a
             // mismatch, never reinterpret (the elementwise contract).
             if &ctx.operand_dims[axis + 1] != out_dims {
                 bail!(
                     "operand coord{axis} value extents {:?} differ from dest extents {:?} \
-                     under composed access — the gather iterates the dest",
+                     under a non-direct layout — the gather iterates the dest",
                     ctx.operand_dims[axis + 1],
                     out_dims
                 );
             }
             let name = format!("coord{axis}");
-            let (chain, idx) = composed_read_index(&name, access, out_dims.len())?;
+            let (chain, idx) = layout_read_index(&name, layout, out_dims, "c")?;
             body.push_str(&chain);
             body.push_str(&format!("    coord = (long long){name}[{idx}];\n"));
         } else {
@@ -203,14 +202,14 @@ pub(crate) fn codegen(
             "    if (coord < 0 || coord >= {ext}LL) __trap();\n",
             ext = data_dims[axis]
         ));
-        if data_access.is_some() {
+        if data_layout.is_some() {
             body.push_str(&format!("    long long data_c{axis} = coord;\n"));
         } else {
             body.push_str(&format!("    flat += coord * {stride}LL;\n", stride = strides[axis]));
         }
     }
-    let read = if let Some(access) = data_access {
-        let (chain, idx) = composed_read_index_pref("data", access, rank, "data_c")?;
+    let read = if let Some(layout) = data_layout {
+        let (chain, idx) = layout_read_index("data", layout, data_dims, "data_c")?;
         body.push_str(&chain);
         format!("data[{idx}]")
     } else {

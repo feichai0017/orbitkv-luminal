@@ -437,12 +437,20 @@ pub trait OpMatcher: std::fmt::Debug {
 /// Strided > ElementOffset > BitOffset) is preferred as a rendering
 /// preference only. No normalization, no analysis, and failure is LOUD:
 /// an error refuses the plan; there is no silent default layout.
+/// PER-VALUE RENDERING (Option B rework, 2026-08-31): the hook receives
+/// the elected VALUE's [`LayoutTensorInfo`] — its layout class plus the
+/// extraction-side facts the runtime already owns (notably `dtype_enum`,
+/// the `dtype-of` row) — so a runtime may fold whatever it wants of its
+/// OWN knowledge into `L` (e.g. a typed layout). Core still never reads
+/// any of it back. CACHE CONTRACT: the rendering must be a pure function
+/// of `(value.layout.eclass, value.dtype_enum)` — core caches on exactly
+/// that key across genomes.
 pub trait LayoutRenderer<L> {
-    /// Render one layout e-class of the serialized e-graph into `L`.
+    /// Render one elected value's layout into `L`.
     fn render_layout(
         &self,
         egraph: &egraph_serialize::EGraph,
-        class: &egraph_serialize::ClassId,
+        value: &LayoutTensorInfo,
     ) -> anyhow::Result<L>;
 }
 

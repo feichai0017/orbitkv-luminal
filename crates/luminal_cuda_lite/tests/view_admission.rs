@@ -18,12 +18,16 @@
 //!    test honest if the fence ever moves);
 //!  * buffer/copy counts are PINNED per fixture (regression tripwires
 //!    for the folded shape);
-//!  * consumers' operand descriptors must CARRY the composed access
-//!    (Phase-3 machinery), checked by EVALUATING the hop chain against
-//!    the hand-computed map — hop count is the e-graph's business.
+//!  * consumers' operand descriptors must CARRY a NON-DIRECT LAYOUT —
+//!    the view's own composed layout as the e-graph minted it — checked
+//!    by EVALUATING that layout to a flat parent element index and
+//!    comparing against the hand-computed map. (The hop chain is retired:
+//!    corrected contract, 2026-08-31. The e-graph composes views at view
+//!    creation; the rendered `L` IS the read path, and how it is spelled
+//!    is the e-graph's business.)
 
 use luminal::buffer_tensor_ir::TypedBuffer;
-use luminal::bufferize::{BufferIrGraph, BufferNode, ComposedAccess};
+use luminal::bufferize::{BufferIrGraph, BufferNode};
 use luminal::graph::Graph;
 use luminal::implementation_search::ImplementationSearchOptions;
 use luminal::prelude::{FxHashMap, NodeIndex};
@@ -53,8 +57,13 @@ fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)]) -> BufferIrGraph<lu
 }
 
 /// The plan-shape audit shared by every fixture. Returns
-/// (compute_count, copy_count, buffer_count, composed slots).
-fn audit(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> (usize, usize, usize, Vec<(String, usize, ComposedAccess)>) {
+/// (compute_count, copy_count, buffer_count, folded slots) — a "folded
+/// slot" being an operand whose carried layout is NOT the direct
+/// row-major read for its own domain.
+type FoldedSlot = (String, usize, luminal_cuda_lite::CudaLayout);
+fn audit(
+    plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>,
+) -> (usize, usize, usize, Vec<FoldedSlot>) {
     let mut computes = 0usize;
     let mut copies = 0usize;
     let mut composed = Vec::new();
@@ -95,14 +104,25 @@ fn audit(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> (usize, usize, 
                 );
 
                 for (slot, info) in operand_info.iter().enumerate() {
-                    if let Some(access) = &info.composed_access {
-                        composed.push((label.to_string(), slot, access.clone()));
+                    let dims = info
+                        .layout
+                        .mirror
+                        .literal_extents()
+                        .expect("elected slot layouts are literal in these fixtures");
+                    if !luminal_cuda_lite::kernels::layout_is_direct(&info.layout, &dims) {
+                        composed.push((label.to_string(), slot, info.layout.clone()));
                     }
                 }
                 for info in result_info {
+                    let dims = info
+                        .layout
+                        .mirror
+                        .literal_extents()
+                        .expect("elected slot layouts are literal in these fixtures");
                     assert!(
-                        info.composed_access.is_none(),
-                        "{label}: a compute RESULT is produced by the node, never through a fold"
+                        luminal_cuda_lite::kernels::layout_is_direct(&info.layout, &dims),
+                        "{label}: a compute RESULT is produced by the node, never read \
+                         through a fold — its layout must be the direct form"
                     );
                 }
             }
@@ -112,21 +132,65 @@ fn audit(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> (usize, usize, 
     (computes, copies, plan.buffers.len(), composed)
 }
 
-/// Evaluate a composed-access chain at one out-coordinate (the Phase-3
-/// probe walk): hops[0] is the outermost fold, each hop's outputs feed
-/// the next; returns final parent coordinates. Loud on unparsed hops.
-fn chain_eval(access: &ComposedAccess, out_coord: &[usize]) -> Vec<i64> {
-    let mut coords: Vec<usize> = out_coord.to_vec();
-    for (k, hop) in access.hops.iter().enumerate() {
-        let entries = hop
-            .entries
-            .as_ref()
-            .unwrap_or_else(|| panic!("hop {k} beyond the parsed subset (fail-closed)"));
-        let next: Vec<i64> = entries.iter().map(|e| e.eval(&coords)).collect();
-        assert!(next.iter().all(|&v| v >= 0), "negative parent index at hop {k}");
-        coords = next.iter().map(|&v| v as usize).collect();
+/// Evaluate a mirror term at concrete coordinates (front-indexed;
+/// `Coord{axis_from_end}` reads `coords[rank-1-axis_from_end]`). The
+/// fixtures' layouts use only the affine subset.
+fn eval_term(expr: &luminal::layouts::IntExprTerm, coords: &[usize]) -> i64 {
+    use luminal::layouts::IntExprTerm as T;
+    let rank = coords.len();
+    match expr {
+        T::Lit(v) => *v,
+        T::Coord { axis_from_end } => {
+            let axis = usize::try_from(*axis_from_end).expect("non-negative axis");
+            assert!(axis < rank, "coordinate axis {axis} out of rank {rank}");
+            coords[rank - 1 - axis] as i64
+        }
+        T::Add(a, b) => eval_term(a, coords) + eval_term(b, coords),
+        T::Mul(a, b) => eval_term(a, coords) * eval_term(b, coords),
+        T::TruncDiv(a, b) => eval_term(a, coords) / eval_term(b, coords),
+        T::TruncRem(a, b) => eval_term(a, coords) % eval_term(b, coords),
+        other => panic!("fixture layouts use no {other:?}"),
     }
-    coords.iter().map(|&v| v as i64).collect()
+}
+
+/// THE READ PATH, evaluated: the slot's own carried layout at one
+/// out-coordinate, down to the FLAT ELEMENT INDEX into the residence's
+/// bytes. This replaces the hop-chain walk — there are no intermediate
+/// parents any more, so there is one answer, not a chain of coordinate
+/// frames. (Honesty note carried from the kernels module: with the chain
+/// gone, the only bounds fence is the final index against the layout's
+/// span where the constructor discloses one.)
+fn flat_index(layout: &luminal_cuda_lite::CudaLayout, out_coord: &[usize]) -> i64 {
+    use luminal::layouts::MirrorLayout as M;
+    let flat = match &layout.mirror {
+        M::RightMajor(rm) => {
+            let extents = rm.shape.0.iter().map(|e| eval_term(e, &[]) as usize);
+            out_coord
+                .iter()
+                .zip(extents)
+                .fold(0usize, |acc, (&c, d)| acc * d + c) as i64
+        }
+        M::LeftMajor(lm) => {
+            let extents: Vec<usize> =
+                lm.shape.0.iter().map(|e| eval_term(e, &[]) as usize).collect();
+            let mut stride = 1usize;
+            let mut acc = 0usize;
+            for (&c, &d) in out_coord.iter().zip(&extents) {
+                acc += c * stride;
+                stride *= d;
+            }
+            acc as i64
+        }
+        M::Strided(st) => st.chain.iter().map(|s| eval_term(s, out_coord)).sum(),
+        M::ElementOffset(eo) => eval_term(&eo.offset, out_coord),
+        M::BitOffset(bo) => {
+            let bits = eval_term(&bo.offset, out_coord);
+            assert_eq!(bits % bo.width.0, 0, "bit offset is element-aligned");
+            bits / bo.width.0
+        }
+    };
+    assert!(flat >= 0, "negative element index {flat}");
+    flat
 }
 
 /// TRANSPOSE CONSUMER: x(2,3) permuted then multiplied. The searched
@@ -150,17 +214,21 @@ fn transpose_consumer_folds_and_carries_the_swap_map() {
     assert_eq!(computes, 1, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(copies, 0, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(buffers, 3, "plan shape drifted:\n{}", plan.summary());
-    assert!(!composed.is_empty(), "no operand carries composed access:\n{}", plan.summary());
-    let (label, slot, access) = &composed[0];
+    assert!(!composed.is_empty(), "no operand carries a folded layout:\n{}", plan.summary());
+    let (label, slot, layout) = &composed[0];
     assert_eq!(label, "MulFunctionalGeneric");
-    let last = access.hops.last().unwrap();
-    assert_eq!(last.parent_dims.as_deref(), Some(&[2i64, 3][..]));
+    // The layout's DOMAIN is the view's shape (3,2) — the value's own
+    // extents, which is exactly why no `dims` field is needed.
+    assert_eq!(layout.mirror.literal_extents(), Some(vec![3, 2]));
     for i in 0..3usize {
         for j in 0..2usize {
+            // Parent x is (2,3) row-major; the transpose's (i,j) is
+            // parent (j,i), flat j*3 + i.
             assert_eq!(
-                chain_eval(access, &[i, j]),
-                vec![j as i64, i as i64],
-                "transpose: mul operand {slot} out ({i},{j}) must address parent ({j},{i})"
+                flat_index(layout, &[i, j]),
+                (j * 3 + i) as i64,
+                "transpose: mul operand {slot} out ({i},{j}) must read parent flat {}",
+                j * 3 + i
             );
         }
     }
@@ -185,17 +253,18 @@ fn slice_consumer_folds_and_carries_the_offset_map() {
     assert_eq!(computes, 1, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(copies, 0, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(buffers, 3, "plan shape drifted:\n{}", plan.summary());
-    assert!(!composed.is_empty(), "no operand carries composed access:\n{}", plan.summary());
-    let (_, _, access) = &composed[0];
-    let last = access.hops.last().unwrap();
-    assert_eq!(last.parent_dims.as_deref(), Some(&[4i64, 6][..]));
+    assert!(!composed.is_empty(), "no operand carries a folded layout:\n{}", plan.summary());
+    let (_, _, layout) = &composed[0];
+    assert_eq!(layout.mirror.literal_extents(), Some(vec![2, 6]));
     for i in 0..2usize {
         for j in 0..6usize {
+            // Parent x is (4,6) row-major; rows 1..3, so out (i,j) is
+            // parent (i+1, j), flat (i+1)*6 + j.
             assert_eq!(
-                chain_eval(access, &[i, j]),
-                vec![i as i64 + 1, j as i64],
-                "slice: out ({i},{j}) must address parent ({},{j})",
-                i + 1
+                flat_index(layout, &[i, j]),
+                ((i + 1) * 6 + j) as i64,
+                "slice: out ({i},{j}) must read parent flat {}",
+                (i + 1) * 6 + j
             );
         }
     }
@@ -221,16 +290,17 @@ fn broadcast_consumer_folds_and_carries_the_stride0_map() {
     assert_eq!(computes, 1, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(copies, 0, "plan shape drifted:\n{}", plan.summary());
     assert_eq!(buffers, 3, "plan shape drifted:\n{}", plan.summary());
-    assert!(!composed.is_empty(), "no operand carries composed access:\n{}", plan.summary());
-    let (_, _, access) = &composed[0];
-    let last = access.hops.last().unwrap();
-    assert_eq!(last.parent_dims.as_deref(), Some(&[3i64][..]));
+    assert!(!composed.is_empty(), "no operand carries a folded layout:\n{}", plan.summary());
+    let (_, _, layout) = &composed[0];
+    assert_eq!(layout.mirror.literal_extents(), Some(vec![2, 3]));
     for i in 0..2usize {
         for j in 0..3usize {
+            // Parent x is (3,) — the broadcast axis is stride-0, so every
+            // i reads the same parent element j.
             assert_eq!(
-                chain_eval(access, &[i, j]),
-                vec![j as i64],
-                "broadcast: out ({i},{j}) must address parent ({j}) for every i"
+                flat_index(layout, &[i, j]),
+                j as i64,
+                "broadcast: out ({i},{j}) must read parent flat {j} for every i"
             );
         }
     }

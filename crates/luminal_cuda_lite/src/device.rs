@@ -142,7 +142,7 @@ pub fn launch_single(source: &str, inputs: &[&[u8]], out_bytes: usize, n: usize)
 pub fn execute_plan(
     plan: &BufferIrGraph<crate::layouts::CudaLayout>,
     staged: &FxHashMap<i64, TypedBuffer>,
-) -> Result<FxHashMap<usize, (TypedBuffer, OutputBinding)>> {
+) -> Result<FxHashMap<usize, (TypedBuffer, OutputBinding<crate::layouts::CudaLayout>)>> {
     // ESCAPE GUARD (ruling 2026-08-27): an output slot's backing storage
     // must SURVIVE the call — FreedBy::Caller, whatever the owner.
     // FreedBy::Program backing an output hands the caller bytes the
@@ -178,19 +178,31 @@ pub fn execute_plan(
     let stream = ctx.default_stream();
     let mut cache = KernelCache { ctx: ctx.clone(), modules: HashMap::new() };
 
-    // Phase 1: materialize every buffer on device.
+    // Phase 1: materialize every buffer on device — ALLOCATION BY
+    // ASSIGNMENT LOOKUP (corrected contract, 2026-08-31): the buffer
+    // backs one tensor, its carried layout gives the span in elements
+    // and the dtype fact gives the byte width. No walk, no voting.
     let mut storage: FxHashMap<BufferId, CudaSlice<u8>> = FxHashMap::default();
     let mut geometry: FxHashMap<BufferId, (Vec<usize>, PlanDtype)> = FxHashMap::default();
     for (id, buffer) in &plan.buffers {
-        let dims = buffer
-            .dims
-            .as_ref()
-            .ok_or_else(|| anyhow!("buffer {:?} has no numeric geometry", buffer.label))?;
-        let dtype = buffer
-            .dtype
-            .ok_or_else(|| anyhow!("buffer {:?} has no dtype", buffer.label))?;
-        let dims: Vec<usize> = dims.iter().map(|&d| usize::try_from(d).unwrap_or(0)).collect();
-        let numel: usize = dims.iter().product();
+        let dims = buffer.layout.mirror.literal_extents().ok_or_else(|| {
+            anyhow!(
+                "buffer {:?} (backing {}) has symbolic layout extents — not executable",
+                buffer.label,
+                buffer.backs
+            )
+        })?;
+        let numel = buffer.layout.mirror.literal_span_elements().ok_or_else(|| {
+            anyhow!(
+                "buffer {:?} (backing {}) has no literal span — symbolic or \
+                 undisclosed-reach layouts are not executable",
+                buffer.label,
+                buffer.backs
+            )
+        })?;
+        let dtype = buffer.layout.dtype.ok_or_else(|| {
+            anyhow!("buffer {:?} (backing {}) carries no dtype fact", buffer.label, buffer.backs)
+        })?;
         let bytes = numel * dtype_bytes(dtype)?;
         let mut slice = stream
             .alloc_zeros::<u8>(bytes.max(1))
@@ -247,25 +259,42 @@ pub fn execute_plan(
     for node in order {
         match &plan.dag[node] {
             BufferNode::BufferInput { .. } | BufferNode::BufferOutput { .. } => {}
-            BufferNode::BufferCopy { src, dst, .. } => {
-                let (src_geo, src_dtype) =
-                    geometry.get(src).ok_or_else(|| anyhow!("copy src unknown"))?.clone();
-                let (dst_geo, dst_dtype) =
-                    geometry.get(dst).ok_or_else(|| anyhow!("copy dst unknown"))?.clone();
-                // RULING 2026-08-27: a BufferCopy is only ever a dumb
-                // whole-buffer memcpy — the Phase-5 copy_through_fold path
-                // is deleted. This geometry/dtype equality check is the
-                // PERMANENT FENCE: a folded delivery smuggled past the
-                // bufferizer's refusal would arrive with a parent-shaped
-                // src and an output-shaped dst and must fail HERE, loudly,
-                // never move bytes.
-                if src_geo.iter().product::<usize>() != dst_geo.iter().product::<usize>()
-                    || src_dtype != dst_dtype
-                {
-                    bail!("copy geometry/dtype mismatch: {src_geo:?}/{src_dtype:?} -> {dst_geo:?}/{dst_dtype:?}");
+            BufferNode::BufferCopy { src, dst } => {
+                // THE BUFFERCOPY CONTRACT, executor side (Austin, ruled
+                // 2026-08-31 — see `bufferize::BufferNode::BufferCopy`):
+                //
+                // * The node carries ONLY {src, dst}.
+                // * Semantics: a DUMB EXACT-SIZE WHOLE-BUFFER copy — one
+                //   `memcpy_dtod` of the whole slice, no layout awareness,
+                //   no element walk. "If a runtime chooses to do resource
+                //   reuse and do unequal sized buffer that is an entirely
+                //   runtime owned choice"; CL-2 pre-materializes exactly
+                //   sized slices and makes no such choice, so unequal
+                //   lengths are a bug HERE and bail loudly (this is the
+                //   executor's own discipline over bufferizer-authored
+                //   nodes, NOT a type fence re-checking an e-graph premise).
+                // * ORDERING IS THIS RUNTIME'S OBLIGATION. The plan supplied
+                //   dependency structure only (data + WAR anti-edges); we
+                //   discharge it by issuing in toposort order onto ONE
+                //   stream, which serializes the copy against every op that
+                //   depends on it and every prior reader of `dst`. A
+                //   multi-stream executor would owe events/barriers here.
+                // * The three causes (conflict repair, boundary placement,
+                //   lifetime repair) are the bufferizer's business; all
+                //   three execute identically.
+                let src_slice = storage
+                    .get(src)
+                    .ok_or_else(|| anyhow!("copy src unknown"))?
+                    .clone();
+                let dst_slice =
+                    storage.get_mut(dst).ok_or_else(|| anyhow!("copy dst unknown"))?;
+                if src_slice.len() != dst_slice.len() {
+                    bail!(
+                        "copy length mismatch: {} -> {} bytes",
+                        src_slice.len(),
+                        dst_slice.len()
+                    );
                 }
-                let src_slice = storage.get(src).unwrap().clone();
-                let dst_slice = storage.get_mut(dst).unwrap();
                 stream.memcpy_dtod(&src_slice, dst_slice).context("D2D copy")?;
             }
             BufferNode::Compute { op, reads, writes, operand_info, result_info, .. } => {
@@ -296,71 +325,18 @@ pub fn execute_plan(
                         .map(|id| storage.get(id).unwrap().clone())
                         .collect();
                     let operand_refs: Vec<&CudaSlice<u8>> = inputs.iter().collect();
-                    // F32-only scope end to end (contract 1): every
-                    // operand slot and the destination must be F32.
+                    // RUNTIME TYPE-CHECKING DIES (corrected contract,
+                    // 2026-08-31, correction 4): the F32 end-to-end
+                    // re-check, the [m, n] frame re-check, and the
+                    // C-operand dims/fold re-checks that stood here
+                    // re-verified facts the e-graph guarantees by rule
+                    // premise (the marker's contracts match F32 dense
+                    // frames; Cdesc == Ddesc by rule guard) — they are
+                    // REMOVED. Checks against the LIBRARY's behavior
+                    // stay where they live (the TF32 strictness
+                    // detector and the ld-bounds guard in the cublaslt
+                    // op module verify the vendor, not our types).
                     let (dest_dims, dest_dtype) = geometry.get(&writes[0]).unwrap().clone();
-                    if dest_dtype != PlanDtype::F32
-                        || operand_info.iter().any(|s| s.dtype != Some(PlanDtype::F32))
-                    {
-                        let bad_operands: Vec<String> = operand_info
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, s)| s.dtype != Some(PlanDtype::F32))
-                            .map(|(i, s)| format!("operand {i}: {:?}", s.dtype))
-                            .collect();
-                        bail!(
-                            "{label}: cuBLASLt scope is F32-only end to end \
-                             (contract 1); dest {dest_dtype:?}, offending \
-                             operands: [{}]",
-                            bad_operands.join(", ")
-                        );
-                    }
-                    // ROW-CONVENTION FRAME CHECK (the orientation-bug
-                    // fence): the fresh dest is written as a dense
-                    // ROW-major m x n matrix, and the plan's disclosure
-                    // walks the result buffer as row-major over the
-                    // RESULT VALUE's dims — the two agree only when the
-                    // planned dims ARE [m, n]. A mismatch means the
-                    // call frame and the plan frame diverged: refuse
-                    // loudly, never land transposed bytes.
-                    if dest_dims != [call.m as usize, call.n as usize] {
-                        bail!(
-                            "{label}: planned destination dims {dest_dims:?} disagree \
-                             with the call frame [m, n] = [{}, {}] — the ROW-major D \
-                             write would not match the disclosed layout",
-                            call.m,
-                            call.n
-                        );
-                    }
-                    // The C-fold forms read a REAL C operand through the
-                    // same ROW m x n descriptor as D (Cdesc == Ddesc by
-                    // rule guard). That read is only correct when the C
-                    // operand buffer holds the call-frame C dense
-                    // row-major: a slot arriving as a FOLDED VIEW
-                    // (composed access over a parent buffer) presents
-                    // different bytes and there is no transC to absorb
-                    // it — refuse loudly.
-                    if let crate::ops::cublaslt::exec::CSource::Operand(ci) = call.c_source {
-                        let slot = operand_info.get(ci).ok_or_else(|| {
-                            anyhow!("{label}: C operand slot {ci} missing from operand_info")
-                        })?;
-                        if slot.composed_access.is_some() {
-                            bail!(
-                                "{label}: C operand arrives as a folded VIEW over its \
-                                 buffer — the ROW-major C descriptor (== D) requires a \
-                                 materialized dense C operand; refusing before dispatch"
-                            );
-                        }
-                        if slot.dims.as_deref() != Some(&[call.m, call.n][..]) {
-                            bail!(
-                                "{label}: C operand dims {:?} disagree with the call \
-                                 frame [m, n] = [{}, {}] — refusing before dispatch",
-                                slot.dims,
-                                call.m,
-                                call.n
-                            );
-                        }
-                    }
                     let dest_bytes =
                         dest_dims.iter().product::<usize>() * dtype_bytes(dest_dtype)?;
                     let mut dest =

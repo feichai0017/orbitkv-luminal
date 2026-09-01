@@ -1,42 +1,91 @@
-//! M4 Phase 4 device gates (`device` feature only): synthetic-descriptor
-//! STRIDED-READ launches, byte-compared against the REFERENCE
-//! MATERIALIZE ROUTE on identical inputs. The reference deliberately
-//! stays materialize-only — its kernel evaluates the same parsed
-//! `IotaExpr` entries per OUT coordinate on the host
-//! (`IotaExpr::eval`, see luminal_reference ops/index_map_apply_materialize)
-//! — so the oracle here is exactly that evaluation, one materialize per
-//! hop, composed outermost-first. Copies move bits, so agreement is
-//! byte-exact; the reduce case folds in the same linear order on both
-//! sides, so it is byte-exact too.
+//! M4 Phase 4 device gates (`device` feature only), RESTATED for the
+//! corrected contract (2026-08-31): synthetic-descriptor STRIDED-READ
+//! launches, byte-compared against an INDEPENDENT HOST ORACLE on
+//! identical inputs.
+//!
+//! What changed. These gates used to build a hop chain and check the
+//! device against the reference materialize route, which evaluated the
+//! same parsed `IotaExpr` entries hop by hop on the host. The hop chain
+//! is deleted: an operand now carries ONE composed layout (the e-graph
+//! composed it at view creation) and the kernel lowers that layout's own
+//! offset expression.
+//!
+//! Keeping the differential HONEST therefore requires care: if the
+//! oracle also evaluated the carried layout, both sides would share the
+//! lowering and the test would prove nothing. So each case states its
+//! index map TWICE — once as the layout handed to codegen, and once as a
+//! hand-written host closure — and the gate is that the two agree
+//! element for element. Copies move bits, so agreement is byte-exact;
+//! the reduce case folds in the same linear order on both sides, so it
+//! is byte-exact too.
 #![cfg(feature = "device")]
 
 use luminal::buffer_tensor_ir::BufferTensorIrOp;
-use luminal::bufferize::{AccessHop, BufferId, ComposedAccess, SlotDescriptor};
+use luminal::bufferize::{BufferId, SlotDescriptor};
 use luminal::dtype::PlanDtype;
-use luminal::index_expr::IotaExpr;
-use luminal_cuda_lite::{device, kernels, ops};
+use luminal::layouts::{
+    BitWidthTerm, ElementOffsetExpressionLayout, IntExprTerm, MirrorLayout,
+    RightMajorContiguousElementLayout, ShapeTerm, StridedElementLayout,
+};
+use luminal_cuda_lite::{device, kernels, ops, CudaLayout};
 
-fn slot(dims: Vec<i64>, access: Option<ComposedAccess>) -> SlotDescriptor {
+fn lit(v: i64) -> IntExprTerm {
+    IntExprTerm::Lit(v)
+}
+fn coord(axis_from_end: i64) -> IntExprTerm {
+    IntExprTerm::Coord { axis_from_end }
+}
+fn mul(a: IntExprTerm, b: IntExprTerm) -> IntExprTerm {
+    IntExprTerm::Mul(Box::new(a), Box::new(b))
+}
+fn add(a: IntExprTerm, b: IntExprTerm) -> IntExprTerm {
+    IntExprTerm::Add(Box::new(a), Box::new(b))
+}
+fn shape(dims: &[i64]) -> ShapeTerm {
+    ShapeTerm(dims.iter().map(|&d| lit(d)).collect())
+}
+
+fn typed(mirror: MirrorLayout) -> CudaLayout {
+    CudaLayout { mirror, dtype: Some(PlanDtype::F32) }
+}
+fn rm_layout(dims: &[i64]) -> CudaLayout {
+    typed(MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
+        shape: shape(dims),
+        width: BitWidthTerm(32),
+    }))
+}
+fn strided_layout(dims: &[i64], chain: Vec<IntExprTerm>) -> CudaLayout {
+    typed(MirrorLayout::Strided(StridedElementLayout {
+        shape: shape(dims),
+        chain,
+        width: BitWidthTerm(32),
+    }))
+}
+fn offset_layout(dims: &[i64], offset: IntExprTerm) -> CudaLayout {
+    typed(MirrorLayout::ElementOffset(ElementOffsetExpressionLayout {
+        offset,
+        shape: shape(dims),
+        width: BitWidthTerm(32),
+    }))
+}
+
+fn slot_l(layout: CudaLayout) -> SlotDescriptor<CudaLayout> {
     SlotDescriptor {
         value: luminal::prelude::egraph_serialize::ClassId::from("val$device_synthetic"),
         buffer: BufferId::Allocated(0),
-        dims: Some(dims),
-        element_bits: Some(32),
-        dtype: Some(PlanDtype::F32),
-        composed_access: access,
+        layout,
     }
 }
 
-fn one_hop(entries: Vec<IotaExpr>, parent_dims: Vec<i64>) -> ComposedAccess {
-    ComposedAccess {
-        hops: vec![AccessHop { entries: Some(entries), parent_dims: Some(parent_dims) }],
-    }
+/// The direct row-major read for `dims` (the flat fast path).
+fn slot(dims: Vec<i64>) -> SlotDescriptor<CudaLayout> {
+    slot_l(rm_layout(&dims))
 }
 
 fn generate(
     op: &dyn BufferTensorIrOp,
-    operand_info: &[SlotDescriptor],
-    result_info: &[SlotDescriptor],
+    operand_info: &[SlotDescriptor<CudaLayout>],
+    result_info: &[SlotDescriptor<CudaLayout>],
 ) -> kernels::KernelSource {
     let ctx = kernels::CodegenCtx::from_descriptors(op.label(), operand_info, result_info)
         .expect("descriptor ctx builds");
@@ -54,47 +103,31 @@ fn floats_of(bytes: &[u8]) -> Vec<f32> {
     bytes.chunks_exact(4).map(|c| f32::from_ne_bytes(c.try_into().unwrap())).collect()
 }
 
-/// The reference materialize route, hop by hop: evaluate each hop's
-/// entries at the current coordinates (bounds-checked, exactly the
-/// reference kernel's ensure) to produce the next hop's coordinates;
-/// the LAST hop's flat parent offset selects the element.
-fn oracle_gather(parent: &[f32], access: &ComposedAccess, out_dims: &[usize]) -> Vec<f32> {
+/// THE INDEPENDENT ORACLE: gather `parent` at every out coordinate using
+/// a HAND-WRITTEN flat-index closure — deliberately not the carried
+/// layout, so the two sides of the differential are two statements of
+/// the same map rather than one statement checked against itself. Out
+/// coordinates enumerate row-major over `out_dims`.
+fn oracle_gather(
+    parent: &[f32],
+    out_dims: &[usize],
+    index: impl Fn(&[usize]) -> usize,
+) -> Vec<f32> {
     let numel: usize = out_dims.iter().product();
+    let rank = out_dims.len();
     let mut out = Vec::with_capacity(numel);
-    for flat in 0..numel {
-        let mut remainder = flat;
-        let mut coords = vec![0usize; out_dims.len()];
-        for axis in (0..out_dims.len()).rev() {
-            coords[axis] = remainder % out_dims[axis];
-            remainder /= out_dims[axis];
+    let mut coords = vec![0usize; rank];
+    for _ in 0..numel {
+        let flat = index(&coords);
+        assert!(flat < parent.len(), "oracle index {flat} in bounds");
+        out.push(parent[flat]);
+        for axis in (0..rank).rev() {
+            coords[axis] += 1;
+            if coords[axis] < out_dims[axis] {
+                break;
+            }
+            coords[axis] = 0;
         }
-        let mut parent_dims: Vec<usize> = Vec::new();
-        for hop in &access.hops {
-            let entries = hop.entries.as_ref().expect("oracle hops are parsed");
-            parent_dims = hop
-                .parent_dims
-                .as_ref()
-                .expect("oracle hops are numeric")
-                .iter()
-                .map(|&d| usize::try_from(d).unwrap())
-                .collect();
-            let next: Vec<usize> = entries
-                .iter()
-                .zip(&parent_dims)
-                .map(|(entry, &ext)| {
-                    let index = entry.eval(&coords);
-                    assert!(index >= 0 && (index as usize) < ext, "oracle index in bounds");
-                    index as usize
-                })
-                .collect();
-            coords = next;
-        }
-        let mut strides = vec![1usize; parent_dims.len()];
-        for k in (0..parent_dims.len().saturating_sub(1)).rev() {
-            strides[k] = strides[k + 1] * parent_dims[k + 1];
-        }
-        let offset: usize = coords.iter().zip(&strides).map(|(c, s)| c * s).sum();
-        out.push(parent[offset]);
     }
     out
 }
@@ -110,53 +143,55 @@ fn assert_bytes_equal(want: &[f32], got: &[f32], what: &str) {
     }
 }
 
-/// Launch a strided COPY through `access` and byte-compare against the
-/// materialize oracle.
-fn copy_case(what: &str, parent_dims_i64: Vec<i64>, out_dims: &[usize], access: ComposedAccess) {
-    let parent_numel: usize =
-        parent_dims_i64.iter().map(|&d| usize::try_from(d).unwrap()).product();
+/// Launch a COPY reading through `layout` and byte-compare against the
+/// hand-written oracle.
+fn copy_case(
+    what: &str,
+    parent_numel: usize,
+    out_dims: &[usize],
+    layout: CudaLayout,
+    index: impl Fn(&[usize]) -> usize,
+) {
     let parent: Vec<f32> = (0..parent_numel).map(|v| v as f32 * 1.5 + 3.0).collect();
     let out_i64: Vec<i64> = out_dims.iter().map(|&d| d as i64).collect();
     let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
     let launch = generate(
         &op,
-        &[slot(out_i64.clone(), Some(access.clone())), slot(out_i64.clone(), None)],
-        &[slot(out_i64, None)],
+        &[slot_l(layout), slot(out_i64.clone())],
+        &[slot(out_i64)],
     );
     let out_bytes = out_dims.iter().product::<usize>() * 4;
     let got = device::launch_single(&launch.source, &[bytes_of(&parent)], out_bytes, launch.n)
         .expect("strided launch");
-    let want = oracle_gather(&parent, &access, out_dims);
+    let want = oracle_gather(&parent, out_dims, index);
     assert_bytes_equal(&want, &floats_of(&got), what);
 }
 
 #[test]
-fn transpose_strided_read_matches_the_materialize_oracle() {
+fn transpose_strided_read_matches_the_host_oracle() {
+    // out [3,2] over parent [2,3]: (i,j) is parent (j,i) = flat j*3 + i.
     copy_case(
         "transpose",
-        vec![2, 3],
+        6,
         &[3, 2],
-        one_hop(vec![IotaExpr::Coord(0), IotaExpr::Coord(1)], vec![2, 3]),
+        strided_layout(&[3, 2], vec![mul(coord(0), lit(3)), coord(1)]),
+        |c| c[1] * 3 + c[0],
     );
 }
 
 #[test]
-fn pitched_slice_strided_read_matches_the_materialize_oracle() {
+fn pitched_slice_strided_read_matches_the_host_oracle() {
     // Zero-base slice, pitch 8 > cols 5 — plus a flat second operand
-    // through the binary add template.
-    let access = one_hop(vec![IotaExpr::Coord(1), IotaExpr::Coord(0)], vec![4, 8]);
+    // through the binary add template. (i,j) is parent flat i*8 + j.
+    let layout = strided_layout(&[4, 5], vec![coord(0), mul(coord(1), lit(8))]);
     let parent: Vec<f32> = (0..32).map(|v| v as f32 - 7.25).collect();
     let b: Vec<f32> = (0..20).map(|v| v as f32 * 0.125).collect();
     let out_dims = [4usize, 5usize];
     let op = ops::add::AddFunctionalDps;
     let launch = generate(
         &op,
-        &[
-            slot(vec![4, 5], Some(access.clone())),
-            slot(vec![4, 5], None),
-            slot(vec![4, 5], None),
-        ],
-        &[slot(vec![4, 5], None)],
+        &[slot_l(layout), slot(vec![4, 5]), slot(vec![4, 5])],
+        &[slot(vec![4, 5])],
     );
     let got = device::launch_single(
         &launch.source,
@@ -165,57 +200,55 @@ fn pitched_slice_strided_read_matches_the_materialize_oracle() {
         launch.n,
     )
     .expect("strided add launch");
-    let gathered = oracle_gather(&parent, &access, &out_dims);
+    let gathered = oracle_gather(&parent, &out_dims, |c| c[0] * 8 + c[1]);
     let want: Vec<f32> = gathered.iter().zip(&b).map(|(x, y)| x + y).collect();
     assert_bytes_equal(&want, &floats_of(&got), "pitched slice + flat add");
 }
 
 #[test]
-fn broadcast_strided_read_matches_the_materialize_oracle() {
+fn broadcast_strided_read_matches_the_host_oracle() {
+    // out [2,3] over parent [1,3]: every row reads the same parent row,
+    // so (i,j) is parent flat j (the dead axis contributes the zero
+    // residue).
     copy_case(
         "broadcast",
-        vec![1, 3],
+        3,
         &[2, 3],
-        one_hop(vec![IotaExpr::Lit(0), IotaExpr::Coord(0)], vec![1, 3]),
+        strided_layout(&[2, 3], vec![coord(0), lit(0)]),
+        |c| c[1],
     );
 }
 
 #[test]
-fn two_hop_chain_matches_the_hopwise_materialize_oracle() {
-    let access = ComposedAccess {
-        hops: vec![
-            AccessHop {
-                entries: Some(vec![IotaExpr::Coord(0), IotaExpr::Coord(1)]),
-                parent_dims: Some(vec![2, 3]),
-            },
-            AccessHop {
-                entries: Some(vec![
-                    IotaExpr::Add(Box::new(IotaExpr::Coord(1)), Box::new(IotaExpr::Lit(1))),
-                    IotaExpr::Coord(0),
-                ]),
-                parent_dims: Some(vec![4, 3]),
-            },
-        ],
-    };
-    copy_case("two-hop chain", vec![4, 3], &[3, 2], access);
+fn composed_two_view_chain_matches_the_host_oracle() {
+    // Was "two-hop chain". The e-graph composes at view creation, so the
+    // slot carries ONE layout for the whole composite: out [3,2] over
+    // parent [4,3], (a,b) -> parent (b+1, a) = flat (b+1)*3 + a. It
+    // renders as an offset-EXPRESSION form, which discloses no reach —
+    // hence the device's only trap here is non-negativity, and the ORACLE
+    // (bounds-checked) is what actually catches an escape.
+    copy_case(
+        "composed two-view chain",
+        12,
+        &[3, 2],
+        offset_layout(&[3, 2], add(mul(add(coord(0), lit(1)), lit(3)), coord(1))),
+        |c| (c[1] + 1) * 3 + c[0],
+    );
 }
 
 #[test]
-fn reduce_over_a_strided_read_matches_the_materialize_then_reduce_route() {
+fn reduce_over_a_strided_read_matches_the_gather_then_reduce_oracle() {
     // ReduceSum(axis_from_end=0) over a [2,3] value that is a transpose
-    // of parent [3,2]; the oracle materializes first (the reference's
-    // only route), then folds in the same linear order.
-    let access = one_hop(vec![IotaExpr::Coord(0), IotaExpr::Coord(1)], vec![3, 2]);
+    // of parent [3,2]; the oracle gathers first, then folds in the same
+    // linear order.
+    let layout = strided_layout(&[2, 3], vec![mul(coord(0), lit(2)), coord(1)]);
     let parent: Vec<f32> = (0..6).map(|v| (v as f32).exp()).collect();
     let op = ops::reduce_sum::ReduceSumDps { axis: 0 };
-    let launch = generate(
-        &op,
-        &[slot(vec![2, 3], Some(access.clone())), slot(vec![2], None)],
-        &[slot(vec![2], None)],
-    );
+    let launch = generate(&op, &[slot_l(layout), slot(vec![2])], &[slot(vec![2])]);
     let got = device::launch_single(&launch.source, &[bytes_of(&parent)], 2 * 4, launch.n)
         .expect("strided reduce launch");
-    let dense = oracle_gather(&parent, &access, &[2, 3]);
+    // (c0,c1) is parent flat c1*2 + c0.
+    let dense = oracle_gather(&parent, &[2, 3], |c| c[1] * 2 + c[0]);
     let want: Vec<f32> = dense
         .chunks_exact(3)
         .map(|row| row.iter().fold(0.0f32, |acc, v| acc + v))

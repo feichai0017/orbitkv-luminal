@@ -11,6 +11,7 @@
 //! MATCHER LIST plus fixture runners — no runtime machinery duplicated.
 
 pub mod add_mul_fused;
+pub mod test_equality;
 
 /// The cuBLASLt marker estate — REHOMED (Train 3 op-ownership move) to
 /// `luminal_cuda_lite::ops::cublaslt`, its executing runtime. The board

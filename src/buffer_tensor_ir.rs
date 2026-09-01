@@ -23,7 +23,7 @@ use anyhow::Result;
 use egraph_serialize::ClassId;
 use petgraph::graph::{DiGraph, NodeIndex};
 
-use crate::bufferize::{Analysis, Buffer, BufferId, Bufferizer, PlanLayout, ValueGeometry};
+use crate::bufferize::{Analysis, Buffer, BufferId, Bufferizer, PlanLayout};
 use crate::layout_ir::{Access, ExtractedGraph, ExtractedNode};
 
 // =============================================================================
@@ -448,12 +448,16 @@ pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + AsAnyOp + Debu
     /// axis (outermost inward), evaluated at the RESULT's coordinates —
     /// the same entry vocabulary the materialize ops carry, parsed
     /// extraction-side (enode-anchored, never from class spellings).
-    /// Implemented by metadata-view ops (no reads, no writes, result tied)
-    /// so the bufferizer can record the access it folds away onto consumer
-    /// slot descriptors ([`crate::bufferize::ComposedAccess`], M4 Phase 3).
-    /// `None` (the default) = no numeric map available: the fold still
-    /// happens, but records a fail-closed hop — numeric consumers must
-    /// refuse loudly, never guess.
+    /// Implemented by metadata-view ops (no reads, no writes, result tied).
+    ///
+    /// PLAN-SIDE CONSUMPTION IS GONE (corrected contract, 2026-08-31):
+    /// the bufferizer no longer records a folded access on consumer slot
+    /// descriptors — the e-graph mints every view value's COMPOSED layout
+    /// at view creation, and the runtime's rendered `L` for that value is
+    /// the read path. This hook survives as OP-RECORD business: what an
+    /// op remembers from its claimed site, for its own matcher/kernel to
+    /// use. `None` (the default) = no numeric map available; consumers
+    /// that need one refuse loudly, never guess.
     fn view_index_map(&self, _result: usize) -> Option<Vec<crate::index_expr::IotaExpr>> {
         None
     }
@@ -923,21 +927,18 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
     order: &[NodeIndex],
     assignment: Bufferizer<L>,
     analysis: &Analysis,
-    value_geometry: &HashMap<ClassId, ValueGeometry<L>>,
+    value_layouts: &HashMap<ClassId, L>,
 ) -> Result<BufferTensorIrGraph<L>> {
-    // The mint-time layout SEED for repair buffers (same contract as
-    // assignment's: the copied value supplies the layout; the annotate
-    // join is the authority and a geometry miss is a planner bug).
+    // The mint-time assignment seed for repair buffers (same contract as
+    // assignment's: the landed value is the tensor the buffer BACKS and
+    // supplies its layout; a table miss is a planner bug).
     let layout_of = |value: &ClassId| -> Result<L> {
-        value_geometry
-            .get(value)
-            .map(|geometry| geometry.layout.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "value {value} has no extraction geometry — every graph \
-                     value records one before BufferTensor construction"
-                )
-            })
+        value_layouts.get(value).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "value {value} has no rendered layout — every graph \
+                 value records one before BufferTensor construction"
+            )
+        })
     };
     let Bufferizer {
         mut buffers,
@@ -1093,36 +1094,49 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                         // nothing — the parent copy IS the view's
                         // initializing write, and view and copy must share
                         // storage).
-                        if op.op.result_writes_memory(result)
-                            && view_root.contains_key(&operands[operand].value)
+                        if let Some(root) = view_root.get(&operands[operand].value).cloned()
                         {
-                            let id = BufferId::Allocated(next_alloc);
-                            next_alloc += 1;
-                            buffers.insert(
-                                id.clone(),
-                                Buffer {
-                                    id: id.clone(),
-                                    access: Access::ReadWrite,
-                                    freed_by: crate::layout_ir::FreedBy::Program,
-                                    owner: crate::bufferize::Owner::System,
-                                    label: "view-repair".to_string(),
-                                    dims: None,
-                                    element_bits: None,
-                                    dtype: None,
-                                    lit: None,
-                                    // Mint-time seed; the writer join
-                                    // fills the authoritative layout at
-                                    // annotate (the copy's landed value).
-                                    layout: layout_of(&operands[operand].value)?,
-                                },
-                            );
-                            target = id;
+                            if op.op.result_writes_memory(result) {
+                                let id = BufferId::Allocated(next_alloc);
+                                next_alloc += 1;
+                                buffers.insert(
+                                    id.clone(),
+                                    Buffer {
+                                        id: id.clone(),
+                                        access: Access::ReadWrite,
+                                        freed_by: crate::layout_ir::FreedBy::Program,
+                                        owner: crate::bufferize::Owner::System,
+                                        label: "view-repair".to_string(),
+                                        lit: None,
+                                        // The base-storage copy lands the
+                                        // fold ROOT's bytes here: the
+                                        // buffer backs the root, whose
+                                        // layout sizes it (parent-shaped).
+                                        backs: root.clone(),
+                                        layout: layout_of(&root)?,
+                                    },
+                                );
+                                target = id;
+                            }
                         }
                         let src = operands[operand].clone();
                         let dst = BufferTensor {
                             value: src.value.clone(),
                             buffer: target.clone(),
                         };
+                        // MINT SITE — CAUSE 1: RESIDENCE CONFLICT REPAIR.
+                        // The conflict engine rejected this operand's
+                        // in-place tie, so the result took fresh storage and
+                        // the operand's bytes must be there before the
+                        // kernel reads them. THE CONTRACT (stated on
+                        // [`crate::bufferize::BufferNode::BufferCopy`]): a
+                        // DUMB EXACT-SIZE WHOLE-BUFFER copy — `target` was
+                        // minted to back exactly this value (or, for a
+                        // folded operand, its fold ROOT), so src and dst are
+                        // the same size by construction. ORDERING IS THE
+                        // RUNTIME'S OBLIGATION: all we emit is the
+                        // dependency structure (the `link` below, and the
+                        // WAR anti-edges the rewrite adds later).
                         let copy = dag.add_node(BtNode::Op {
                             op: Box::new(BufferCopy),
                             operands: vec![src.clone()],
@@ -1267,14 +1281,12 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                                                         crate::layout_ir::FreedBy::Caller,
                                                     owner: crate::bufferize::Owner::System,
                                                     label: "escape-repair".to_string(),
-                                                    dims: None,
-                                                    element_bits: None,
-                                                    dtype: None,
                                                     lit: None,
-                                                    // Seed from the fold
-                                                    // ROOT — the value the
-                                                    // base-storage copy
-                                                    // actually lands here.
+                                                    // The fold ROOT is the
+                                                    // value the base-storage
+                                                    // copy lands here: the
+                                                    // buffer backs it.
+                                                    backs: root.clone(),
                                                     layout: layout_of(&root)?,
                                                 },
                                             );
@@ -1286,6 +1298,21 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                                                 value: root.clone(),
                                                 buffer: id.clone(),
                                             };
+                                            // MINT SITE — CAUSE 3: LIFETIME
+                                            // REPAIR. The value must outlive
+                                            // the storage it occupies (it
+                                            // escapes to the caller, but its
+                                            // current residence is
+                                            // FreedBy::Program or otherwise
+                                            // wrongly-lived), so it is
+                                            // relocated into storage with
+                                            // the right lifetime. Same
+                                            // contract as every copy: dumb,
+                                            // EXACT-SIZE (both buffers back
+                                            // the fold ROOT, parent-shaped),
+                                            // whole-buffer; ORDERING IS THE
+                                            // RUNTIME'S OBLIGATION — we emit
+                                            // dependency structure only.
                                             let copy = dag.add_node(BtNode::Op {
                                                 op: Box::new(BufferCopy),
                                                 operands: vec![src.clone()],
@@ -1312,9 +1339,18 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
                         continue;
                     }
                     if src_buffer != dest {
-                        // Materialize-into-destination: a boundary transport.
-                        // (A producer pinned to write `dest` directly makes
-                        // src == dest and skips this.)
+                        // MINT SITE — CAUSE 2: BOUNDARY PLACEMENT. This
+                        // tensor is bound to a SPECIFIC caller buffer
+                        // (`dest`) whose producing residence is elsewhere
+                        // (`src_buffer`), so the bytes move into the
+                        // caller's storage. (A producer pinned to write
+                        // `dest` directly makes src == dest and skips this.)
+                        // THE CONTRACT (stated on
+                        // [`crate::bufferize::BufferNode::BufferCopy`]): a
+                        // DUMB EXACT-SIZE WHOLE-BUFFER copy — the caller's
+                        // buffer is declared for exactly this tensor, so the
+                        // sizes agree by the boundary declaration. ORDERING
+                        // IS THE RUNTIME'S OBLIGATION.
                         if buffers.get(&dest).is_some_and(|b| b.access == Access::ReadOnly) {
                             anyhow::bail!(
                                 "output slot {} requires materializing a value into \
@@ -2380,10 +2416,12 @@ mod tests {
                     freed_by,
                     owner: crate::bufferize::Owner::Caller,
                     label: name.to_string(),
-                    dims: None,
-                    element_bits: None,
-                    dtype: None,
                     lit: None,
+                    // THE ASSIGNMENT (corrected contract): a hand-built
+                    // boundary buffer backs the same-named tensor. There
+                    // is no dims/bits/dtype row to fill any more — sizing
+                    // is span-of-`layout`, which the runtime owns.
+                    backs: cid(name),
                     layout: mock_layout(),
                 },
             );
@@ -2533,10 +2571,8 @@ mod tests {
                 freed_by,
                 owner: crate::bufferize::Owner::System,
                 label: format!("alloc{buffer}"),
-                dims: None,
-                element_bits: None,
-                dtype: None,
                 lit: None,
+                backs: cid(&format!("alloc{buffer}")),
                 layout: mock_layout(),
             },
         );

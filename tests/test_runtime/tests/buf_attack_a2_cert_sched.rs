@@ -56,6 +56,7 @@ fn report(name: &str, text: &str) {
     // escaping backing buffer, the view slot backed by minted storage
     // handed to the caller, and the layout disclosed on the binding.
     let plan = luminal::test_support::bufferize_mock(&dps).expect("the view output escapes");
+    let table = luminal::test_support::mock_layout_table(&dps);
     let summary = plan.summary();
     println!("[{name}] plan:\n{summary}");
     use luminal::bufferize::{BufferId, BufferNode};
@@ -91,9 +92,13 @@ fn report(name: &str, text: &str) {
         )),
         "[{name}] no free for the escaping buffer:\n{summary}"
     );
-    assert!(
-        slot.composed_access.is_some(),
-        "[{name}] the binding discloses the elected layout:\n{summary}"
+    // OPTION B: the layout is TOTAL on bindings; what is pinned is that
+    // the binding carries the SLOT VALUE's own rendered layout, not the
+    // backing buffer's resident layout.
+    assert_eq!(
+        Some(&slot.layout),
+        table.get(&slot.value),
+        "[{name}] the binding discloses the slot value's own elected layout:\n{summary}"
     );
     println!("[{name}] view-nodes(dps)={views}");
 }

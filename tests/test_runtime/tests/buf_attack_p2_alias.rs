@@ -278,7 +278,9 @@ fn c_view_bound_to_output_escapes_the_chain_residence() {
         .remove(0);
     let v = g.op(Box::new(MockView), &[&y], &[("v", "view")]).remove(0);
     g.output(&v, "out");
-    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("the view output escapes");
+    let graph = g.build();
+    let table = luminal::test_support::mock_layout_table(&graph);
+    let plan = luminal::test_support::bufferize_mock(&graph).expect("the view output escapes");
     println!("{}", plan.summary());
     let cps = copies(&plan);
     assert_eq!(cps.len(), 0, "zero copies — the residence is handed over:\n{}", plan.summary());
@@ -298,7 +300,12 @@ fn c_view_bound_to_output_escapes_the_chain_residence() {
         "…which ESCAPES:\n{}",
         plan.summary()
     );
-    assert!(slot.composed_access.is_some(), "the view layout is disclosed");
+    // OPTION B: the binding carries the VIEW's own elected layout — the
+    // delivery description an externally loaded plan would otherwise
+    // have no way to obtain. (Presence is total now; identity is the
+    // fact worth pinning.)
+    assert_eq!(&slot.layout, &table[&v], "the view's own layout rides the binding");
+    assert_ne!(table[&v], table[&y], "…a different function from the residence's");
 }
 
 /// (g): POISON THROUGH A VIEW. A view's operand is not READ (the poison door

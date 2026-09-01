@@ -2,12 +2,15 @@
 //! bufferized plans (ruling 2026-07-28: lives in luminal; once the path is
 //! COMPLETE it replaces `ReferenceRuntime` — not before).
 //!
-//! Executes a [`BufferIrGraph`] directly: every buffer is a [`TypedBuffer`] sized
-//! from the plan's annotated numeric geometry (dims × 32-bit elements —
-//! slice 1 is f32-only and bails loudly otherwise); compute nodes dispatch
-//! through THIS runtime's kernel registry ([`kernels`]) by concrete op
-//! type — ops carry no execution of their own (ruling 2026-08-06), and an
-//! op without a kernel here refuses by name. Caller data binds by the
+//! Executes a [`BufferIrGraph`] directly: every buffer is a [`TypedBuffer`]
+//! sized by ASSIGNMENT LOOKUP (corrected contract, 2026-08-31) — the plan
+//! says which tensor a buffer backs, the carried [`RefLayout`] is that
+//! tensor's elected layout, and allocation is span-of-layout elements in
+//! the layout's own dtype. No sizing walk, no voting: every consumer
+//! takes the BufferId blindly. Compute nodes dispatch through THIS
+//! runtime's kernel registry ([`kernels`]) by concrete op type — ops
+//! carry no execution of their own (ruling 2026-08-06), and an op
+//! without a kernel here refuses by name. Caller data binds by the
 //! numeric `BufferLit` id, the same key `hlir_to_logical` derives from
 //! HLIR node indices, so differential tests against `ReferenceRuntime`
 //! bind identically on both sides.
@@ -89,6 +92,27 @@ impl ReferenceRuntime {
         self.output_buffers = outputs.iter().map(|s| (s.tensor, s.buffer)).collect();
     }
 
+    /// Load a plan for execution.
+    ///
+    /// CORRECTION 7, and OPTION B's answer to it. A plan built by this
+    /// runtime's own `search` needs nothing else: the runtime owns the
+    /// recorder, the e-graph and the elections, so it knew every boundary
+    /// binding and every layout before it called `bufferize`. An
+    /// EXTERNALLY LOADED or HAND-BUILT plan has no such runtime behind it,
+    /// and the corrected contract requires that the boundary/layout
+    /// knowledge be supplied explicitly, with a loud bail when absent and
+    /// never a guess.
+    ///
+    /// Under Option B that argument is already in the plan, so this
+    /// signature stays one-argument: `Buffer::layout` carries every
+    /// backed tensor's elected layout (span + dtype ⇒ allocation) and
+    /// `OutputBinding::layout` carries every delivery's. The "loud bail
+    /// when absent" lives at USE: `execute` refuses a buffer whose layout
+    /// has no literal span or no dtype fact, naming the buffer and the
+    /// tensor it backs. Nothing is defaulted.
+    ///
+    /// Boundary bindings likewise ride the plan: `Buffer::lit` is the
+    /// numeric `BufferLit` key caller data binds by, indexed here.
     pub fn load_plan(&mut self, plan: BufferIrGraph<RefLayout>) {
         self.lit_index = plan
             .buffers
@@ -265,10 +289,6 @@ impl ReferenceRuntime {
         self.staged.insert(buffer, data.into());
     }
 
-    fn numel(dims: &[i64]) -> usize {
-        dims.iter().product::<i64>().max(0) as usize
-    }
-
     pub fn execute(&mut self) -> Result<()> {
         let plan = self.plan.as_ref().ok_or_else(|| anyhow!("no plan loaded"))?;
 
@@ -305,21 +325,32 @@ impl ReferenceRuntime {
             }
         }
 
-        // Materialize every buffer: staged caller data where provided
-        // (variant-checked against the buffer's DTYPE, length-checked
-        // against the annotated geometry), zeros otherwise. The plan
-        // dtype picks the typed representation (2026-08-11) — width
-        // alone cannot: bits-of(Int) == bits-of(F32). A staged payload
-        // of the wrong variant is a loud refusal, never a conversion.
+        // Materialize every buffer by ASSIGNMENT LOOKUP: the buffer backs
+        // one tensor, whose carried layout gives the span (elements) and
+        // the typed representation (the dtype fact rides the runtime's
+        // own RefLayout — width alone cannot pick a variant:
+        // bits-of(Int) == bits-of(F32)). Staged caller data is
+        // variant-checked against that dtype and length-checked against
+        // the span; zeros otherwise. A staged payload of the wrong
+        // variant is a loud refusal, never a conversion.
         let mut storage: FxHashMap<BufferId, TypedBuffer> = FxHashMap::default();
         for (id, buffer) in &plan.buffers {
-            let dims = buffer.dims.as_ref().ok_or_else(|| {
-                anyhow!("buffer {} has no numeric geometry (symbolic dims are not executable yet)", buffer.label)
+            let numel = buffer.layout.mirror.literal_span_elements().ok_or_else(|| {
+                anyhow!(
+                    "buffer {} (backing {}) has no literal span — symbolic \
+                     or undisclosed-reach layouts are not executable",
+                    buffer.label,
+                    buffer.backs
+                )
             })?;
-            let dtype = buffer.dtype.ok_or_else(|| {
-                anyhow!("buffer {} has no dtype (dtype-of row never reached the plan)", buffer.label)
+            let dtype = buffer.layout.dtype.ok_or_else(|| {
+                anyhow!(
+                    "buffer {} (backing {}) carries no dtype fact — cannot \
+                     pick a typed representation",
+                    buffer.label,
+                    buffer.backs
+                )
             })?;
-            let numel = Self::numel(dims);
             let staged = buffer.lit.and_then(|lit| self.staged.get(&lit));
             if let Some(staged) = staged {
                 ensure!(
@@ -399,15 +430,32 @@ impl ReferenceRuntime {
         for index in order {
             match &plan.dag[index] {
                 BufferNode::BufferInput { .. } | BufferNode::BufferOutput { .. } => {}
-                BufferNode::BufferCopy { src, dst, .. } => {
-                    // RULING 2026-08-27: a BufferCopy is only ever a dumb
-                    // whole-buffer memcpy — the Phase-5 `access` field (and
-                    // this executor's folded-copy refusal arm) is deleted
-                    // with the field itself. The length/type checks below
-                    // are the PERMANENT FENCE: a folded delivery smuggled
-                    // past the bufferizer's refusal arrives parent-shaped
-                    // against an output-shaped dst and fails the length
-                    // check loudly, never byte-copies.
+                BufferNode::BufferCopy { src, dst } => {
+                    // THE BUFFERCOPY CONTRACT, executor side (Austin, ruled
+                    // 2026-08-31 — see `bufferize::BufferNode::BufferCopy`):
+                    //
+                    // * The node carries ONLY {src, dst}. Nothing else is
+                    //   read here, because nothing else exists.
+                    // * Semantics: a DUMB EXACT-SIZE WHOLE-BUFFER copy.
+                    //   "If a runtime chooses to do resource reuse and do
+                    //   unequal sized buffer that is an entirely runtime
+                    //   owned choice" — THIS runtime makes no such choice,
+                    //   so it holds itself to exact size and refuses
+                    //   otherwise (the length/type check below is this
+                    //   executor's own discipline, not a re-check of an
+                    //   e-graph premise: copies are bufferizer-authored).
+                    // * ORDERING IS THIS RUNTIME'S OBLIGATION. The plan gave
+                    //   us dependency structure only (data edges + WAR
+                    //   anti-edges); we discharge the obligation by
+                    //   executing the toposort of that dag above, which puts
+                    //   every dependent op after this copy and every prior
+                    //   reader of `dst` before it. A runtime with real
+                    //   concurrency would need barriers here; this one is
+                    //   sequential, and that IS its scheduling answer.
+                    // * The three causes a copy exists (conflict repair,
+                    //   boundary placement, lifetime repair) are the
+                    //   bufferizer's business; the executor treats all three
+                    //   identically — move the bytes.
                     let data = storage
                         .get(src)
                         .ok_or_else(|| anyhow!("copy reads unknown buffer"))?
@@ -424,21 +472,71 @@ impl ReferenceRuntime {
                     );
                     *dest = data;
                 }
-                BufferNode::Compute { op, reads, writes, .. } => {
+                BufferNode::Compute { op, reads, writes, operand_info, .. } => {
                     let mut operands = Vec::with_capacity(reads.len());
                     let mut operand_dims = Vec::with_capacity(reads.len());
-                    for id in reads {
+                    for (k, id) in reads.iter().enumerate() {
                         operands.push(
                             storage
                                 .get(id)
                                 .ok_or_else(|| anyhow!("{} reads unknown buffer", op.label()))?
                                 .clone(),
                         );
-                        let dims = plan.buffers[id]
-                            .dims
-                            .as_ref()
-                            .ok_or_else(|| anyhow!("{} operand lacks geometry", op.label()))?;
-                        operand_dims.push(dims.iter().map(|d| *d as usize).collect());
+                        // Per-slot VALUE geometry from the slot's own
+                        // carried layout — the layout's DOMAIN is the
+                        // value's shape, which is all a flat kernel needs.
+                        //
+                        // WHY NO LAYOUT-SPELLING FENCE HERE. This executor
+                        // is layout-agnostic BY CONSISTENCY, not by
+                        // assumption: it allocates one span-of-layout
+                        // buffer per BACKED TENSOR and both writes and
+                        // reads that buffer in the backed tensor's own
+                        // element order. Whatever function the e-graph
+                        // elected — right-major, left-major, strided — the
+                        // producer and every consumer of that same tensor
+                        // agree on it, so the numbers are right. Demanding
+                        // RightMajor would refuse perfectly consistent
+                        // plans (a left-major class with no right-major
+                        // spelling is a legal election, not an error).
+                        //
+                        // THE REAL HAZARD is reading someone ELSE's bytes
+                        // through a DIFFERENT function — a FOLDED operand.
+                        // The plan does not (and should not) label folds:
+                        // a folded view and an in-place cohabitant are
+                        // both just "this value lives in this buffer". The
+                        // difference is entirely in the LAYOUT, so that is
+                        // the test: the operand's carried `L` must be the
+                        // one the buffer was allocated for. A DPS
+                        // in-place cohabitant passes by construction (the
+                        // poison destination clones its tied result's
+                        // layout); a view does not (its composed layout is
+                        // a different function over the same bytes) and is
+                        // a LOUD capability refusal — this executor lowers
+                        // no composed read path.
+                        //
+                        // Layout EQUALITY is a runtime-side operation on
+                        // the runtime's OWN type. Core never compares
+                        // layouts (`PlanLayout` has no `PartialEq`).
+                        let slot = operand_info.get(k).ok_or_else(|| {
+                            anyhow!("{} operand {k} lacks its slot descriptor", op.label())
+                        })?;
+                        if op.operand_reads_memory(k)
+                            && slot.layout != plan.buffers[id].layout
+                        {
+                            anyhow::bail!(
+                                "{} operand {k} READS value {} through a layout that is not \
+                                 the one buffer {} was allocated for — a folded read this \
+                                 executor does not lower (it reads each buffer in one \
+                                 element order). Fail-closed, never a silent flat misread.",
+                                op.label(),
+                                slot.value,
+                                plan.buffers[id].label,
+                            );
+                        }
+                        let dims = slot.layout.mirror.literal_extents().ok_or_else(|| {
+                            anyhow!("{} operand {k} has symbolic extents", op.label())
+                        })?;
+                        operand_dims.push(dims);
                     }
                     let mut dests = Vec::with_capacity(writes.len());
                     for id in writes {
@@ -506,14 +604,20 @@ impl ReferenceRuntime {
     /// elections: output slot `index`'s BACKING buffer contents plus its
     /// [`OutputBinding`] — the elected layout the caller interprets those
     /// bytes under. A dense election returns the slot's boundary buffer
-    /// and a `None` (row-major) access; a view election returns the
-    /// escaped backing buffer (possibly parent-sized) and the folded
-    /// chain. `luminal::bufferize::walk_layout_index` is the trusted
-    /// element reader. This runtime's own searches are materialize-only
-    /// (they never elect views), so its outputs are de-facto row-major
-    /// and `get_f32` semantics are unchanged; view-elected slots arrive
-    /// only via externally loaded plans.
-    pub fn output_slot(&self, index: usize) -> Result<(&TypedBuffer, &OutputBinding)> {
+    /// and that tensor's own layout; a VIEW election returns the escaped
+    /// backing buffer (possibly parent-sized) and the view's COMPOSED
+    /// layout — zero-copy by construction, completely legal, never a
+    /// refusal (correction 5).
+    ///
+    /// The layout is TOTAL on the binding, so there is nothing to test
+    /// for presence. Element readback through the returned (buffer,
+    /// layout) pair is a TEST concern and lives in the testing crate
+    /// (`test_runtime::test_equality`); core's ex-`walk_layout_index`
+    /// died with the hop machinery. This runtime's own searches are
+    /// materialize-only (they never elect views), so its outputs are
+    /// de-facto dense and `get_f32` semantics are unchanged; view-elected
+    /// slots arrive only via externally loaded plans.
+    pub fn output_slot(&self, index: usize) -> Result<(&TypedBuffer, &OutputBinding<crate::layouts::RefLayout>)> {
         let binding = self.output_layout(index)?;
         let data = self
             .storage
@@ -524,7 +628,7 @@ impl ReferenceRuntime {
 
     /// Output slot `index`'s binding — buffer identity plus the elected
     /// layout (see [`Self::output_slot`]).
-    pub fn output_layout(&self, index: usize) -> Result<&OutputBinding> {
+    pub fn output_layout(&self, index: usize) -> Result<&OutputBinding<crate::layouts::RefLayout>> {
         let plan = self.plan.as_ref().ok_or_else(|| anyhow!("no plan loaded"))?;
         for node in plan.dag.node_weights() {
             if let BufferNode::BufferOutput { slots } = node {
@@ -1205,15 +1309,15 @@ mod tests {
         )
             .expect("extracts")
             .expect("plan");
+        let dps = luminal::dps::dps_rewrite(&extracted);
         let layouts = luminal::extractor::rendered_layout_table(
             &serialized,
-            &extracted,
+            &dps,
             &crate::layouts::ReferenceLayoutRenderer,
             &mut std::collections::HashMap::new(),
         )
         .expect("layouts render");
-        let plan = luminal::bufferize::bufferize(&luminal::dps::dps_rewrite(&extracted), &layouts)
-            .expect("bufferizes");
+        let plan = luminal::bufferize::bufferize(&dps, &layouts).expect("bufferizes");
         let mut rt = crate::ReferenceRuntime::default();
         rt.stage_slots(&program.input_slots, &program.output_slots);
         rt.load_plan(plan);

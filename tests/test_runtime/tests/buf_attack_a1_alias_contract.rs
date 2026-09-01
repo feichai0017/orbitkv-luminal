@@ -161,7 +161,9 @@ fn a1_value_plus_view_to_two_outputs_direct_slot_first() {
     let v = g.op(Box::new(MockView), &[&y], &[("v", "view")]).remove(0);
     g.output(&y, "D");
     g.output(&v, "E");
-    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
+    let graph = g.build();
+    let table = luminal::test_support::mock_layout_table(&graph);
+    let plan = luminal::test_support::bufferize_mock(&graph).expect("bufferize");
     println!("{}", plan.summary());
 
     assert!(matches!(plan.value_buffer[&y], BufferId::Boundary(_)), "y seeded into D");
@@ -181,8 +183,13 @@ fn a1_value_plus_view_to_two_outputs_direct_slot_first() {
         .expect("the output node");
     assert_eq!(slots[0].buffer, plan.value_buffer[&y], "the direct slot is D");
     assert_eq!(slots[1].buffer, plan.value_buffer[&y], "the view slot is backed by D too");
-    assert!(slots[0].composed_access.is_none(), "dense slot: direct (row-major) layout");
-    assert!(slots[1].composed_access.is_some(), "view slot: the layout is disclosed");
+    // OPTION B: the layout is TOTAL on every binding — "disclosed" is no
+    // longer a presence question. The distinction is WHICH layout: the
+    // dense slot carries y's own, the view slot carries the view's, and
+    // the two are different functions over the SAME buffer.
+    assert_eq!(&slots[0].layout, &table[&y], "dense slot: y's own layout");
+    assert_eq!(&slots[1].layout, &table[&v], "view slot: the view's own layout");
+    assert_ne!(slots[0].layout, slots[1].layout, "one buffer, two deliveries");
 }
 
 /// ATTACK 2, arm B: same program, slot order flipped (view slot is slot 0).
@@ -205,7 +212,9 @@ fn a1_value_plus_view_to_two_outputs_view_slot_first() {
     let v = g.op(Box::new(MockView), &[&y], &[("v", "view")]).remove(0);
     g.output(&v, "D");
     g.output(&y, "E");
-    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
+    let graph = g.build();
+    let table = luminal::test_support::mock_layout_table(&graph);
+    let plan = luminal::test_support::bufferize_mock(&graph).expect("bufferize");
     println!("{}", plan.summary());
 
     assert!(matches!(plan.value_buffer[&y], BufferId::Boundary(_)), "y seeded into E");
@@ -224,7 +233,7 @@ fn a1_value_plus_view_to_two_outputs_view_slot_first() {
         })
         .expect("the output node");
     assert_eq!(slots[0].buffer, plan.value_buffer[&y], "the view slot rides y's residence");
-    assert!(slots[0].composed_access.is_some(), "…with the layout disclosed");
+    assert_eq!(&slots[0].layout, &table[&v], "…carrying the VIEW's own layout");
     assert_eq!(slots[1].buffer, plan.value_buffer[&y], "the direct slot is the residence");
 }
 
@@ -327,7 +336,9 @@ fn a1_mutating_consumer_through_view_of_bound_value_vetoed_and_repaired() {
         .remove(0);
     g.output(&y, "D");
     g.output(&r, "E");
-    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferize");
+    let graph = g.build();
+    let table = luminal::test_support::mock_layout_table(&graph);
+    let plan = luminal::test_support::bufferize_mock(&graph).expect("bufferize");
     println!("{}", plan.summary());
 
     // y seeded into D; the accumulator must NOT write D.
@@ -365,5 +376,8 @@ fn a1_mutating_consumer_through_view_of_bound_value_vetoed_and_repaired() {
         })
         .expect("the accumulator survives lowering");
     assert_eq!(consumer_operand.buffer, repair.1, "the consumer reads the re-rooted view");
-    assert!(consumer_operand.composed_access.is_some(), "…through its unchanged fold");
+    // …through the VIEW's own layout, unchanged by the re-root (the
+    // layout addresses the residence's bytes, and the copy is
+    // byte-identical).
+    assert_eq!(&consumer_operand.layout, &table[&v], "the view's own layout, unchanged");
 }

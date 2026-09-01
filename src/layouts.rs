@@ -249,6 +249,87 @@ impl SpanExpr for StridedElementLayout {
 }
 
 // =============================================================================
+// Literal readers — RUNTIME convenience, never planner machinery
+// =============================================================================
+
+impl IntExprTerm {
+    /// Evaluate a closed literal expression (no vars, no coordinates) to
+    /// its value. `None` for symbolic/coordinate-bearing terms — callers
+    /// bail loudly, never guess. Runtime-side convenience: the planner
+    /// never evaluates layout terms.
+    pub fn eval_literal(&self) -> Option<i64> {
+        let go = |e: &IntExprTerm| e.eval_literal();
+        Some(match self {
+            IntExprTerm::Lit(v) => *v,
+            IntExprTerm::Var(_) | IntExprTerm::Coord { .. } => return None,
+            IntExprTerm::Add(a, b) => go(a)?.checked_add(go(b)?)?,
+            IntExprTerm::Mul(a, b) => go(a)?.checked_mul(go(b)?)?,
+            IntExprTerm::TruncDiv(a, b) => go(a)?.checked_div(go(b)?)?,
+            IntExprTerm::TruncRem(a, b) => go(a)?.checked_rem(go(b)?)?,
+            IntExprTerm::CeilDiv(a, b) => {
+                let (a, b) = (go(a)?, go(b)?);
+                if b == 0 {
+                    return None;
+                }
+                // Toward +inf for the non-negative operands layouts use.
+                a.checked_add(b - 1)?.checked_div(b)?
+            }
+            IntExprTerm::Min(a, b) => go(a)?.min(go(b)?),
+            IntExprTerm::Max(a, b) => go(a)?.max(go(b)?),
+            IntExprTerm::LessThanCast(a, b) => i64::from(go(a)? < go(b)?),
+        })
+    }
+}
+
+impl MirrorLayout {
+    /// The layout's DOMAIN shape (every constructor carries one).
+    pub fn shape(&self) -> &ShapeTerm {
+        match self {
+            MirrorLayout::RightMajor(l) => &l.shape,
+            MirrorLayout::LeftMajor(l) => &l.shape,
+            MirrorLayout::Strided(l) => &l.shape,
+            MirrorLayout::ElementOffset(l) => &l.shape,
+            MirrorLayout::BitOffset(l) => &l.shape,
+        }
+    }
+
+    /// The element access width in bits.
+    pub fn width_bits(&self) -> i64 {
+        match self {
+            MirrorLayout::RightMajor(l) => l.width.0,
+            MirrorLayout::LeftMajor(l) => l.width.0,
+            MirrorLayout::Strided(l) => l.width.0,
+            MirrorLayout::ElementOffset(l) => l.width.0,
+            MirrorLayout::BitOffset(l) => l.width.0,
+        }
+    }
+
+    /// The domain extents as literals — `None` if any axis is symbolic.
+    pub fn literal_extents(&self) -> Option<Vec<usize>> {
+        self.shape()
+            .0
+            .iter()
+            .map(|e| e.eval_literal().and_then(|v| usize::try_from(v).ok()))
+            .collect()
+    }
+
+    /// The layout's storage reach in ELEMENTS, where the constructor
+    /// discloses one ([`SpanExpr`]: the packed ladder) and the terms are
+    /// literal. `None` for the offset-expression forms (undisclosed
+    /// reach) and for symbolic terms — allocation-sizing callers bail
+    /// loudly on `None`, never guess.
+    pub fn literal_span_elements(&self) -> Option<usize> {
+        let span = match self {
+            MirrorLayout::RightMajor(l) => l.span(),
+            MirrorLayout::LeftMajor(l) => l.span(),
+            MirrorLayout::Strided(l) => l.span(),
+            MirrorLayout::ElementOffset(_) | MirrorLayout::BitOffset(_) => return None,
+        };
+        span.eval_literal().and_then(|v| usize::try_from(v).ok())
+    }
+}
+
+// =============================================================================
 // The spelling renderer
 // =============================================================================
 

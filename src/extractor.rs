@@ -428,46 +428,55 @@ pub fn extract_layout_ir_with_ops_and_matchers(
 }
 
 
-/// Build the rendered-layout table for one extracted graph: enumerate
-/// every value's LAYOUT e-class (pure enumeration — core never parses a
-/// layout spelling) and call the runtime's [`LayoutRenderer`] hook once
-/// per distinct class, reusing `cache` across calls (all spellings of a
-/// class denote one function, so a class renders the same every time —
-/// the search loop shares one cache across its genomes). A renderer
-/// error is LOUD and refuses the graph: there is no default layout.
+/// Build the rendered-layout table for one extracted graph, keyed by
+/// VALUE e-class: enumerate every elected value (pure enumeration — core
+/// never parses a layout spelling) and call the runtime's
+/// [`LayoutRenderer`] hook, reusing `cache` across calls. The cache key
+/// is `(layout class, dtype-of fact)` — exactly the inputs the renderer
+/// contract permits it to read (all spellings of a layout class denote
+/// one function, and the dtype fact is the one extraction-side value
+/// fact a runtime may fold into `L`), so one cache serves every genome.
+/// A renderer error is LOUD and refuses the graph: there is no default
+/// layout.
 ///
-/// Rendering the PRE-DPS graph suffices for the post-DPS one: the DPS
-/// rewrite's poison destinations clone their tied result's layout,
-/// e-class included, so the table covers them by construction.
+/// CALL IT ON THE GRAPH BUFFERIZE WILL SEE — the POST-DPS one. The table
+/// is VALUE-keyed now, and the DPS rewrite mints fresh poison-destination
+/// VALUES, so a pre-DPS table is not total over the post-DPS graph and
+/// `extraction_layouts` refuses it loudly. Rendering post-DPS is free:
+/// each poison clones its tied result's layout class AND dtype fact, so
+/// it hits the `(layout class, dtype)` cache. (Historically the table was
+/// keyed by layout class, and the pre-DPS graph sufficed because
+/// the DPS rewrite's poison destinations clone their tied result's layout,
+/// e-class included, so the table covered them by construction.)
 pub fn rendered_layout_table<L: Clone>(
     egraph: &EGraph,
     graph: &ExtractedGraph,
     renderer: &dyn crate::layout_ir::LayoutRenderer<L>,
-    cache: &mut HashMap<ClassId, L>,
+    cache: &mut HashMap<(ClassId, Option<crate::dtype::PlanDtype>), L>,
 ) -> Result<HashMap<ClassId, L>> {
     let mut table: HashMap<ClassId, L> = HashMap::new();
     let render = |value: &crate::layout_ir::LayoutTensorInfo,
                       table: &mut HashMap<ClassId, L>,
-                      cache: &mut HashMap<ClassId, L>|
+                      cache: &mut HashMap<(ClassId, Option<crate::dtype::PlanDtype>), L>|
      -> Result<()> {
-        let class = &value.layout.eclass;
-        if table.contains_key(class) {
+        if table.contains_key(&value.eclass) {
             return Ok(());
         }
-        let rendered = match cache.get(class) {
+        let key = (value.layout.eclass.clone(), value.dtype_enum);
+        let rendered = match cache.get(&key) {
             Some(rendered) => rendered.clone(),
             None => {
-                let rendered = renderer.render_layout(egraph, class).with_context(|| {
+                let rendered = renderer.render_layout(egraph, value).with_context(|| {
                     format!(
-                        "rendering the layout of value {} (layout class {class})",
-                        value.eclass
+                        "rendering the layout of value {} (layout class {})",
+                        value.eclass, value.layout.eclass
                     )
                 })?;
-                cache.insert(class.clone(), rendered.clone());
+                cache.insert(key, rendered.clone());
                 rendered
             }
         };
-        table.insert(class.clone(), rendered);
+        table.insert(value.eclass.clone(), rendered);
         Ok(())
     };
     for node in graph.dag.node_weights() {

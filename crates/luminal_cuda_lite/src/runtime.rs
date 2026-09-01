@@ -48,7 +48,7 @@ pub struct CudaRuntime {
     /// layout, filled by execute (D2H) — the escape-and-disclose fetch,
     /// keyed by slot index (an escaped slot's backing buffer is a minted
     /// allocation with no BufferLit, so slot order is the stable key).
-    outputs_host: FxHashMap<usize, (TypedBuffer, luminal::bufferize::OutputBinding)>,
+    outputs_host: FxHashMap<usize, (TypedBuffer, luminal::bufferize::OutputBinding<CudaLayout>)>,
     input_buffers: FxHashMap<NodeIndex, i64>,
     /// Bound output tensor → its slot index (program slot order).
     output_index: FxHashMap<NodeIndex, usize>,
@@ -278,11 +278,22 @@ impl CudaRuntime {
     /// from row-major on a same-numel weld (e.g. a transpose) — so the
     /// legacy dense-shaped signature must never hand them over silently.
     /// Escaped outputs go through [`Self::fetch`] and interpret under
-    /// [`Self::output_layout`] (the escape-and-disclose contract —
-    /// `walk_layout_index` is the trusted reader).
+    /// [`Self::output_layout`] (the escape-and-disclose contract; the
+    /// reader is [`crate::layouts::dense_f32`], this runtime evaluating
+    /// its own layout vocabulary).
     pub fn get_f32(&self, tensor: NodeIndex) -> Result<&Vec<f32>> {
+        // PROTOTYPE (Option B): the row-major question is asked of the
+        // HELD LAYOUT itself — the same vocabulary the codegen read path
+        // uses. Direct = the packed right-major form over its own
+        // literal domain (the layout's domain IS the value's shape).
+        let is_direct = |binding: &luminal::bufferize::OutputBinding<CudaLayout>| {
+            match binding.layout.mirror.literal_extents() {
+                Some(dims) => crate::kernels::layout_is_direct(&binding.layout, &dims),
+                None => false,
+            }
+        };
         match self.fetch(tensor)? {
-            (_, binding) if binding.composed_access.is_some() => bail!(
+            (_, binding) if !is_direct(binding) => bail!(
                 "get_f32 on a view-elected (escaped) output: the backing \
                  bytes are not row-major over the value's dims — use fetch() \
                  and interpret under the disclosed layout"
@@ -298,7 +309,7 @@ impl CudaRuntime {
     pub fn fetch(
         &self,
         tensor: NodeIndex,
-    ) -> Result<(&TypedBuffer, &luminal::bufferize::OutputBinding)> {
+    ) -> Result<(&TypedBuffer, &luminal::bufferize::OutputBinding<CudaLayout>)> {
         let index = self
             .output_index
             .get(&tensor)
@@ -313,7 +324,7 @@ impl CudaRuntime {
     pub fn output_layout(
         &self,
         tensor: NodeIndex,
-    ) -> Result<&luminal::bufferize::OutputBinding> {
+    ) -> Result<&luminal::bufferize::OutputBinding<CudaLayout>> {
         Ok(self.fetch(tensor)?.1)
     }
 

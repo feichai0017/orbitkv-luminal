@@ -120,6 +120,16 @@ pub enum Owner {
 }
 
 /// A concrete buffer in the plan.
+///
+/// CORRECTED CONTRACT (Austin, 2026-08-31): "The bufferizer is only
+/// responsible for determining which buffer IDs back which layout
+/// tensors." A buffer row is therefore the ASSIGNMENT's buffer side —
+/// identity, ownership/lifetime declarations, the boundary binding key,
+/// and WHICH TENSOR the buffer backs — and nothing else. There is no
+/// plan-carried geometry (dims/bits/dtype all left the vocabulary):
+/// allocation is `span-of-layout` bytes for the backed tensor's layout,
+/// which the runtime already knows (it elected it) and which Option B
+/// ADDITIONALLY carries here as `layout`.
 #[derive(Debug, Clone)]
 pub struct Buffer<L: PlanLayout> {
     pub id: BufferId,
@@ -131,69 +141,62 @@ pub struct Buffer<L: PlanLayout> {
     pub freed_by: FreedBy,
     pub owner: Owner,
     pub label: String,
-    /// Numeric extents of the values this buffer backs (annotated after
-    /// lowering from the extraction's literal geometry; `None` = symbolic).
-    pub dims: Option<Vec<i64>>,
-    /// Element bit width (same provenance and contract as `dims`).
-    pub element_bits: Option<i64>,
-    /// The plan dtype, from the logical side's `dtype-of` row (same
-    /// provenance/consumer contract as `dims`). The executor dispatches
-    /// storage on THIS, never on width alone — `bits-of(Int)` equals
-    /// `bits-of(F32)`, so width cannot carry the type (typed-buffers
-    /// landing A, 2026-08-11).
-    pub dtype: Option<crate::dtype::PlanDtype>,
     /// The numeric `BufferLit` id for boundary buffers — the key runtimes
     /// bind caller data by.
     pub lit: Option<i64>,
-    /// The RESIDENT layout under which this buffer's bytes were written —
-    /// TOTAL, never optional: every LayoutTensor carries a Layout by
-    /// construction (`LayoutTensorLit LogicalTensor Layout`) and boundary
-    /// bindings pin layouts, so a layoutless buffer is a planner bug and
-    /// unrepresentable here. Seeded at mint from the value the buffer was
-    /// minted for, then OVERWRITTEN at annotate time by the
-    /// writer-identity layout fill (same writer set as the dims join):
-    /// writers are the authority over the seed. Writers are never
-    /// COMPARED against each other — layout equality is enforced in the
-    /// e-graph, not re-checked here (`L` carries no `PartialEq`) — but
-    /// a buffer whose writers supplied no layout still bails loudly at
-    /// the fill (totality/presence tracking, not comparison). TRANSPORT
-    /// ONLY this train: core never consumes `L` beyond carrying it.
+    /// THE ASSIGNMENT, buffer side: the tensor whose bytes this buffer
+    /// holds — the value it was minted for (interior) or pinned to
+    /// (boundary). Allocation = look up THIS tensor's layout (in the
+    /// runtime's own table, or in `layout` right here) and allocate its
+    /// span. Cohabiting values (in-place chains) share the buffer by
+    /// e-graph-checked precondition; no voting, no fixpoint, no
+    /// contradiction detection reconstructs what assignment already says.
+    ///
+    /// WHICH cohabitant this names is a SIZING answer, not an identity
+    /// claim. On a DPS chain the buffer is minted for the poison
+    /// DESTINATION, so `backs` names the poison — which sizes correctly
+    /// (a poison clones its tied result's shape/dtype/layout) and says
+    /// nothing about which of the cohabitants is "the" value. In
+    /// particular: `backs != slot.value` does NOT mean an operand reads
+    /// through a fold. A runtime that needs that distinction compares
+    /// LAYOUTS on its own type — a cohabitant carries the layout the
+    /// buffer was allocated for, a view carries a different function
+    /// over the same bytes. Core never makes that comparison (no
+    /// `PartialEq` on [`PlanLayout`]); the runtime owns it.
+    pub backs: ClassId,
+    /// PROTOTYPE (Option B): the backed tensor's elected layout — the `L`
+    /// the runtime's renderer minted for `backs`, carried VERBATIM.
+    /// Informationally redundant for a live runtime (it knew every layout
+    /// before it called bufferize); carried so plans are SELF-CONTAINED
+    /// for `load_plan`/hand-built callers, who may read this instead of a
+    /// table they never had. Core never interprets, composes, sizes, or
+    /// compares it — transport only.
     pub layout: L,
 }
 
-/// Where a program output value ends up: its value, the buffer backing it,
-/// and the ELECTED LAYOUT under which the caller interprets that buffer's
-/// bytes (ruling 2026-08-27, escape-and-disclose): "We always return a
-/// buffer. And the user always knows what Layout they should use to
-/// interpret this buffer. Whether it's Dense or not doesn't matter." ONE
-/// layout language for every slot — the same composed-access vocabulary
-/// consumer slots carry — with no Dense/Composed distinction: a dense
-/// election is simply `composed_access: None` (the value addresses its
-/// buffer directly, row-major over `dims`), a view election carries the
-/// folded hop chain re-rooted onto the escaped/repaired backing buffer
-/// (the last hop's parent extents ARE that buffer's geometry). The
-/// backing buffer may be caller storage (dense delivery, or a
-/// view-of-input returned zero-copy) or an ESCAPING program allocation
-/// (`Owner::System` + `FreedBy::Caller` — handed to the caller to
-/// manage).
+/// Where a program output value ends up: its value and the buffer backing
+/// it — the ASSIGNMENT's output-boundary rows. VIEW OUTPUTS ARE
+/// COMPLETELY LEGAL and fulfilled STRUCTURALLY (corrected contract,
+/// 2026-08-31): a view is no-work-same-buffer, so a view-elected slot's
+/// `buffer` is its parent's backing storage (escaped or repaired —
+/// zero-copy by construction), never a refusal and never a forced dense
+/// delivery. The backing buffer may be caller storage or an ESCAPING
+/// program allocation (`Owner::System` + `FreedBy::Caller`).
+///
+/// The runtime hands the user this buffer and may attach the layout it
+/// already knows ("maybe it can be typed — not essential"); Option B
+/// carries that layout here so externally loaded plans can do the same.
 #[derive(Debug, Clone)]
-pub struct OutputBinding {
+pub struct OutputBinding<L: PlanLayout> {
     pub index: usize,
     pub value: ClassId,
     pub buffer: BufferId,
-    /// The output VALUE's literal extents (`None` = symbolic — numeric
-    /// consumers bail loudly, the [`Buffer::dims`] contract).
-    pub dims: Option<Vec<i64>>,
-    /// The value's element bit width (same contract as `dims`).
-    pub element_bits: Option<i64>,
-    /// The value's plan dtype (same contract as `dims`).
-    pub dtype: Option<crate::dtype::PlanDtype>,
-    /// The elected layout: `None` = the value addresses its buffer
-    /// directly (row-major over `dims`); `Some` = the folded view chain
-    /// through which element `[i0, i1, ...]` of the value addresses the
-    /// backing buffer's bytes ([`walk_layout_index`] is the trusted host
-    /// reader).
-    pub composed_access: Option<ComposedAccess>,
+    /// PROTOTYPE (Option B): the output value's elected layout, carried
+    /// VERBATIM from the runtime's rendered table — for a view election,
+    /// the view's COMPOSED layout as the e-graph minted it, already
+    /// addressing the backing buffer's bytes. Redundant for a live
+    /// runtime; self-containment for loaded plans.
+    pub layout: L,
 }
 
 /// A program input slot: a value pinned to a caller-owned buffer. Slot order
@@ -225,70 +228,40 @@ pub struct BufferEdge {
     pub kind: EdgeKind,
 }
 
-/// One folded view between a slot's value and its backing storage: the
-/// view's index map plus the geometry it indexes into. `entries` holds one
-/// expression tree per PARENT axis (outermost inward), evaluated at the
-/// hop's OUT coordinates — exactly the numeric vocabulary the runtimes
-/// already parse and compile for `IndexMapApplyMaterialize` (extraction-side
-/// parsing, enode-anchored, never destructured from class spellings).
-/// `entries: None` is the fail-closed form: the view folded but its map was
-/// beyond the parsed expression subset, so a numeric consumer must refuse
-/// loudly rather than assume identity. `parent_dims` are the extents the
-/// entries index into (`None` = symbolic, the [`Buffer::dims`] contract).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccessHop {
-    /// Per-parent-axis index expressions over this hop's OUT coordinates.
-    pub entries: Option<Vec<crate::index_expr::IotaExpr>>,
-    /// The hop's parent extents — the bounds `entries` index into.
-    pub parent_dims: Option<Vec<i64>>,
-}
+// The hop machinery (`AccessHop` / `ComposedAccess`) is DELETED
+// (corrected contract, 2026-08-31): recording per-slot view-fold chains
+// was the planner COMPOSING layout knowledge — the e-graph already mints
+// every view value's composed layout at view creation, and the runtime's
+// rendered `L` for that value IS the read path. The planner records
+// assignment, never access expressions.
 
-/// The composed per-slot access expression: how a slot's value addresses its
-/// buffer through the views folded between them. Filled at view-fold time
-/// (M4 Phase 3): `hops[0]` is the OUTERMOST fold — the view producing the
-/// slot's value, its `entries` evaluated at the slot's own coordinates —
-/// and each hop's outputs are the next hop's coordinates (hop `k`'s
-/// `parent_dims` are hop `k+1`'s out dims); the LAST hop's parent is the
-/// residence the slot actually reads. Multi-hop chains are stored STACKED
-/// AND UN-NORMALIZED — the planner records composition order, it never
-/// rewrites expressions (that is the e-graph's job, never-depend-on-spelling).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComposedAccess {
-    pub hops: Vec<AccessHop>,
-}
-
-/// Per-slot geometry descriptor on a plan node: the VALUE occupying an
-/// operand/result slot, the buffer backing it, and the value's literal
-/// geometry (`None` = symbolic, numeric consumers bail loudly — the same
-/// contract as [`Buffer::dims`]). Identity (`value`, `buffer`) is filled at
-/// lowering from the BufferTensor operands/results; geometry comes from the
-/// extraction's per-value facts. Purely additive this phase: nothing reads
-/// it yet except tests and the writer-identity dims join.
+/// Per-slot descriptor on a plan node: the VALUE occupying an
+/// operand/result slot, the buffer backing it — the ASSIGNMENT restated
+/// per slot — plus the Option-B carried layout. Identity is filled at
+/// lowering from the BufferTensor operands/results. Whatever else an op's
+/// kernel wants to remember from its claimed site (extents, dtypes,
+/// masks) is the OP RECORD's private business (its matcher captured it) —
+/// never plan vocabulary.
 #[derive(Debug, Clone)]
-pub struct SlotDescriptor {
+pub struct SlotDescriptor<L: PlanLayout> {
     /// The value occupying this slot (operand read / result written).
     pub value: ClassId,
     /// The buffer backing the slot (same entry as `reads`/`writes`).
     pub buffer: BufferId,
-    /// The value's literal extents (`None` = symbolic).
-    pub dims: Option<Vec<i64>>,
-    /// The value's element bit width (same contract as `dims`).
-    pub element_bits: Option<i64>,
-    /// The value's plan dtype (same contract as `dims`).
-    pub dtype: Option<crate::dtype::PlanDtype>,
-    /// Composed view access for this slot: `Some` iff one or more folded
-    /// views stand between the slot's value and the buffer it reads —
-    /// filled at view-fold time (operand slots only; a compute RESULT is
-    /// produced by the node itself, never through a fold). `None` = the
-    /// slot addresses its buffer directly.
-    pub composed_access: Option<ComposedAccess>,
+    /// PROTOTYPE (Option B): the slot value's elected layout, carried
+    /// VERBATIM from the runtime's rendered table (TOTAL: every
+    /// LayoutTensor carries a layout by construction; a missing row bails
+    /// at lowering, never defaults). For an operand reading through
+    /// folded views this is the view's COMPOSED layout as the e-graph
+    /// minted it, addressing the residence's bytes directly.
+    pub layout: L,
 }
 
 /// A node in the buffer IR. `Compute` nodes are the original ops, now reading and
 /// writing buffers; `BufferCopy` is the only genuinely new operation (bufferizer-
 /// inserted materialization); the boundaries are pinned buffers.
 #[derive(Debug, Clone)]
-pub enum BufferNode {
+pub enum BufferNode<L: PlanLayout> {
     /// The program input boundary: every input slot's value pinned to its
     /// caller-owned buffer — ONE node, mirroring [`BufferNode::BufferOutput`]
     /// (and `BtNode::Input` upstream), so the two boundaries read the same.
@@ -303,170 +276,104 @@ pub enum BufferNode {
         /// contracts (`alias_info`), and slot names come from `OpSlotNames`.
         ties: Vec<(usize, usize)>,
         /// Per-operand descriptors, parallel to `reads`.
-        operand_info: Vec<SlotDescriptor>,
+        operand_info: Vec<SlotDescriptor<L>>,
         /// Per-result descriptors, parallel to `writes`.
-        result_info: Vec<SlotDescriptor>,
+        result_info: Vec<SlotDescriptor<L>>,
     },
     /// A bufferizer-inserted copy of `src`'s bytes into `dst`.
     ///
-    /// RULING (Austin, escape-and-disclose): "BufferCopy should only ever
-    /// be a dumb memcopy of a whole buffer." One meaning, no layout
-    /// awareness. A FOLDED resident is copied by copying its BASE STORAGE
-    /// (the parent buffer) whole — copying the base buffer COUNTS AS
-    /// DELIVERY — and re-rooting the fold onto the copy; a copy
-    /// materialized into a specific layout is a different LAYOUTTENSOR
-    /// candidate in the e-graph, discovered via search, never a copy
-    /// mode. Repair destinations are always FRESH single-writer buffers
-    /// minted by the bufferizer; the e-graph never represents
-    /// buffer-level choices — repairs are deterministic bufferizer
-    /// insertions ("we don't search over buffer tensors in the egraph...
-    /// We're just going to insert buffer copies as needed to repair").
-    /// Executors enforce the geometry/dtype equality fence before moving
-    /// bytes — that fence is permanent.
-    BufferCopy {
-        src: BufferId,
-        dst: BufferId,
-        /// The value the copy transports — a copy preserves the value and
-        /// changes the buffer, so ONE value names what lands in `dst`. The
-        /// writer-identity dims join reads this to give `dst` the copied
-        /// value's geometry (never the src BUFFER's, which may be cohabited
-        /// by values of other extents). For a base-storage copy of a folded
-        /// resident this is the fold's ROOT PARENT value — the value whose
-        /// bytes the whole-buffer memcpy actually moves.
-        value: ClassId,
-    },
+    /// # THE BUFFERCOPY CONTRACT (Austin, ruled 2026-08-31 — stated, never implied)
+    ///
+    /// **The node carries ONLY the pair `{src, dst}`.** There is no third
+    /// field. (The former `value` existed solely to feed the
+    /// writer-identity dims join, and that join is deleted with the plan's
+    /// geometry vocabulary.)
+    ///
+    /// **Semantics: a DUMB EXACT-SIZE WHOLE-BUFFER COPY.** Verbatim:
+    /// "semantically it is a dumb exact size copy. If a runtime chooses to
+    /// do resource reuse and do unequal sized buffer that is an entirely
+    /// runtime owned choice." No layout awareness, no element walk, no
+    /// partial ranges, no shape conversion. `dst` ends holding `src`'s
+    /// bytes.
+    ///
+    /// **ORDERING IS THE RUNTIME OBLIGATION.** Verbatim: "the runtime is
+    /// responsible for analyzing which ops depend on the Copy and making
+    /// sure that appropriate ordering is maintained." The plan supplies the
+    /// DEPENDENCY STRUCTURE — the dag, including [`EdgeKind::Anti`]
+    /// write-after-read edges — and nothing more; scheduling, hazard
+    /// handling, stream/queue placement and any barrier the hardware needs
+    /// are runtime-side. The bufferizer does not choose an execution order.
+    ///
+    /// **The three causes a copy is minted** (each documented again at its
+    /// mint site — in [`lower`] and in
+    /// [`crate::buffer_tensor_ir::build_buffer_tensor_ir`], which is where
+    /// the decision to copy is actually taken):
+    ///
+    /// 1. **Residence conflict repair** — an in-place candidate was
+    ///    rejected by the conflict engine, so the result gets fresh storage
+    ///    and the operand's bytes are copied in first.
+    /// 2. **Boundary placement** — a tensor is bound to a SPECIFIC caller
+    ///    buffer whose producing residence is elsewhere, so its bytes are
+    ///    moved into the caller's storage.
+    /// 3. **Lifetime repair** — a value must outlive the storage it
+    ///    currently occupies (an escape, or a buffer about to be reused),
+    ///    so it is relocated into storage with the right lifetime.
+    ///
+    /// A FOLDED resident is copied by copying its BASE STORAGE (the parent
+    /// buffer) whole — copying the base buffer COUNTS AS DELIVERY — and
+    /// re-rooting the fold onto the copy; a copy materialized INTO a
+    /// specific layout is a different LAYOUTTENSOR candidate in the
+    /// e-graph, discovered via search, never a copy mode. Repair
+    /// destinations are always FRESH single-writer buffers minted by the
+    /// bufferizer; the e-graph never represents buffer-level choices —
+    /// repairs are deterministic bufferizer insertions ("we don't search
+    /// over buffer tensors in the egraph... We're just going to insert
+    /// buffer copies as needed to repair").
+    BufferCopy { src: BufferId, dst: BufferId },
     /// A program output: each slot's value pinned into its destination buffer.
-    BufferOutput { slots: Vec<OutputBinding> },
+    BufferOutput { slots: Vec<OutputBinding<L>> },
 }
 
-/// Read element `[i0, i1, ...]` of an output value through its returned
-/// layout, down to a flat element index into the BACKING buffer — the
-/// trusted host-side walker for the escape-and-disclose contract (its
-/// device analogue is `luminal_cuda_lite::kernels::composed_read_index`,
-/// which lowers the identical composition to CUDA statements). Direct
-/// (`access: None`) is row-major over the value's own dims (which are the
-/// buffer's dims for a dense election); a hop chain composes
-/// outermost-first — hop 0's entries evaluated at the value's own
-/// coordinates, each hop's outputs feeding the next hop's coordinates,
-/// the LAST hop's parent being the residence actually read. Fail-closed
-/// at every step: unparsed entries, symbolic extents, and out-of-bounds
-/// hop outputs all bail loudly — never treated as identity.
-pub fn walk_layout_index(
-    access: Option<&ComposedAccess>,
-    value_dims: &[i64],
-    base_dims: &[i64],
-    coords: &[usize],
-) -> Result<usize> {
-    let checked_dims = |dims: &[i64], what: &str| -> Result<Vec<usize>> {
-        dims.iter()
-            .map(|&d| {
-                usize::try_from(d).ok().filter(|&d| d > 0).ok_or_else(|| {
-                    anyhow::anyhow!("layout walk: non-positive {what} extent {d}")
-                })
-            })
-            .collect()
-    };
-    let flat = |coords: &[usize], dims: &[usize]| -> Result<usize> {
-        let mut index = 0usize;
-        for (axis, (&c, &d)) in coords.iter().zip(dims.iter()).enumerate() {
-            anyhow::ensure!(
-                c < d,
-                "layout walk: coordinate {c} out of bounds for extent {d} (axis {axis})"
-            );
-            index = index * d + c;
-        }
-        Ok(index)
-    };
-    let Some(access) = access else {
-        // Direct: the value addresses its buffer row-major at its own
-        // coordinates — legal only when the buffer IS value-shaped. The
-        // writer-identity dims join is an equality lattice (every resident
-        // of a buffer shares its dims), so this is the same fence the
-        // composed arm puts on the final hop's parent: a mismatch means
-        // the claimed backing does not hold this value's row-major domain.
-        let dims = checked_dims(value_dims, "value")?;
-        let base = checked_dims(base_dims, "base")?;
-        anyhow::ensure!(
-            base == dims,
-            "layout walk: direct value dims {dims:?} differ from the backing \
-             buffer geometry {base:?}"
-        );
-        anyhow::ensure!(
-            coords.len() == dims.len(),
-            "layout walk: {} coordinates for a rank-{} value",
-            coords.len(),
-            dims.len()
-        );
-        return flat(coords, &dims);
-    };
-    anyhow::ensure!(!access.hops.is_empty(), "layout walk: composed access with zero hops");
-    anyhow::ensure!(
-        coords.len() == value_dims.len(),
-        "layout walk: {} coordinates for a rank-{} value",
-        coords.len(),
-        value_dims.len()
-    );
-    let mut current: Vec<usize> = coords.to_vec();
-    let mut last_parent: Vec<usize> = Vec::new();
-    for (h, hop) in access.hops.iter().enumerate() {
-        let Some(entries) = &hop.entries else {
-            anyhow::bail!(
-                "layout walk: hop {h} index map beyond the parsed expression \
-                 subset (fail-closed, never identity)"
-            );
-        };
-        let Some(parent_dims) = &hop.parent_dims else {
-            anyhow::bail!("layout walk: hop {h} has symbolic parent extents");
-        };
-        let parent = checked_dims(parent_dims, "parent")?;
-        anyhow::ensure!(
-            entries.len() == parent.len(),
-            "layout walk: hop {h} has {} map entries vs parent rank {}",
-            entries.len(),
-            parent.len()
-        );
-        let mut next = Vec::with_capacity(parent.len());
-        for (m, entry) in entries.iter().enumerate() {
-            let value = entry.eval(&current);
-            let ok = usize::try_from(value).ok().filter(|&v| v < parent[m]);
-            let Some(v) = ok else {
-                anyhow::bail!(
-                    "layout walk: hop {h} axis {m} index {value} out of bounds \
-                     for parent extent {}",
-                    parent[m]
-                );
-            };
-            next.push(v);
-        }
-        current = next;
-        last_parent = parent;
-    }
-    // The buffer's geometry must BE the final hop's parent extents — the
-    // re-rooted chain addresses exactly the backing storage.
-    let base = checked_dims(base_dims, "base")?;
-    anyhow::ensure!(
-        base == last_parent,
-        "layout walk: backing buffer geometry {base:?} differs from the final \
-         hop's parent extents {last_parent:?}"
-    );
-    flat(&current, &last_parent)
-}
+// PROTOTYPE (Option B): `walk_layout_index` — the hop-chain host walker —
+// LEFT CORE (Austin's ruling: it "probably gets deleted / moved to
+// something called 'test equality' or something in the testing crate").
+// Element readback through a returned layout is a TEST concern: the
+// testing crate's `test_equality` module evaluates the runtime's own
+// layout vocabulary ((buffer, layout) pairs, mirror-struct expressions),
+// with no core involvement. Core transports layouts; it never reads
+// through them.
 
 /// The out-of-place bufferization result: a new, independent dataflow graph whose
 /// values are all backed by buffers and whose copies are first-class nodes. The
 /// source [`ExtractedGraph`] is left untouched.
 #[derive(Debug, Clone)]
 pub struct BufferIrGraph<L: PlanLayout> {
-    pub dag: DiGraph<BufferNode, BufferEdge>,
+    pub dag: DiGraph<BufferNode<L>, BufferEdge>,
     /// Every distinct buffer in the plan, by id.
     pub buffers: HashMap<BufferId, Buffer<L>>,
     /// The buffer holding each value (values collapse onto buffers via reuse).
-    /// A `BTreeMap` deliberately: residual iterations (the checked bits/dtype
-    /// joins, diagnostics) walk it in value order, so their messages are
-    /// stable run-to-run — never std-HashMap hash order.
+    /// A `BTreeMap` deliberately: residual iterations (diagnostics) walk it
+    /// in value order, so their messages are stable run-to-run — never
+    /// std-HashMap hash order.
     pub value_buffer: BTreeMap<ClassId, BufferId>,
     /// The `BufferOutput` node(s).
     pub outputs: Vec<NodeIndex>,
+}
+
+impl<L: PlanLayout> BufferIrGraph<L> {
+    /// THE ASSIGNMENT, queried buffer-side: which tensor does `buffer`
+    /// back? Allocation = look up this tensor's layout (the runtime's own
+    /// table, or [`Buffer::layout`] carried alongside) and allocate its
+    /// span — no walk, no voting.
+    pub fn backed_tensor(&self, buffer: &BufferId) -> Option<&ClassId> {
+        self.buffers.get(buffer).map(|b| &b.backs)
+    }
+
+    /// THE ASSIGNMENT, queried tensor-side: which buffer backs `value`?
+    /// (Boundary tensors included — the boundary-condition query.)
+    pub fn buffer_of(&self, value: &ClassId) -> Option<&BufferId> {
+        self.value_buffer.get(value)
+    }
 }
 
 impl<L: PlanLayout> BufferIrGraph<L> {
@@ -539,7 +446,7 @@ impl<L: PlanLayout> BufferIrGraph<L> {
                     self.buffer_name(dst),
                 )),
                 BufferNode::BufferOutput { slots } => {
-                    let mut slots: Vec<&OutputBinding> = slots.iter().collect();
+                    let mut slots: Vec<&OutputBinding<L>> = slots.iter().collect();
                     slots.sort_by_key(|slot| slot.index);
                     for slot in slots {
                         output_lines
@@ -1619,104 +1526,73 @@ pub fn bufferize<L: PlanLayout>(
     graph: &ExtractedGraph,
     layouts: &HashMap<ClassId, L>,
 ) -> Result<BufferIrGraph<L>> {
-    let geometry = extraction_geometry(graph, layouts)?;
-    let mut plan = lower(buffer_tensor_plan(graph, &geometry)?, &geometry)?;
-    annotate_buffer_geometry(&mut plan, graph, &geometry)?;
+    // `layouts` is keyed by VALUE e-class (the runtime's rendered table,
+    // [`crate::extractor::rendered_layout_table`]).
+    let value_layouts = extraction_layouts(graph, layouts)?;
+    let mut plan = lower(buffer_tensor_plan(graph, &value_layouts)?, &value_layouts)?;
+    annotate_boundary_lits(&mut plan, graph);
     Ok(plan)
 }
 
-/// A value's literal geometry as the extraction recorded it. `None` fields
-/// mean symbolic/underivable — numeric consumers bail loudly, never guess.
-/// The LAYOUT is total: every LayoutTensor carries one by construction,
-/// and [`extraction_geometry`] bails loudly if the rendered table has no
-/// row for a value's layout class.
-#[derive(Debug, Clone)]
-pub(crate) struct ValueGeometry<L: PlanLayout> {
-    pub(crate) dims: Option<Vec<i64>>,
-    pub(crate) element_bits: Option<i64>,
-    pub(crate) dtype: Option<crate::dtype::PlanDtype>,
-    /// The value's rendered layout — opaque, transported, never read.
-    pub(crate) layout: L,
-}
-
-/// Collect every extraction value's literal geometry, keyed by e-class.
-pub(crate) fn extraction_geometry<L: PlanLayout>(
+/// Every extraction VALUE's rendered layout, keyed by value e-class —
+/// TOTAL: every LayoutTensor carries a Layout by construction, so a value
+/// with no rendered row is a loud refusal, never a default. This is the
+/// ONE per-value fact the planner transports; dims, element bits, and
+/// dtype are the runtime's own extraction-side knowledge and never enter
+/// the plan (corrected contract, 2026-08-31).
+pub(crate) fn extraction_layouts<L: PlanLayout>(
     graph: &ExtractedGraph,
     layouts: &HashMap<ClassId, L>,
-) -> Result<HashMap<ClassId, ValueGeometry<L>>> {
-    let mut value_geometry: HashMap<ClassId, ValueGeometry<L>> = HashMap::new();
-    let layout_of = |value: &crate::layout_ir::LayoutTensorInfo| -> Result<L> {
-        layouts.get(&value.layout.eclass).cloned().ok_or_else(|| {
+) -> Result<HashMap<ClassId, L>> {
+    let mut value_layouts: HashMap<ClassId, L> = HashMap::new();
+    let mut record = |value: &crate::layout_ir::LayoutTensorInfo,
+                      table: &mut HashMap<ClassId, L>|
+     -> Result<()> {
+        if table.contains_key(&value.eclass) {
+            return Ok(());
+        }
+        let layout = layouts.get(&value.eclass).cloned().ok_or_else(|| {
             anyhow::anyhow!(
-                "value {} carries layout class {} but the rendered layout \
-                 table has no row for it — every LayoutTensor carries a \
-                 Layout by construction, so the renderer must cover it or \
-                 the plan must refuse",
+                "value {} (layout class {}) has no row in the rendered \
+                 layout table — every LayoutTensor carries a Layout by \
+                 construction, so the renderer must cover it or the plan \
+                 must refuse",
                 value.eclass,
                 value.layout.eclass,
             )
-        })
+        })?;
+        table.insert(value.eclass.clone(), layout);
+        Ok(())
     };
     for node in graph.dag.node_weights() {
         match node {
-            ExtractedNode::BufferInput(input) => {
-                if !value_geometry.contains_key(&input.value.eclass) {
-                    value_geometry.insert(
-                        input.value.eclass.clone(),
-                        ValueGeometry {
-                            dims: input.value.dims.clone(),
-                            element_bits: input.value.element_bits,
-                            dtype: input.value.dtype_enum,
-                            layout: layout_of(&input.value)?,
-                        },
-                    );
-                }
-            }
+            ExtractedNode::BufferInput(input) => record(&input.value, &mut value_layouts)?,
             ExtractedNode::LayoutOp(op) => {
                 for output in &op.outputs {
-                    if !value_geometry.contains_key(&output.eclass) {
-                        value_geometry.insert(
-                            output.eclass.clone(),
-                            ValueGeometry {
-                                dims: output.dims.clone(),
-                                element_bits: output.element_bits,
-                                dtype: output.dtype_enum,
-                                layout: layout_of(output)?,
-                            },
-                        );
-                    }
+                    record(output, &mut value_layouts)?;
                 }
             }
             ExtractedNode::BufferOutput(_) => {}
         }
     }
-    Ok(value_geometry)
+    Ok(value_layouts)
 }
 
-/// Thread the extraction's literal geometry (dims, element bits) and the
-/// boundary `BufferLit` keys onto the plan's buffers — the sizing/binding
-/// surface the `ReferenceRuntime` executes from. Purely additive; `None`
-/// stays `None` for symbolic geometry, and numeric consumers bail loudly.
+/// Thread the boundary `BufferLit` keys onto the plan's buffers — the
+/// binding surface runtimes stage caller data by. This is the WHOLE of
+/// post-lowering annotation now (corrected contract, 2026-08-31): there
+/// is NO sizing walk. Allocation is an assignment lookup — for each plan
+/// buffer, `backs` names the tensor it holds, that tensor's layout (the
+/// runtime's own knowledge, or the carried [`Buffer::layout`]) gives the
+/// span, and every consumer takes the BufferId blindly: no voting, no
+/// fixpoint, no contradiction detection — "all the necessary
+/// preconditions have been checked in the egraph."
 ///
 /// ALLOCATION DOCTRINE (ruling 2026-08-27): every allocation site's bytes
-/// are its LAYOUT'S REQUIRED SPAN. Both layouts the planner allocates
-/// today are contiguous, whose span is numel × width — exactly the
-/// `dims`-product sizing the executors already compute from this
-/// annotation, so the doctrine changes no code. The day a non-contiguous
-/// allocation first appears, the affine strided span stands ready:
-/// (offset + Σ((extent_i − 1) · |stride_i|) + 1) × width.
-///
-/// CAPACITY CHECKS ARE AN OPEN ITEM, deliberately not implemented: no fit
-/// checks anywhere — provided (caller) buffers are blanket-assumed
-/// adequate for what the plan lands in them, and dynamic sizing is
-/// deferred (Austin: cohabitant bytes in returned storage are a
-/// non-issue — "If it's in the base tensor, we can copy and expose it to
-/// the user").
-fn annotate_buffer_geometry<L: PlanLayout>(
-    plan: &mut BufferIrGraph<L>,
-    graph: &ExtractedGraph,
-    value_geometry: &HashMap<ClassId, ValueGeometry<L>>,
-) -> Result<()> {
+/// are its LAYOUT'S REQUIRED SPAN. CAPACITY CHECKS ARE AN OPEN ITEM,
+/// deliberately not implemented: provided (caller) buffers are
+/// blanket-assumed adequate for what the plan lands in them.
+fn annotate_boundary_lits<L: PlanLayout>(plan: &mut BufferIrGraph<L>, graph: &ExtractedGraph) {
     let mut boundary_lits: HashMap<ClassId, i64> = HashMap::new();
     for node in graph.dag.node_weights() {
         match node {
@@ -1735,211 +1611,11 @@ fn annotate_buffer_geometry<L: PlanLayout>(
             }
         }
     }
-
-    // THE WRITER-IDENTITY DIMS JOIN (ruling 2026-08-13, approved 2026-08-26):
-    // a buffer's storage geometry is the geometry of the residents that
-    // SUPPLY ITS BYTES, and nothing else. Writers are enumerated from the
-    // plan's nodes in deterministic node order (never a value map):
-    //
-    //   * `BufferInput` slots — the caller stages the slot value's bytes;
-    //   * `Compute` results with `result_writes_memory` — the kernel writes
-    //     the result value's bytes (BufferAlloc results declare no write:
-    //     undefined contents have no geometry to contribute);
-    //   * `BufferCopy` destinations — the COPIED value's bytes land in dst.
-    //
-    // Folded views produce no plan node, so a view reader can never vote —
-    // that is what makes the join sound where a checked all-residents join
-    // refuses valid plans (matmul expand reads (2,3) through (2,4,3); a
-    // scalar broadcast reads () through (3,5)). Join law per buffer:
-    // None ∨ x = x; equal ∨ equal = equal; two DIFFERENT known dims are a
-    // planner contradiction and bail loudly, both writers named. There is
-    // no first-wins arm anywhere.
-    let mut dims_votes: HashMap<BufferId, (Vec<i64>, String)> = HashMap::new();
-    // THE WRITER-IDENTITY LAYOUT FILL (resident-geometry cleanup, ruling
-    // 2026-08-31; equality join dropped by amendment): the SAME writer
-    // set as the dims join, but NO comparison — layout equality between
-    // writers is enforced in the e-graph, so the bufferizer only
-    // transports (`L` carries no `PartialEq`). The first writer in
-    // deterministic plan-node order supplies the fill (any writer would:
-    // all writers of a buffer denote one layout function). Unlike dims
-    // (symbolic values abstain), a writer's layout is TOTAL, so every
-    // writer counts as presence; the fill happens below, and a buffer
-    // left without any writer layout bails loudly there.
-    let mut layout_votes: HashMap<BufferId, L> = HashMap::new();
-    {
-        let mut vote = |buffer: &BufferId, value: &ClassId, writer: String| -> Result<()> {
-            let Some(geometry) = value_geometry.get(value) else {
-                return Ok(());
-            };
-            layout_votes
-                .entry(buffer.clone())
-                .or_insert_with(|| geometry.layout.clone());
-            let Some(dims) = &geometry.dims else {
-                return Ok(()); // symbolic: None ∨ x = x
-            };
-            match dims_votes.get(buffer) {
-                None => {
-                    dims_votes.insert(buffer.clone(), (dims.clone(), writer));
-                }
-                Some((held, held_by)) if held != dims => anyhow::bail!(
-                    "buffer geometry contradiction on {buffer:?}: {writer} \
-                     writes {dims:?} into a buffer that {held_by} already \
-                     writes as {held:?} — a buffer's writers must agree on \
-                     its storage geometry",
-                ),
-                Some(_) => {}
-            }
-            Ok(())
-        };
-        for index in plan.dag.node_indices() {
-            match &plan.dag[index] {
-                BufferNode::BufferInput { slots } => {
-                    for slot in slots {
-                        vote(
-                            &slot.buffer,
-                            &slot.value,
-                            format!("input slot (value {})", slot.value),
-                        )?;
-                    }
-                }
-                BufferNode::Compute {
-                    op,
-                    writes,
-                    result_info,
-                    ..
-                } => {
-                    for (result, id) in writes.iter().enumerate() {
-                        if !op.result_writes_memory(result) {
-                            continue;
-                        }
-                        let Some(info) = result_info.get(result) else {
-                            anyhow::bail!(
-                                "plan node {} is missing the descriptor for \
-                                 result {result} — lowering must fill \
-                                 result_info for every result slot",
-                                op.label()
-                            );
-                        };
-                        vote(
-                            id,
-                            &info.value,
-                            format!("{} (result {result}, value {})", op.label(), info.value),
-                        )?;
-                    }
-                }
-                BufferNode::BufferCopy { dst, value, .. } => {
-                    vote(dst, value, format!("BufferCopy (value {value})"))?;
-                }
-                BufferNode::BufferOutput { .. } => {}
-            }
-        }
-    }
-    for buffer in plan.buffers.values_mut() {
-        if let Some((dims, _)) = dims_votes.get(&buffer.id) {
-            buffer.dims = Some(dims.clone());
-        }
-        // THE LAYOUT FILL: the writer's layout replaces the mint-time
-        // seed (the seed exists only so `Buffer.layout` is total by
-        // construction; writers are the authority). No writer layout
-        // means the buffer's writers supplied none — a planner bug, and
-        // the ruling's loud bail (presence tracking, never comparison).
-        match layout_votes.get(&buffer.id) {
-            Some(layout) => buffer.layout = layout.clone(),
-            None => anyhow::bail!(
-                "buffer {} has no writer-supplied layout — every buffer's \
-                 bytes are staged by some writer (input slot, writing \
-                 result, or copy), so a layoutless buffer is a planner bug",
-                buffer.label,
-            ),
-        }
-    }
-
-    for (value, id) in &plan.value_buffer {
-        if let Some(ValueGeometry {
-            element_bits: bits,
-            dtype,
-            ..
-        }) = value_geometry.get(value)
-        {
-            if let Some(buffer) = plan.buffers.get_mut(id) {
-                // Bits join is CHECKED, an order-independent lattice join
-                // (None ∨ x = x; equal ∨ equal = equal; different knowns
-                // BAIL) — every resident, view readers included, must agree
-                // on the element width. Iteration order is the BTreeMap's
-                // value order, so bail messages are stable.
-                match (buffer.element_bits, *bits) {
-                    (None, known) => buffer.element_bits = known,
-                    (Some(held), Some(new)) if held != new => anyhow::bail!(
-                        "buffer {} backs values of conflicting element                          widths {held} and {new} bits",
-                        buffer.label
-                    ),
-                    _ => {}
-                }
-                // Dtype join is CHECKED, not first-wins: two values
-                // cohabiting one buffer with different dtypes would be a
-                // silent reinterpretation — exactly the smuggling the
-                // typed-buffers ruling forbids. (Width-compatible reuse
-                // across dtypes must instead refuse here, loudly.)
-                match (buffer.dtype, dtype) {
-                    (None, Some(dtype)) => buffer.dtype = Some(*dtype),
-                    (Some(held), Some(dtype)) if held != *dtype => anyhow::bail!(
-                        "buffer {} backs values of conflicting dtypes \
-                         {held:?} and {dtype:?} — dtype-blind buffer reuse \
-                         is not executable",
-                        buffer.label
-                    ),
-                    _ => {}
-                }
-            }
-        }
-    }
-    // Consistency tripwire: a buffer's layout width must agree with its
-    // dtype's egglog bits-of row (the always-mint rule guarantees this
-    // for auto-minted layouts; a mismatch means a padded/foreign layout
-    // reached execution, which has no typed-storage story yet).
-    for buffer in plan.buffers.values() {
-        if let (Some(bits), Some(dtype)) = (buffer.element_bits, buffer.dtype) {
-            anyhow::ensure!(
-                bits == dtype.egglog_bits(),
-                "buffer {} is annotated {dtype:?} (bits-of = {}) but its \
-                 layout width is {bits} bits",
-                buffer.label,
-                dtype.egglog_bits()
-            );
-        }
-    }
     for buffer in plan.buffers.values_mut() {
         if let BufferId::Boundary(eclass) = &buffer.id {
             buffer.lit = boundary_lits.get(eclass).copied();
         }
     }
-    // A delivery copy's destination inherits its source's WIDTH/DTYPE when
-    // the dst had no value of its own to join on (None ∨ x = x — a fill,
-    // never an override; a conflicting known already bailed in the checked
-    // joins above). Dims take no part here: the writer-identity join above
-    // already gave dst the COPIED VALUE's geometry, which is the correct
-    // one even when the src buffer is cohabited by values of other extents.
-    let copy_pairs: Vec<(BufferId, BufferId)> = plan
-        .dag
-        .node_weights()
-        .filter_map(|node| match node {
-            BufferNode::BufferCopy { src, dst, .. } => Some((src.clone(), dst.clone())),
-            _ => None,
-        })
-        .collect();
-    for (src, dst) in copy_pairs {
-        let Some(source) = plan.buffers.get(&src) else { continue };
-        let (bits, dtype) = (source.element_bits, source.dtype);
-        if let Some(buffer) = plan.buffers.get_mut(&dst) {
-            if buffer.element_bits.is_none() {
-                buffer.element_bits = bits;
-            }
-            if buffer.dtype.is_none() {
-                buffer.dtype = dtype;
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The PLANNING half of [`bufferize`]: validate the input program, analyze,
@@ -1950,7 +1626,7 @@ fn annotate_buffer_geometry<L: PlanLayout>(
 /// [`lower`] erases it into the executable plan.
 pub(crate) fn buffer_tensor_plan<L: PlanLayout>(
     graph: &ExtractedGraph,
-    value_geometry: &HashMap<ClassId, ValueGeometry<L>>,
+    value_layouts: &HashMap<ClassId, L>,
 ) -> Result<crate::buffer_tensor_ir::BufferTensorIrGraph<L>> {
     validate_input_program(graph)?;
     let order = toposort(&graph.dag, None)
@@ -2017,13 +1693,13 @@ pub(crate) fn buffer_tensor_plan<L: PlanLayout>(
     }
 
     let mut analysis = Analyzer::new(&analysis_ops, &facts).run()?;
-    let assignment = Bufferizer::assign(graph, &order, &mut analysis, &seeds, value_geometry)?;
+    let assignment = Bufferizer::assign(graph, &order, &mut analysis, &seeds, value_layouts)?;
     let mut bt = crate::buffer_tensor_ir::build_buffer_tensor_ir(
         graph,
         &order,
         assignment,
         &analysis,
-        value_geometry,
+        value_layouts,
     )?;
     crate::buffer_tensor_ir::install_anti_edges(&mut bt);
     // The certificate runs AFTER the storage-lifetime pass: its lifetime arms
@@ -2072,24 +1748,23 @@ impl<L: PlanLayout> Bufferizer<L> {
         order: &[NodeIndex],
         analysis: &mut Analysis,
         seeds: &[Seed],
-        value_geometry: &HashMap<ClassId, ValueGeometry<L>>,
+        value_layouts: &HashMap<ClassId, L>,
     ) -> Result<Self> {
         let mut this = Bufferizer::default();
-        // The mint-time layout SEED: the value each buffer is minted for
-        // supplies its layout so `Buffer.layout` is total by
-        // construction. The annotate-time writer join is the authority
-        // and overwrites the seed; geometry is total over graph values,
-        // so a miss here is a planner bug and bails loudly.
+        // THE ASSIGNMENT SEED: the value each buffer is minted for (or a
+        // boundary is pinned to) is the tensor the buffer BACKS, and that
+        // tensor supplies the carried layout — mint-time facts, final.
+        // There is no later writer join overriding them: cohabitants
+        // share storage by e-graph-checked precondition. The table is
+        // total over graph values, so a miss is a planner bug and bails
+        // loudly.
         let layout_of = |value: &ClassId| -> Result<L> {
-            value_geometry
-                .get(value)
-                .map(|geometry| geometry.layout.clone())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "value {value} has no extraction geometry — every \
-                         graph value records one before assignment"
-                    )
-                })
+            value_layouts.get(value).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "value {value} has no rendered layout — every graph \
+                     value records one before assignment"
+                )
+            })
         };
 
         // Intern the INPUT boundary buffers first: `intern_boundary` is
@@ -2105,6 +1780,7 @@ impl<L: PlanLayout> Bufferizer<L> {
                     input.buffer.access(),
                     input.buffer.freed_by(),
                     input.buffer.id_label.clone(),
+                    input.value.eclass.clone(),
                     layout_of(&input.value.eclass)?,
                 );
             }
@@ -2137,6 +1813,7 @@ impl<L: PlanLayout> Bufferizer<L> {
                 seed.access,
                 seed.freed_by,
                 seed.buffer_label.clone(),
+                seed.poison.clone(),
                 layout_of(&seed.poison)?,
             );
             // The interned buffer keeps the FIRST declarations it was seen
@@ -2157,6 +1834,7 @@ impl<L: PlanLayout> Bufferizer<L> {
                         input.buffer.access(),
                         input.buffer.freed_by(),
                         input.buffer.id_label.clone(),
+                        input.value.eclass.clone(),
                         layout_of(&input.value.eclass)?,
                     );
                     this.bind(analysis, &input.value.eclass, id);
@@ -2172,8 +1850,11 @@ impl<L: PlanLayout> Bufferizer<L> {
                         // fresh, system-owned allocation (out of place).
                         let id = match this.rep_buffer.get(&rep) {
                             Some(existing) => existing.clone(),
-                            None => this
-                                .allocate(output.label.clone(), layout_of(&output.eclass)?),
+                            None => this.allocate(
+                                output.label.clone(),
+                                output.eclass.clone(),
+                                layout_of(&output.eclass)?,
+                            ),
                         };
                         this.bind(analysis, &output.eclass, id);
                     }
@@ -2187,6 +1868,7 @@ impl<L: PlanLayout> Bufferizer<L> {
                             slot.buffer.access(),
                             slot.buffer.freed_by(),
                             slot.buffer.id_label.clone(),
+                            slot.value.clone(),
                             layout_of(&slot.value)?,
                         );
                     }
@@ -2210,6 +1892,7 @@ impl<L: PlanLayout> Bufferizer<L> {
         access: Access,
         freed_by: FreedBy,
         label: String,
+        backs: ClassId,
         layout: L,
     ) -> BufferId {
         let id = BufferId::Boundary(eclass.clone());
@@ -2219,16 +1902,14 @@ impl<L: PlanLayout> Bufferizer<L> {
             freed_by,
             owner: Owner::Caller,
             label,
-            dims: None,
-            element_bits: None,
-            dtype: None,
             lit: None,
+            backs,
             layout,
         });
         id
     }
 
-    fn allocate(&mut self, label: String, layout: L) -> BufferId {
+    fn allocate(&mut self, label: String, backs: ClassId, layout: L) -> BufferId {
         let id = BufferId::Allocated(self.next_alloc);
         self.next_alloc += 1;
         self.buffers.insert(
@@ -2245,10 +1926,8 @@ impl<L: PlanLayout> Bufferizer<L> {
                 freed_by: FreedBy::Program,
                 owner: Owner::System,
                 label,
-                dims: None,
-                element_bits: None,
-                dtype: None,
                 lit: None,
+                backs,
                 layout,
             },
         );
@@ -2274,7 +1953,7 @@ impl<L: PlanLayout> Bufferizer<L> {
 ///    lower to nothing (a future Alloc node takes that seat);
 ///  * no surviving view-shaped node — views must lower to a producer
 ///    redirect, never to compute.
-fn validate_plan(dag: &DiGraph<BufferNode, BufferEdge>) -> Result<()> {
+fn validate_plan<L: PlanLayout>(dag: &DiGraph<BufferNode<L>, BufferEdge>) -> Result<()> {
     for index in dag.node_indices() {
         match &dag[index] {
             BufferNode::BufferCopy { src, dst, .. } if src == dst => {
@@ -2349,7 +2028,7 @@ fn validate_plan(dag: &DiGraph<BufferNode, BufferEdge>) -> Result<()> {
 /// ([`validate_plan`]).
 pub(crate) fn lower<L: PlanLayout>(
     bt: crate::buffer_tensor_ir::BufferTensorIrGraph<L>,
-    value_geometry: &HashMap<ClassId, ValueGeometry<L>>,
+    value_layouts: &HashMap<ClassId, L>,
 ) -> Result<BufferIrGraph<L>> {
     use crate::buffer_tensor_ir::{BtNode, BufferTensor, BufferTensorIrGraph};
     let BufferTensorIrGraph {
@@ -2360,24 +2039,38 @@ pub(crate) fn lower<L: PlanLayout>(
 
     use petgraph::visit::EdgeRef;
 
-    // Per-slot descriptor: identity from the BufferTensor (value, buffer)
-    // pair, geometry from the extraction's per-value facts, composed access
-    // from the view folds recorded below (operand slots reading a
-    // folded-view value carry the full stacked chain; everything else is a
-    // direct read and stays `None`).
-    let describe = |tensor: &BufferTensor, access: Option<ComposedAccess>| -> SlotDescriptor {
-        let geometry = value_geometry.get(&tensor.value);
-        SlotDescriptor {
+    // Per-slot descriptor: the assignment restated per slot — (value,
+    // buffer) identity from the BufferTensor pair, plus the Option-B
+    // carried layout from the rendered table.
+    let describe = |tensor: &BufferTensor| -> Result<SlotDescriptor<L>> {
+        // PROTOTYPE (Option B): the slot's layout is TOTAL. Every
+        // EXTRACTION value has a rendered-layout row; the one legal miss
+        // is a planner-SYNTHESIZED undefined value (a BufferAlloc poison
+        // minted by `optimize` — never read, never returned), whose slot
+        // carries its residence buffer's mint-seed layout (also total).
+        // Anything else is a loud bail, never a default.
+        let layout = match value_layouts.get(&tensor.value) {
+            Some(layout) => layout.clone(),
+            None => buffers
+                .get(&tensor.buffer)
+                .map(|buffer: &Buffer<L>| buffer.layout.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "lowering: value {} occupies a slot with neither a \
+                         rendered-layout row nor an interned buffer — a \
+                         layoutless slot is unrepresentable (fail-closed)",
+                        tensor.value
+                    )
+                })?,
+        };
+        Ok(SlotDescriptor {
             value: tensor.value.clone(),
             buffer: tensor.buffer.clone(),
-            dims: geometry.and_then(|g| g.dims.clone()),
-            element_bits: geometry.and_then(|g| g.element_bits),
-            dtype: geometry.and_then(|g| g.dtype),
-            composed_access: access,
-        }
+            layout,
+        })
     };
 
-    let mut dag: DiGraph<BufferNode, BufferEdge> = DiGraph::new();
+    let mut dag: DiGraph<BufferNode<L>, BufferEdge> = DiGraph::new();
     // The lowered node producing each RESIDENCE (value, buffer) — a copy
     // gives one value a second residence with a distinct producer, so the
     // pair is the key, never the value alone.
@@ -2385,13 +2078,6 @@ pub(crate) fn lower<L: PlanLayout>(
     // BT node -> lowered node, for transferring Anti edges (folded nodes have
     // no entry).
     let mut lowered: HashMap<NodeIndex, NodeIndex> = HashMap::new();
-    // The access each FOLDED view value's readers must compose to reach the
-    // parent residence's bytes — recorded at fold time, keyed by value (a
-    // view is a value-level distinction; a repair copy moves its PARENT's
-    // value, so a view value never gains a second, differently-shaped
-    // residence). A chain of folds stacks: the new hop goes in front of the
-    // parent's own chain (outermost-first), un-normalized.
-    let mut folded_access: HashMap<ClassId, ComposedAccess> = HashMap::new();
     // Each folded view value's ROOT parent — the non-view resident whose
     // bytes the fold chain ultimately addresses. A base-storage copy of a
     // folded resident (ruling 2026-08-27) transports THIS value: the dumb
@@ -2463,23 +2149,13 @@ pub(crate) fn lower<L: PlanLayout>(
                 if is_view {
                     for (result, tensor) in results.iter().enumerate() {
                         let parent = &operands[derives(result).expect("checked by is_view")];
-                        // Phase 3: the fold no longer discards the view's
-                        // index map — record it (with the parent's dims,
-                        // the extents it indexes into) so every consumer's
-                        // operand descriptor carries the composed access.
-                        // A parent that is itself a folded view stacks its
-                        // chain BEHIND this hop (outermost-first).
-                        let hop = AccessHop {
-                            entries: op.view_index_map(result),
-                            parent_dims: value_geometry
-                                .get(&parent.value)
-                                .and_then(|g| g.dims.clone()),
-                        };
-                        let mut hops = vec![hop];
-                        if let Some(parent_access) = folded_access.get(&parent.value) {
-                            hops.extend(parent_access.hops.iter().cloned());
-                        }
-                        folded_access.insert(tensor.value.clone(), ComposedAccess { hops });
+                        // The fold records NO access expression (corrected
+                        // contract, 2026-08-31): the view value's own
+                        // rendered layout — already composed by the
+                        // e-graph at view creation — is how its readers
+                        // address the parent residence's bytes. Only the
+                        // fold ROOT is tracked, for the base-storage copy
+                        // and the escape re-root.
                         let root = fold_root
                             .get(&parent.value)
                             .cloned()
@@ -2499,32 +2175,33 @@ pub(crate) fn lower<L: PlanLayout>(
                 {
                     let src = &operands[0];
                     let dst = &results[0];
+                    // MINT SITE — cause 1 (residence conflict repair) and
+                    // cause 3 (lifetime repair): the BT graph already
+                    // decided a transport was needed; this is where it
+                    // becomes a plan node. THE CONTRACT (see
+                    // [`BufferNode::BufferCopy`]): a DUMB EXACT-SIZE
+                    // WHOLE-BUFFER copy, and ORDERING IS THE RUNTIME'S
+                    // OBLIGATION — all this site owes is the dependency
+                    // structure (the data edge below, plus the WAR
+                    // anti-edges added later).
+                    //
                     // A FOLDED resident (the value addresses `src` through
-                    // folded views): a BufferCopy is only ever a dumb
-                    // whole-buffer memcpy, so the one legal lowering is the
-                    // BASE-STORAGE copy — memcpy the PARENT buffer whole
-                    // (`value` = fold root, so the dims join sizes dst as
-                    // the parent; copying the base buffer counts as
-                    // delivery) and re-root the fold onto the copy:
-                    // consumers keep their composed access, now anchored on
-                    // the copied buffer. Possibly expensive, and that is
-                    // fine — search finds cheaper routes via cost. The
-                    // bufferizer never switches to the materialize route
-                    // (election committed the genome); a materializing copy
-                    // is a LayoutTensor candidate in the e-graph, never a
-                    // copy mode.
-                    if folded_access.contains_key(&src.value) {
-                        let root = fold_root.get(&src.value).cloned().ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "lowering invariant broken: value {} carries composed \
-                                 access but no fold root was recorded",
-                                src.value
-                            )
-                        })?;
+                    // folded views): the copy is dumb and whole-buffer, so
+                    // the one legal lowering is the BASE-STORAGE copy —
+                    // memcpy the PARENT buffer whole (copying the base
+                    // buffer counts as delivery; src and dst are the same
+                    // parent-sized storage, exact-size by construction) and
+                    // re-root the fold onto the copy: consumers keep their
+                    // own composed layouts, now anchored on the copied
+                    // buffer. Possibly expensive, and that is fine — search
+                    // finds cheaper routes via cost. The bufferizer never
+                    // switches to the materialize route (election committed
+                    // the genome); a materializing copy is a LayoutTensor
+                    // candidate in the e-graph, never a copy mode.
+                    if let Some(root) = fold_root.get(&src.value).cloned() {
                         let copy = dag.add_node(BufferNode::BufferCopy {
                             src: src.buffer.clone(),
                             dst: dst.buffer.clone(),
-                            value: root.clone(),
                         });
                         if let Some(&from) = producer.get(&residence(src)) {
                             dag.add_edge(
@@ -2541,17 +2218,19 @@ pub(crate) fn lower<L: PlanLayout>(
                         // dst (its bytes are what the memcpy moved), and the
                         // folded value's dst residence is produced by the
                         // copy — downstream consumers of (value, dst) hang
-                        // off the copy and read through their unchanged hop
-                        // chains over the copied parent bytes.
+                        // off the copy and read the copied parent bytes
+                        // through their value's own (unchanged) layout.
                         producer.insert((root, dst.buffer.clone()), copy);
                         producer.insert(residence(dst), copy);
                         lowered.insert(index, copy);
                         continue;
                     }
+                    // The unfolded transport: same value, different buffer.
+                    // Exact-size by construction (both buffers back the same
+                    // tensor's layout); ordering is the runtime's.
                     let copy = dag.add_node(BufferNode::BufferCopy {
                         src: src.buffer.clone(),
                         dst: dst.buffer.clone(),
-                        value: src.value.clone(),
                     });
                     if let Some(&from) = producer.get(&residence(src)) {
                         dag.add_edge(
@@ -2581,11 +2260,12 @@ pub(crate) fn lower<L: PlanLayout>(
                     ties: ties.clone(),
                     operand_info: operands
                         .iter()
-                        .map(|t| describe(t, folded_access.get(&t.value).cloned()))
-                        .collect(),
-                    // A compute result is produced HERE — never through a
-                    // fold — so its access is always direct.
-                    result_info: results.iter().map(|t| describe(t, None)).collect(),
+                        .map(&describe)
+                        .collect::<Result<Vec<_>>>()?,
+                    result_info: results
+                        .iter()
+                        .map(&describe)
+                        .collect::<Result<Vec<_>>>()?,
                 });
                 for (idx, tensor) in operands.iter().enumerate() {
                     if let Some(&from) = producer.get(&residence(tensor)) {
@@ -2606,27 +2286,30 @@ pub(crate) fn lower<L: PlanLayout>(
                 lowered.insert(index, node);
             }
             BtNode::Output { slots } => {
-                // EVERY slot carries its elected layout uniformly (ruling
-                // 2026-08-27): dense elections are `composed_access: None`
-                // (row-major over the value's dims), view elections carry
-                // the folded chain — already re-rooted onto the backing
-                // buffer, whose geometry is the last hop's parent extents.
-                let bindings: Vec<OutputBinding> = slots
+                // EVERY slot carries its elected layout uniformly: a view
+                // output is fulfilled STRUCTURALLY (its buffer is its
+                // parent's backing storage — zero-copy by construction),
+                // and the returned layout is the slot value's own rendered
+                // `L`, verbatim. Total, loud on a miss.
+                let bindings: Vec<OutputBinding<L>> = slots
                     .iter()
                     .enumerate()
                     .map(|(index, slot)| {
-                        let geometry = value_geometry.get(&slot.value);
-                        OutputBinding {
+                        let Some(layout) = value_layouts.get(&slot.value) else {
+                            anyhow::bail!(
+                                "lowering: output slot value {} has no \
+                                 rendered-layout row (fail-closed)",
+                                slot.value
+                            );
+                        };
+                        Ok(OutputBinding {
                             index,
                             value: slot.value.clone(),
                             buffer: slot.buffer.clone(),
-                            dims: geometry.and_then(|g| g.dims.clone()),
-                            element_bits: geometry.and_then(|g| g.element_bits),
-                            dtype: geometry.and_then(|g| g.dtype),
-                            composed_access: folded_access.get(&slot.value).cloned(),
-                        }
+                            layout: layout.clone(),
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>>>()?;
                 let out_node = dag.add_node(BufferNode::BufferOutput { slots: bindings });
                 outputs.push(out_node);
                 lowered.insert(index, out_node);
@@ -2674,10 +2357,17 @@ pub(crate) fn lower<L: PlanLayout>(
                         })
                         .map(|((_, buffer), node)| (buffer.clone(), *node));
                     if let Some((src_buffer, from)) = source {
+                        // MINT SITE — cause 2 (BOUNDARY PLACEMENT): this
+                        // tensor is bound to a SPECIFIC caller buffer, and
+                        // its producing residence is elsewhere, so its bytes
+                        // move into the caller's storage. Same contract as
+                        // every other copy (see [`BufferNode::BufferCopy`]):
+                        // dumb, exact-size, whole-buffer; the plan supplies
+                        // only the dependency structure (the data edge below
+                        // + WAR anti-edges), and the runtime owns ordering.
                         let copy = dag.add_node(BufferNode::BufferCopy {
                             src: src_buffer.clone(),
                             dst: slot.buffer.clone(),
-                            value: slot.value.clone(),
                         });
                         dag.add_edge(
                             from,
@@ -3343,7 +3033,7 @@ mod tests {
             in_place: HashMap::from([((0, 0), false)]),
             op_count: 2,
         };
-        let geometry = extraction_geometry(&graph, &crate::test_support::mock_layout_table(&graph))
+        let geometry = extraction_layouts(&graph, &crate::test_support::mock_layout_table(&graph))
             .expect("mock layouts are total over the graph");
         let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[], &geometry)
             .expect("assignment runs");
@@ -3477,12 +3167,9 @@ mod tests {
     #[test]
     fn validator_rejects_self_copy() {
         let d = vbuf("D");
-        let mut dag = DiGraph::new();
-        dag.add_node(BufferNode::BufferCopy {
-            src: d.clone(),
-            dst: d.clone(),
-            value: cid("v"),
-        });
+        let mut dag: DiGraph<BufferNode<crate::test_support::MockLayout>, BufferEdge> =
+            DiGraph::new();
+        dag.add_node(BufferNode::BufferCopy { src: d.clone(), dst: d.clone() });
         let err = validate_plan(&dag).unwrap_err();
         assert!(err.to_string().contains("self-copy"), "{err}");
     }
@@ -3493,7 +3180,8 @@ mod tests {
     /// same shape IS the BufferAlloc, and legal.)
     #[test]
     fn validator_rejects_alloc_on_caller_storage() {
-        let mut dag = DiGraph::new();
+        let mut dag: DiGraph<BufferNode<crate::test_support::MockLayout>, BufferEdge> =
+            DiGraph::new();
         dag.add_node(BufferNode::Compute {
             op: Box::new(EmptyOp),
             reads: Vec::new(),
@@ -3511,7 +3199,8 @@ mod tests {
     #[test]
     fn validator_rejects_unfolded_view() {
         use crate::test_support::MockView;
-        let mut dag = DiGraph::new();
+        let mut dag: DiGraph<BufferNode<crate::test_support::MockLayout>, BufferEdge> =
+            DiGraph::new();
         dag.add_node(BufferNode::Compute {
             op: Box::new(MockView),
             reads: vec![vbuf("D")],
@@ -3577,15 +3266,17 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // M4 Phase 3: the fold records the composed access
+    // View folds: the slot carries the view value's OWN layout (corrected
+    // contract, 2026-08-31 — the hop machinery is deleted; the e-graph
+    // mints every view's composed layout, and the rendered `L` is the
+    // read path).
     // -------------------------------------------------------------------------
 
-    /// A folded view no longer discards its index map: the consumer's
-    /// operand descriptor carries a one-hop [`ComposedAccess`] with the
-    /// view's entries, while the node's result descriptor (produced HERE,
-    /// not through a fold) stays direct.
+    /// A folded view redirects its consumer to the parent's buffer while
+    /// the slot keeps the VIEW's identity: its value, and its own
+    /// rendered layout, verbatim from the table.
     #[test]
-    fn folded_view_records_composed_access_on_consumer() {
+    fn folded_view_slot_carries_the_views_own_layout() {
         use crate::index_expr::IotaExpr;
         use crate::test_support::{MockViewWithMap, TestGraph};
         let entries = vec![IotaExpr::Coord(0), IotaExpr::Coord(1)];
@@ -3604,7 +3295,8 @@ mod tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = crate::test_support::bufferize_mock(&g.build()).expect("bufferizes");
+        let graph = g.build();
+        let plan = crate::test_support::bufferize_mock(&graph).expect("bufferizes");
 
         let consumer = plan
             .dag
@@ -3625,27 +3317,24 @@ mod tests {
             operand_info[0].buffer, plan.value_buffer[&x],
             "the slot's BUFFER is the parent's (the fold's redirect)"
         );
-        let access = operand_info[0]
-            .composed_access
-            .as_ref()
-            .expect("the fold records the composed access");
-        assert_eq!(access.hops.len(), 1);
-        assert_eq!(access.hops[0].entries.as_deref(), Some(entries.as_slice()));
-        // TestGraph carries no numeric geometry, so parent dims are the
-        // honest `None` (the symbolic contract) — never a fabricated shape.
-        assert_eq!(access.hops[0].parent_dims, None);
-        assert!(
-            result_info[0].composed_access.is_none(),
-            "a compute result is produced here, never through a fold"
+        let table = crate::test_support::mock_layout_table(&graph);
+        assert_eq!(
+            &operand_info[0].layout, &table[&v],
+            "the slot carries the VIEW's own rendered layout, verbatim"
         );
+        assert_eq!(
+            &result_info[0].layout, &table[&r],
+            "a compute result carries its own layout (produced here, never through a fold)"
+        );
+        let _ = entries;
     }
 
-    /// A two-hop chain reaches the consumer STACKED, outermost-first and
-    /// un-normalized: hops[0] is the view producing the slot's value (its
-    /// entries evaluate at the slot's own coordinates), hops[1] the view
-    /// under it.
+    /// A two-hop view chain still lowers to ONE producer redirect: the
+    /// consumer's slot is anchored on the ROOT parent's buffer, and the
+    /// slot's layout is the OUTER view's own rendered layout (the
+    /// e-graph minted the composition; the planner records nothing).
     #[test]
-    fn two_hop_view_chain_stacks_outermost_first() {
+    fn two_hop_view_chain_redirects_to_the_root_parent() {
         use crate::index_expr::IotaExpr;
         use crate::test_support::{MockViewWithMap, TestGraph};
         let inner = vec![IotaExpr::Coord(1), IotaExpr::Coord(0)]; // v1 over x
@@ -3673,7 +3362,8 @@ mod tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = crate::test_support::bufferize_mock(&g.build()).expect("bufferizes");
+        let graph = g.build();
+        let plan = crate::test_support::bufferize_mock(&graph).expect("bufferizes");
 
         let operand_info = plan
             .dag
@@ -3687,19 +3377,20 @@ mod tests {
             .expect("the consumer survives lowering");
         assert_eq!(operand_info[0].value, v2);
         assert_eq!(operand_info[0].buffer, plan.value_buffer[&x], "both folds redirect to x");
-        let access = operand_info[0].composed_access.as_ref().expect("chain recorded");
-        assert_eq!(access.hops.len(), 2, "stacked, never pre-composed");
-        assert_eq!(access.hops[0].entries.as_deref(), Some(outer.as_slice()), "outermost first");
-        assert_eq!(access.hops[1].entries.as_deref(), Some(inner.as_slice()));
-        let _ = v1;
+        let table = crate::test_support::mock_layout_table(&graph);
+        assert_eq!(
+            &operand_info[0].layout, &table[&v2],
+            "the slot carries the OUTER view's own layout"
+        );
+        let (_, _, _) = (v1, inner, outer);
     }
 
-    /// A view op WITHOUT a numeric map still folds, and the fold is
-    /// fail-closed: the hop is recorded with `entries: None` — a numeric
-    /// consumer must refuse loudly, never assume identity. (Loud bail,
-    /// never silent mistranslation.)
+    /// A view op WITHOUT a numeric map still folds structurally — the
+    /// read path is the view VALUE's own rendered layout, so there is no
+    /// per-op map to lose (fail-closure moved to RENDER time: a layout
+    /// class the renderer cannot render refuses the whole plan).
     #[test]
-    fn mapless_view_fold_records_a_fail_closed_hop() {
+    fn mapless_view_fold_still_redirects_with_the_views_layout() {
         use crate::test_support::{MockView, TestGraph};
         let mut g = TestGraph::new();
         let x = g.input("x", "B", Access::ReadWrite, "rm");
@@ -3711,7 +3402,8 @@ mod tests {
         )[0]
         .clone();
         g.output(&r, "D");
-        let plan = crate::test_support::bufferize_mock(&g.build()).expect("bufferizes");
+        let graph = g.build();
+        let plan = crate::test_support::bufferize_mock(&graph).expect("bufferizes");
 
         let operand_info = plan
             .dag
@@ -3723,12 +3415,10 @@ mod tests {
                 _ => None,
             })
             .expect("the consumer survives lowering");
-        let access = operand_info[0]
-            .composed_access
-            .as_ref()
-            .expect("even a mapless fold is recorded — a dropped hop would be silent identity");
-        assert_eq!(access.hops.len(), 1);
-        assert_eq!(access.hops[0].entries, None, "fail-closed: no numeric map, no guess");
+        assert_eq!(operand_info[0].value, v);
+        assert_eq!(operand_info[0].buffer, plan.value_buffer[&x], "the fold's redirect");
+        let table = crate::test_support::mock_layout_table(&graph);
+        assert_eq!(&operand_info[0].layout, &table[&v], "the view's own layout, verbatim");
     }
 
     // -------------------------------------------------------------------------
@@ -3737,12 +3427,18 @@ mod tests {
     // plus the elected layout.
     // -------------------------------------------------------------------------
 
-    /// A view OF AN INPUT bound to a foreign output slot returns ZERO-COPY:
-    /// the storage is already the caller's, so the slot is backed by the
-    /// input buffer itself and the declared output buffer goes unused
-    /// (dropped by DCE — runtimes never allocate it). The disclosure half:
-    /// the slot's binding carries the elected layout — the folded chain
-    /// over the input buffer.
+    /// THE VIEW-OUTPUT FIXTURE (corrected contract, 2026-08-31, correction
+    /// 5): VIEW OUTPUTS ARE COMPLETELY LEGAL and fulfilled STRUCTURALLY. A
+    /// view is no-work-same-buffer, so a view-elected output slot's
+    /// ASSIGNED buffer simply IS its parent's backing storage — zero-copy
+    /// by construction, never a refusal and never a forced dense delivery.
+    /// Here the parent is an INPUT, so the storage is already the caller's:
+    /// the slot is backed by the input buffer itself and the declared
+    /// output buffer goes unused (dropped by DCE — runtimes never allocate
+    /// it). Option B's addition: the binding also CARRIES the view value's
+    /// elected layout `L`, verbatim from the rendered table, so an
+    /// externally loaded plan can read the delivery geometry without the
+    /// table a live runtime already has.
     #[test]
     fn folded_output_on_input_residence_returns_zero_copy() {
         use crate::index_expr::IotaExpr;
@@ -3757,7 +3453,8 @@ mod tests {
         )[0]
         .clone();
         g.output(&v, "E");
-        let plan = crate::test_support::bufferize_mock(&g.build()).expect("a view of an input escapes zero-copy");
+        let graph = g.build();
+        let plan = crate::test_support::bufferize_mock(&graph).expect("a view of an input escapes zero-copy");
 
         assert!(
             !plan
@@ -3781,30 +3478,42 @@ mod tests {
             "the declared output buffer is unused and DCE'd:\n{}",
             plan.summary()
         );
-        let access = slot
-            .composed_access
-            .as_ref()
-            .expect("the disclosure half: the slot carries the elected layout");
-        assert_eq!(access.hops.len(), 1);
-        assert_eq!(access.hops[0].entries.as_deref(), Some(entries.as_slice()));
+        // THE ASSIGNMENT is queryable both ways for the escaping storage.
+        assert_eq!(
+            plan.backed_tensor(&slot.buffer),
+            Some(&x),
+            "the input buffer's assignment row still names the tensor it backs"
+        );
+        // Option B's disclosure: the slot carries the VIEW value's own
+        // elected layout, verbatim from the rendered table.
+        let table = crate::test_support::mock_layout_table(&graph);
+        assert_eq!(&slot.layout, &table[&v], "the view's own layout rides the binding");
+        assert_ne!(
+            table[&v], table[&x],
+            "the view's layout is a DIFFERENT function from its parent's — \
+             the carried L is what makes the zero-copy delivery readable"
+        );
+        // `entries` shaped the view's layout class in the mock table; the
+        // planner never parsed them (it transports L opaquely).
+        let _ = &entries;
     }
 
     /// INTERIOR copy of a folded resident — the default legal lowering is
-    /// the BASE-STORAGE copy: the parent buffer is memcpy'd whole (the
-    /// copy's `value` is the fold's root parent, so the dims join sizes the
-    /// destination as the parent) and the fold re-roots onto the copy — the
-    /// consumer's data edge hangs off the copy and its operand descriptor
-    /// keeps the composed access, now anchored on the copied buffer. Forced
-    /// by hand-rejecting the CONSUMER's dest tie (its operand is the view),
+    /// the BASE-STORAGE copy: the parent buffer is memcpy'd whole (a DUMB
+    /// EXACT-SIZE WHOLE-BUFFER copy — the copy contract admits no other
+    /// mode) and the fold re-roots onto the copy — the consumer's data edge
+    /// hangs off the copy and its operand descriptor keeps the view's own
+    /// composed layout, now anchored on the copied buffer. Forced by
+    /// hand-rejecting the CONSUMER's dest tie (its operand is the view),
     /// the same discipline as `rejected_view_repairs_by_copying_the_parent`.
     ///
     /// The destination is a FRESHLY MINTED single-writer buffer, never the
     /// tied result's (ruling 2026-08-27, the repair-destination fix): the
     /// base-storage copy is PARENT-shaped while the consumer writes its
-    /// result-shaped bytes, and the writer-identity dims join — an equality
-    /// lattice, deliberately untouched — would loudly refuse the two
-    /// cohabiting (see `folded_repair_into_result_buffer_would_contradict`,
-    /// the geometry-carrying probe).
+    /// result-shaped bytes, so the two must not cohabit. Under the
+    /// corrected contract that is an ASSIGNMENT fact — the fresh buffer
+    /// `backs` the parent, the result's buffer `backs` the result — not a
+    /// geometry join the planner re-derives.
     #[test]
     fn interior_copy_of_folded_resident_copies_the_parent_and_reroots() {
         use crate::index_expr::IotaExpr;
@@ -3836,7 +3545,7 @@ mod tests {
             in_place: HashMap::from([((0, 0), true), ((1, 0), false)]), // consumer tie REJECTED
             op_count: 2,
         };
-        let geometry = extraction_geometry(&graph, &crate::test_support::mock_layout_table(&graph))
+        let geometry = extraction_layouts(&graph, &crate::test_support::mock_layout_table(&graph))
             .expect("mock layouts are total over the graph");
         let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[], &geometry)
             .expect("assignment runs");
@@ -3847,24 +3556,33 @@ mod tests {
         let plan = lower(bt, &geometry)
             .expect("an interior folded copy lowers via the base-storage copy");
 
-        // The repair copy transports the fold's ROOT PARENT (x), whole —
-        // never the view value with a layout-aware mode.
+        // The repair copy moves the fold's BASE STORAGE — the parent's
+        // buffer, whole. The node carries only {src, dst}; the copy is
+        // identified by its SOURCE being the parent residence, and its
+        // destination's ASSIGNMENT row says which tensor landed there.
         let (copy_idx, copy_src, copy_dst) = plan
             .dag
             .node_indices()
             .find_map(|i| match &plan.dag[i] {
-                BufferNode::BufferCopy { src, dst, value } if *value == x => {
+                BufferNode::BufferCopy { src, dst } if *src == plan.value_buffer[&x] => {
                     Some((i, src.clone(), dst.clone()))
                 }
                 _ => None,
             })
             .unwrap_or_else(|| {
                 panic!(
-                    "the base-storage copy transports the parent value:\n{}",
+                    "the base-storage copy reads the parent's buffer:\n{}",
                     plan.summary()
                 )
             });
         assert_eq!(copy_src, plan.value_buffer[&x], "copied FROM the parent's buffer");
+        assert_eq!(
+            plan.backed_tensor(&copy_dst),
+            Some(&x),
+            "the destination's ASSIGNMENT says the PARENT landed there — \
+             parent-shaped storage, sized by the parent's layout:\n{}",
+            plan.summary()
+        );
         assert!(
             matches!(copy_dst, BufferId::Allocated(_)),
             "interior destination is program storage:\n{}",
@@ -3896,14 +3614,15 @@ mod tests {
         assert!(
             !plan.dag.node_indices().any(|i| matches!(
                 &plan.dag[i],
-                BufferNode::BufferCopy { value, .. } if *value == v
+                BufferNode::BufferCopy { dst, .. } if plan.backed_tensor(dst) == Some(&v)
             )),
-            "no copy transports the view value itself:\n{}",
+            "no buffer is minted to hold the VIEW value itself — a view is \
+             no-work-same-buffer, so only its base storage is ever copied:\n{}",
             plan.summary()
         );
 
         // THE RE-ROOT: the consumer hangs off the copy and reads the view
-        // through its unchanged composed access, anchored on the copy's dst.
+        // through its unchanged composed layout, anchored on the copy's dst.
         let consumer = plan
             .dag
             .node_indices()
@@ -3922,12 +3641,14 @@ mod tests {
         };
         assert_eq!(operand_info[0].value, v, "the slot's VALUE stays the view's");
         assert_eq!(operand_info[0].buffer, copy_dst, "…now anchored on the copied buffer");
-        let access = operand_info[0]
-            .composed_access
-            .as_ref()
-            .expect("the consumer keeps its composed access over the copy");
-        assert_eq!(access.hops.len(), 1);
-        assert_eq!(access.hops[0].entries.as_deref(), Some(entries.as_slice()));
+        let table = crate::test_support::mock_layout_table(&graph);
+        assert_eq!(
+            &operand_info[0].layout, &table[&v],
+            "the consumer reads through the VIEW's own elected layout — \
+             unchanged by the re-root, because the layout addresses the \
+             residence's bytes and the copy is byte-identical"
+        );
+        let _ = &entries;
     }
 
     /// ESCAPE IN PLACE: a view of an INTERIOR (program-minted) resident
@@ -3956,7 +3677,8 @@ mod tests {
         )[0]
         .clone();
         g.output(&v, "E");
-        let plan = crate::test_support::bufferize_mock(&g.build()).expect("a minted residence escapes in place");
+        let graph = g.build();
+        let plan = crate::test_support::bufferize_mock(&graph).expect("a minted residence escapes in place");
 
         assert!(
             !plan
@@ -4000,8 +3722,17 @@ mod tests {
             "the declared output buffer is unused and DCE'd:\n{}",
             plan.summary()
         );
-        let access = slot.composed_access.as_ref().expect("the layout is disclosed");
-        assert_eq!(access.hops[0].entries.as_deref(), Some(entries.as_slice()));
+        // Option B's disclosure: the binding carries the VIEW value's own
+        // elected layout — the delivery geometry over the escaping buffer.
+        let table = crate::test_support::mock_layout_table(&graph);
+        assert_eq!(&slot.layout, &table[&v], "the view's own layout rides the binding");
+        assert_eq!(
+            plan.backed_tensor(&slot.buffer),
+            Some(&p),
+            "the escaping storage's ASSIGNMENT names the PRODUCED tensor; the \
+             view rides it structurally (zero-copy), and the carried L says how"
+        );
+        let _ = &entries;
     }
 
     /// REPAIR ON DONATED RESIDENCE — the one forced repair: donated storage
@@ -4028,23 +3759,29 @@ mod tests {
         )[0]
         .clone();
         g.output(&v, "E");
-        let plan = crate::test_support::bufferize_mock(&g.build()).expect("a donated residence repairs");
+        let graph = g.build();
+        let plan = crate::test_support::bufferize_mock(&graph).expect("a donated residence repairs");
 
-        // ONE dumb whole-base copy transports the fold ROOT into a fresh
-        // escaping buffer.
-        let copies: Vec<(BufferId, BufferId, ClassId)> = plan
+        // ONE dumb whole-base copy (a LIFETIME repair — cause 3) moves the
+        // fold's base storage into a fresh escaping buffer. The node
+        // carries only {src, dst}; what landed in `dst` is the ASSIGNMENT's
+        // business.
+        let copies: Vec<(BufferId, BufferId)> = plan
             .dag
             .node_weights()
             .filter_map(|node| match node {
-                BufferNode::BufferCopy { src, dst, value } => {
-                    Some((src.clone(), dst.clone(), value.clone()))
-                }
+                BufferNode::BufferCopy { src, dst } => Some((src.clone(), dst.clone())),
                 _ => None,
             })
             .collect();
         assert_eq!(copies.len(), 1, "one base-storage copy:\n{}", plan.summary());
-        let (copy_src, copy_dst, copy_value) = copies[0].clone();
-        assert_eq!(copy_value, x, "the copy transports the fold ROOT");
+        let (copy_src, copy_dst) = copies[0].clone();
+        assert_eq!(
+            plan.backed_tensor(&copy_dst),
+            Some(&x),
+            "the destination's ASSIGNMENT names the fold ROOT — the value \
+             whose bytes the whole-buffer memcpy moved"
+        );
         assert_eq!(copy_src, plan.value_buffer[&x], "…from the donated residence");
         assert!(matches!(copy_dst, BufferId::Allocated(_)), "…into minted storage");
         let record = &plan.buffers[&copy_dst];
@@ -4065,7 +3802,11 @@ mod tests {
             "donated storage never backs an output slot:\n{}",
             plan.summary()
         );
-        assert!(slot.composed_access.is_some(), "the layout is disclosed");
+        assert_eq!(
+            &slot.layout,
+            &crate::test_support::mock_layout_table(&graph)[&v],
+            "the binding discloses the view value's own elected layout"
+        );
         // The donated buffer still dies with the call.
         assert!(
             plan.dag.node_indices().any(|i| matches!(
@@ -4119,9 +3860,10 @@ mod tests {
         .clone();
         g.output(&v1, "D");
         g.output(&v2, "E");
-        let plan = crate::test_support::bufferize_mock(&g.build()).expect("shared-base views escape together");
+        let graph = g.build();
+        let plan = crate::test_support::bufferize_mock(&graph).expect("shared-base views escape together");
 
-        let slots: Vec<OutputBinding> = plan
+        let slots: Vec<OutputBinding<crate::test_support::MockLayout>> = plan
             .dag
             .node_weights()
             .find_map(|node| match node {
@@ -4141,13 +3883,15 @@ mod tests {
             "zero copies:\n{}",
             plan.summary()
         );
-        let hop0 = |slot: &OutputBinding| {
-            slot.composed_access.as_ref().expect("layout disclosed").hops[0]
-                .entries
-                .clone()
-        };
-        assert_eq!(hop0(&slots[0]).as_deref(), Some(row0.as_slice()));
-        assert_eq!(hop0(&slots[1]).as_deref(), Some(transpose.as_slice()));
+        // TWO views, ONE buffer, TWO DIFFERENT carried layouts — this is
+        // exactly where the carried `L` earns its keep for an externally
+        // loaded plan: the buffer id alone cannot tell the two deliveries
+        // apart, and the assignment names only the base tensor.
+        let table = crate::test_support::mock_layout_table(&graph);
+        assert_eq!(&slots[0].layout, &table[&v1]);
+        assert_eq!(&slots[1].layout, &table[&v2]);
+        assert_ne!(slots[0].layout, slots[1].layout, "distinct views, distinct L");
+        let _ = (&row0, &transpose);
     }
 
     /// SHARED BASE, donated residence: the repair is minted ONCE — one
@@ -4193,7 +3937,7 @@ mod tests {
             })
             .collect();
         assert_eq!(copies.len(), 1, "ONE base-storage copy:\n{}", plan.summary());
-        let slots: Vec<OutputBinding> = plan
+        let slots: Vec<OutputBinding<crate::test_support::MockLayout>> = plan
             .dag
             .node_weights()
             .find_map(|node| match node {
@@ -4206,19 +3950,23 @@ mod tests {
         assert_eq!(plan.buffers[&copies[0]].freed_by, FreedBy::Caller);
     }
 
-    /// THE ITEM-3 CONTRADICTION PROBE, geometry-carrying. Parent P `[5,3]`
-    /// (15 elems) in buffer A; view v = row0 `[1,3]` of P; a consumer whose
-    /// in-place dst-tie on v is REJECTED. PRE-FIX (the 5b latent bug): the
-    /// repair copy targeted the tied RESULT's buffer, so the base-storage
-    /// copy voted `[5,3]` into a buffer the consumer's result votes `[1,3]`
-    /// — the writer-identity dims join (an equality lattice, deliberately
-    /// untouched: it stays the planner-bug tripwire) bailed loudly with
-    /// "buffer geometry contradiction". POST-FIX green plan, pinned here:
-    /// the copy targets a FRESH parent-shaped buffer it solely writes, the
-    /// consumer reads the re-rooted view from it, and every buffer's
-    /// geometry joins cleanly.
+    /// THE ITEM-3 PROBE, RESPELLED AS ASSIGNMENT (corrected contract,
+    /// 2026-08-31). Parent x in buffer A; view v = row0 of x; a consumer
+    /// whose in-place dst-tie on v is REJECTED. The historical form of this
+    /// test carried per-value dims and ran the writer-identity DIMS JOIN,
+    /// asserting the repair buffer "votes" `[5,3]` while the result buffer
+    /// "votes" `[1,3]`. That whole apparatus is DELETED: there is no sizing
+    /// walk, no voting, and no contradiction detection ("all the necessary
+    /// preconditions have been checked in the egraph").
+    ///
+    /// What survives is the fact the join was reconstructing, now stated
+    /// directly: THE ASSIGNMENT. The repair destination is a FRESH buffer
+    /// that `backs` the PARENT (so a runtime sizes it by the parent's
+    /// layout), never the tied result's buffer, which `backs` the result
+    /// (sized by the result's layout). One lookup each; nothing to
+    /// contradict.
     #[test]
-    fn folded_repair_into_result_buffer_would_contradict() {
+    fn folded_repair_targets_a_fresh_parent_backed_buffer() {
         use crate::index_expr::IotaExpr;
         use crate::test_support::{MockOp, MockViewWithMap, TestGraph};
         let entries = vec![IotaExpr::Lit(0), IotaExpr::Coord(0)];
@@ -4249,7 +3997,7 @@ mod tests {
             op_count: 2,
         };
         let mock_geometry =
-            extraction_geometry(&graph, &crate::test_support::mock_layout_table(&graph))
+            extraction_layouts(&graph, &crate::test_support::mock_layout_table(&graph))
                 .expect("mock layouts are total over the graph");
         let assignment = Bufferizer::assign(&graph, &order, &mut analysis, &[], &mock_geometry)
             .expect("assignment runs");
@@ -4257,51 +4005,40 @@ mod tests {
             &graph, &order, assignment, &analysis, &mock_geometry,
         )
         .expect("construction survives the rejected tie");
-        let geometry: HashMap<ClassId, ValueGeometry<crate::test_support::MockLayout>> = [
-            (x.clone(), vec![5, 3]),
-            (v.clone(), vec![1, 3]),
-            (r.clone(), vec![1, 3]),
-        ]
-        .into_iter()
-        .map(|(value, dims)| {
-            let layout = mock_geometry[&value].layout.clone();
-            (
-                value,
-                ValueGeometry {
-                    dims: Some(dims),
-                    element_bits: Some(32),
-                    dtype: Some(crate::dtype::PlanDtype::F32),
-                    layout,
-                },
-            )
-        })
-        .collect();
-        let mut plan = lower(bt, &geometry).expect("the base-storage copy lowers");
-        annotate_buffer_geometry(&mut plan, &graph, &geometry)
-            .expect("POST-FIX: the fresh single-writer destination joins cleanly");
+        // Lowering takes the rendered layout table directly — there is no
+        // second, geometry-bearing table to build, and no annotation pass
+        // to run afterwards.
+        let plan = lower(bt, &mock_geometry).expect("the base-storage copy lowers");
 
-        let (copy_dst,) = plan
+        let copy_dst = plan
             .dag
             .node_weights()
             .find_map(|node| match node {
-                BufferNode::BufferCopy { dst, value, .. } if *value == x => {
-                    Some((dst.clone(),))
+                BufferNode::BufferCopy { src, dst } if *src == plan.value_buffer[&x] => {
+                    Some(dst.clone())
                 }
                 _ => None,
             })
-            .expect("the parent-transporting repair copy");
+            .expect("the base-storage repair copy");
         assert_ne!(copy_dst, plan.value_buffer[&r], "fresh, not the result's buffer");
         assert_eq!(
-            plan.buffers[&copy_dst].dims.as_deref(),
-            Some([5, 3].as_slice()),
-            "the repair buffer is PARENT-shaped:\n{}",
+            plan.backed_tensor(&copy_dst),
+            Some(&x),
+            "the repair buffer BACKS THE PARENT — a runtime sizes it by the \
+             parent's layout, with no walk and no vote:\n{}",
             plan.summary()
         );
         assert_eq!(
-            plan.buffers[&plan.value_buffer[&r]].dims.as_deref(),
-            Some([1, 3].as_slice()),
-            "the consumer's result buffer keeps its own geometry:\n{}",
+            plan.backed_tensor(&plan.value_buffer[&r]),
+            Some(&r),
+            "the consumer's result buffer backs the RESULT:\n{}",
             plan.summary()
         );
+        // Option B: each buffer additionally carries the backed tensor's
+        // layout, so a load_plan caller gets the same two answers with no
+        // table of its own.
+        assert_eq!(&plan.buffers[&copy_dst].layout, &mock_geometry[&x]);
+        assert_eq!(&plan.buffers[&plan.value_buffer[&r]].layout, &mock_geometry[&r]);
+        let _ = &entries;
     }
 }

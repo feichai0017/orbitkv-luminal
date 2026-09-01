@@ -351,10 +351,12 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
 
     // fingerprint → measured nanos (the dedup cache).
     let mut cache: FxHashMap<u64, u128> = FxHashMap::default();
-    // Rendered layouts are per-CLASS facts (all spellings of a class
-    // denote one function), so one cache serves every genome.
-    let mut layout_cache: std::collections::HashMap<egraph_serialize::ClassId, L> =
-        std::collections::HashMap::new();
+    // Rendered layouts are pure functions of (layout class, dtype fact)
+    // — the renderer cache contract — so one cache serves every genome.
+    let mut layout_cache: std::collections::HashMap<
+        (egraph_serialize::ClassId, Option<crate::dtype::PlanDtype>),
+        L,
+    > = std::collections::HashMap::new();
     let mut plans_profiled = 0usize;
     let mut fingerprint_hits = 0usize;
     // Refusal accounting, minimal form (Step 5 down-payment): keep the
@@ -429,15 +431,20 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
                     // refusal rejects THIS genome, loudly accounted, and
                     // the search tries others), then bufferize under the
                     // rendered table.
+                    // The table is VALUE-keyed (corrected contract), so it
+                    // must be built over the graph bufferize sees — the
+                    // POST-DPS one, whose poison destinations are fresh
+                    // values. They clone their tied result's layout class
+                    // AND dtype fact, so every poison is a renderer-cache
+                    // HIT: value-keying costs no extra renderer calls.
+                    let dps = crate::dps::dps_rewrite(&graph);
                     let built = extractor::rendered_layout_table(
                         egraph,
-                        &graph,
+                        &dps,
                         layout_renderer,
                         &mut layout_cache,
                     )
-                    .and_then(|table| {
-                        crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph), &table)
-                    });
+                    .and_then(|table| crate::bufferize::bufferize(&dps, &table));
                     timings.plan_build_nanos += build_start.elapsed().as_nanos();
                     let plan = match built {
                         Ok(plan) => plan,
@@ -481,15 +488,14 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
             };
             if best.as_ref().is_none_or(|(best_nanos, _, _)| nanos < *best_nanos) {
                 let build_start = Instant::now();
+                let dps = crate::dps::dps_rewrite(&graph);
                 let built = extractor::rendered_layout_table(
                     egraph,
-                    &graph,
+                    &dps,
                     layout_renderer,
                     &mut layout_cache,
                 )
-                .and_then(|table| {
-                    crate::bufferize::bufferize(&crate::dps::dps_rewrite(&graph), &table)
-                });
+                .and_then(|table| crate::bufferize::bufferize(&dps, &table));
                 timings.plan_build_nanos += build_start.elapsed().as_nanos();
                 let Ok(plan) = built else {
                     continue;

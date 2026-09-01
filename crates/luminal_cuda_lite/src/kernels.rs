@@ -17,69 +17,73 @@
 
 use anyhow::{bail, Result};
 use luminal::buffer_tensor_ir::BufferTensorIrOp;
-use luminal::bufferize::{ComposedAccess, SlotDescriptor};
+use crate::layouts::CudaLayout;
+use luminal::bufferize::SlotDescriptor;
 use luminal::dtype::PlanDtype;
 use luminal::index_expr::IotaExpr;
 use std::any::TypeId;
 
 /// Geometry + typing for one compute node, in plan order: operands
 /// (destination-last, the DPS convention), then destinations again as
-/// the write set. Dims come from the node's own [`SlotDescriptor`]s (M4
-/// Phase 3) — per-slot VALUE geometry, which equals the shared buffer
-/// table's numbers while no view is electable on this backend (the
-/// string-identity pin in `tests/codegen_identity.rs`).
+/// the write set. EVERYTHING here derives from the node's own
+/// [`SlotDescriptor`] layouts — this runtime's carried `CudaLayout` per
+/// slot: dims are the layout's literal domain extents, dtypes its
+/// carried dtype fact, and every non-direct read lowers the layout's
+/// own offset expression ([`layout_read_index`]). The hop-chain
+/// machinery is fully retired (corrected contract, 2026-08-31): the
+/// e-graph mints every view's composed layout at view creation, and the
+/// runtime's rendered `L` IS the read path.
 #[derive(Debug)]
 pub struct CodegenCtx {
     pub operand_dims: Vec<Vec<usize>>,
     pub operand_dtypes: Vec<PlanDtype>,
     pub dest_dims: Vec<Vec<usize>>,
     pub dest_dtypes: Vec<PlanDtype>,
-    /// Per-operand composed view access, parallel to `operand_dims` —
-    /// `Some` iff folded views stand between the slot's value and its
-    /// buffer. Phase 4: the elementwise/reduce templates lower a `Some`
-    /// operand to `parent[f(out_coords)]` (see [`composed_read_index`]);
-    /// Train-2B extends the same lowering to the READ operands of the
-    /// expression-carrying kernels (gather, scatter, materialize —
-    /// `tests/composed_read_families.rs`); iota/constant (dest-only)
-    /// refuse loudly via [`require_flat_operands`], and every WRITE
-    /// side stays fail-closed (CL-4b). The all-`None` flat fast paths
-    /// are byte-identical to pre-Phase-4 codegen (pinned in
-    /// `tests/codegen_identity.rs`).
-    pub composed_access: Vec<Option<ComposedAccess>>,
+    /// Per-operand slot layouts, parallel to `operand_dims` — each
+    /// operand's OWN elected layout as the runtime's renderer minted it
+    /// (for a folded operand, the view's COMPOSED layout, addressing
+    /// the residence's bytes directly).
+    pub operand_layouts: Vec<CudaLayout>,
 }
 
 impl CodegenCtx {
     /// Build codegen geometry from the compute node's own slot
-    /// descriptors — never the shared buffer table (Phase 3 pin). Loud
-    /// on missing numerics, mirroring the executor's None-dims bail.
+    /// descriptors — never the shared buffer table. Dims and dtypes come
+    /// from each slot's carried layout (the layout's DOMAIN is the
+    /// value's shape); loud on symbolic extents or a missing dtype fact,
+    /// never a guess.
     pub fn from_descriptors(
         label: &str,
-        operand_info: &[SlotDescriptor],
-        result_info: &[SlotDescriptor],
+        operand_info: &[SlotDescriptor<CudaLayout>],
+        result_info: &[SlotDescriptor<CudaLayout>],
     ) -> Result<Self> {
+        let dims_of = |slot: &SlotDescriptor<CudaLayout>, role: &str| -> Result<Vec<usize>> {
+            slot.layout.mirror.literal_extents().ok_or_else(|| {
+                anyhow::anyhow!("{label} {role} has symbolic layout extents (no numeric codegen)")
+            })
+        };
+        let dtype_of = |slot: &SlotDescriptor<CudaLayout>, role: &str| -> Result<PlanDtype> {
+            slot.layout
+                .dtype
+                .ok_or_else(|| anyhow::anyhow!("{label} {role} carries no dtype fact"))
+        };
+        let dest_dims: Vec<Vec<usize>> = result_info
+            .iter()
+            .map(|s| dims_of(s, "dest"))
+            .collect::<Result<_>>()?;
         // Strided WRITES are not lowered (CL-4b territory): destinations
-        // stay dense out-of-place, so a composed access on a RESULT slot
-        // is a loud refusal at the single codegen entry point — never a
-        // silently dense write through a view.
-        for (k, slot) in result_info.iter().enumerate() {
-            if slot.composed_access.is_some() {
+        // stay dense out-of-place, so a result slot whose layout is not
+        // the direct row-major form over its domain refuses loudly at
+        // the single codegen entry point — a CAPABILITY refusal (this
+        // backend lowers no strided write), never an e-graph re-check.
+        for (k, (slot, dims)) in result_info.iter().zip(&dest_dims).enumerate() {
+            if !layout_is_direct(&slot.layout, dims) {
                 bail!(
-                    "{label} result {k} carries a composed access: strided writes \
+                    "{label} result {k} carries a non-direct layout: strided writes \
                      are not lowered (dests stay dense out-of-place; CL-4b)"
                 );
             }
         }
-        let dims_of = |slot: &SlotDescriptor, role: &str| -> Result<Vec<usize>> {
-            let dims = slot
-                .dims
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("{label} {role} lacks geometry"))?;
-            Ok(dims.iter().map(|&d| usize::try_from(d).unwrap_or(0)).collect())
-        };
-        let dtype_of = |slot: &SlotDescriptor, role: &str| -> Result<PlanDtype> {
-            slot.dtype
-                .ok_or_else(|| anyhow::anyhow!("{label} {role} lacks dtype"))
-        };
         Ok(CodegenCtx {
             operand_dims: operand_info
                 .iter()
@@ -89,17 +93,223 @@ impl CodegenCtx {
                 .iter()
                 .map(|s| dtype_of(s, "operand"))
                 .collect::<Result<_>>()?,
-            dest_dims: result_info
-                .iter()
-                .map(|s| dims_of(s, "dest"))
-                .collect::<Result<_>>()?,
+            dest_dims,
             dest_dtypes: result_info
                 .iter()
                 .map(|s| dtype_of(s, "dest"))
                 .collect::<Result<_>>()?,
-            composed_access: operand_info.iter().map(|s| s.composed_access.clone()).collect(),
+            operand_layouts: operand_info.iter().map(|s| s.layout.clone()).collect(),
         })
     }
+
+    /// The slot's layout when it is NOT the direct read for its dims —
+    /// the expression-read discriminator every family keys on (`None` =
+    /// the flat `name[i]` fast path holds).
+    pub fn non_direct_operand(&self, slot: usize) -> Option<&CudaLayout> {
+        let layout = &self.operand_layouts[slot];
+        (!layout_is_direct(layout, &self.operand_dims[slot])).then_some(layout)
+    }
+}
+
+// ===========================================================================
+// PROTOTYPE (Option B): reading operands through their SLOT LAYOUTS.
+//
+// The slot's own elected layout (`SlotDescriptor::layout`, the runtime's
+// rendered `MirrorLayout`) is the ONE vocabulary for how a value
+// addresses its residence — for a folded operand it is the view's
+// COMPOSED layout, which the e-graph already minted (preamble view
+// BitOffset composition / native strided chains). The elementwise family
+// below lowers that layout's offset expression DIRECTLY, retiring the
+// per-slot hop chain for this family.
+//
+// BOUNDS HONESTY (pinned in `codegen_identity::strided`): the hop chain
+// trapped EVERY intermediate index against its hop's parent extents; a
+// composed expression has no intermediate parents, so the trap surface
+// shrinks to ONE final check of the flat element index — against the
+// layout's own SPAN where the layout discloses one (the packed ladder:
+// right-major / left-major / strided), and against NOTHING but
+// non-negativity for the offset-expression forms, which deliberately do
+// not disclose their reach (`SpanExpr` is unimplemented there). That is
+// the cost of the composed read: out-of-bounds inside the expression is
+// caught only if the final index escapes the span (packed) or goes
+// negative (offset forms).
+// ===========================================================================
+
+/// Is this layout the DIRECT read for a value of `dims` — row-major,
+/// packed, value-shaped? (The flat `a[i]` fast path; also the CL-4b
+/// write fence.) Rank ≤ 1 left-major is the same function but the
+/// renderer prefers the right-major spelling when present, so we key on
+/// right-major alone — a dense class rendering otherwise takes the
+/// (correct, slower) expression read and the byte-identity pin flags it.
+pub fn layout_is_direct(layout: &CudaLayout, dims: &[usize]) -> bool {
+    match &layout.mirror {
+        luminal::layouts::MirrorLayout::RightMajor(_) => {
+            layout.mirror.literal_extents().as_deref() == Some(dims)
+        }
+        _ => false,
+    }
+}
+
+/// Lower a mirror-layout [`IntExprTerm`] to a C expression over
+/// `long long`, coordinates spelled `{prefix}{front_index}`
+/// (`Coord{axis_from_end}` reads `{prefix}{rank-1-axis_from_end}`).
+/// Symbolic vars bail loudly (no numeric codegen for symbolic layouts).
+fn lower_layout_term(
+    expr: &luminal::layouts::IntExprTerm,
+    rank: usize,
+    prefix: &str,
+) -> Result<String> {
+    use luminal::layouts::IntExprTerm as T;
+    let rec = |e: &T| lower_layout_term(e, rank, prefix);
+    Ok(match expr {
+        T::Lit(v) => format!("{v}LL"),
+        T::Var(name) => bail!("layout read: symbolic dim `{name}` has no numeric codegen"),
+        T::Coord { axis_from_end } => {
+            let axis = usize::try_from(*axis_from_end)
+                .ok()
+                .filter(|&a| a < rank)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("layout read: coordinate axis {axis_from_end} out of rank {rank}")
+                })?;
+            format!("{prefix}{}", rank - 1 - axis)
+        }
+        T::Add(a, b) => format!("({} + {})", rec(a)?, rec(b)?),
+        T::Mul(a, b) => format!("({} * {})", rec(a)?, rec(b)?),
+        T::TruncDiv(a, b) => format!("({} / {})", rec(a)?, rec(b)?),
+        T::TruncRem(a, b) => format!("({} % {})", rec(a)?, rec(b)?),
+        T::CeilDiv(a, b) => {
+            // PROTOTYPE: minted layouts have not needed CeilDiv in a
+            // lowered read yet; refuse rather than guess a negative-
+            // operand convention.
+            let (_, _) = (rec(a)?, rec(b)?);
+            bail!("layout read: IntCeilDiv lowering not implemented (fail-closed)")
+        }
+        T::Min(a, b) => {
+            let (a, b) = (rec(a)?, rec(b)?);
+            format!("(({a}) < ({b}) ? ({a}) : ({b}))")
+        }
+        T::Max(a, b) => {
+            let (a, b) = (rec(a)?, rec(b)?);
+            format!("(({a}) > ({b}) ? ({a}) : ({b}))")
+        }
+        T::LessThanCast(a, b) => {
+            format!("(({}) < ({}) ? 1LL : 0LL)", rec(a)?, rec(b)?)
+        }
+    })
+}
+
+/// Lower one operand's SLOT LAYOUT to C statements computing its flat
+/// element read index at the current coordinates
+/// `{in_prefix}0..{in_prefix}{rank-1}` (front-indexed). Returns
+/// `(code, index_var)`; the statements bind `{operand}_idx` plus the
+/// single final bounds trap described in the module note above. The
+/// layout's own domain (its shape) must be LITERAL and equal the slot's
+/// value dims — a foreign-domain layout is a planner/renderer
+/// incoherence and refuses loudly.
+pub fn layout_read_index(
+    operand: &str,
+    layout: &CudaLayout,
+    slot_dims: &[usize],
+    in_prefix: &str,
+) -> Result<(String, String)> {
+    use luminal::layouts::{MirrorLayout, SpanExpr};
+    let rank = slot_dims.len();
+    let idx = format!("{operand}_idx");
+    let check_domain = |shape: &luminal::layouts::ShapeTerm| -> Result<()> {
+        let extents: Option<Vec<usize>> = shape
+            .0
+            .iter()
+            .map(|e| e.eval_literal().and_then(|v| usize::try_from(v).ok()))
+            .collect();
+        let Some(extents) = extents else {
+            bail!("operand {operand}: layout has symbolic extents (no numeric codegen)");
+        };
+        if extents != slot_dims {
+            bail!(
+                "operand {operand}: layout domain {extents:?} differs from the slot's \
+                 value extents {slot_dims:?} — refuse, never reinterpret"
+            );
+        }
+        Ok(())
+    };
+    // (code lines, offset expr, span bound: Some(packed reach) / None)
+    let (offset, span): (String, Option<String>) = match &layout.mirror {
+        MirrorLayout::RightMajor(rm) => {
+            check_domain(&rm.shape)?;
+            let strides = strides_of(slot_dims);
+            let flat = if rank == 0 {
+                "0LL".to_string()
+            } else {
+                (0..rank)
+                    .map(|axis| format!("{in_prefix}{axis} * {}LL", strides[axis]))
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            };
+            (flat, Some(format!("{}LL", numel(slot_dims))))
+        }
+        MirrorLayout::LeftMajor(lm) => {
+            check_domain(&lm.shape)?;
+            let mut strides = vec![1usize; rank];
+            for axis in 1..rank {
+                strides[axis] = strides[axis - 1] * slot_dims[axis - 1];
+            }
+            let flat = if rank == 0 {
+                "0LL".to_string()
+            } else {
+                (0..rank)
+                    .map(|axis| format!("{in_prefix}{axis} * {}LL", strides[axis]))
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            };
+            (flat, Some(format!("{}LL", numel(slot_dims))))
+        }
+        MirrorLayout::Strided(st) => {
+            check_domain(&st.shape)?;
+            let summands = st
+                .chain
+                .iter()
+                .map(|s| lower_layout_term(s, rank, in_prefix))
+                .collect::<Result<Vec<_>>>()?;
+            let flat = if summands.is_empty() {
+                "0LL".to_string()
+            } else {
+                summands.join(" + ")
+            };
+            // The strided span IS disclosed (SpanExpr): 1 + Σ summand at
+            // the last coordinate of each axis — a literal expression
+            // here (rank 0: no coordinates survive the substitution).
+            let span = lower_layout_term(&st.span(), 0, in_prefix)?;
+            (flat, Some(span))
+        }
+        MirrorLayout::ElementOffset(eo) => {
+            check_domain(&eo.shape)?;
+            // NO DISCLOSED REACH: an offset function alone does not say
+            // how far it points (SpanExpr deliberately unimplemented) —
+            // the only honest trap left is non-negativity.
+            (lower_layout_term(&eo.offset, rank, in_prefix)?, None)
+        }
+        MirrorLayout::BitOffset(bo) => {
+            check_domain(&bo.shape)?;
+            let bits = lower_layout_term(&bo.offset, rank, in_prefix)?;
+            let width = bo.width.0;
+            // Bit form: element index = bit offset / width, with a
+            // divisibility trap (a mid-element bit offset has no element
+            // read). Same undisclosed-reach story as ElementOffset.
+            let bits_var = format!("{operand}_bits");
+            let code = format!(
+                "    long long {bits_var} = {bits};\n    if ({bits_var} < 0 || ({bits_var} % {width}LL) != 0) __trap();\n    long long {idx} = {bits_var} / {width}LL;\n"
+            );
+            return Ok((code, idx));
+        }
+    };
+    let mut code = format!("    long long {idx} = {offset};\n");
+    match span {
+        Some(span) => code.push_str(&format!(
+            "    if ({idx} < 0 || {idx} >= ({span})) __trap();\n"
+        )),
+        None => code.push_str(&format!("    if ({idx} < 0) __trap();\n")),
+    }
+    Ok((code, idx))
 }
 
 /// One generated launch: entry name is always `k`; `n` is the launch
@@ -152,10 +362,13 @@ pub(crate) fn numel(dims: &[usize]) -> usize {
     dims.iter().product()
 }
 
-/// `out[i] = <expr of a[i], b[i]>` over the destination's numel. An
-/// operand carrying a [`ComposedAccess`] is read through its folded-view
-/// chain instead: `a[i]` becomes `a[a_idx]` with the chain lowered by
-/// [`composed_read_index`] (Phase 4 strided reads).
+/// `out[i] = <expr of a[i], b[i]>` over the destination's numel.
+/// PROTOTYPE (Option B): each operand is read through its SLOT LAYOUT —
+/// a direct (row-major, value-shaped) layout keeps the flat `a[i]`
+/// (byte-identical fast path when every slot is direct); any other
+/// layout switches `a[i]` to `a[a_idx]` with the layout's own offset
+/// expression lowered by [`layout_read_index`]. The hop chain is NOT
+/// consulted in this family.
 pub(crate) fn binary(ctx: &CodegenCtx, expr: &str) -> Result<Vec<KernelSource>> {
     let [a, b, _dest] = ctx.operand_dtypes.as_slice() else {
         bail!("binary op expects two operands + dest, got {}", ctx.operand_dtypes.len());
@@ -163,7 +376,7 @@ pub(crate) fn binary(ctx: &CodegenCtx, expr: &str) -> Result<Vec<KernelSource>> 
     let (ta, tb) = (cuda_type(*a)?, cuda_type(*b)?);
     let to = cuda_type(ctx.dest_dtypes[0])?;
     let n = numel(&ctx.dest_dims[0]);
-    if ctx.composed_access.iter().all(Option::is_none) {
+    if all_operands_direct(ctx) {
         // The flat fast path, byte-identical to pre-Phase-4 codegen.
         let source = format!(
             r#"extern "C" __global__ void k(const {ta}* a, const {tb}* b, {to}* out, unsigned long long n) {{
@@ -177,14 +390,24 @@ pub(crate) fn binary(ctx: &CodegenCtx, expr: &str) -> Result<Vec<KernelSource>> 
     strided_elementwise(ctx, expr, &["a", "b"], &sig, to)
 }
 
-/// `out[i] = <expr of a[i]>` over the destination's numel. A composed
-/// access on the operand switches `a[i]` to the strided read `a[a_idx]`
-/// (see [`binary`]).
+/// Every operand slot's layout is the direct read for its dims (the
+/// flat-fast-path / write-fence discriminator — Option B keys this on
+/// the LAYOUT, never on hop presence).
+fn all_operands_direct(ctx: &CodegenCtx) -> bool {
+    ctx.operand_layouts
+        .iter()
+        .zip(&ctx.operand_dims)
+        .all(|(layout, dims)| layout_is_direct(layout, dims))
+}
+
+/// `out[i] = <expr of a[i]>` over the destination's numel. A non-direct
+/// slot layout switches `a[i]` to the expression read `a[a_idx]` (see
+/// [`binary`]).
 pub(crate) fn unary(ctx: &CodegenCtx, expr: &str) -> Result<Vec<KernelSource>> {
     let ta = cuda_type(ctx.operand_dtypes[0])?;
     let to = cuda_type(ctx.dest_dtypes[0])?;
     let n = numel(&ctx.dest_dims[0]);
-    if ctx.composed_access.iter().all(Option::is_none) {
+    if all_operands_direct(ctx) {
         // The flat fast path, byte-identical to pre-Phase-4 codegen.
         let source = format!(
             r#"extern "C" __global__ void k(const {ta}* a, {to}* out, unsigned long long n) {{
@@ -204,13 +427,15 @@ pub(crate) fn unary(ctx: &CodegenCtx, expr: &str) -> Result<Vec<KernelSource>> {
 // e-graph (the materialize kernel), discovered via search, never a copy
 // mode.
 
-/// The strided elementwise form (Phase 4): identical launch geometry to
-/// the flat template — one thread per OUT element — but every operand
-/// carrying a [`ComposedAccess`] is read at `name[f(out_coords)]`,
-/// where `f` is its hop chain lowered by [`composed_read_index`] over
-/// the out-coordinate prelude. Contract with the op-module exprs: the
-/// template expr reads operand `name` exactly as the literal token
-/// `name[i]`, which is rewritten here to `name[{name}_idx]`.
+/// The strided elementwise form — PROTOTYPE (Option B): identical
+/// launch geometry to the flat template (one thread per OUT element),
+/// but every operand whose SLOT LAYOUT is not the direct read is read
+/// at `name[f(out_coords)]`, where `f` is the layout's own offset
+/// expression lowered by [`layout_read_index`] over the out-coordinate
+/// prelude — the hop chain is dead in this family. Contract with the
+/// op-module exprs: the template expr reads operand `name` exactly as
+/// the literal token `name[i]`, which is rewritten here to
+/// `name[{name}_idx]`.
 ///
 /// The DPS dest slot (the operand slot after the named reads) must stay
 /// direct: strided WRITES are CL-4b and refuse loudly.
@@ -223,10 +448,10 @@ fn strided_elementwise(
 ) -> Result<Vec<KernelSource>> {
     let out_dims = &ctx.dest_dims[0];
     let n = numel(out_dims);
-    for (k, access) in ctx.composed_access.iter().enumerate() {
-        if k >= names.len() && access.is_some() {
+    for (k, layout) in ctx.operand_layouts.iter().enumerate() {
+        if k >= names.len() && !layout_is_direct(layout, &ctx.operand_dims[k]) {
             bail!(
-                "dest operand slot {k} carries a composed access: strided writes \
+                "dest operand slot {k} carries a non-direct layout: strided writes \
                  are not lowered (dests stay dense out-of-place; CL-4b)"
             );
         }
@@ -234,23 +459,24 @@ fn strided_elementwise(
     let mut chains = String::new();
     let mut rendered = expr.to_string();
     for (k, name) in names.iter().enumerate() {
-        let Some(access) = ctx.composed_access.get(k).and_then(|a| a.as_ref()) else {
+        if layout_is_direct(&ctx.operand_layouts[k], &ctx.operand_dims[k]) {
             continue;
-        };
+        }
         // An elementwise operand VALUE spans the out iteration space —
-        // hop 0's entries are functions of the slot's own coordinates,
-        // which must therefore be the out coordinates. A mismatch means
-        // the fold recorded a different geometry than this template
-        // iterates: refuse, never reinterpret.
+        // its layout's domain is the slot's own coordinates, which must
+        // therefore be the out coordinates. A mismatch means the elected
+        // layout has a different geometry than this template iterates:
+        // refuse, never reinterpret.
         if &ctx.operand_dims[k] != out_dims {
             bail!(
                 "operand {name} value extents {:?} differ from dest extents {:?} \
-                 under composed access — elementwise templates iterate the dest",
+                 under a non-direct layout — elementwise templates iterate the dest",
                 ctx.operand_dims[k],
                 out_dims
             );
         }
-        let (code, idx) = composed_read_index(name, access, out_dims.len())?;
+        let (code, idx) =
+            layout_read_index(name, &ctx.operand_layouts[k], out_dims, "c")?;
         chains.push_str(&code);
         let flat = format!("{name}[i]");
         if !rendered.contains(&flat) {
@@ -269,110 +495,15 @@ fn strided_elementwise(
     Ok(vec![KernelSource::plain(source, n)])
 }
 
-/// Lower one operand's [`ComposedAccess`] chain to C statements
-/// computing its flat read index at the CURRENT coordinates
-/// `c0..c{coord_rank-1}` (front-indexed, from [`coord_prelude`] or the
-/// reduce template's coordinate rebuild). Returns `(code, index_var)`:
-/// the statements bind `{operand}_h{k}_{m}` per hop `k` / parent axis
-/// `m` — hop 0 evaluated at the slot's own coordinates, each hop's
-/// outputs feeding the next hop's [`IotaExpr::Coord`]s (codegen-time
-/// composition) — with a per-axis bounds `__trap()` exactly like the
-/// materialize kernel, and finally `{operand}_idx`, the row-major flat
-/// offset into the LAST hop's parent (the residence actually read).
-///
-/// Fail-closed at every hop: `entries: None` (map beyond the parsed
-/// subset) and symbolic/non-positive parent extents bail loudly —
-/// never treated as identity.
-pub(crate) fn composed_read_index(
-    operand: &str,
-    access: &ComposedAccess,
-    coord_rank: usize,
-) -> Result<(String, String)> {
-    composed_read_index_pref(operand, access, coord_rank, "c")
-}
-
-/// [`composed_read_index`] with a caller-chosen INPUT coordinate
-/// prefix: hop 0's entries are evaluated at `{in_prefix}0..` instead of
-/// `c0..`. The expression-carrying kernels (gather's data operand, the
-/// materialize's parent) use this to feed their OWN computed
-/// coordinates — the gathered coordinate values, the applied map's
-/// outputs — into a folded chain that stands between the slot's value
-/// and its residence.
-pub(crate) fn composed_read_index_pref(
-    operand: &str,
-    access: &ComposedAccess,
-    coord_rank: usize,
-    in_prefix: &str,
-) -> Result<(String, String)> {
-    if access.hops.is_empty() {
-        bail!("operand {operand}: composed access with zero hops");
-    }
-    let mut code = String::new();
-    let mut in_rank = coord_rank;
-    let mut in_prefix = in_prefix.to_string();
-    let mut last_parent: Vec<usize> = Vec::new();
-    for (h, hop) in access.hops.iter().enumerate() {
-        let Some(entries) = &hop.entries else {
-            bail!(
-                "operand {operand} hop {h}: index map beyond the parsed expression \
-                 subset (fail-closed, never identity)"
-            );
-        };
-        let Some(parent_dims) = &hop.parent_dims else {
-            bail!("operand {operand} hop {h}: symbolic parent extents");
-        };
-        if entries.len() != parent_dims.len() {
-            bail!(
-                "operand {operand} hop {h}: {} map entries vs parent rank {}",
-                entries.len(),
-                parent_dims.len()
-            );
-        }
-        let parent: Vec<usize> = parent_dims
-            .iter()
-            .map(|&d| {
-                usize::try_from(d).ok().filter(|&d| d > 0).ok_or_else(|| {
-                    anyhow::anyhow!("operand {operand} hop {h}: non-positive parent extent {d}")
-                })
-            })
-            .collect::<Result<_>>()?;
-        for (m, entry) in entries.iter().enumerate() {
-            let value = lower_expr_pref(entry, in_rank, &in_prefix)?;
-            let var = format!("{operand}_h{h}_{m}");
-            code.push_str(&format!(
-                "    long long {var} = {value};\n    if ({var} < 0 || {var} >= {ext}LL) __trap();\n",
-                ext = parent[m]
-            ));
-        }
-        in_rank = parent.len();
-        in_prefix = format!("{operand}_h{h}_");
-        last_parent = parent;
-    }
-    let strides = strides_of(&last_parent);
-    let last_hop = access.hops.len() - 1;
-    let idx = format!("{operand}_idx");
-    let flat = if last_parent.is_empty() {
-        "0".to_string()
-    } else {
-        (0..last_parent.len())
-            .map(|m| format!("{operand}_h{last_hop}_{m} * {}LL", strides[m]))
-            .collect::<Vec<_>>()
-            .join(" + ")
-    };
-    code.push_str(&format!("    long long {idx} = {flat};\n"));
-    Ok((code, idx))
-}
-
-/// Loud refusal for codegen bodies that do not lower composed access
-/// (iota, constant — dest-only signatures since Train-2B lowered the
-/// gather/scatter/materialize READ sides): an operand arriving with
-/// folded-view addressing through a kernel that would index it flat is
+/// Loud refusal for codegen bodies that do not lower expression reads
+/// (iota, constant — dest-only signatures): an operand arriving with a
+/// non-direct layout through a kernel that would index it flat is
 /// silent mistranslation — bail instead.
 pub(crate) fn require_flat_operands(label: &str, ctx: &CodegenCtx) -> Result<()> {
-    for (k, access) in ctx.composed_access.iter().enumerate() {
-        if access.is_some() {
+    for k in 0..ctx.operand_layouts.len() {
+        if ctx.non_direct_operand(k).is_some() {
             bail!(
-                "{label}: operand {k} carries a composed access this kernel does \
+                "{label}: operand {k} carries a non-direct layout this kernel does \
                  not lower (fail-closed, never identity)"
             );
         }
@@ -401,7 +532,7 @@ pub(crate) fn reduce(
     let inner: usize = in_dims[axis + 1..].iter().product();
     let outer: usize = in_dims[..axis].iter().product();
     let n = outer * inner;
-    if ctx.composed_access.iter().all(Option::is_none) {
+    if (0..ctx.operand_layouts.len()).all(|k| ctx.non_direct_operand(k).is_none()) {
         // The flat fast path, byte-identical to pre-Phase-4 codegen.
         let source = format!(
             r#"extern "C" __global__ void k(const {ta}* a, {to}* out, unsigned long long n) {{
@@ -419,22 +550,23 @@ pub(crate) fn reduce(
         );
         return Ok(vec![KernelSource::plain(source, n)]);
     }
-    // Phase 4 strided read: the input slot carries a ComposedAccess, so
-    // its flat address is replaced by the hop chain evaluated at the
-    // INPUT VALUE's coordinates `c0..c{rank-1}` — rebuilt here from the
-    // outer/inner decomposition plus the loop's own `r` at the reduced
-    // axis. The dest slot must stay direct (CL-4b, no strided writes).
-    for (k, access) in ctx.composed_access.iter().enumerate() {
-        if k >= 1 && access.is_some() {
+    // Strided read: the input slot's layout is not the direct form, so
+    // its flat address is replaced by the layout's own offset expression
+    // evaluated at the INPUT VALUE's coordinates `c0..c{rank-1}` —
+    // rebuilt here from the outer/inner decomposition plus the loop's
+    // own `r` at the reduced axis. The dest slot must stay direct
+    // (CL-4b, no strided writes).
+    for k in 1..ctx.operand_layouts.len() {
+        if ctx.non_direct_operand(k).is_some() {
             bail!(
-                "dest operand slot {k} carries a composed access: strided writes \
+                "dest operand slot {k} carries a non-direct layout: strided writes \
                  are not lowered (dests stay dense out-of-place; CL-4b)"
             );
         }
     }
-    let access = ctx.composed_access[0]
-        .as_ref()
-        .expect("reduce strided path entered with a composed input access");
+    let layout = ctx
+        .non_direct_operand(0)
+        .expect("reduce strided path entered with a non-direct input layout");
     // Coordinates OUTSIDE the reduced axis are loop-invariant: decompose
     // `inner` then `outer` (row-major, innermost axis first) before the
     // loop; `c{axis}` is the loop variable.
@@ -452,7 +584,7 @@ pub(crate) fn reduce(
             d = in_dims[ax]
         ));
     }
-    let (chain, idx) = composed_read_index("a", access, in_dims.len())?;
+    let (chain, idx) = layout_read_index("a", layout, in_dims, "c")?;
     // Re-indent the chain into the loop body.
     let chain = chain.replace("    ", "        ");
     let source = format!(

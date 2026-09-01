@@ -17,7 +17,7 @@ use luminal::layout_ir::{
 };
 
 use crate::kernels::{
-    composed_read_index, coord_prelude, cuda_type, numel, strides_of, CodegenCtx, KernelSource,
+    coord_prelude, cuda_type, layout_read_index, numel, strides_of, CodegenCtx, KernelSource,
 };
 use anyhow::{bail, Result};
 
@@ -149,10 +149,10 @@ impl ToDps for ScatterFunctionalDps {
 
 impl LayoutIrOp for ScatterFunctionalDps {}
 
-/// The CUDA lowering, colocated with its op. Train-2B: the READ-side
-/// operands (init, src, coordinates) may carry a [`ComposedAccess`] —
-/// each folds into that operand's read index via
-/// [`crate::kernels::composed_read_index`]. The WRITE side (dest0)
+/// The CUDA lowering, colocated with its op. The READ-side operands
+/// (init, src, coordinates) may arrive with non-direct layouts — each
+/// lowers into that operand's read index via
+/// [`crate::kernels::layout_read_index`]. The WRITE side (dest0)
 /// stays fail-closed (CL-4b), and the checked-scatter injectivity
 /// flags are untouched: the write address arithmetic is identical.
 pub(crate) fn codegen(
@@ -163,9 +163,9 @@ pub(crate) fn codegen(
         bail!("scatter codegen reached with a non-Scatter op");
     };
     let rank = scatter.rank;
-    if ctx.composed_access.get(scatter.dest_index()).is_some_and(Option::is_some) {
+    if ctx.non_direct_operand(scatter.dest_index()).is_some() {
         bail!(
-            "dest operand slot {} carries a composed access: strided writes \
+            "dest operand slot {} carries a non-direct layout: strided writes \
              are not lowered (dests stay dense out-of-place; CL-4b)",
             scatter.dest_index()
         );
@@ -189,15 +189,15 @@ pub(crate) fn codegen(
     // Launch 1: dest = copy(init), over dest numel. A folded init is
     // read through its chain at the DEST coordinates (init's value
     // spans the dest space by construction).
-    let copy_src = if let Some(access) = ctx.composed_access[0].as_ref() {
+    let copy_src = if let Some(layout) = ctx.non_direct_operand(0) {
         if init_dims != dest_dims {
             bail!(
                 "operand init value extents {init_dims:?} differ from dest extents \
-                 {dest_dims:?} under composed access — the scatter copy iterates the dest"
+                 {dest_dims:?} under a non-direct layout — the scatter copy iterates the dest"
             );
         }
         let prelude = coord_prelude(dest_dims);
-        let (chain, idx) = composed_read_index("init", access, dest_dims.len())?;
+        let (chain, idx) = layout_read_index("init", layout, dest_dims, "c")?;
         format!(
             r#"extern "C" __global__ void k({sig}, unsigned int* flags, {t}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -220,29 +220,28 @@ pub(crate) fn codegen(
     // operands read through their chains at the SRC coordinates (the
     // launch's iteration space); the WRITE address stays the flat
     // coordinate-built one.
-    let src_access = ctx.composed_access[1].as_ref();
-    let coord_folded =
-        (2..2 + rank).any(|slot| ctx.composed_access.get(slot).is_some_and(Option::is_some));
+    let src_layout = ctx.non_direct_operand(1);
+    let coord_folded = (2..2 + rank).any(|slot| ctx.non_direct_operand(slot).is_some());
     let mut body = String::new();
-    if src_access.is_some() || coord_folded {
+    if src_layout.is_some() || coord_folded {
         body.push_str(&coord_prelude(src_dims));
     }
     body.push_str("    long long flat = 0;\n    long long coord;\n");
     for axis in 0..rank {
-        if let Some(access) = ctx.composed_access.get(axis + 2).and_then(|a| a.as_ref()) {
+        if let Some(layout) = ctx.non_direct_operand(axis + 2) {
             // The coordinate value's own extents must be src's for the
             // prelude's `c*` to be its coordinates: refuse a mismatch,
             // never reinterpret (the elementwise contract).
             if &ctx.operand_dims[axis + 2] != src_dims {
                 bail!(
                     "operand coord{axis} value extents {:?} differ from src extents \
-                     {src_dims:?} under composed access — the scatter write launch \
+                     {src_dims:?} under a non-direct layout — the scatter write launch \
                      iterates src",
                     ctx.operand_dims[axis + 2]
                 );
             }
             let name = format!("coord{axis}");
-            let (chain, idx) = composed_read_index(&name, access, src_dims.len())?;
+            let (chain, idx) = layout_read_index(&name, layout, src_dims, "c")?;
             body.push_str(&chain);
             body.push_str(&format!("    coord = (long long){name}[{idx}];\n"));
         } else {
@@ -254,8 +253,8 @@ pub(crate) fn codegen(
             stride = strides[axis]
         ));
     }
-    let src_read = if let Some(access) = src_access {
-        let (chain, idx) = composed_read_index("src", access, src_dims.len())?;
+    let src_read = if let Some(layout) = src_layout {
+        let (chain, idx) = layout_read_index("src", layout, src_dims, "c")?;
         body.push_str(&chain);
         format!("src[{idx}]")
     } else {

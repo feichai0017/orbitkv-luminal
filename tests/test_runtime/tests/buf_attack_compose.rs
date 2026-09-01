@@ -408,19 +408,25 @@ impl DimsGraph {
     }
 }
 
-/// FLIPPED PIN (was: the first-wins nondeterminism measurement). A view
-/// whose numel DIFFERS from its parent's (a broadcast-flavored view),
-/// admitted onto the parent's CALLER-PINNED input buffer — the exact
-/// resident mix P2-on-real-backends creates. Under the WRITER-IDENTITY
-/// dims join (M4 Phase 1, approved 2026-08-26) the caller buffer's dims
-/// come ONLY from the resident that supplies its bytes — the staged input
-/// x at (2,3). The view reads THROUGH the buffer at (2,2,3) but produces
-/// no plan node and can never vote. We bufferize the SAME graph 60 times
-/// in one process: the old probe measured first-wins flicker between
-/// (2,3) and (2,2,3); the law now demands exactly {(2,3)}, every run.
+/// RESPELLED FOR THE CORRECTED CONTRACT (2026-08-31, correction 2). The
+/// historical pin here was the WRITER-IDENTITY DIMS JOIN: a view whose
+/// numel differs from its parent's, admitted onto the parent's
+/// caller-pinned buffer, and the pin was that the buffer's `dims` field
+/// settled deterministically on the WRITER's (2,3) rather than
+/// flickering with the resident hash order.
+///
+/// There is no dims field, no join, and no voting any more: "for each
+/// plan buffer, query the ASSIGNMENT for what it backs, look up that
+/// tensor's layout in the runtime's own knowledge, allocate span-of-layout
+/// bytes." So the determinism question moves to THE ASSIGNMENT — the one
+/// thing a runtime now reads to size storage. Same 60-run recipe, same
+/// hazard (two residents of one buffer at different extents), and the
+/// demand is exactly as strict: the buffer backs the STAGED INPUT, every
+/// run. The view rides the same storage and never competes for the row.
 #[test]
-fn caller_buffer_dims_writer_identity_join_is_deterministic() {
-    let mut outcomes: std::collections::BTreeSet<Vec<i64>> = Default::default();
+fn caller_buffer_assignment_is_deterministic() {
+    let mut outcomes: std::collections::BTreeSet<String> = Default::default();
+    let mut layouts: std::collections::BTreeSet<String> = Default::default();
     for _ in 0..60 {
         let mut g = DimsGraph::new();
         let x = g.input("x", "X", &[2, 3]);
@@ -433,34 +439,45 @@ fn caller_buffer_dims_writer_identity_join_is_deterministic() {
             &[2, 2, 3],
         );
         g.output(&c.eclass, "E");
-        let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferizes");
+        let graph = g.build();
+        let table = luminal::test_support::mock_layout_table(&graph);
+        let plan = luminal::test_support::bufferize_mock(&graph).expect("bufferizes");
         // sanity: the view really is resident in x's caller buffer
         let xbuf = plan.value_buffer[&x.eclass].clone();
         assert!(matches!(xbuf, BufferId::Boundary(_)));
         assert_eq!(plan.value_buffer[&v.eclass], xbuf, "view admitted onto the pinned buffer");
-        let dims = plan.buffers[&xbuf].dims.clone().expect("annotated");
-        outcomes.insert(dims);
+        outcomes.insert(plan.backed_tensor(&xbuf).expect("assignment row").to_string());
+        // Option B: the carried layout is the BACKED tensor's, so a
+        // load_plan caller sizes the same storage the same way.
+        assert_eq!(&plan.buffers[&xbuf].layout, &table[&x.eclass]);
+        layouts.insert(format!("{:?}", plan.buffers[&xbuf].layout));
     }
-    println!("distinct dims outcomes for the caller buffer over 60 runs: {outcomes:?}");
-    // THE PIN: writer identity, not resident hash-order. The staged input
-    // is the buffer's only writer, so its geometry — and only its geometry —
-    // names the storage, in every run.
+    println!("distinct assignment rows for the caller buffer over 60 runs: {outcomes:?}");
     assert_eq!(
         outcomes,
-        std::collections::BTreeSet::from([vec![2, 3]]),
-        "the caller buffer's dims must be the WRITER's geometry, every run"
+        std::collections::BTreeSet::from([x_name()]),
+        "the caller buffer must back the STAGED INPUT, every run"
     );
+    assert_eq!(layouts.len(), 1, "…and carry one layout, every run");
 }
 
-/// GATE (conflicting writers): two writers of one buffer that disagree on
-/// geometry are a planner contradiction and must BAIL LOUDLY, both writers
-/// named — never resolved by iteration order. Recipe: an in-place
-/// accumulator admitted onto the caller's ReadWrite input buffer (the
-/// attack-3c admission from the P2 probes) whose result claims DIFFERENT
-/// dims than the staged input — the buffer then has two disagreeing
-/// writers: the input stage at (2,3) and the compute result at (3,4).
+fn x_name() -> String {
+    "val$x".to_string()
+}
+
+/// THE DELETED DOOR, stated honestly (corrected contract, correction 2).
+/// The historical gate here demanded a LOUD BAIL when two writers of one
+/// buffer disagreed on geometry ("buffer geometry contradiction", both
+/// writers named). That door is GONE with the dims join: the bufferizer
+/// runs no sizing walk, holds no vote, and detects no contradiction —
+/// "all the necessary preconditions have been checked in the egraph."
+///
+/// The same program is now simply PLANNED. What replaces the gate is the
+/// assignment being unambiguous: each buffer names exactly one backed
+/// tensor, so there is nothing for two residents to disagree about — a
+/// runtime sizes by that one tensor's layout and hands the id out blindly.
 #[test]
-fn conflicting_writers_bail_loudly_with_both_named() {
+fn disagreeing_residents_no_longer_hit_a_geometry_door() {
     let mut g = DimsGraph::new();
     let x = g.input("x", "B", &[2, 3]);
     let r = g.op(
@@ -471,19 +488,19 @@ fn conflicting_writers_bail_loudly_with_both_named() {
         &[3, 4],
     );
     g.output(&r.eclass, "E");
-    let err = luminal::test_support::bufferize_mock(&g.build()).expect_err(
-        "two writers with disagreeing geometry on one buffer must be rejected",
-    );
-    let text = format!("{err:#}");
-    println!("rejected: {text}");
-    assert!(
-        text.contains("buffer geometry contradiction"),
-        "the writer-join door must name itself: {text}"
-    );
-    assert!(
-        text.contains("[2, 3]") && text.contains("[3, 4]"),
-        "both writers' dims must be named: {text}"
-    );
+    let graph = g.build();
+    let plan = luminal::test_support::bufferize_mock(&graph)
+        .expect("no geometry door remains: the plan is the assignment");
+    println!("{}", plan.summary());
+    // Every buffer has exactly ONE assignment row — the whole of what a
+    // runtime needs to size it.
+    for (id, buffer) in &plan.buffers {
+        assert!(
+            plan.backed_tensor(id).is_some(),
+            "buffer {} has no assignment row",
+            buffer.label
+        );
+    }
 }
 
 /// GATE (per-node descriptor schema, approved 2026-08-26b): every lowered
@@ -508,7 +525,9 @@ fn every_compute_node_carries_filled_slot_descriptors() {
         &[2, 2, 3],
     );
     g.output(&c.eclass, "E");
-    let plan = luminal::test_support::bufferize_mock(&g.build()).expect("bufferizes");
+    let graph = g.build();
+    let table = luminal::test_support::mock_layout_table(&graph);
+    let plan = luminal::test_support::bufferize_mock(&graph).expect("bufferizes");
 
     let mut computes = 0usize;
     for node in plan.dag.node_weights() {
@@ -524,29 +543,38 @@ fn every_compute_node_carries_filled_slot_descriptors() {
                     assert_eq!(&slot.buffer, id, "{}: descriptor buffer = writes entry", op.label());
                 }
                 if op.label() == "MockOp" {
+                    // The descriptor's ONE payload beyond identity is the
+                    // slot value's own carried layout — TOTAL by
+                    // construction (a missing row bails at lowering).
                     for slot in operand_info.iter().chain(result_info) {
-                        assert!(slot.dims.is_some(), "MockOp slot dims filled (value {})", slot.value);
-                        assert!(slot.dtype.is_some(), "MockOp slot dtype filled (value {})", slot.value);
-                        assert!(slot.element_bits.is_some(), "MockOp slot bits filled (value {})", slot.value);
+                        assert_eq!(
+                            Some(&slot.layout),
+                            table.get(&slot.value),
+                            "slot carries its own value's elected layout (value {})",
+                            slot.value
+                        );
                     }
-                    // Phase 3: the operand READS THROUGH the folded view, so
-                    // its descriptor records the fold — one hop, fail-closed
-                    // entries (MockView has no numeric map), parent dims =
-                    // x's literal extents. Results are produced here: direct.
-                    let access = operand_info[0]
-                        .composed_access
-                        .as_ref()
-                        .expect("the view-reading operand carries the fold's composed access");
-                    assert_eq!(access.hops.len(), 1, "one folded view, one hop");
-                    assert_eq!(access.hops[0].entries, None, "MockView is mapless: fail-closed");
-                    assert_eq!(access.hops[0].parent_dims, Some(vec![2, 3]), "parent extents ride the hop");
-                    for slot in result_info {
-                        assert!(slot.composed_access.is_none(), "results are never folds");
-                    }
+                    // The operand READS THROUGH the folded view, so its
+                    // descriptor carries the VIEW's layout — a different
+                    // function from the residence's, which is exactly the
+                    // information the buffer table cannot supply.
+                    assert_eq!(&operand_info[0].layout, &table[&v.eclass]);
+                    assert_ne!(
+                        operand_info[0].layout, table[&x.eclass],
+                        "the view's layout is not its parent's"
+                    );
                 }
             }
-            BufferNode::BufferCopy { value, .. } => {
-                assert_eq!(value, &c.eclass, "the delivery copy names the value it transports");
+            // The copy carries ONLY {src, dst} (the BufferCopy contract):
+            // a dumb exact-size whole-buffer copy, with ordering left to
+            // the runtime. What landed in `dst` is the ASSIGNMENT's word.
+            BufferNode::BufferCopy { src, dst } => {
+                assert_ne!(src, dst, "never a self-copy");
+                assert_eq!(
+                    plan.backed_tensor(dst),
+                    Some(&c.eclass),
+                    "the delivery destination backs the delivered value"
+                );
             }
             _ => {}
         }
@@ -571,7 +599,10 @@ fn every_compute_node_carries_filled_slot_descriptors() {
         plan.value_buffer[&x.eclass],
         "…resident in the parent's caller buffer"
     );
-    assert_eq!(consumer.dims, Some(vec![2, 2, 3]), "…at the view's own geometry");
+    assert_eq!(
+        &consumer.layout, &table[&v.eclass],
+        "…at the view's OWN layout (the geometry now lives in L, not a dims field)"
+    );
 }
 
 /// COMPOSED DOOR (attack 1+4, P1xP2): an output slot bound to a VIEW OF A

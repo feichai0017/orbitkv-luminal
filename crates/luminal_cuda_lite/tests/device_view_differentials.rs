@@ -25,49 +25,27 @@ use luminal::prelude::{FxHashMap, NodeIndex};
 use luminal_cuda_lite::CudaRuntime;
 
 
-/// Read the device output DENSELY through its disclosed layout
-/// (escape-and-disclose, ruling 2026-08-27): a view-elected output
-/// returns its BACKING buffer's bytes (possibly parent-sized) plus the
-/// elected layout, so the honest comparison walks each element
-/// [i0, i1, ...] through the hop chain — `walk_layout_index` is the
-/// trusted reader. A dense election walks the identity, so this is the
-/// universal readback: no fixture assumes dense anymore.
+/// Read the device output DENSELY through its RETURNED LAYOUT
+/// (escape-and-disclose + the corrected contract, 2026-08-31): a
+/// view-elected output returns its BACKING buffer's bytes (possibly
+/// parent-sized) plus the elected layout `L`, so the honest comparison
+/// EVALUATES that layout at each coordinate down to a flat element
+/// index. The hop-chain walker is gone with the hop machinery; the
+/// reader is this runtime evaluating its OWN vocabulary
+/// (`layouts::dense_f32`). The canonical cross-runtime version lives in
+/// the testing crate as `test_runtime::test_equality::dense_f32` — CL
+/// cannot depend on it (`test_runtime` depends on CL).
+///
+/// A dense election evaluates the identity, so this stays the universal
+/// readback: no fixture assumes dense.
 fn walked_dense(rt: &CudaRuntime, out: NodeIndex) -> Vec<f32> {
     let (data, binding) = rt.fetch(out).expect("escape-and-disclose fetch");
     let bytes = match data {
         TypedBuffer::F32(values) => values,
         other => panic!("output is {}, not f32", other.type_name()),
     };
-    let dims = binding.dims.clone().expect("numeric output dims");
-    let base_dims = rt
-        .plan()
-        .expect("plan loaded")
-        .buffers
-        .get(&binding.buffer)
-        .and_then(|record| record.dims.clone())
-        .expect("backing buffer geometry");
-    let numel: usize = dims.iter().map(|&d| d as usize).product();
-    let rank = dims.len();
-    let mut dense = Vec::with_capacity(numel);
-    let mut coords = vec![0usize; rank];
-    for _ in 0..numel {
-        let flat = luminal::bufferize::walk_layout_index(
-            binding.composed_access.as_ref(),
-            &dims,
-            &base_dims,
-            &coords,
-        )
-        .expect("the walker reads the disclosed layout");
-        dense.push(bytes[flat]);
-        for axis in (0..rank).rev() {
-            coords[axis] += 1;
-            if coords[axis] < dims[axis] as usize {
-                break;
-            }
-            coords[axis] = 0;
-        }
-    }
-    dense
+    luminal_cuda_lite::layouts::dense_f32(bytes, &binding.layout)
+        .expect("the returned layout reads dense over its backing buffer")
 }
 
 fn view_search_options() -> ImplementationSearchOptions {
@@ -102,7 +80,9 @@ fn run_differential(
     rt.search(&data, &view_search_options()).expect("cuda search");
 
     // The plan must have ELECTED AND FOLDED the view: no materialize
-    // computes, and at least one consumer reads through composed access.
+    // computes, and at least one consumer READS THROUGH A LAYOUT THAT IS
+    // NOT the one its buffer was allocated for (the corrected contract's
+    // fold discriminator — the plan does not label folds).
     let plan = rt.plan().expect("plan loaded");
     let mut folded_slots = 0usize;
     for node in plan.dag.node_weights() {
@@ -116,8 +96,10 @@ fn run_differential(
                 "{what}: foldable movement was materialized:\n{}",
                 plan.summary()
             );
-            folded_slots +=
-                operand_info.iter().filter(|s| s.composed_access.is_some()).count();
+            folded_slots += operand_info
+                .iter()
+                .filter(|s| s.layout != plan.buffers[&s.buffer].layout)
+                .count();
         }
     }
     assert!(

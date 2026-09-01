@@ -144,15 +144,15 @@ use crate::layout_ir::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockLayout(pub ClassId);
 
-/// The mock rendered-layout table for a built graph: every value's layout
-/// class mapped to its identity. Works for hand-built [`TestGraph`]s and
-/// real extractions alike (the table is keyed by layout e-class, which
-/// both carry by construction).
+/// The mock rendered-layout table for a built graph, keyed by VALUE
+/// e-class (the [`crate::bufferize::bufferize`] contract): every value
+/// maps to the identity of its layout class. Works for hand-built
+/// [`TestGraph`]s and real extractions alike.
 pub fn mock_layout_table(graph: &ExtractedGraph) -> HashMap<ClassId, MockLayout> {
     let mut table = HashMap::new();
     let mut record = |value: &LayoutTensorInfo| {
         table
-            .entry(value.layout.eclass.clone())
+            .entry(value.eclass.clone())
             .or_insert_with(|| MockLayout(value.layout.eclass.clone()));
     };
     for node in graph.dag.node_weights() {
@@ -1618,41 +1618,57 @@ mod harness_tests {
         assert_eq!(dps.inputs[3].port, "dest0");
     }
 
-    /// TYPED-BUFFERS LANDING A PIN (2026-08-11): the serialized
-    /// `dtype-of` rows are readable (op = "dtype-of", children[0] = the
-    /// logical argument, the row's own eclass holds the nullary Dtype
-    /// member — the bounds-row encoding), and they thread through
-    /// extraction onto every plan buffer. The mixed-dtype gather fixture
-    /// exercises F32 data, an Int boundary input, an Int interior iota
-    /// (a planner-allocated buffer), and an F32 output — so both
-    /// boundary and allocated buffers must arrive typed, and the
-    /// dtype/width consistency bail inside `annotate_buffer_geometry`
-    /// has run over all of them by the time bufferize returns Ok.
+    /// TYPED-BUFFERS PIN, RESPELLED FOR THE CORRECTED CONTRACT
+    /// (2026-08-31, correction 1). The serialized `dtype-of` rows are
+    /// still readable (op = "dtype-of", children[0] = the logical
+    /// argument, the row's own eclass holds the nullary Dtype member —
+    /// the bounds-row encoding), but they NO LONGER thread onto plan
+    /// buffers: `PlanDtype` left the plan and bufferizer vocabulary
+    /// entirely. What they thread onto is the RUNTIME'S OWN `L` — here
+    /// `RefLayout { mirror, dtype }` — which the reference renderer folds
+    /// at extraction time and which Option B then carries on each
+    /// assignment entry.
+    ///
+    /// The mixed-dtype gather fixture exercises F32 data, an Int boundary
+    /// input, an Int interior iota (a planner-allocated buffer), and an
+    /// F32 output — so both boundary and allocated buffers must arrive
+    /// with a typed carried layout. There is no width/dtype consistency
+    /// bail any more (the e-graph enforces dtype consistency); the fact
+    /// pinned here is TRANSPORT: every assignment row's `L` carries the
+    /// dtype its own backed tensor was declared with.
     #[test]
-    fn dtype_index_reads_serialized_rows_onto_buffers() {
+    fn dtype_rows_reach_the_runtimes_own_layout_type() {
         use luminal::dtype::PlanDtype;
-        let graph = extract_fixture("boundary_gather.egg");
-        let plan = luminal::test_support::bufferize_mock(&luminal::dps::dps_rewrite(&graph))
-            .expect("mixed-dtype plan bufferizes");
+        let egraph = serialize_fixture("boundary_gather.egg");
+        let graph = luminal::dps::dps_rewrite(&extract_fixture("boundary_gather.egg"));
+        let mut cache = std::collections::HashMap::new();
+        let table = luminal::extractor::rendered_layout_table(
+            &egraph,
+            &graph, // the POST-DPS graph: value-keyed tables cover poisons
+            &luminal_reference::ReferenceLayoutRenderer,
+            &mut cache,
+        )
+        .expect("the reference renderer covers every elected value");
+        let plan = bufferize::bufferize(&graph, &table).expect("mixed-dtype plan bufferizes");
 
         let mut by_lit: std::collections::HashMap<i64, PlanDtype> = Default::default();
         let mut allocated_int = 0usize;
         for buffer in plan.buffers.values() {
-            if buffer.element_bits.is_some() {
-                let dtype = buffer.dtype.unwrap_or_else(|| {
-                    panic!("buffer {} has geometry but no dtype", buffer.label)
-                });
-                assert_eq!(
-                    dtype.egglog_bits(),
-                    buffer.element_bits.expect("checked above"),
-                    "buffer {} width disagrees with its dtype",
-                    buffer.label
-                );
-                if let Some(lit) = buffer.lit {
-                    by_lit.insert(lit, dtype);
-                } else if dtype == PlanDtype::Int {
-                    allocated_int += 1;
-                }
+            let dtype = buffer.layout.dtype.unwrap_or_else(|| {
+                panic!("buffer {} carries no dtype fact in its L", buffer.label)
+            });
+            // TRANSPORT, not derivation: the row on the buffer's carried
+            // layout IS the row the renderer put on the BACKED tensor.
+            assert_eq!(
+                Some(&buffer.layout),
+                table.get(&buffer.backs),
+                "buffer {} carries its backed tensor's own rendered layout",
+                buffer.label
+            );
+            if let Some(lit) = buffer.lit {
+                by_lit.insert(lit, dtype);
+            } else if dtype == PlanDtype::Int {
+                allocated_int += 1;
             }
         }
         assert_eq!(by_lit.get(&310), Some(&PlanDtype::F32), "embedding table");
@@ -1873,7 +1889,8 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(MockView), &[&x], &[("v", "row0")])[0].clone();
         g.output(&v, "B");
-        let plan = bufferize_mock(&g.build()).expect("bufferizes");
+        let graph = g.build();
+        let plan = bufferize_mock(&graph).expect("bufferizes");
 
         assert!(plan.buffers.keys().all(|id| matches!(id, BufferId::Boundary(_))));
         assert!(
@@ -1896,15 +1913,13 @@ mod harness_tests {
             "the slot is backed by the input buffer:\n{}",
             plan.summary()
         );
-        let access = slot
-            .composed_access
-            .as_ref()
-            .expect("the binding discloses the view layout over the input buffer");
-        assert_eq!(access.hops.len(), 1, "the row0 fold is the one hop");
-        assert_eq!(
-            access.hops[0].entries, None,
-            "MockView carries no numeric map — the hop stays fail-closed"
-        );
+        // THE DISCLOSURE (Option B): the binding carries the VIEW value's
+        // own elected layout — a different function from its parent's, over
+        // the same bytes. That is the whole of it: no hop chain, no dims,
+        // no dtype. The caller interprets the returned buffer under it.
+        let table = luminal::test_support::mock_layout_table(&graph);
+        assert_eq!(&slot.layout, &table[&v], "the view's layout, verbatim");
+        assert_ne!(table[&v], table[&x], "the view is not its parent");
     }
 
     /// THE REAL VIEW OP, plan level (Step 3): `IndexMapApplyView` feeding a
@@ -1973,7 +1988,8 @@ mod harness_tests {
         let x = g.input("x", "B", Access::ReadWrite, "rm");
         let v = g.op(Box::new(IndexMapApplyView { entries: None }), &[&x], &[("v", "row0")])[0].clone();
         g.output(&v, "D");
-        let plan = bufferize_mock(&g.build())
+        let graph = g.build();
+        let plan = bufferize_mock(&graph)
             .expect("a view of an input returns zero-copy under escape semantics");
 
         assert_eq!(
@@ -2004,11 +2020,11 @@ mod harness_tests {
             "the slot is backed by the INPUT buffer:\n{}",
             plan.summary()
         );
-        let access = slot
-            .composed_access
-            .as_ref()
-            .expect("the binding discloses the elected view layout");
-        assert_eq!(access.hops.len(), 1);
+        let table = luminal::test_support::mock_layout_table(&graph);
+        assert_eq!(
+            &slot.layout, &table[&v],
+            "the binding discloses the elected view layout, verbatim"
+        );
     }
 
     /// STAGE 7 / STEP 4, the view-feeds-compute boundary fixture end to end:
@@ -4012,28 +4028,35 @@ mod ring_ignition_battery {
 
 #[cfg(test)]
 mod escape_execution_tests {
-    //! ESCAPE-AND-DISCLOSE, executor-level (ruling 2026-08-27): hand-built
-    //! plans (the surface `load_plan` accepts — never certified by the
-    //! pre-lowering certificate) prove the reference executor's escape
-    //! path end to end: the fetch returns the BACKING buffer's bytes plus
-    //! the elected layout, the trusted host walker reads elements through
-    //! it, and the executor guard refuses minted-non-escaping storage
-    //! backing an output slot. Same dep-world discipline as
-    //! `harness_tests`: every luminal type comes from the `luminal::`
-    //! build luminal_reference links.
+    //! THE HAND-BUILT-PLAN FIXTURE — where Option B's carried `L` is load
+    //! bearing (correction 7). A live runtime knows every layout before it
+    //! calls `bufferize`, so the plan tells it nothing new. These plans
+    //! have NO such runtime behind them: they are the surface `load_plan`
+    //! accepts, built by hand, with no e-graph, no recorder and no
+    //! rendered table anywhere. Under Option B they need no companion
+    //! argument, because the boundary/layout knowledge a live runtime
+    //! would have had rides the plan itself: `Buffer::layout` sizes every
+    //! allocation and `OutputBinding::layout` describes every delivery.
+    //!
+    //! They also prove the escape path end to end: the fetch returns the
+    //! BACKING buffer's bytes plus the elected layout, elements are read
+    //! by evaluating that layout, and the executor guard refuses
+    //! minted-non-escaping storage backing an output slot. Same dep-world
+    //! discipline as `harness_tests`: every luminal type comes from the
+    //! `luminal::` build luminal_reference links.
     use egraph_serialize::ClassId;
     use luminal::buffer_tensor_ir::TypedBuffer;
     use luminal::bufferize::{
-        walk_layout_index, AccessHop, Buffer, BufferEdge, BufferId, BufferIrGraph, BufferNode,
-        ComposedAccess, EdgeKind, InputBinding, OutputBinding, Owner,
+        Buffer, BufferEdge, BufferId, BufferIrGraph, BufferNode, EdgeKind, InputBinding,
+        OutputBinding, Owner,
     };
-    use luminal::index_expr::IotaExpr;
     use luminal::layout_ir::{Access, FreedBy};
     use luminal::prelude::petgraph::graph::DiGraph;
     use luminal_reference::{RefLayout, ReferenceRuntime};
 
-    /// A hand-built plan's transported layout (never consumed by the
-    /// executor — `Buffer.layout` is opaque transport).
+    /// A hand-built plan's carried layout. THE ONLY SIZING INPUT: the
+    /// executor allocates span-of-layout elements in the layout's dtype —
+    /// no dims field, no walk, no vote.
     fn rm_layout(dims: &[i64]) -> RefLayout {
         // Dep-world discipline: `luminal::layouts`, never `crate::layouts` —
         // RefLayout is the plain `luminal` build's MirrorLayout, and the
@@ -4041,10 +4064,35 @@ mod escape_execution_tests {
         use luminal::layouts::{
             BitWidthTerm, IntExprTerm, MirrorLayout, RightMajorContiguousElementLayout, ShapeTerm,
         };
-        MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
-            shape: ShapeTerm(dims.iter().map(|&d| IntExprTerm::Lit(d)).collect()),
-            width: BitWidthTerm(32),
-        })
+        RefLayout {
+            mirror: MirrorLayout::RightMajor(RightMajorContiguousElementLayout {
+                shape: ShapeTerm(dims.iter().map(|&d| IntExprTerm::Lit(d)).collect()),
+                width: BitWidthTerm(32),
+            }),
+            dtype: Some(luminal::dtype::PlanDtype::F32),
+        }
+    }
+
+    /// PROTOTYPE (Option B): the transpose view's COMPOSED layout — the
+    /// `L` the e-graph would mint for the view value (shape `[3,2]`,
+    /// reading its dense `[2,3]` parent): element (i,j) at parent flat
+    /// j*3 + i, spelled as the strided chain from-end [coord0*3, coord1].
+    fn transpose_strided_layout() -> RefLayout {
+        use luminal::layouts::{
+            BitWidthTerm, IntExprTerm, MirrorLayout, ShapeTerm, StridedElementLayout,
+        };
+        let coord = |axis_from_end: i64| IntExprTerm::Coord { axis_from_end };
+        RefLayout {
+            mirror: MirrorLayout::Strided(StridedElementLayout {
+                shape: ShapeTerm(vec![IntExprTerm::Lit(3), IntExprTerm::Lit(2)]),
+                chain: vec![
+                    IntExprTerm::Mul(Box::new(coord(0)), Box::new(IntExprTerm::Lit(3))),
+                    coord(1),
+                ],
+                width: BitWidthTerm(32),
+            }),
+            dtype: Some(luminal::dtype::PlanDtype::F32),
+        }
     }
 
     /// A minimal escaped-output plan: input x `[2,3]` (BufferLit 7) is
@@ -4066,10 +4114,8 @@ mod escape_execution_tests {
                 freed_by: FreedBy::Caller,
                 owner: Owner::Caller,
                 label: "B".to_string(),
-                dims: Some(vec![2, 3]),
-                element_bits: Some(32),
-                dtype: Some(luminal::dtype::PlanDtype::F32),
                 lit: Some(7),
+                backs: x.clone(),
                 layout: rm_layout(&[2, 3]),
             },
         );
@@ -4081,38 +4127,36 @@ mod escape_execution_tests {
                 freed_by,
                 owner: Owner::System,
                 label: "escaped".to_string(),
-                dims: Some(vec![2, 3]),
-                element_bits: Some(32),
-                dtype: Some(luminal::dtype::PlanDtype::F32),
                 lit: None,
+                // THE ASSIGNMENT: this storage holds the PARENT's bytes
+                // (the base copy landed them), so it backs x and is sized
+                // by x's layout — parent-sized, not view-sized.
+                backs: x.clone(),
                 layout: rm_layout(&[2, 3]),
             },
         );
-        let mut dag: DiGraph<BufferNode, BufferEdge> = DiGraph::new();
+        let mut dag: DiGraph<BufferNode<RefLayout>, BufferEdge> = DiGraph::new();
         let input = dag.add_node(BufferNode::BufferInput {
             slots: vec![InputBinding { value: x.clone(), buffer: input_id.clone() }],
         });
+        // The copy carries ONLY {src, dst} — a dumb exact-size whole-buffer
+        // copy (both buffers are the parent's 6 f32s). Ordering is this
+        // fixture's own obligation, discharged by the data edges below.
         let copy = dag.add_node(BufferNode::BufferCopy {
             src: input_id.clone(),
             dst: escaped_id.clone(),
-            value: x.clone(),
         });
         let out = dag.add_node(BufferNode::BufferOutput {
             slots: vec![OutputBinding {
                 index: 0,
                 value: v.clone(),
                 buffer: escaped_id.clone(),
-                dims: Some(vec![3, 2]),
-                element_bits: Some(32),
-                dtype: Some(luminal::dtype::PlanDtype::F32),
-                composed_access: Some(ComposedAccess {
-                    hops: vec![AccessHop {
-                        // Transpose: parent axis 0 reads the view's LAST
-                        // coordinate, parent axis 1 the first.
-                        entries: Some(vec![IotaExpr::Coord(0), IotaExpr::Coord(1)]),
-                        parent_dims: Some(vec![2, 3]),
-                    }],
-                }),
+                // A VIEW OUTPUT, fulfilled STRUCTURALLY: the slot's buffer
+                // IS the parent's storage (zero-copy by construction), and
+                // the carried layout — the view's composed strided form —
+                // is how the caller reads it. No dims, no dtype, no hop
+                // chain: the layout is the whole disclosure.
+                layout: transpose_strided_layout(),
             }],
         });
         dag.add_edge(
@@ -4134,11 +4178,16 @@ mod escape_execution_tests {
         BufferIrGraph { dag, buffers, value_buffer, outputs: vec![out] }
     }
 
-    /// PROBE 1, the executed-bytes half: the escaped slot's fetch returns
-    /// the backing buffer's bytes plus the layout, and the walker reads
-    /// every element of the transpose view correctly.
+    /// PROBE 1, the executed-bytes half — OPTION B RESTRUCTURE: the
+    /// escaped slot's fetch returns the backing buffer's bytes plus the
+    /// slot's HELD LAYOUT (`binding.layout`, verbatim), and elements are
+    /// read by EVALUATING the mirror layout's own expressions — no core
+    /// walker (`walk_layout_index` left core; the canonical test-equality
+    /// utility lives in the testing crate `test_runtime::test_equality`,
+    /// duplicated minimally here because core's own dev-tests cannot
+    /// depend on the testing crate without a dev-cycle).
     #[test]
-    fn escaped_output_executes_and_walks_correctly() {
+    fn escaped_output_executes_and_reads_through_the_held_layout() {
         let mut rt = ReferenceRuntime::default();
         rt.load_plan(escaped_plan(FreedBy::Caller));
         let staged: Vec<f32> = (0..6).map(|n| n as f32 * 10.0).collect();
@@ -4148,20 +4197,32 @@ mod escape_execution_tests {
         let (data, binding) = rt.output_slot(0).expect("the universal fetch");
         let bytes = data.as_f32().expect("f32 backing bytes");
         assert_eq!(bytes.len(), 6, "the BACKING buffer is parent-sized");
-        let value_dims = binding.dims.clone().expect("value dims disclosed");
-        assert_eq!(value_dims, vec![3, 2]);
-        let base_dims = vec![2i64, 3];
-        for i in 0..3 {
-            for j in 0..2 {
-                let flat = walk_layout_index(
-                    binding.composed_access.as_ref(),
-                    &value_dims,
-                    &base_dims,
-                    &[i, j],
-                )
-                .expect("the walker composes the disclosed layout");
+        // The value's shape comes from the CARRIED LAYOUT's domain — there
+        // is no dims field to read.
+        use luminal::layouts::{IntExprTerm, MirrorLayout};
+        assert_eq!(binding.layout.mirror.literal_extents(), Some(vec![3, 2]));
+        let MirrorLayout::Strided(strided) = &binding.layout.mirror else {
+            panic!("the disclosed layout is the composed strided form");
+        };
+        // Evaluate one chain summand at concrete coords (from-end axes).
+        fn eval(expr: &IntExprTerm, coords: &[usize]) -> i64 {
+            match expr {
+                IntExprTerm::Lit(v) => *v,
+                IntExprTerm::Coord { axis_from_end } => {
+                    let rank = coords.len();
+                    coords[rank - 1 - *axis_from_end as usize] as i64
+                }
+                IntExprTerm::Add(a, b) => eval(a, coords) + eval(b, coords),
+                IntExprTerm::Mul(a, b) => eval(a, coords) * eval(b, coords),
+                other => panic!("fixture layout uses no {other:?}"),
+            }
+        }
+        for i in 0..3usize {
+            for j in 0..2usize {
+                let coords = [i, j];
+                let flat: i64 = strided.chain.iter().map(|s| eval(s, &coords)).sum();
                 assert_eq!(
-                    bytes[flat],
+                    bytes[flat as usize],
                     staged[j * 3 + i],
                     "v[{i},{j}] must be x[{j},{i}]"
                 );
@@ -4204,8 +4265,7 @@ mod escape_execution_tests {
         for node in plan.dag.node_weights_mut() {
             if let BufferNode::BufferOutput { slots } = node {
                 slots[0].buffer = input_id.clone();
-                slots[0].composed_access = None;
-                slots[0].dims = Some(vec![2, 3]);
+                slots[0].layout = rm_layout(&[2, 3]);
             }
         }
         let mut rt = ReferenceRuntime::default();

@@ -32,36 +32,10 @@ fn walked_dense(rt: &CudaRuntime, out: NodeIndex) -> Vec<f32> {
         TypedBuffer::F32(values) => values,
         other => panic!("output is {}, not f32", other.type_name()),
     };
-    let dims = binding.dims.clone().expect("numeric output dims");
-    let base_dims = rt
-        .plan()
-        .expect("plan loaded")
-        .buffers
-        .get(&binding.buffer)
-        .and_then(|record| record.dims.clone())
-        .expect("backing buffer geometry");
-    let numel: usize = dims.iter().map(|&d| d as usize).product();
-    let rank = dims.len();
-    let mut dense = Vec::with_capacity(numel);
-    let mut coords = vec![0usize; rank];
-    for _ in 0..numel {
-        let flat = luminal::bufferize::walk_layout_index(
-            binding.composed_access.as_ref(),
-            &dims,
-            &base_dims,
-            &coords,
-        )
-        .expect("the walker reads the disclosed layout");
-        dense.push(bytes[flat]);
-        for axis in (0..rank).rev() {
-            coords[axis] += 1;
-            if coords[axis] < dims[axis] as usize {
-                break;
-            }
-            coords[axis] = 0;
-        }
-    }
-    dense
+    // The value's shape and read path both come from the RETURNED
+    // LAYOUT; there is no `dims` field and no hop chain any more.
+    luminal_cuda_lite::layouts::dense_f32(bytes, &binding.layout)
+        .expect("the returned layout reads dense over its backing buffer")
 }
 use luminal_cuda_lite::ops::cublaslt::device_call;
 use luminal_cuda_lite::ops::cublaslt::exec::{CSource, LtCall, LtDesc};

@@ -6,8 +6,15 @@
 //! lower"). Everything here is host-side: real searched plans through
 //! the CUDA ladder, rendered to CUDA source strings (the
 //! codegen_identity discipline), pinned for composed index arithmetic +
-//! per-axis __trap() bounds + hop-composition order (outermost-first,
-//! the walk_layout_index / composed_read_index convention). Numeric
+//! bounds traps. UNDER THE CORRECTED CONTRACT (2026-08-31) the hop chain
+//! is gone: each read operand carries ONE composed layout (the e-graph
+//! composed it at view creation) and the kernels lower that layout's own
+//! offset expression. The pins below therefore show ONE index expression
+//! and ONE final trap per folded operand — against the layout's SPAN
+//! where the constructor discloses one (the packed ladder), and against
+//! non-negativity alone for the offset-expression forms, which disclose
+//! no reach. That narrowing of the trap surface is the honest cost of
+//! composing in the e-graph instead of the planner. Numeric
 //! truth for the gather family comes from the reference runtime on the
 //! SAME graph (materialize-only by ruling aff22598 — flat kernels),
 //! pinned against hand-computed values. WRITE sides stay fail-closed:
@@ -63,10 +70,11 @@ fn rendered(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> Vec<(String,
             .unwrap_or_else(|| panic!("elected op {label} has no codegen row"));
         let ctx = kernels::CodegenCtx::from_descriptors(&label, operand_info, result_info)
             .unwrap_or_else(|e| panic!("descriptor ctx for {label}: {e}"));
-        let folded: Vec<usize> = operand_info
-            .iter()
-            .enumerate()
-            .filter_map(|(k, s)| s.composed_access.as_ref().map(|_| k))
+        // "Folded" now means: the operand's own carried LAYOUT is not
+        // the direct read for its domain (corrected contract — the
+        // composed-access field is gone; the layout IS the read path).
+        let folded: Vec<usize> = (0..operand_info.len())
+            .filter(|&k| ctx.non_direct_operand(k).is_some())
             .collect();
         let sources: Vec<String> = (kernel.codegen)(op.as_ref(), &ctx)
             .unwrap_or_else(|e| panic!("codegen for {label}: {e}"))
@@ -150,9 +158,8 @@ fn gather_lowers_a_folded_coordinate_operand() {
     long long c0 = (long long)(rem % 2ULL); rem /= 2ULL;
     long long flat = 0;
     long long coord;
-    long long coord0_h0_0 = c0;
-    if (coord0_h0_0 < 0 || coord0_h0_0 >= 2LL) __trap();
-    long long coord0_idx = coord0_h0_0 * 1LL;
+    long long coord0_idx = c0 + 0LL;
+    if (coord0_idx < 0 || coord0_idx >= (((1LL + (2LL + -1LL)) + 0LL))) __trap();
     coord = (long long)coord0[coord0_idx];
     if (coord < 0 || coord >= 4LL) __trap();
     flat += coord * 3LL;
@@ -162,6 +169,12 @@ fn gather_lowers_a_folded_coordinate_operand() {
     out[i] = data[flat];
 }"#
     );
+    // READ THE COORD0 LINE: `c0 + 0LL` is the BROADCAST layout itself —
+    // the stride-0 residue on the expanded axis and the bare coordinate
+    // on the live one — with ONE trap against that layout's disclosed
+    // span (1 + (2-1) + 0 = 2 elements of `rows`). The gather's own
+    // value-extent traps (`coord >= 4`, `coord >= 3`) are unchanged:
+    // they guard the INDIRECTION, not the layout.
 }
 
 /// GATHER, data through a fold: the data operand is a permute view, so
@@ -197,19 +210,16 @@ fn gather_lowers_a_folded_data_operand() {
         &sources[0],
         &[
             // The gathered coordinates are trapped against the data
-            // VALUE's extents (4,3), then bound as the chain's inputs.
+            // VALUE's extents (4,3), then become the layout's coordinates.
             "if (coord < 0 || coord >= 4LL) __trap();",
             "long long data_c0 = coord;",
             "if (coord < 0 || coord >= 3LL) __trap();",
             "long long data_c1 = coord;",
-            // Hop 0 = the permute map into base (3,4), evaluated at
-            // the data-value coordinates, per-axis trapped.
-            "long long data_h0_0 = data_c1;",
-            "if (data_h0_0 < 0 || data_h0_0 >= 3LL) __trap();",
-            "long long data_h0_1 = data_c0;",
-            "if (data_h0_1 < 0 || data_h0_1 >= 4LL) __trap();",
-            // Residence read over base's row-major strides (4,1).
-            "long long data_idx = data_h0_0 * 4LL + data_h0_1 * 1LL;",
+            // The permute's COMPOSED layout, lowered once: data[i][j]
+            // lives at base flat j*4 + i.
+            "long long data_idx = data_c0 * 1LL + data_c1 * 4LL;",
+            // ONE trap, against the layout's disclosed span (base numel).
+            "if (data_idx < 0 || data_idx >= (12LL)) __trap();",
             "out[i] = data[data_idx];",
         ],
         "gather folded-data",
@@ -268,10 +278,9 @@ fn scatter_lowers_a_folded_coordinate_operand() {
             // src-coordinate prelude over (2,3)
             "long long c1 = (long long)(rem % 3ULL); rem /= 3ULL;",
             "long long c0 = (long long)(rem % 2ULL); rem /= 2ULL;",
-            // the broadcast chain + trap, then the strided coord read
-            "long long coord0_h0_0 = c0;",
-            "if (coord0_h0_0 < 0 || coord0_h0_0 >= 2LL) __trap();",
-            "long long coord0_idx = coord0_h0_0 * 1LL;",
+            // the broadcast LAYOUT, lowered once, with one span trap
+            "long long coord0_idx = c0 + 0LL;",
+            "if (coord0_idx < 0 || coord0_idx >= (((1LL + (2LL + -1LL)) + 0LL))) __trap();",
             "coord = (long long)coord0[coord0_idx];",
             // the scatter's own value-extent traps stand
             "if (coord < 0 || coord >= 4LL) __trap();",
@@ -332,31 +341,33 @@ fn scatter_lowers_all_read_side_folds() {
         "init, src, and coord0 all read through folds:\n{}",
         plan.summary()
     );
-    // Launch 1: init read through the permute chain at DEST coordinates.
+    // Launch 1: init read through its PERMUTE LAYOUT at dest coordinates
+    // — init[i][j] = init_base[j][i], i.e. base flat j*4 + i.
     assert_contains(
         &sources[0],
         &[
-            "long long init_h0_0 = c1;",
-            "if (init_h0_0 < 0 || init_h0_0 >= 3LL) __trap();",
-            "long long init_h0_1 = c0;",
-            "if (init_h0_1 < 0 || init_h0_1 >= 4LL) __trap();",
-            "long long init_idx = init_h0_0 * 4LL + init_h0_1 * 1LL;",
+            "long long init_idx = c0 * 1LL + c1 * 4LL;",
+            "if (init_idx < 0 || init_idx >= (12LL)) __trap();",
             "out[i] = init[init_idx];",
         ],
         "scatter all-folds copy launch",
     );
-    // Launch 2: src through the slice chain (+1 row offset), coord0
-    // through the broadcast chain; write side untouched.
+    // Launch 2: src through its SLICE layout (+1 row), coord0 through
+    // its broadcast layout; write side untouched.
+    //
+    // BOUNDS HONESTY, visible here: the slice composes to an
+    // ElementOffset form, which discloses NO reach (`SpanExpr` is
+    // deliberately unimplemented for it), so its only trap is
+    // non-negativity — where the hop machinery trapped every
+    // intermediate coordinate against its parent's extents. This is the
+    // documented cost of composing in the e-graph.
     assert_contains(
         &sources[1],
         &[
-            "long long coord0_h0_0 = c0;",
+            "long long coord0_idx = c0 + 0LL;",
             "coord = (long long)coord0[coord0_idx];",
-            "long long src_h0_0 = (c0 + 1LL);",
-            "if (src_h0_0 < 0 || src_h0_0 >= 4LL) __trap();",
-            "long long src_h0_1 = c1;",
-            "if (src_h0_1 < 0 || src_h0_1 >= 3LL) __trap();",
-            "long long src_idx = src_h0_0 * 3LL + src_h0_1 * 1LL;",
+            "long long src_idx = (((c0 * 3LL) + 3LL) + c1);",
+            "if (src_idx < 0) __trap();",
             "if (atomicExch(&flags[flat], 1u) != 0u) __trap();",
             "out[flat] = src[src_idx];",
         ],
@@ -405,13 +416,11 @@ fn materialize_lowers_a_folded_input_operand() {
             "long long parent_c0 = idx;",
             "if (idx < 0 || idx >= 2LL) __trap();",
             "long long parent_c1 = idx;",
-            // ...and the folded permute chain is evaluated at THOSE
-            // (composition on top), per-axis trapped against x (2,3).
-            "long long parent_h0_0 = parent_c1;",
-            "if (parent_h0_0 < 0 || parent_h0_0 >= 2LL) __trap();",
-            "long long parent_h0_1 = parent_c0;",
-            "if (parent_h0_1 < 0 || parent_h0_1 >= 3LL) __trap();",
-            "long long parent_idx = parent_h0_0 * 3LL + parent_h0_1 * 1LL;",
+            // ...and the folded permute's COMPOSED LAYOUT is evaluated at
+            // THOSE coordinates (composition on top), once: x^T[a][b] is
+            // x flat b*3 + a.
+            "long long parent_idx = parent_c0 * 1LL + parent_c1 * 3LL;",
+            "if (parent_idx < 0 || parent_idx >= (6LL)) __trap();",
             "out[i] = parent[parent_idx];",
         ],
         "materialize folded input",

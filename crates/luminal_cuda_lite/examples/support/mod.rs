@@ -35,7 +35,7 @@ pub fn require_device(example: &str) {
 pub mod device {
     use anyhow::{anyhow, bail, Context, Result};
     use luminal::buffer_tensor_ir::TypedBuffer;
-    use luminal::bufferize::{walk_layout_index, BufferNode};
+    use luminal::bufferize::BufferNode;
     use luminal::graph::Graph;
     use luminal::prelude::{FxHashMap, NodeIndex};
     use luminal_cuda_lite::CudaRuntime;
@@ -67,55 +67,23 @@ pub mod device {
         Ok(rt)
     }
 
-    /// Read a device output DENSELY through its disclosed layout — the
-    /// escape-and-disclose readback copied from
-    /// `crates/luminal_cuda_lite/tests/device_fidelity.rs::walked_dense`:
-    /// a view-elected output returns its BACKING buffer's bytes (possibly
-    /// parent-sized) plus the elected layout, so the honest comparison
-    /// walks each element `[i0, i1, ...]` through the hop chain —
-    /// `luminal::bufferize::walk_layout_index` is the trusted reader.
-    /// A dense election walks the identity, so this is the universal
-    /// readback.
+    /// Read a device output DENSELY through its RETURNED LAYOUT
+    /// (escape-and-disclose + the corrected contract, 2026-08-31): a
+    /// view-elected output returns its BACKING buffer's bytes (possibly
+    /// parent-sized) plus the elected layout, and the honest comparison
+    /// EVALUATES that layout — `luminal_cuda_lite::layouts::dense_f32`,
+    /// this runtime reading its own vocabulary. A dense election
+    /// evaluates the identity, so this is the universal readback.
     fn walked_dense(rt: &CudaRuntime, out: NodeIndex) -> Result<Vec<f32>> {
         let (data, binding) = rt.fetch(out).context("escape-and-disclose fetch")?;
         let bytes = match data {
             TypedBuffer::F32(values) => values,
             other => bail!("output is {}, not f32", other.type_name()),
         };
-        let dims = binding
-            .dims
-            .clone()
-            .ok_or_else(|| anyhow!("symbolic output dims — numeric readback refuses"))?;
-        let base_dims = rt
-            .plan()
-            .ok_or_else(|| anyhow!("plan not loaded"))?
-            .buffers
-            .get(&binding.buffer)
-            .and_then(|record| record.dims.clone())
-            .ok_or_else(|| anyhow!("backing buffer has no numeric geometry"))?;
-        let numel: usize = dims.iter().map(|&d| d as usize).product();
-        let rank = dims.len();
-        let mut dense = Vec::with_capacity(numel);
-        let mut coords = vec![0usize; rank];
-        for _ in 0..numel {
-            let flat = walk_layout_index(
-                binding.composed_access.as_ref(),
-                &dims,
-                &base_dims,
-                &coords,
-            )
-            .context("the walker reads the disclosed layout")?;
-            dense.push(bytes[flat]);
-            for axis in (0..rank).rev() {
-                coords[axis] += 1;
-                if coords[axis] < dims[axis] as usize {
-                    break;
-                }
-                coords[axis] = 0;
-            }
-        }
-        Ok(dense)
+        luminal_cuda_lite::layouts::dense_f32(bytes, &binding.layout)
+            .context("reading the output through its returned layout")
     }
+
 
     /// Elementwise comparison at the device_fidelity epsilon
     /// (`tests/device_fidelity.rs::assert_close`):
@@ -154,8 +122,9 @@ pub mod device {
 
     /// Plan statistics: kernel launches (Compute nodes), whole-buffer
     /// copies (BufferCopy nodes), distinct buffers, and output slots
-    /// split into direct vs escaped (view-elected: `composed_access`
-    /// disclosed, backing buffer escapes to the caller).
+    /// split into direct vs escaped (VIEW-ELECTED: the slot's returned
+    /// layout is not the direct read for its own domain, so the backing
+    /// buffer escapes to the caller and is read through that layout).
     struct PlanStats {
         kernels: usize,
         copies: usize,
@@ -181,7 +150,14 @@ pub mod device {
                 BufferNode::BufferOutput { slots } => {
                     for slot in slots {
                         stats.outputs += 1;
-                        if slot.composed_access.is_some() {
+                        let direct = slot
+                            .layout
+                            .mirror
+                            .literal_extents()
+                            .is_some_and(|dims| {
+                                luminal_cuda_lite::kernels::layout_is_direct(&slot.layout, &dims)
+                            });
+                        if !direct {
                             stats.escaped += 1;
                         }
                     }

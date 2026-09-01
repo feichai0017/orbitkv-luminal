@@ -198,46 +198,30 @@ fn t6a_bufferize_all_four_forms() {
             luminal::layout_ir::FreedBy::Caller,
             "{name}: the backing buffer escapes to the caller\n{summary}"
         );
-        assert!(
-            slot.composed_access.is_some(),
-            "{name}: the weld's layout is disclosed on the binding\n{summary}"
+        // THE DISCLOSURE (Option B, corrected contract): the binding
+        // carries the slot VALUE's own elected layout `L`, verbatim from
+        // the rendered table — for this weld, the transpose view's
+        // composed layout. Mock plans transport `MockLayout` (the layout
+        // class identity), so the pin here is IDENTITY: the returned L
+        // is the value's own table row, and the ASSIGNMENT is queryable
+        // (the escaping buffer backs a real tensor whose buffer is the
+        // slot's). Element-level walkability of real rendered layouts is
+        // pinned in `test_runtime::test_equality`'s own tests.
+        let table = luminal::test_support::mock_layout_table(&dps_graph);
+        assert_eq!(
+            &slot.layout,
+            table.get(&slot.value).expect("slot value has a mock table row"),
+            "{name}: the binding discloses the slot value's own elected layout\n{summary}"
         );
-        // …and the disclosure is WALKABLE, not just present: every element
-        // of the output value resolves through the hop chain to an
-        // in-bounds flat index of the backing buffer (the walker
-        // fail-closes on unparsed entries, symbolic parent extents, and a
-        // base/final-parent mismatch — so a green walk proves all three).
-        let value_dims = slot.dims.clone().unwrap_or_else(|| {
-            panic!("{name}: escaped slot must disclose numeric value dims\n{summary}")
-        });
-        let base_dims = plan.buffers[&slot.buffer].dims.clone().unwrap_or_else(|| {
-            panic!("{name}: escaping backing buffer must carry numeric geometry\n{summary}")
-        });
-        let base_numel: usize = base_dims.iter().map(|&d| d as usize).product();
-        let numel: usize = value_dims.iter().map(|&d| d as usize).product();
-        let rank = value_dims.len();
-        let mut coords = vec![0usize; rank];
-        let mut seen = std::collections::HashSet::new();
-        for _ in 0..numel {
-            let flat = luminal::bufferize::walk_layout_index(
-                slot.composed_access.as_ref(),
-                &value_dims,
-                &base_dims,
-                &coords,
-            )
-            .unwrap_or_else(|err| {
-                panic!("{name}: disclosed layout must walk at {coords:?}: {err:#}")
-            });
-            assert!(flat < base_numel, "{name}: walked index {flat} exceeds backing numel");
-            assert!(seen.insert(flat), "{name}: two elements walk to flat index {flat}");
-            for axis in (0..rank).rev() {
-                coords[axis] += 1;
-                if coords[axis] < value_dims[axis] as usize {
-                    break;
-                }
-                coords[axis] = 0;
-            }
-        }
+        let backs = plan
+            .backed_tensor(&slot.buffer)
+            .expect("escaping buffer has an assignment row")
+            .clone();
+        assert_eq!(
+            plan.buffer_of(&backs),
+            Some(&slot.buffer),
+            "{name}: the assignment is queryable both ways (buffer <-> backed tensor)\n{summary}"
+        );
     }
 }
 

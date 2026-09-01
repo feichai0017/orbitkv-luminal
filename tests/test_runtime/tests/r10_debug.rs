@@ -468,8 +468,9 @@ fn r10_debug_bufferize() {
         luminal::layout_ir::FreedBy::Caller,
         "the backing buffer escapes to the caller"
     );
-    assert!(
-        slot.composed_access.is_some(),
-        "the binding discloses the elected (weld) layout"
+    assert_eq!(
+        Some(&slot.layout),
+        luminal::test_support::mock_layout_table(&dps).get(&slot.value),
+        "the binding discloses the slot value's own elected (weld) layout"
     );
 }
