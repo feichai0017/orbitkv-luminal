@@ -144,8 +144,7 @@ pub(crate) fn codegen(
         let mut body = String::from("    long long flat = 0;\n    long long coord;\n");
         for axis in 0..rank {
             body.push_str(&format!(
-                "    coord = (long long)coord{axis}[i];\n    if (coord < 0 || coord >= {ext}LL) __trap();\n    flat += coord * {stride}LL;\n",
-                ext = data_dims[axis],
+                "    coord = (long long)coord{axis}[i];\n    flat += coord * {stride}LL;\n",
                 stride = strides[axis]
             ));
         }
@@ -196,12 +195,11 @@ pub(crate) fn codegen(
         } else {
             body.push_str(&format!("    coord = (long long)coord{axis}[i];\n"));
         }
-        // The gather's own checked contract: coordinates are bounded by
-        // the data VALUE's extents, composed access or not.
-        body.push_str(&format!(
-            "    if (coord < 0 || coord >= {ext}LL) __trap();\n",
-            ext = data_dims[axis]
-        ));
+        // The gather once checked each coordinate against the data
+        // VALUE's extents here — a DATA-derived check, the coordinate
+        // coming from an index buffer. It is gone: an out-of-range index
+        // is UB at this layer (see the NO RUNTIME BOUNDS TRAPS note in
+        // `crate::kernels`).
         if data_layout.is_some() {
             body.push_str(&format!("    long long data_c{axis} = coord;\n"));
         } else {

@@ -199,7 +199,7 @@ pub(crate) fn codegen(
         let prelude = coord_prelude(dest_dims);
         let (chain, idx) = layout_read_index("init", layout, dest_dims, "c")?;
         format!(
-            r#"extern "C" __global__ void k({sig}, unsigned int* flags, {t}* out, unsigned long long n) {{
+            r#"extern "C" __global__ void k({sig}, {t}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
 {prelude}{chain}    out[i] = init[{idx}];
@@ -208,18 +208,29 @@ pub(crate) fn codegen(
     } else {
         // Byte-identical to pre-Train-2B codegen.
         format!(
-            r#"extern "C" __global__ void k({sig}, unsigned int* flags, {t}* out, unsigned long long n) {{
+            r#"extern "C" __global__ void k({sig}, {t}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = init[i];
 }}"#
         )
     };
-    // Launch 2: scattered writes over src numel, with the injectivity
-    // check (checked-scatter ruling): an already-set flag is a
-    // conflicting write and traps loudly. Folded src/coordinate
+    // Launch 2: scattered writes over src numel. Folded src/coordinate
     // operands read through their chains at the SRC coordinates (the
     // launch's iteration space); the WRITE address stays the flat
     // coordinate-built one.
+    //
+    // UNCHECKED SCATTER (ruling 2026-08-31, see the NO RUNTIME BOUNDS
+    // TRAPS note in `crate::kernels`). Two checks used to live in this
+    // launch: each coordinate against the destination axis extent, and
+    // injectivity via `atomicExch(&flags[flat],1u) != 0u` over a zeroed
+    // `flags` scratch buffer, which caught two source elements landing
+    // on one destination element. Both are gone, and with them the
+    // `flags` buffer: the injectivity trap was its ONLY reader, so the
+    // dest-sized `unsigned int` scratch allocation and its zeroing were
+    // pure cost once the check went. Consequently a scatter with
+    // duplicate coordinates now races (last writer wins, nondeterminis-
+    // tically) instead of faulting, and an out-of-range coordinate
+    // writes out of bounds.
     let src_layout = ctx.non_direct_operand(1);
     let coord_folded = (2..2 + rank).any(|slot| ctx.non_direct_operand(slot).is_some());
     let mut body = String::new();
@@ -248,8 +259,7 @@ pub(crate) fn codegen(
             body.push_str(&format!("    coord = (long long)coord{axis}[i];\n"));
         }
         body.push_str(&format!(
-            "    if (coord < 0 || coord >= {ext}LL) __trap();\n    flat += coord * {stride}LL;\n",
-            ext = init_dims[axis],
+            "    flat += coord * {stride}LL;\n",
             stride = strides[axis]
         ));
     }
@@ -261,17 +271,15 @@ pub(crate) fn codegen(
         "src[i]".to_string()
     };
     let scatter_src = format!(
-        r#"extern "C" __global__ void k({sig}, unsigned int* flags, {t}* out, unsigned long long n) {{
+        r#"extern "C" __global__ void k({sig}, {t}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-{body}    if (atomicExch(&flags[flat], 1u) != 0u) __trap();
-    out[flat] = {src_read};
+{body}    out[flat] = {src_read};
 }}"#
     );
-    let flags_bytes = dest_n * std::mem::size_of::<u32>();
     Ok(vec![
-        KernelSource { source: copy_src, n: dest_n, scratch_bytes: flags_bytes },
-        KernelSource { source: scatter_src, n: src_n, scratch_bytes: flags_bytes },
+        KernelSource::plain(copy_src, dest_n),
+        KernelSource::plain(scatter_src, src_n),
     ])
 }
 

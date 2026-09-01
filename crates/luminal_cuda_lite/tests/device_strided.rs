@@ -224,9 +224,10 @@ fn composed_two_view_chain_matches_the_host_oracle() {
     // Was "two-hop chain". The e-graph composes at view creation, so the
     // slot carries ONE layout for the whole composite: out [3,2] over
     // parent [4,3], (a,b) -> parent (b+1, a) = flat (b+1)*3 + a. It
-    // renders as an offset-EXPRESSION form, which discloses no reach —
-    // hence the device's only trap here is non-negativity, and the ORACLE
-    // (bounds-checked) is what actually catches an escape.
+    // renders as an offset-EXPRESSION form. The device checks nothing at
+    // all (ruling 2026-08-31, NO RUNTIME BOUNDS TRAPS): the ORACLE, which
+    // is bounds-checked on the host, is the only thing that catches an
+    // escape here.
     copy_case(
         "composed two-view chain",
         12,
