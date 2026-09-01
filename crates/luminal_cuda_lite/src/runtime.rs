@@ -272,7 +272,7 @@ impl CudaRuntime {
         }
     }
 
-    /// Read back a DIRECT-layout output tensor's f32 payload (already
+    /// Read back a DENSE output tensor's f32 payload (already
     /// D2H'd by execute). Loud on a view-elected (escaped) output: its
     /// backing bytes are parent-laid-out — indistinguishable by length
     /// from row-major on a same-numel weld (e.g. a transpose) — so the
@@ -282,18 +282,22 @@ impl CudaRuntime {
     /// reader is [`crate::layouts::dense_f32`], this runtime evaluating
     /// its own layout vocabulary).
     pub fn get_f32(&self, tensor: NodeIndex) -> Result<&Vec<f32>> {
-        // PROTOTYPE (Option B): the row-major question is asked of the
-        // HELD LAYOUT itself — the same vocabulary the codegen read path
-        // uses. Direct = the packed right-major form over its own
-        // literal domain (the layout's domain IS the value's shape).
-        let is_direct = |binding: &luminal::bufferize::OutputBinding<CudaLayout>| {
+        // The row-major question is asked of the HELD LAYOUT's FUNCTION
+        // — literally the codegen read path's own simplifier
+        // ([`crate::kernels::reads_identity`]): element `k` of this
+        // value is at flat index `k` of the backing, so the dense
+        // `Vec<f32>` IS the value. Asked of the function, not the
+        // spelling: a class the renderer happens to hand back as a
+        // dense strided chain answers yes, exactly as its right-major
+        // spelling would.
+        let is_dense = |binding: &luminal::bufferize::OutputBinding<CudaLayout>| {
             match binding.layout.mirror.literal_extents() {
-                Some(dims) => crate::kernels::layout_is_direct(&binding.layout, &dims),
+                Some(dims) => crate::kernels::reads_identity(&binding.layout, &dims),
                 None => false,
             }
         };
         match self.fetch(tensor)? {
-            (_, binding) if !is_direct(binding) => bail!(
+            (_, binding) if !is_dense(binding) => bail!(
                 "get_f32 on a view-elected (escaped) output: the backing \
                  bytes are not row-major over the value's dims — use fetch() \
                  and interpret under the disclosed layout"

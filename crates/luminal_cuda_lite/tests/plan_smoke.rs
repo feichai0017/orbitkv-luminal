@@ -167,8 +167,8 @@ fn codegen_emits_wellformed_sources() {
         dest_dims: vec![vec![2, 3]],
         dest_dtypes: vec![PlanDtype::F32],
         // The slot layouts ARE the read paths (the hop chain is retired):
-        // all three are the direct row-major form, so the flat fast path
-        // holds and the emitted source is the pre-Option-B text.
+        // all three are dense row-major, so every read simplifies to the
+        // identity and the body collapses to the pre-Option-B text.
         operand_layouts: vec![rm_layout(&[2, 3]), rm_layout(&[2, 3]), rm_layout(&[2, 3])],
     };
     let add = luminal_cuda_lite::ops::add::AddFunctionalDps;

@@ -98,8 +98,9 @@ impl ToDps for IndexMapApplyMaterializeDps {
 
 impl LayoutIrOp for IndexMapApplyMaterializeDps {}
 
-/// The CUDA lowering, colocated with its op. A non-direct layout on
-/// operand 0 is a view folded onto the materialize's input — the op's
+/// The CUDA lowering, colocated with its op. A layout whose read does
+/// not simplify to the identity, on
+/// operand 0, is a view folded onto the materialize's input — the op's
 /// own map application produces the input VALUE's coordinates, and the
 /// slot's carried layout then reads ON TOP of them (via
 /// [`crate::kernels::layout_read_index`]) down to the residence
@@ -111,10 +112,10 @@ pub(crate) fn codegen(
     let Some(mat) = op.as_any().downcast_ref::<IndexMapApplyMaterializeDps>() else {
         bail!("materialize codegen reached with a non-Materialize op");
     };
-    if ctx.non_direct_operand(1).is_some() {
+    if ctx.expression_operand(1).is_some() {
         bail!(
-            "dest operand slot 1 carries a non-direct layout: strided writes \
-             are not lowered (dests stay dense out-of-place; CL-4b)"
+            "dest operand slot 1 carries a layout that does not reduce to the \
+             identity index: strided writes are not lowered (dests stay dense out-of-place; CL-4b)"
         );
     }
     let Some(entries) = &mat.entries else {
@@ -129,7 +130,7 @@ pub(crate) fn codegen(
     let to = cuda_type(ctx.dest_dtypes[0])?;
     let n = numel(out_dims);
     let prelude = coord_prelude(out_dims);
-    if let Some(layout) = ctx.non_direct_operand(0) {
+    if let Some(layout) = ctx.expression_operand(0) {
         // The strided branch: the op's map lands on the input VALUE's
         // coordinates (`parent_c*`), then the slot's carried layout
         // carries them to the residence. Each mapped coordinate was once
@@ -153,7 +154,8 @@ pub(crate) fn codegen(
         );
         return Ok(vec![KernelSource::plain(source, n)]);
     }
-    // The flat fast path, byte-identical to pre-Train-2B codegen.
+    // Every read simplified to the identity: no coordinate is
+        // materialized and the body collapses to the flat form.
     let parent_strides = strides_of(parent_dims);
     let mut body = String::from("    long long pflat = 0;\n    long long idx;\n");
     for (k, entry) in entries.iter().enumerate() {

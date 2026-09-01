@@ -122,8 +122,9 @@ pub mod device {
 
     /// Plan statistics: kernel launches (Compute nodes), whole-buffer
     /// copies (BufferCopy nodes), distinct buffers, and output slots
-    /// split into direct vs escaped (VIEW-ELECTED: the slot's returned
-    /// layout is not the direct read for its own domain, so the backing
+    /// split into dense vs escaped (VIEW-ELECTED: the slot.s returned
+    /// layout does not reduce to the identity read over its own
+    /// domain, so the backing
     /// buffer escapes to the caller and is read through that layout).
     struct PlanStats {
         kernels: usize,
@@ -155,7 +156,7 @@ pub mod device {
                             .mirror
                             .literal_extents()
                             .is_some_and(|dims| {
-                                luminal_cuda_lite::kernels::layout_is_direct(&slot.layout, &dims)
+                                luminal_cuda_lite::kernels::reads_identity(&slot.layout, &dims)
                             });
                         if !direct {
                             stats.escaped += 1;

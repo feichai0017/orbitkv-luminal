@@ -26,7 +26,21 @@ use std::collections::HashMap;
 /// layout), never a plan `dims`/`dtype` field. That is precisely why the
 /// route still diverges on folded operands: the residence's layout is
 /// the parent's, and the operand wanted the view's.
-fn sources_via_buffer_table(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> Vec<(String, String)> {
+///
+/// It may now REFUSE, and that is the point. Reading a folded operand's
+/// geometry out of the buffer table hands the elementwise template an
+/// operand whose extents are not the dest's (the matmul fixture: a
+/// `[8,3]` residence under a `[4,3,8]` broadcast). The template's
+/// coherence check used to be asked only of operands taking the
+/// expression read, so a right-major residence of the wrong shape
+/// sailed past it and this route emitted a silently-reinterpreting
+/// kernel — a wrong kernel nobody ran, but a wrong kernel. Since the
+/// one-read-path ruling (2026-08-31) the check is asked of every
+/// operand, so the replication route refuses instead. `Err` here IS
+/// divergence, of the loudest kind.
+fn sources_via_buffer_table(
+    plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>,
+) -> Vec<(String, Result<Vec<String>, String>)> {
     let geometry: HashMap<BufferId, (Vec<usize>, PlanDtype)> = plan
         .buffers
         .iter()
@@ -62,13 +76,12 @@ fn sources_via_buffer_table(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>)
                 .map(|id| plan.buffers[id].layout.clone())
                 .collect(),
         };
-        for (i, launch) in (kernel.codegen)(op.as_ref(), &ctx)
-            .unwrap_or_else(|e| panic!("codegen for {label}: {e}"))
-            .into_iter()
-            .enumerate()
-        {
-            out.push((format!("{label}#{i}"), launch.source));
-        }
+        out.push((
+            label,
+            (kernel.codegen)(op.as_ref(), &ctx)
+                .map(|ls| ls.into_iter().map(|l| l.source).collect())
+                .map_err(|e| e.to_string()),
+        ));
     }
     out
 }
@@ -130,7 +143,9 @@ fn representative_plans() -> Vec<(&'static str, BufferIrGraph<luminal_cuda_lite:
 /// The third tuple slot records whether the node read through a fold
 /// (any operand carrying composed access) — the Phase-5 restatement
 /// keys on it.
-fn sources_via_descriptors(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> Vec<(String, String, bool)> {
+fn sources_via_descriptors(
+    plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>,
+) -> Vec<(String, Vec<String>, bool)> {
     let mut out = Vec::new();
     for node in plan.dag.node_weights() {
         let BufferNode::Compute { op, reads, writes, operand_info, result_info, .. } = node
@@ -149,7 +164,7 @@ fn sources_via_descriptors(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) 
         // with the premise; the caller now pins where divergence from
         // the buffer-table route is required vs forbidden.
         // Option B: the divergence discriminator is the slot LAYOUT —
-        // an operand whose own elected layout is not the direct read.
+        // an operand whose read does not simplify to the identity.
         // (A view whose composed layout IS direct would be a flat read
         // on both routes, correctly.)
         let folded = operand_info.iter().any(|slot| {
@@ -158,19 +173,18 @@ fn sources_via_descriptors(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) 
                 .mirror
                 .literal_extents()
                 .expect("elected slot layouts are literal in these fixtures");
-            !kernels::layout_is_direct(&slot.layout, &dims)
+            !kernels::reads_identity(&slot.layout, &dims)
         });
         let kernel = kernels::codegen_for(op.as_ref())
             .unwrap_or_else(|| panic!("elected op {label} has no codegen row"));
         let ctx = kernels::CodegenCtx::from_descriptors(&label, operand_info, result_info)
             .unwrap_or_else(|e| panic!("descriptor ctx for {label}: {e}"));
-        for (i, launch) in (kernel.codegen)(op.as_ref(), &ctx)
+        let sources: Vec<String> = (kernel.codegen)(op.as_ref(), &ctx)
             .unwrap_or_else(|e| panic!("codegen for {label}: {e}"))
             .into_iter()
-            .enumerate()
-        {
-            out.push((format!("{label}#{i}"), launch.source, folded));
-        }
+            .map(|l| l.source)
+            .collect();
+        out.push((label, sources, folded));
     }
     out
 }
@@ -236,7 +250,7 @@ mod strided {
         }))
     }
 
-    /// A slot whose layout is the DIRECT read (row-major over its dims).
+    /// A slot whose layout is the dense row-major read over its dims.
     /// EVERYTHING the codegen needs — extents, dtype, read path — comes
     /// from that one layout: the descriptor has no dims/dtype/hop fields
     /// left to fill (corrected contract, 2026-08-31).
@@ -262,9 +276,9 @@ mod strided {
         s
     }
 
-    /// A deliberately NON-DIRECT layout for the fail-closed write-side
-    /// pins: any strided form over the slot's own dims will do.
-    fn nondirect(dims: &[i64]) -> CudaLayout {
+    /// A layout whose read does NOT reduce to the identity, for the
+    /// fail-closed write-side pins: stride 2 over the slot.s own dims.
+    fn unsimplifiable(dims: &[i64]) -> CudaLayout {
         strided_layout(dims, vec![mul(coord(0), lit(2))])
     }
 
@@ -459,7 +473,7 @@ mod strided {
     #[test]
     fn cast_wraps_the_strided_read() {
         // A reversed rank-1 read: chain [-coord + 3] spelled as
-        // ((coord0 * -1) + 3) — non-direct, so the expression path runs.
+        // ((coord0 * -1) + 3) — does not simplify, so it is lowered.
         let layout = strided_layout(&[4], vec![add(mul(coord(0), lit(-1)), lit(3))]);
         let op = ops::cast::CastDps;
         // The dtypes ride the slots' CARRIED LAYOUTS (the runtime's own
@@ -500,43 +514,58 @@ mod strided {
         // An operand layout whose DOMAIN is not the destination's: the
         // template reads at the dest's coordinates, so this is a real
         // incoherence and refuses in the template, never reinterprets.
-        let layout = strided_layout(&[2, 3], vec![coord(0), mul(coord(1), lit(3))]);
-        let ctx = kernels::CodegenCtx::from_descriptors(
-            "Copy",
-            &[slot_l(layout), slot(vec![3, 2])],
-            &[slot(vec![3, 2])],
-        )
-        .expect("ctx builds");
-        let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
-            .expect_err("foreign-domain layout must refuse");
-        assert!(
-            err.to_string().contains("differ from dest extents"),
-            "the template names the incoherence: {err}"
-        );
+        //
+        // ASKED OF EVERY OPERAND NOW (ruling 2026-08-31). Both spellings
+        // below denote the SAME dense [2,3] read against a [3,2] dest,
+        // and both must refuse. Before the ruling only the first did:
+        // the coherence check lived inside the "non-direct" branch, so a
+        // right-major operand of the wrong shape sailed through the flat
+        // path and silently reinterpreted 6 elements as [3,2]. That is
+        // the spelling-dependence, caught in a second place.
+        for (what, layout) in [
+            ("strided spelling", strided_layout(&[2, 3], vec![coord(0), mul(coord(1), lit(3))])),
+            ("right-major spelling", rm_layout(&[2, 3])),
+        ] {
+            let ctx = kernels::CodegenCtx::from_descriptors(
+                "Copy",
+                &[slot_l(layout), slot(vec![3, 2])],
+                &[slot(vec![3, 2])],
+            )
+            .expect("ctx builds");
+            let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
+                .expect_err("a foreign-domain operand must refuse, whatever its spelling");
+            assert!(
+                err.to_string().contains("differ from dest extents"),
+                "{what}: the template names the incoherence: {err}"
+            );
+        }
     }
 
-    /// A NON-DIRECT LAYOUT on a RESULT descriptor refuses at the single
-    /// codegen entry point (strided writes are CL-4b). Under the
-    /// corrected contract this is the ONLY spelling of the refusal —
-    /// the hop-carrying variant died with the hop machinery, and this is
-    /// a CAPABILITY refusal (the backend lowers no strided write), never
-    /// a re-check of an e-graph premise.
+    /// A RESULT layout whose read does NOT reduce to the identity
+    /// refuses at the single codegen entry point (strided writes are
+    /// CL-4b). RULING 2026-08-31: the fence is decided by the SIMPLIFIER
+    /// on the write function, not by the mirror constructor — a strided
+    /// chain that IS dense passes it (see
+    /// `dense_spellings_all_collapse_to_the_flat_read`), and this one
+    /// (stride 2 over a rank-1 value) does not. A CAPABILITY refusal
+    /// (the backend lowers no strided write), never a re-check of an
+    /// e-graph premise.
     #[test]
-    fn result_non_direct_layout_refuses_at_from_descriptors() {
+    fn result_that_does_not_write_at_the_identity_index_refuses() {
         let t_layout = strided_layout(&[4], vec![mul(coord(0), lit(2))]);
         let err = kernels::CodegenCtx::from_descriptors(
             "ProbeOp",
             &[slot(vec![4])],
             &[slot_l(t_layout)],
         )
-        .expect_err("result non-direct layout must refuse");
-        assert!(err.to_string().contains("non-direct layout"), "got: {err}");
+        .expect_err("a result that does not write at the identity index must refuse");
+        assert!(err.to_string().contains("strided writes are not lowered"), "got: {err}");
     }
 
-    /// A non-direct LAYOUT on the DPS dest OPERAND slot refuses in the
-    /// template (same CL-4b line, Option B spelling).
+    /// A dest OPERAND slot whose write index is not the identity refuses
+    /// in the template (same CL-4b line).
     #[test]
-    fn dest_operand_non_direct_layout_refuses_in_the_template() {
+    fn dest_operand_that_does_not_write_at_the_identity_index_refuses() {
         let t_layout = strided_layout(&[3, 2], vec![mul(coord(0), lit(3)), coord(1)]);
         let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
         let ctx = kernels::CodegenCtx::from_descriptors(
@@ -546,7 +575,7 @@ mod strided {
         )
         .expect("ctx builds");
         let err = (kernels::codegen_for(&op).unwrap().codegen)(&op, &ctx)
-            .expect_err("dest operand non-direct layout must refuse");
+            .expect_err("a dest operand that does not write at the identity index must refuse");
         assert!(err.to_string().contains("strided writes"), "got: {err}");
     }
 
@@ -558,15 +587,15 @@ mod strided {
     #[test]
     fn expression_kernel_write_sides_stay_fail_closed() {
         // The write-side refusal now keys on the dest OPERAND slot's
-        // own carried layout being non-direct — the one discriminator.
-        let dest_nondirect = || slot_l(nondirect(&[4]));
+        // own carried layout not writing at the identity index.
+        let dest_unsimplifiable = || slot_l(unsimplifiable(&[4]));
         let coord = slot_dt(vec![4], PlanDtype::Int);
 
         // Gather: dest0 at slot rank+1.
         let op = ops::gather::GatherDps { rank: 1 };
         let ctx = kernels::CodegenCtx::from_descriptors(
             "Gather",
-            &[slot(vec![4]), coord.clone(), dest_nondirect()],
+            &[slot(vec![4]), coord.clone(), dest_unsimplifiable()],
             &[slot(vec![4])],
         )
         .expect("ctx builds");
@@ -582,7 +611,7 @@ mod strided {
                 slot(vec![4]),
                 slot(vec![2]),
                 coord.clone(),
-                dest_nondirect(),
+                dest_unsimplifiable(),
             ],
             &[slot(vec![4])],
         )
@@ -597,7 +626,7 @@ mod strided {
         };
         let ctx = kernels::CodegenCtx::from_descriptors(
             "IndexMapApplyMaterialize",
-            &[slot(vec![4]), dest_nondirect()],
+            &[slot(vec![4]), dest_unsimplifiable()],
             &[slot(vec![4])],
         )
         .expect("ctx builds");
@@ -609,7 +638,7 @@ mod strided {
         let op = ops::iota::IotaDps { expr: Some(IotaExpr::Coord(0)) };
         let ctx = kernels::CodegenCtx::from_descriptors(
             "Iota",
-            &[dest_nondirect()],
+            &[dest_unsimplifiable()],
             &[slot(vec![4])],
         )
         .expect("ctx builds");
@@ -618,8 +647,22 @@ mod strided {
         assert!(err.to_string().contains("does not lower"), "got: {err}");
     }
 
-    /// Descriptor-less operands still emit the flat `a[i]` kernel
-    /// byte-identically to the pre-Phase-4 template (hard pin).
+    /// THE BYTE-IDENTITY PIN — unchanged text, changed meaning.
+    ///
+    /// It was written to prove the flat FAST PATH fired: a
+    /// `layout_is_direct` constructor match diverted these operands
+    /// around the expression path entirely. That fast path is gone
+    /// (ruling 2026-08-31, "there should be no special casing... it
+    /// should always go through the expression pathway"). These operands
+    /// now go through the SAME expression path as every other read; what
+    /// this pin proves today is that the SIMPLIFIER recognizes the dense
+    /// case — each read reduces to the identity over the very `i` the
+    /// coordinates would have been decomposed from, so no coordinate is
+    /// materialized, the prelude is dead, and the body collapses back to
+    /// exactly this text.
+    ///
+    /// If this string ever changes for a dense operand, the simplifier
+    /// is INCOMPLETE. Fix the simplifier; do not update this pin.
     #[test]
     fn flat_path_is_byte_identical() {
         let op = ops::add::AddFunctionalDps;
@@ -635,6 +678,174 @@ mod strided {
     if (i < n) out[i] = a[i] + b[i];
 }"#
         );
+    }
+
+    // =======================================================================
+    // THE TWO-SPELLING PROOF (ruling 2026-08-31).
+    //
+    // The e-graph may hand the renderer ANY spelling of a layout class —
+    // all spellings of a class denote one function, and `render_layout`
+    // only states a PREFERENCE among the ones it finds. So the read
+    // decision may not be made on a spelling. These tests state one dense
+    // function five ways and require the emitted CUDA source to be
+    // byte-identical every time.
+    // =======================================================================
+
+    /// The dense row-major read of a [2,3] value — strides [3,1] — in
+    /// five spellings:
+    ///   1. `RightMajor[2,3]`               (structural)
+    ///   2. `Strided` chain `[c1, c0*3]`    (dense strides, canonical residues)
+    ///   3. `Strided` chain `[c1*1 + 0, c0*3]` — an explicit unit stride
+    ///      and a zero residue, the kind of leftover an unnormalized
+    ///      composition carries
+    ///   4. `ElementOffset` `(c0*6 + c1*2) / 2` — folds to the same by
+    ///      exact division, the kind of thing a bit/element conversion
+    ///      leaves behind
+    ///   5. `BitOffset` `(c0*3 + c1) * 32` at width 32 — the bit form of
+    ///      the same read
+    ///
+    /// Each is first checked to BE the same function by the runtime's
+    /// own independent evaluator (`layouts::element_index`, which walks
+    /// the mirror structs and knows nothing about codegen), then the
+    /// emitted source is compared. Two statements, one answer.
+    #[test]
+    fn dense_spellings_all_collapse_to_the_flat_read() {
+        use luminal::layouts::BitOffsetExpressionLayout;
+        let dims = [2usize, 3usize];
+        // from-end: coord(0) = c1 (stride 1), coord(1) = c0 (stride 3).
+        let spellings: Vec<(&str, CudaLayout)> = vec![
+            ("right-major", rm_layout(&[2, 3])),
+            (
+                "strided, dense chain",
+                strided_layout(&[2, 3], vec![coord(0), mul(coord(1), lit(3))]),
+            ),
+            (
+                "strided, unnormalized residues",
+                strided_layout(
+                    &[2, 3],
+                    vec![add(mul(coord(0), lit(1)), lit(0)), mul(coord(1), lit(3))],
+                ),
+            ),
+            (
+                "element-offset, exact division",
+                offset_layout(
+                    &[2, 3],
+                    IntExprTerm::TruncDiv(
+                        Box::new(add(mul(coord(1), lit(6)), mul(coord(0), lit(2)))),
+                        Box::new(lit(2)),
+                    ),
+                ),
+            ),
+            (
+                "bit-offset at width 32",
+                typed(MirrorLayout::BitOffset(BitOffsetExpressionLayout {
+                    offset: mul(add(mul(coord(1), lit(3)), coord(0)), lit(32)),
+                    shape: shape(&[2, 3]),
+                    width: BitWidthTerm(32),
+                })),
+            ),
+        ];
+
+        // (a) INDEPENDENTLY: every spelling really is the same function.
+        for (what, layout) in &spellings {
+            for c0 in 0..dims[0] {
+                for c1 in 0..dims[1] {
+                    let got = luminal_cuda_lite::layouts::element_index(layout, &[c0, c1])
+                        .unwrap_or_else(|e| panic!("{what} evaluates at ({c0},{c1}): {e}"));
+                    assert_eq!(
+                        got,
+                        c0 * 3 + c1,
+                        "{what}: the spellings must denote the SAME function"
+                    );
+                }
+            }
+        }
+
+        // (b) THEREFORE: identical emitted source, and it is the flat
+        //     read — the simplifier recognizes all five.
+        let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
+        let want = r#"extern "C" __global__ void k(const float* a, float* out, unsigned long long n) {
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = a[i];
+}"#;
+        for (what, layout) in &spellings {
+            let source = generate(
+                &op,
+                &[slot_l(layout.clone()), slot(vec![2, 3])],
+                &[slot(vec![2, 3])],
+            );
+            assert_eq!(
+                source, want,
+                "{what}: a dense read must emit the flat source, whatever its spelling"
+            );
+        }
+    }
+
+    /// The write fence obeys the same rule from the other side: a dense
+    /// STRIDED destination is writable (its write index reduces to the
+    /// identity) even though it is not spelled `RightMajor` — under the
+    /// old constructor match this refused, which was a capability the
+    /// backend has being denied on a spelling.
+    #[test]
+    fn a_dense_strided_destination_passes_the_write_fence() {
+        let dense_strided = strided_layout(&[2, 3], vec![coord(0), mul(coord(1), lit(3))]);
+        let op = ops::materialize_layout_copy::MaterializeLayoutCopyDps;
+        let source = generate(
+            &op,
+            &[slot(vec![2, 3]), slot_l(dense_strided.clone())],
+            &[slot_l(dense_strided)],
+        );
+        assert_eq!(
+            source,
+            r#"extern "C" __global__ void k(const float* a, float* out, unsigned long long n) {
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = a[i];
+}"#
+        );
+    }
+
+    /// The simplifier is not credulous: a chain that is dense-LOOKING
+    /// but permuted, offset, or scaled must NOT collapse. (The
+    /// transpose/pitch/broadcast/offset cases above are the same point
+    /// stated through their emitted expressions; this states it as a
+    /// direct verdict, including the extent-1 rule.)
+    #[test]
+    fn only_the_identity_collapses() {
+        let cases: Vec<(&str, Vec<usize>, CudaLayout, bool)> = vec![
+            ("transposed [3,2]", vec![3, 2], strided_layout(&[3, 2], vec![mul(coord(0), lit(3)), coord(1)]), false),
+            ("pitched [4,5]", vec![4, 5], strided_layout(&[4, 5], vec![coord(0), mul(coord(1), lit(8))]), false),
+            ("broadcast [2,3]", vec![2, 3], strided_layout(&[2, 3], vec![coord(0), lit(0)]), false),
+            ("nonzero base [3,2]", vec![3, 2], offset_layout(&[3, 2], add(mul(add(coord(1), lit(1)), lit(2)), coord(0))), false),
+            ("inexact division", vec![4], offset_layout(&[4], IntExprTerm::TruncDiv(Box::new(mul(coord(0), lit(3))), Box::new(lit(2)))), false),
+            ("foreign domain", vec![3, 2], rm_layout(&[2, 3]), false),
+            // An extent-1 axis pins no coefficient: c is always 0, so
+            // every spelling of that axis' contribution is the same
+            // function. This is a fact about the function, not a licence.
+            ("extent-1 axis, stride 0", vec![1, 3], strided_layout(&[1, 3], vec![coord(0), lit(0)]), true),
+            ("extent-1 axis, wild stride", vec![1, 3], strided_layout(&[1, 3], vec![coord(0), mul(coord(1), lit(99))]), true),
+            ("rank 0", vec![], offset_layout(&[], lit(0)), true),
+            // Left-major and right-major coincide at rank 1.
+            ("left-major rank 1", vec![5], typed(MirrorLayout::LeftMajor(
+                luminal::layouts::LeftMajorContiguousElementLayout {
+                    shape: shape(&[5]),
+                    width: BitWidthTerm(32),
+                },
+            )), true),
+            // ...and diverge at rank 2, where left-major is a transpose.
+            ("left-major rank 2", vec![2, 3], typed(MirrorLayout::LeftMajor(
+                luminal::layouts::LeftMajorContiguousElementLayout {
+                    shape: shape(&[2, 3]),
+                    width: BitWidthTerm(32),
+                },
+            )), false),
+        ];
+        for (what, dims, layout, want) in cases {
+            assert_eq!(
+                kernels::reads_identity(&layout, &dims),
+                want,
+                "{what}: the simplifier's verdict"
+            );
+        }
     }
 }
 
@@ -680,7 +891,10 @@ fn descriptor_ctx_bails_loudly_on_unusable_layouts() {
     let ok = kernels::CodegenCtx::from_descriptors("ProbeOp", &[filled.clone()], &[filled])
         .expect("filled descriptors build");
     assert_eq!(ok.operand_dims, vec![vec![2, 3]]);
-    assert!(ok.non_direct_operand(0).is_none(), "the direct form is the flat fast path");
+    assert!(
+        ok.expression_operand(0).is_none(),
+        "a dense layout read simplifies to the identity — no expression to lower"
+    );
 }
 
 /// RE-PINNED ONCE at Phase 5 (view electability). Justification per
@@ -708,20 +922,32 @@ fn codegen_strings_via_descriptors_match_the_buffer_table() {
             via_descriptors.len(),
             "{name}: both routes generate the same kernel sequence"
         );
-        for ((t_label, t_source), (d_label, d_source, folded)) in
+        for ((t_label, t_sources), (d_label, d_sources, folded)) in
             via_table.iter().zip(&via_descriptors)
         {
             assert_eq!(t_label, d_label, "{name}: kernel order agrees between routes");
             if *folded {
                 folded_seen += 1;
-                assert_ne!(
-                    t_source, d_source,
-                    "{name}/{d_label}: a folded operand must change the generated \
-                     read (the buffer table cannot know the composed access)"
-                );
+                // Divergence, in one of its two forms: a DIFFERENT
+                // kernel, or (since the one-read-path ruling) a loud
+                // refusal — the replication route cannot even state a
+                // coherent kernel for a folded operand's residence.
+                match t_sources {
+                    Err(why) => assert!(
+                        why.contains("differ from dest extents"),
+                        "{name}/{d_label}: the replication route must refuse for the \
+                         stated reason, got: {why}"
+                    ),
+                    Ok(t) => assert_ne!(
+                        t, d_sources,
+                        "{name}/{d_label}: a folded operand must change the generated \
+                         read (the buffer table cannot know the composed access)"
+                    ),
+                }
             } else {
                 assert_eq!(
-                    t_source, d_source,
+                    t_sources.as_ref().expect("non-folded nodes generate on both routes"),
+                    d_sources,
                     "{name}/{d_label}: descriptor-derived codegen must be \
                      string-identical to the buffer table on non-folded nodes"
                 );
@@ -730,17 +956,22 @@ fn codegen_strings_via_descriptors_match_the_buffer_table() {
         if let Ok(dir) = std::env::var("CODEGEN_DUMP_DIR") {
             let dir = std::path::Path::new(&dir);
             std::fs::create_dir_all(dir).expect("dump dir");
-            for (i, (label, source, _)) in via_descriptors.iter().enumerate() {
-                let file = dir.join(format!("{name}_{i:02}_{}.cu", label.replace('#', "_")));
-                std::fs::write(file, source).expect("dump write");
+            for (i, (label, sources, _)) in via_descriptors.iter().enumerate() {
+                for (k, source) in sources.iter().enumerate() {
+                    let file = dir.join(format!("{name}_{i:02}_{k}_{label}.cu"));
+                    std::fs::write(file, source).expect("dump write");
+                }
             }
         }
         let folded_here = via_descriptors.iter().filter(|(_, _, f)| *f).count();
+        let refused = via_table.iter().filter(|(_, s)| s.is_err()).count();
         println!(
-            "[{name}] {} kernels: {} identical via both paths, {} folded (divergence required)",
+            "[{name}] {} nodes: {} identical via both paths, {} folded \
+             (divergence required; {} of those the replication route refuses outright)",
             via_table.len(),
             via_table.len() - folded_here,
-            folded_here
+            folded_here,
+            refused
         );
     }
     assert!(

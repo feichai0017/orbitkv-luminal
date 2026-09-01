@@ -18,7 +18,8 @@
 //!    test honest if the fence ever moves);
 //!  * buffer/copy counts are PINNED per fixture (regression tripwires
 //!    for the folded shape);
-//!  * consumers' operand descriptors must CARRY a NON-DIRECT LAYOUT —
+//!  * consumers. operand descriptors must CARRY A LAYOUT WHOSE READ
+//!    DOES NOT SIMPLIFY TO THE IDENTITY —
 //!    the view's own composed layout as the e-graph minted it — checked
 //!    by EVALUATING that layout to a flat parent element index and
 //!    comparing against the hand-computed map. (The hop chain is retired:
@@ -58,8 +59,8 @@ fn plan_for(cx: &Graph, inputs: &[(NodeIndex, TypedBuffer)]) -> BufferIrGraph<lu
 
 /// The plan-shape audit shared by every fixture. Returns
 /// (compute_count, copy_count, buffer_count, folded slots) — a "folded
-/// slot" being an operand whose carried layout is NOT the direct
-/// row-major read for its own domain.
+/// slot" being an operand whose carried layout does NOT reduce to the
+/// identity read over its own domain.
 type FoldedSlot = (String, usize, luminal_cuda_lite::CudaLayout);
 fn audit(
     plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>,
@@ -109,7 +110,7 @@ fn audit(
                         .mirror
                         .literal_extents()
                         .expect("elected slot layouts are literal in these fixtures");
-                    if !luminal_cuda_lite::kernels::layout_is_direct(&info.layout, &dims) {
+                    if !luminal_cuda_lite::kernels::reads_identity(&info.layout, &dims) {
                         composed.push((label.to_string(), slot, info.layout.clone()));
                     }
                 }
@@ -120,9 +121,9 @@ fn audit(
                         .literal_extents()
                         .expect("elected slot layouts are literal in these fixtures");
                     assert!(
-                        luminal_cuda_lite::kernels::layout_is_direct(&info.layout, &dims),
+                        luminal_cuda_lite::kernels::reads_identity(&info.layout, &dims),
                         "{label}: a compute RESULT is produced by the node, never read \
-                         through a fold — its layout must be the direct form"
+                         through a fold — its layout must write at the identity index"
                     );
                 }
             }
