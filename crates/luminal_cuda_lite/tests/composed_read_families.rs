@@ -69,11 +69,11 @@ fn rendered(plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>) -> Vec<(String,
             .unwrap_or_else(|| panic!("elected op {label} has no codegen row"));
         let ctx = kernels::CodegenCtx::from_descriptors(&label, operand_info, result_info)
             .unwrap_or_else(|e| panic!("descriptor ctx for {label}: {e}"));
-        // "Folded" now means: the operand's own carried LAYOUT is not
-        // the direct read for its domain (corrected contract — the
-        // composed-access field is gone; the layout IS the read path).
+        // "Folded" now means: the operand.s own carried LAYOUT does not
+        // simplify to the identity read over its domain (the layout IS
+        // the read path, and the simplifier is the only verdict on it).
         let folded: Vec<usize> = (0..operand_info.len())
-            .filter(|&k| ctx.non_direct_operand(k).is_some())
+            .filter(|&k| ctx.expression_operand(k).is_some())
             .collect();
         let sources: Vec<String> = (kernel.codegen)(op.as_ref(), &ctx)
             .unwrap_or_else(|e| panic!("codegen for {label}: {e}"))

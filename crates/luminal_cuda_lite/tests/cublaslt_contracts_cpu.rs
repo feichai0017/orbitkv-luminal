@@ -341,7 +341,7 @@ fn dest_frame_refuses_a_rank_mismatch() {
 #[test]
 fn dest_frame_refuses_layouts_this_backend_cannot_write() {
     // CAPABILITY refusal, the host-call mirror of the codegen path's
-    // non-direct-result refusal: cuBLASLt has exactly two matrix orders,
+    // destination refusal: cuBLASLt has exactly two matrix orders,
     // so a strided or offset-expression destination is not writable by
     // this route. Loud, never wrong bytes.
     let strided = CudaLayout {

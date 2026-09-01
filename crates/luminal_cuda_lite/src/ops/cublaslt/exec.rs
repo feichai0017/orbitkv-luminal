@@ -277,7 +277,7 @@ pub fn validate_ld_bounds(who: &str, desc: &LtDesc, elems: usize) -> Result<()> 
 ///  * `LeftMajor[m, n]`  — `(r, c)` at `c*m + r` → COL, `ld = m`.
 ///
 /// Everything else is a CAPABILITY REFUSAL, the exact mirror of the
-/// kernel path's non-direct-result refusal in
+/// kernel path's identity-index write fence in
 /// `kernels::CodegenCtx::from_descriptors`: this backend writes no
 /// strided and no offset-expression destination, by kernel or by
 /// library call. Loud, never wrong bytes.
@@ -318,7 +318,7 @@ pub fn bind_destination(
              writes only the two dense orders cuBLASLt can express (RightMajor -> \
              CUBLASLT_ORDER_ROW, LeftMajor -> CUBLASLT_ORDER_COL). Strided and \
              offset-expression destinations are NOT lowered — a CAPABILITY refusal \
-             (the host-call mirror of the codegen path's non-direct-result refusal), \
+             (the host-call mirror of the codegen path's identity-index write fence), \
              never a guess. Layout: {other:?}",
             match other {
                 M::Strided(_) => "STRIDED",

@@ -107,8 +107,9 @@ impl ToDps for GatherDps {
 impl LayoutIrOp for GatherDps {}
 
 /// The CUDA lowering, colocated with its op. Every READ operand (data
-/// AND coordinates) may arrive with a non-direct layout — the slot's
-/// own carried layout lowers into that operand's read index exactly as
+/// AND coordinates) may arrive with a layout whose read does not
+/// simplify to the identity; the slot's own carried layout then lowers
+/// into that operand's read index exactly as
 /// [`crate::kernels::layout_read_index`] does for the elementwise
 /// templates. The WRITE side (dest0) stays fail-closed (CL-4b).
 pub(crate) fn codegen(
@@ -119,10 +120,10 @@ pub(crate) fn codegen(
         bail!("gather codegen reached with a non-Gather op");
     };
     let rank = gather.rank;
-    if ctx.non_direct_operand(gather.dest_index()).is_some() {
+    if ctx.expression_operand(gather.dest_index()).is_some() {
         bail!(
-            "dest operand slot {} carries a non-direct layout: strided writes \
-             are not lowered (dests stay dense out-of-place; CL-4b)",
+            "dest operand slot {} carries a layout that does not reduce to the \
+             identity index: strided writes are not lowered (dests stay dense out-of-place; CL-4b)",
             gather.dest_index()
         );
     }
@@ -139,8 +140,9 @@ pub(crate) fn codegen(
     for axis in 0..rank {
         sig.push_str(&format!(", const int* coord{axis}"));
     }
-    if (0..ctx.operand_layouts.len()).all(|k| ctx.non_direct_operand(k).is_none()) {
-        // The flat fast path, byte-identical to pre-Train-2B codegen.
+    if (0..ctx.operand_layouts.len()).all(|k| ctx.expression_operand(k).is_none()) {
+        // Every read simplified to the identity: no coordinate is
+        // materialized and the body collapses to the flat form.
         let mut body = String::from("    long long flat = 0;\n    long long coord;\n");
         for axis in 0..rank {
             body.push_str(&format!(
@@ -165,8 +167,8 @@ pub(crate) fn codegen(
     // themselves: they are bound as `data_c{axis}` and the data chain
     // is evaluated at THOSE (the gather's own indirection composes ON
     // TOP of the folded chain).
-    let coord_folded = (1..=rank).any(|slot| ctx.non_direct_operand(slot).is_some());
-    let data_layout = ctx.non_direct_operand(0);
+    let coord_folded = (1..=rank).any(|slot| ctx.expression_operand(slot).is_some());
+    let data_layout = ctx.expression_operand(0);
     let mut body = String::new();
     if coord_folded {
         body.push_str(&coord_prelude(out_dims));
@@ -176,14 +178,14 @@ pub(crate) fn codegen(
     }
     body.push_str("    long long coord;\n");
     for axis in 0..rank {
-        if let Some(layout) = ctx.non_direct_operand(axis + 1) {
+        if let Some(layout) = ctx.expression_operand(axis + 1) {
             // The coordinate value's own extents must be the out
             // extents for `c*` to be its coordinates: refuse a
             // mismatch, never reinterpret (the elementwise contract).
             if &ctx.operand_dims[axis + 1] != out_dims {
                 bail!(
                     "operand coord{axis} value extents {:?} differ from dest extents {:?} \
-                     under a non-direct layout — the gather iterates the dest",
+                     — the gather iterates the dest",
                     ctx.operand_dims[axis + 1],
                     out_dims
                 );

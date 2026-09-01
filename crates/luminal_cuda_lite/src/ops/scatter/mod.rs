@@ -150,7 +150,8 @@ impl ToDps for ScatterFunctionalDps {
 impl LayoutIrOp for ScatterFunctionalDps {}
 
 /// The CUDA lowering, colocated with its op. The READ-side operands
-/// (init, src, coordinates) may arrive with non-direct layouts — each
+/// (init, src, coordinates) may arrive with a layout whose read does
+/// not simplify to the identity; each such operand then
 /// lowers into that operand's read index via
 /// [`crate::kernels::layout_read_index`]. The WRITE side (dest0)
 /// stays fail-closed (CL-4b), and the checked-scatter injectivity
@@ -163,10 +164,10 @@ pub(crate) fn codegen(
         bail!("scatter codegen reached with a non-Scatter op");
     };
     let rank = scatter.rank;
-    if ctx.non_direct_operand(scatter.dest_index()).is_some() {
+    if ctx.expression_operand(scatter.dest_index()).is_some() {
         bail!(
-            "dest operand slot {} carries a non-direct layout: strided writes \
-             are not lowered (dests stay dense out-of-place; CL-4b)",
+            "dest operand slot {} carries a layout that does not reduce to the \
+             identity index: strided writes are not lowered (dests stay dense out-of-place; CL-4b)",
             scatter.dest_index()
         );
     }
@@ -189,11 +190,11 @@ pub(crate) fn codegen(
     // Launch 1: dest = copy(init), over dest numel. A folded init is
     // read through its chain at the DEST coordinates (init's value
     // spans the dest space by construction).
-    let copy_src = if let Some(layout) = ctx.non_direct_operand(0) {
+    let copy_src = if let Some(layout) = ctx.expression_operand(0) {
         if init_dims != dest_dims {
             bail!(
                 "operand init value extents {init_dims:?} differ from dest extents \
-                 {dest_dims:?} under a non-direct layout — the scatter copy iterates the dest"
+                 {dest_dims:?} — the scatter copy iterates the dest"
             );
         }
         let prelude = coord_prelude(dest_dims);
@@ -231,22 +232,22 @@ pub(crate) fn codegen(
     // duplicate coordinates now races (last writer wins, nondeterminis-
     // tically) instead of faulting, and an out-of-range coordinate
     // writes out of bounds.
-    let src_layout = ctx.non_direct_operand(1);
-    let coord_folded = (2..2 + rank).any(|slot| ctx.non_direct_operand(slot).is_some());
+    let src_layout = ctx.expression_operand(1);
+    let coord_folded = (2..2 + rank).any(|slot| ctx.expression_operand(slot).is_some());
     let mut body = String::new();
     if src_layout.is_some() || coord_folded {
         body.push_str(&coord_prelude(src_dims));
     }
     body.push_str("    long long flat = 0;\n    long long coord;\n");
     for axis in 0..rank {
-        if let Some(layout) = ctx.non_direct_operand(axis + 2) {
+        if let Some(layout) = ctx.expression_operand(axis + 2) {
             // The coordinate value's own extents must be src's for the
             // prelude's `c*` to be its coordinates: refuse a mismatch,
             // never reinterpret (the elementwise contract).
             if &ctx.operand_dims[axis + 2] != src_dims {
                 bail!(
                     "operand coord{axis} value extents {:?} differ from src extents \
-                     {src_dims:?} under a non-direct layout — the scatter write launch \
+                     {src_dims:?} — the scatter write launch \
                      iterates src",
                     ctx.operand_dims[axis + 2]
                 );

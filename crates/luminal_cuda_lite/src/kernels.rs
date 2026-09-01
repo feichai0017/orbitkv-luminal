@@ -28,8 +28,10 @@ use std::any::TypeId;
 /// the write set. EVERYTHING here derives from the node's own
 /// [`SlotDescriptor`] layouts — this runtime's carried `CudaLayout` per
 /// slot: dims are the layout's literal domain extents, dtypes its
-/// carried dtype fact, and every non-direct read lowers the layout's
-/// own offset expression ([`layout_read_index`]). The hop-chain
+/// carried dtype fact, and EVERY read goes through the layout's own
+/// offset expression ([`layout_read_index`]) — the ones that simplify
+/// to the identity ([`reads_identity`]) collapse to `a[i]` and the rest
+/// are lowered. The hop-chain
 /// machinery is fully retired (corrected contract, 2026-08-31): the
 /// e-graph mints every view's composed layout at view creation, and the
 /// runtime's rendered `L` IS the read path.
@@ -72,15 +74,18 @@ impl CodegenCtx {
             .map(|s| dims_of(s, "dest"))
             .collect::<Result<_>>()?;
         // Strided WRITES are not lowered (CL-4b territory): destinations
-        // stay dense out-of-place, so a result slot whose layout is not
-        // the direct row-major form over its domain refuses loudly at
-        // the single codegen entry point — a CAPABILITY refusal (this
-        // backend lowers no strided write), never an e-graph re-check.
+        // stay dense out-of-place. Every kernel here writes `out[i]`, so
+        // a result slot is only writable when its layout's read function
+        // IS the identity over that same `i` — decided by the simplifier
+        // ([`reads_identity`]), never by the mirror constructor. A
+        // CAPABILITY refusal (this backend lowers no strided write),
+        // never an e-graph re-check.
         for (k, (slot, dims)) in result_info.iter().zip(&dest_dims).enumerate() {
-            if !layout_is_direct(&slot.layout, dims) {
+            if !reads_identity(&slot.layout, dims) {
                 bail!(
-                    "{label} result {k} carries a non-direct layout: strided writes \
-                     are not lowered (dests stay dense out-of-place; CL-4b)"
+                    "{label} result {k} carries a layout that does not reduce to the \
+                     identity index: strided writes are not lowered (dests stay dense \
+                     out-of-place; CL-4b)"
                 );
             }
         }
@@ -102,12 +107,24 @@ impl CodegenCtx {
         })
     }
 
-    /// The slot's layout when it is NOT the direct read for its dims —
-    /// the expression-read discriminator every family keys on (`None` =
-    /// the flat `name[i]` fast path holds).
-    pub fn non_direct_operand(&self, slot: usize) -> Option<&CudaLayout> {
+    /// The slot's layout when its read does NOT simplify away — i.e.
+    /// when the layout expression must actually be lowered and
+    /// evaluated at materialized coordinates. `None` means the
+    /// simplifier reduced the read to the identity, so the operand is
+    /// spelled `name[i]` and no coordinate is materialized for it.
+    /// There is no second path: this is the same expression pathway,
+    /// simplified.
+    pub fn expression_operand(&self, slot: usize) -> Option<&CudaLayout> {
         let layout = &self.operand_layouts[slot];
-        (!layout_is_direct(layout, &self.operand_dims[slot])).then_some(layout)
+        (!reads_identity(layout, &self.operand_dims[slot])).then_some(layout)
+    }
+
+    /// Every operand's read simplified to the identity, so the lowered
+    /// kernel materializes no coordinates at all — the coordinate
+    /// prelude would be dead code and the whole body collapses to the
+    /// flat form.
+    pub fn all_reads_simplify_to_flat(&self) -> bool {
+        (0..self.operand_layouts.len()).all(|k| self.expression_operand(k).is_none())
     }
 }
 
@@ -167,19 +184,207 @@ impl CodegenCtx {
 // thread of every kernel.
 // ===========================================================================
 
-/// Is this layout the DIRECT read for a value of `dims` — row-major,
-/// packed, value-shaped? (The flat `a[i]` fast path; also the CL-4b
-/// write fence.) Rank ≤ 1 left-major is the same function but the
-/// renderer prefers the right-major spelling when present, so we key on
-/// right-major alone — a dense class rendering otherwise takes the
-/// (correct, slower) expression read and the byte-identity pin flags it.
-pub fn layout_is_direct(layout: &CudaLayout, dims: &[usize]) -> bool {
-    match &layout.mirror {
-        luminal::layouts::MirrorLayout::RightMajor(_) => {
-            layout.mirror.literal_extents().as_deref() == Some(dims)
-        }
-        _ => false,
+// ===========================================================================
+// THE READ SIMPLIFIER — the only decision on the read path.
+//
+// RULING (Austin, 2026-08-31): "It always needs to emit a strided
+// expression? That strided expression might just simplify to a[i]. But
+// there should be no special casing. it should always go through the
+// expression pathway and should never be special cased."
+//
+// There is ONE read path: materialize the value's coordinates from the
+// flat thread index `i`, then evaluate the slot layout's own offset
+// expression at those coordinates. For a DENSE layout that whole
+// round trip is the identity — the coordinate decomposition and the
+// index recomposition cancel — and the kernel may read `a[i]` with no
+// coordinates materialized at all. That is a SIMPLIFICATION of the
+// expression, not a fork in front of it.
+//
+// What died here: `layout_is_direct`, which answered the same question
+// by matching the mirror CONSTRUCTOR (`RightMajor` and nothing else).
+// Its own doc comment admitted the hole — "a dense class rendering
+// otherwise takes the (correct, slower) expression read" — and a
+// decision made on a SPELLING is exactly what the e-graph is entitled
+// to break: every spelling in a layout class denotes ONE function, and
+// the renderer hands us whichever it finds. `reads_identity` below
+// decides on the FUNCTION.
+// ===========================================================================
+
+/// An AFFINE form over a value's coordinates: `constant + Σ coeffs[axis]
+/// * c{axis}`, `coeffs` FRONT-indexed and exactly `rank` long. This is a
+/// canonical form, not a spelling: two layouts denoting the same affine
+/// function reduce to the same `Affine` however they are written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Affine {
+    constant: i64,
+    coeffs: Vec<i64>,
+}
+
+impl Affine {
+    fn zero(rank: usize) -> Self {
+        Affine { constant: 0, coeffs: vec![0; rank] }
     }
+
+    fn constant(v: i64, rank: usize) -> Self {
+        Affine { constant: v, coeffs: vec![0; rank] }
+    }
+
+    /// The unit form for one FRONT axis: `c{axis}`.
+    fn coord(axis: usize, rank: usize) -> Self {
+        let mut coeffs = vec![0; rank];
+        coeffs[axis] = 1;
+        Affine { constant: 0, coeffs }
+    }
+
+    /// `constant + Σ strides[axis] * c{axis}` with `constant = 0`.
+    fn from_strides(strides: &[usize]) -> Option<Self> {
+        Some(Affine {
+            constant: 0,
+            coeffs: strides.iter().map(|&s| i64::try_from(s).ok()).collect::<Option<_>>()?,
+        })
+    }
+
+    /// The whole form, if it is coordinate-independent.
+    fn as_constant(&self) -> Option<i64> {
+        self.coeffs.iter().all(|&c| c == 0).then_some(self.constant)
+    }
+
+    /// Overflow is treated as "not analyzable" (`None`) — the caller
+    /// then takes the general expression read, which is always correct.
+    fn add(self, other: Self) -> Option<Self> {
+        Some(Affine {
+            constant: self.constant.checked_add(other.constant)?,
+            coeffs: self
+                .coeffs
+                .iter()
+                .zip(&other.coeffs)
+                .map(|(a, b)| a.checked_add(*b))
+                .collect::<Option<_>>()?,
+        })
+    }
+
+    fn scale(self, k: i64) -> Option<Self> {
+        Some(Affine {
+            constant: self.constant.checked_mul(k)?,
+            coeffs: self.coeffs.iter().map(|c| c.checked_mul(k)).collect::<Option<_>>()?,
+        })
+    }
+
+    /// Division that is EXACT on every term — the only division an
+    /// affine form survives. `(6*c0 + 2*c1) / 2` is `3*c0 + c1`;
+    /// `(3*c0) / 2` is not affine and gives `None`. Exactness is what
+    /// makes this sound for truncating division at any sign: if every
+    /// term divides evenly then the whole value is `k * (affine)` and
+    /// truncation never rounds.
+    fn exact_div(self, k: i64) -> Option<Self> {
+        if k == 0 || self.constant % k != 0 || self.coeffs.iter().any(|c| c % k != 0) {
+            return None;
+        }
+        Some(Affine {
+            constant: self.constant.checked_div(k)?,
+            coeffs: self.coeffs.iter().map(|c| c.checked_div(k)).collect::<Option<_>>()?,
+        })
+    }
+}
+
+/// Reduce one mirror term to an affine form over the value's `rank`
+/// coordinates. `None` means "not an affine function of the
+/// coordinates" — symbolic vars, coordinate-dependent products,
+/// inexact division, remainder, min/max, the bool bridge — and a `None`
+/// anywhere simply means the general expression read is emitted, which
+/// is always correct. Nothing here inspects a layout constructor.
+fn affine_of_term(expr: &luminal::layouts::IntExprTerm, rank: usize) -> Option<Affine> {
+    use luminal::layouts::IntExprTerm as T;
+    match expr {
+        T::Lit(v) => Some(Affine::constant(*v, rank)),
+        T::Var(_) => None,
+        T::Coord { axis_from_end } => {
+            let axis = usize::try_from(*axis_from_end).ok().filter(|&a| a < rank)?;
+            Some(Affine::coord(rank - 1 - axis, rank))
+        }
+        T::Add(a, b) => affine_of_term(a, rank)?.add(affine_of_term(b, rank)?),
+        T::Mul(a, b) => {
+            let (a, b) = (affine_of_term(a, rank)?, affine_of_term(b, rank)?);
+            match (a.as_constant(), b.as_constant()) {
+                (Some(k), _) => b.scale(k),
+                (_, Some(k)) => a.scale(k),
+                // A product of two coordinate-dependent forms is not
+                // affine — no simplification, take the expression read.
+                _ => None,
+            }
+        }
+        T::TruncDiv(a, b) => {
+            let k = affine_of_term(b, rank)?.as_constant()?;
+            affine_of_term(a, rank)?.exact_div(k)
+        }
+        T::TruncRem(_, _) | T::CeilDiv(_, _) | T::Min(_, _) | T::Max(_, _)
+        | T::LessThanCast(_, _) => None,
+    }
+}
+
+/// The slot layout's READ FUNCTION, reduced to an affine form over the
+/// value's coordinates — one `Affine` per mirror spelling, never a
+/// classification of the spelling itself. The layout's own domain must
+/// be literal and equal `dims` (its domain IS the value's shape); a
+/// foreign domain is a planner/renderer incoherence and is refused
+/// downstream, so it yields `None` here rather than a read.
+fn read_affine(layout: &CudaLayout, dims: &[usize]) -> Option<Affine> {
+    use luminal::layouts::MirrorLayout as M;
+    let rank = dims.len();
+    if layout.mirror.literal_extents().as_deref() != Some(dims) {
+        return None;
+    }
+    match &layout.mirror {
+        // The packed ladder states its strides structurally.
+        M::RightMajor(_) => Affine::from_strides(&strides_of(dims)),
+        M::LeftMajor(_) => {
+            let mut strides = vec![1usize; rank];
+            for axis in 1..rank {
+                strides[axis] = strides[axis - 1] * dims[axis - 1];
+            }
+            Affine::from_strides(&strides)
+        }
+        // The expression forms state it as a term.
+        M::Strided(st) => st
+            .chain
+            .iter()
+            .try_fold(Affine::zero(rank), |acc, s| acc.add(affine_of_term(s, rank)?)),
+        M::ElementOffset(eo) => affine_of_term(&eo.offset, rank),
+        M::BitOffset(bo) => affine_of_term(&bo.offset, rank)?.exact_div(bo.width.0),
+    }
+}
+
+/// THE SIMPLIFIER'S VERDICT: does this layout's read function reduce to
+/// the IDENTITY over the flat index the coordinates were derived from?
+///
+/// The read path decomposes flat `i` into row-major coordinates
+/// `c0..c{rank-1}` over `dims` and evaluates the layout at them. Writing
+/// `s = strides_of(dims)`, that decomposition satisfies `i = Σ s[axis] *
+/// c{axis}` exactly. So the round trip is the identity precisely when
+/// the layout's affine form is that same sum with no constant term —
+/// and then the kernel reads `a[i]` with no coordinate materialized.
+///
+/// SPELLING-INDEPENDENT by construction: right-major, a strided chain
+/// with dense strides, an offset expression that folds to the same, and
+/// a bit-offset form whose bits divide out all reduce to one `Affine`.
+///
+/// An EXTENT-1 axis contributes `c{axis} ∈ {0}`, so its coefficient is
+/// unobservable and any value of it is accepted — the coefficient
+/// collision is a fact about the function, not a licence.
+///
+/// This is also the CL-4b WRITE FENCE (a destination is written at
+/// `out[i]`, so it must land where the identity says it does) and the
+/// escaped-output question in `CudaRuntime::get_f32` (is the backing
+/// dense over the value's dims?). One function, three callers.
+pub fn reads_identity(layout: &CudaLayout, dims: &[usize]) -> bool {
+    let Some(affine) = read_affine(layout, dims) else {
+        return false;
+    };
+    let strides = strides_of(dims);
+    affine.constant == 0
+        && (0..dims.len()).all(|axis| {
+            dims[axis] == 1 || i64::try_from(strides[axis]) == Ok(affine.coeffs[axis])
+        })
 }
 
 /// Lower a mirror-layout [`IntExprTerm`] to a C expression over
@@ -387,63 +592,27 @@ pub(crate) fn numel(dims: &[usize]) -> usize {
     dims.iter().product()
 }
 
-/// `out[i] = <expr of a[i], b[i]>` over the destination's numel.
-/// PROTOTYPE (Option B): each operand is read through its SLOT LAYOUT —
-/// a direct (row-major, value-shaped) layout keeps the flat `a[i]`
-/// (byte-identical fast path when every slot is direct); any other
-/// layout switches `a[i]` to `a[a_idx]` with the layout's own offset
-/// expression lowered by [`layout_read_index`]. The hop chain is NOT
-/// consulted in this family.
+/// `out[i] = <expr of a[i], b[i]>` over the destination's numel. Both
+/// operands go through the ONE read path ([`elementwise`]); a read whose
+/// layout expression simplifies to the identity stays the literal
+/// `a[i]`.
 pub(crate) fn binary(ctx: &CodegenCtx, expr: &str) -> Result<Vec<KernelSource>> {
     let [a, b, _dest] = ctx.operand_dtypes.as_slice() else {
         bail!("binary op expects two operands + dest, got {}", ctx.operand_dtypes.len());
     };
     let (ta, tb) = (cuda_type(*a)?, cuda_type(*b)?);
     let to = cuda_type(ctx.dest_dtypes[0])?;
-    let n = numel(&ctx.dest_dims[0]);
-    if all_operands_direct(ctx) {
-        // The flat fast path, byte-identical to pre-Phase-4 codegen.
-        let source = format!(
-            r#"extern "C" __global__ void k(const {ta}* a, const {tb}* b, {to}* out, unsigned long long n) {{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) out[i] = {expr};
-}}"#
-        );
-        return Ok(vec![KernelSource::plain(source, n)]);
-    }
     let sig = format!("const {ta}* a, const {tb}* b");
-    strided_elementwise(ctx, expr, &["a", "b"], &sig, to)
+    elementwise(ctx, expr, &["a", "b"], &sig, to)
 }
 
-/// Every operand slot's layout is the direct read for its dims (the
-/// flat-fast-path / write-fence discriminator — Option B keys this on
-/// the LAYOUT, never on hop presence).
-fn all_operands_direct(ctx: &CodegenCtx) -> bool {
-    ctx.operand_layouts
-        .iter()
-        .zip(&ctx.operand_dims)
-        .all(|(layout, dims)| layout_is_direct(layout, dims))
-}
-
-/// `out[i] = <expr of a[i]>` over the destination's numel. A non-direct
-/// slot layout switches `a[i]` to the expression read `a[a_idx]` (see
-/// [`binary`]).
+/// `out[i] = <expr of a[i]>` over the destination's numel — the same
+/// one read path as [`binary`], one operand.
 pub(crate) fn unary(ctx: &CodegenCtx, expr: &str) -> Result<Vec<KernelSource>> {
     let ta = cuda_type(ctx.operand_dtypes[0])?;
     let to = cuda_type(ctx.dest_dtypes[0])?;
-    let n = numel(&ctx.dest_dims[0]);
-    if all_operands_direct(ctx) {
-        // The flat fast path, byte-identical to pre-Phase-4 codegen.
-        let source = format!(
-            r#"extern "C" __global__ void k(const {ta}* a, {to}* out, unsigned long long n) {{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) out[i] = {expr};
-}}"#
-        );
-        return Ok(vec![KernelSource::plain(source, n)]);
-    }
     let sig = format!("const {ta}* a");
-    strided_elementwise(ctx, expr, &["a"], &sig, to)
+    elementwise(ctx, expr, &["a"], &sig, to)
 }
 
 // RULING 2026-08-27: the Phase-5 `copy_through_fold` lowering is DELETED —
@@ -452,19 +621,29 @@ pub(crate) fn unary(ctx: &CodegenCtx, expr: &str) -> Result<Vec<KernelSource>> {
 // e-graph (the materialize kernel), discovered via search, never a copy
 // mode.
 
-/// The strided elementwise form — PROTOTYPE (Option B): identical
-/// launch geometry to the flat template (one thread per OUT element),
-/// but every operand whose SLOT LAYOUT is not the direct read is read
-/// at `name[f(out_coords)]`, where `f` is the layout's own offset
-/// expression lowered by [`layout_read_index`] over the out-coordinate
-/// prelude — the hop chain is dead in this family. Contract with the
-/// op-module exprs: the template expr reads operand `name` exactly as
-/// the literal token `name[i]`, which is rewritten here to
-/// `name[{name}_idx]`.
+/// THE elementwise read path — there is no other one. One thread per
+/// OUT element; every named operand is read at
+/// `name[f(out_coords)]`, where `f` is that operand's own slot layout
+/// lowered by [`layout_read_index`] over the out-coordinate prelude.
 ///
-/// The DPS dest slot (the operand slot after the named reads) must stay
-/// direct: strided WRITES are CL-4b and refuse loudly.
-fn strided_elementwise(
+/// THE SIMPLIFIER (ruling 2026-08-31). Before lowering, each operand's
+/// read function is reduced ([`reads_identity`]): a read that is the
+/// identity over the very `i` the coordinates were decomposed from
+/// needs no expression at all and stays the literal `name[i]`. If EVERY
+/// read simplifies that way, no coordinate is ever used, the prelude is
+/// dead, and the body collapses to the flat one-liner — which is what
+/// the byte-identity pin observes. That collapse is a simplification of
+/// this path, not a fast path in front of it: nothing here looks at a
+/// mirror constructor.
+///
+/// Contract with the op-module exprs: the template expr reads operand
+/// `name` exactly as the literal token `name[i]`, rewritten here to
+/// `name[{name}_idx]` when the read does not simplify.
+///
+/// The DPS dest slot (the operand slot after the named reads) must
+/// write at the identity index: strided WRITES are CL-4b and refuse
+/// loudly.
+fn elementwise(
     ctx: &CodegenCtx,
     expr: &str,
     names: &[&str],
@@ -473,41 +652,56 @@ fn strided_elementwise(
 ) -> Result<Vec<KernelSource>> {
     let out_dims = &ctx.dest_dims[0];
     let n = numel(out_dims);
-    for (k, layout) in ctx.operand_layouts.iter().enumerate() {
-        if k >= names.len() && !layout_is_direct(layout, &ctx.operand_dims[k]) {
+    for k in names.len()..ctx.operand_layouts.len() {
+        if ctx.expression_operand(k).is_some() {
             bail!(
-                "dest operand slot {k} carries a non-direct layout: strided writes \
-                 are not lowered (dests stay dense out-of-place; CL-4b)"
+                "dest operand slot {k} carries a layout that does not reduce to the \
+                 identity index: strided writes are not lowered (dests stay dense \
+                 out-of-place; CL-4b)"
+            );
+        }
+    }
+    // An elementwise operand VALUE spans the out iteration space, so its
+    // own extents must be the dest's — asked of EVERY named operand,
+    // whatever its layout spells. (It used to be asked only of operands
+    // that took the expression read, which made a coherence check
+    // spelling-dependent: a dense-but-strided operand answered it and a
+    // right-major one of the same wrong shape did not.)
+    for (k, name) in names.iter().enumerate() {
+        if &ctx.operand_dims[k] != out_dims {
+            bail!(
+                "operand {name} value extents {:?} differ from dest extents {:?} — \
+                 elementwise templates iterate the dest; refuse, never reinterpret",
+                ctx.operand_dims[k],
+                out_dims
             );
         }
     }
     let mut chains = String::new();
     let mut rendered = expr.to_string();
     for (k, name) in names.iter().enumerate() {
-        if layout_is_direct(&ctx.operand_layouts[k], &ctx.operand_dims[k]) {
+        let Some(layout) = ctx.expression_operand(k) else {
+            // The read simplified to the identity: `name[i]` already.
             continue;
-        }
-        // An elementwise operand VALUE spans the out iteration space —
-        // its layout's domain is the slot's own coordinates, which must
-        // therefore be the out coordinates. A mismatch means the elected
-        // layout has a different geometry than this template iterates:
-        // refuse, never reinterpret.
-        if &ctx.operand_dims[k] != out_dims {
-            bail!(
-                "operand {name} value extents {:?} differ from dest extents {:?} \
-                 under a non-direct layout — elementwise templates iterate the dest",
-                ctx.operand_dims[k],
-                out_dims
-            );
-        }
-        let (code, idx) =
-            layout_read_index(name, &ctx.operand_layouts[k], out_dims, "c")?;
+        };
+        let (code, idx) = layout_read_index(name, layout, out_dims, "c")?;
         chains.push_str(&code);
         let flat = format!("{name}[i]");
         if !rendered.contains(&flat) {
             bail!("template expr `{expr}` has no `{flat}` token to rewrite for a composed operand");
         }
         rendered = rendered.replace(&flat, &format!("{name}[{idx}]"));
+    }
+    if chains.is_empty() {
+        // Every read simplified away — no coordinate is referenced, so
+        // the prelude and the coordinate-indexed body vanish with them.
+        let source = format!(
+            r#"extern "C" __global__ void k({sig}, {to}* out, unsigned long long n) {{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = {rendered};
+}}"#
+        );
+        return Ok(vec![KernelSource::plain(source, n)]);
     }
     let prelude = coord_prelude(out_dims);
     let source = format!(
@@ -521,14 +715,14 @@ fn strided_elementwise(
 }
 
 /// Loud refusal for codegen bodies that do not lower expression reads
-/// (iota, constant — dest-only signatures): an operand arriving with a
-/// non-direct layout through a kernel that would index it flat is
-/// silent mistranslation — bail instead.
+/// (iota, constant — dest-only signatures): an operand whose read does
+/// NOT simplify to the identity, arriving at a kernel that would index
+/// it flat, is silent mistranslation — bail instead.
 pub(crate) fn require_flat_operands(label: &str, ctx: &CodegenCtx) -> Result<()> {
     for k in 0..ctx.operand_layouts.len() {
-        if ctx.non_direct_operand(k).is_some() {
+        if ctx.expression_operand(k).is_some() {
             bail!(
-                "{label}: operand {k} carries a non-direct layout this kernel does \
+                "{label}: operand {k} carries a layout expression this kernel does \
                  not lower (fail-closed, never identity)"
             );
         }
@@ -557,8 +751,10 @@ pub(crate) fn reduce(
     let inner: usize = in_dims[axis + 1..].iter().product();
     let outer: usize = in_dims[..axis].iter().product();
     let n = outer * inner;
-    if (0..ctx.operand_layouts.len()).all(|k| ctx.non_direct_operand(k).is_none()) {
-        // The flat fast path, byte-identical to pre-Phase-4 codegen.
+    if ctx.all_reads_simplify_to_flat() {
+        // Every read simplified to the identity, so the input needs no
+        // coordinates: the reduction walks the row-major addresses
+        // directly. Same collapse as the elementwise family.
         let source = format!(
             r#"extern "C" __global__ void k(const {ta}* a, {to}* out, unsigned long long n) {{
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -575,23 +771,24 @@ pub(crate) fn reduce(
         );
         return Ok(vec![KernelSource::plain(source, n)]);
     }
-    // Strided read: the input slot's layout is not the direct form, so
-    // its flat address is replaced by the layout's own offset expression
-    // evaluated at the INPUT VALUE's coordinates `c0..c{rank-1}` —
-    // rebuilt here from the outer/inner decomposition plus the loop's
-    // own `r` at the reduced axis. The dest slot must stay direct
-    // (CL-4b, no strided writes).
+    // Expression read: the input slot's read did NOT simplify, so its
+    // flat address is the layout's own offset expression evaluated at
+    // the INPUT VALUE's coordinates `c0..c{rank-1}` — rebuilt here from
+    // the outer/inner decomposition plus the loop's own `r` at the
+    // reduced axis. The dest slot must still write at the identity
+    // index (CL-4b, no strided writes).
     for k in 1..ctx.operand_layouts.len() {
-        if ctx.non_direct_operand(k).is_some() {
+        if ctx.expression_operand(k).is_some() {
             bail!(
-                "dest operand slot {k} carries a non-direct layout: strided writes \
-                 are not lowered (dests stay dense out-of-place; CL-4b)"
+                "dest operand slot {k} carries a layout that does not reduce to the \
+                 identity index: strided writes are not lowered (dests stay dense \
+                 out-of-place; CL-4b)"
             );
         }
     }
     let layout = ctx
-        .non_direct_operand(0)
-        .expect("reduce strided path entered with a non-direct input layout");
+        .expression_operand(0)
+        .expect("reduce expression path entered with an unsimplified input layout");
     // Coordinates OUTSIDE the reduced axis are loop-invariant: decompose
     // `inner` then `outer` (row-major, innermost axis first) before the
     // loop; `c{axis}` is the loop variable.
