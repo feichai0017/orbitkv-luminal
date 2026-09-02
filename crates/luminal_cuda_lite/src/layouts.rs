@@ -1,4 +1,4 @@
-//! The CUDA-lite runtime's LAYOUT vocabulary and renderer (resident-
+//! The CUDA-lite runtime's LAYOUT vocabulary and decoder (resident-
 //! geometry cleanup, ruling 2026-08-31; Option B rework). Core's
 //! bufferizer is generic over an opaque layout type; this backend
 //! instantiates it with a TYPED layout — the shared mirror vocabulary
@@ -12,7 +12,7 @@ use anyhow::Result;
 use luminal::layout_ir::LayoutTensorInfo;
 use luminal::prelude::egraph_serialize::EGraph;
 
-/// The CUDA-lite runtime's opaque plan-layout type: the rendered mirror
+/// The CUDA-lite runtime's opaque plan-layout type: the decoded mirror
 /// layout plus the value's dtype fact (`None` bails loudly at use,
 /// never silently).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,22 +24,22 @@ pub struct CudaLayout {
 /// The CUDA-lite bufferized plan.
 pub type CudaPlan = luminal::bufferize::BufferIrGraph<CudaLayout>;
 
-/// The extraction-side layout renderer: minimal-faithful — the five
-/// constructor spellings render into the mirror structs, preferring the
-/// most-structured spelling present (a rendering preference only), with
+/// The extraction-side layout decoder: minimal-faithful — the five
+/// constructor spellings decode into the mirror structs, preferring the
+/// most-structured spelling present (a decoding preference only), with
 /// the value's dtype fact carried alongside. No normalization, no
 /// analysis; failure is loud and refuses the plan. Pure in
-/// `(layout class, dtype fact)` — the renderer cache contract.
+/// `(layout class, dtype fact)` — the decoder cache contract.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct CudaLayoutRenderer;
+pub struct CudaLayoutDecoder;
 
-impl luminal::layout_ir::LayoutRenderer<CudaLayout> for CudaLayoutRenderer {
-    fn render_layout(&self, egraph: &EGraph, value: &LayoutTensorInfo) -> Result<CudaLayout> {
+impl luminal::layout_ir::LayoutDecoder<CudaLayout> for CudaLayoutDecoder {
+    fn decode(&self, egraph: &EGraph, value: &LayoutTensorInfo) -> Result<CudaLayout> {
         Ok(CudaLayout {
-            mirror: luminal::layouts::render_layout_for(
+            mirror: luminal::layouts::decode_layout_for(
                 egraph,
                 &value.layout.eclass,
-                "cuda-lite layout renderer",
+                "cuda-lite layout decoder",
             )?,
             dtype: value.dtype_enum,
         })

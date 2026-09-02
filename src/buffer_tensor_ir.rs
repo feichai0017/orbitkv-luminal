@@ -446,7 +446,7 @@ pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + AsAnyOp + Debu
     /// PLAN-SIDE CONSUMPTION IS GONE (corrected contract, 2026-08-31):
     /// the bufferizer no longer records a folded access on consumer slot
     /// descriptors — the e-graph mints every view value's COMPOSED layout
-    /// at view creation, and the runtime's rendered `L` for that value is
+    /// at view creation, and the runtime's decoded `L` for that value is
     /// the read path. This hook survives as OP-RECORD business: what an
     /// op remembers from its claimed site, for its own matcher/kernel to
     /// use. `None` (the default) = no numeric map available; consumers
@@ -924,7 +924,7 @@ pub(crate) fn build_buffer_tensor_ir<L: PlanLayout>(
     let layout_of = |value: &ClassId| -> Result<L> {
         value_layouts.get(value).cloned().ok_or_else(|| {
             anyhow::anyhow!(
-                "value {value} has no rendered layout — every graph \
+                "value {value} has no decoded layout — every graph \
                  value records one before BufferTensor construction"
             )
         })

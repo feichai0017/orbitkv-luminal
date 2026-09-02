@@ -190,7 +190,7 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
     options: &ImplementationSearchOptions,
     allow_override: Option<Vec<&'static str>>,
     matchers: Vec<Box<dyn crate::layout_ir::OpMatcher>>,
-    layout_renderer: &dyn crate::layout_ir::LayoutRenderer<L>,
+    layout_decoder: &dyn crate::layout_ir::LayoutDecoder<L>,
     profiler: &mut dyn PlanProfiler<L>,
 ) -> Result<SearchOutcome<L>> {
     // Tensor-keyed at the boundary (the retired-HLIR-keyspace design);
@@ -352,8 +352,8 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
 
     // fingerprint → measured nanos (the dedup cache).
     let mut cache: FxHashMap<u64, u128> = FxHashMap::default();
-    // Rendered layouts are pure functions of (layout class, dtype fact)
-    // — the renderer cache contract — so one cache serves every genome.
+    // Decoded layouts are pure functions of (layout class, dtype fact)
+    // — the decoder cache contract — so one cache serves every genome.
     let mut layout_cache: std::collections::HashMap<
         (egraph_serialize::ClassId, Option<crate::dtype::PlanDtype>),
         L,
@@ -427,21 +427,21 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
                 }
                 None => {
                     let build_start = Instant::now();
-                    // Render the elected layouts (the runtime's hook; a
+                    // Decode the elected layouts (the runtime's hook; a
                     // refusal rejects THIS genome, loudly accounted, and
                     // the search tries others), then bufferize under the
-                    // rendered table.
+                    // decoded table.
                     // The table is VALUE-keyed (corrected contract), so it
                     // must be built over the graph bufferize sees — the
                     // POST-DPS one, whose poison destinations are fresh
                     // values. They clone their tied result's layout class
-                    // AND dtype fact, so every poison is a renderer-cache
-                    // HIT: value-keying costs no extra renderer calls.
+                    // AND dtype fact, so every poison is a decoder-cache
+                    // HIT: value-keying costs no extra decoder calls.
                     let dps = crate::dps::dps_rewrite(&graph);
-                    let built = extractor::rendered_layout_table(
+                    let built = extractor::decoded_layout_table(
                         egraph,
                         &dps,
-                        layout_renderer,
+                        layout_decoder,
                         &mut layout_cache,
                     )
                     .and_then(|table| crate::bufferize::bufferize(&dps, &table));
@@ -495,10 +495,10 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
             {
                 let build_start = Instant::now();
                 let dps = crate::dps::dps_rewrite(&graph);
-                let built = extractor::rendered_layout_table(
+                let built = extractor::decoded_layout_table(
                     egraph,
                     &dps,
-                    layout_renderer,
+                    layout_decoder,
                     &mut layout_cache,
                 )
                 .and_then(|table| crate::bufferize::bufferize(&dps, &table));
@@ -564,7 +564,7 @@ pub fn bucketed_search_implementations<L: crate::bufferize::PlanLayout>(
     options: &ImplementationSearchOptions,
     assembled_program: &str,
     matchers: impl Fn() -> Vec<Box<dyn crate::layout_ir::OpMatcher>>,
-    layout_renderer: &dyn crate::layout_ir::LayoutRenderer<L>,
+    layout_decoder: &dyn crate::layout_ir::LayoutDecoder<L>,
     profiler: &mut dyn PlanProfiler<L>,
     bindings: &dyn crate::runtime_binding::RuntimeBindingsGenerator,
 ) -> Result<Vec<BucketPlan<L>>> {
@@ -657,7 +657,7 @@ pub fn bucketed_search_implementations<L: crate::bufferize::PlanLayout>(
             options,
             None,
             matchers(),
-            layout_renderer,
+            layout_decoder,
             profiler,
         )?;
         plans.push(BucketPlan {
@@ -823,7 +823,7 @@ mod tests {
             &ImplementationSearchOptions::default(),
             luminal_reference::assembled_program(),
             luminal_reference::ops::built_in_matchers,
-            &luminal_reference::ReferenceLayoutRenderer,
+            &luminal_reference::ReferenceLayoutDecoder,
             &mut luminal_reference::ReferenceProfiler,
             &luminal_reference::ReferenceBindings,
         )

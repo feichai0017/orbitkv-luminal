@@ -92,8 +92,8 @@ use crate::layout_ir::{
 /// enforced in the e-graph, where all spellings of a layout class
 /// denote one function — no tripwire is re-derived here). There is no
 /// layout vocabulary in core: the RUNTIME provides the concrete type
-/// when it builds plans (its extraction-side layout renderer produces
-/// the values — see [`crate::layout_ir::LayoutRenderer`]), and backends
+/// when it builds plans (its extraction-side layout decoder produces
+/// the values — see [`crate::layout_ir::LayoutDecoder`]), and backends
 /// are free to use layouts core has never heard of.
 /// Blanket-implemented: the bound IS the whole contract.
 pub trait PlanLayout: Clone + std::fmt::Debug {}
@@ -165,7 +165,7 @@ pub struct Buffer<L: PlanLayout> {
     /// `PartialEq` on [`PlanLayout`]); the runtime owns it.
     pub backs: ClassId,
     /// PROTOTYPE (Option B): the backed tensor's elected layout — the `L`
-    /// the runtime's renderer minted for `backs`, carried VERBATIM.
+    /// the runtime's decoder minted for `backs`, carried VERBATIM.
     /// Informationally redundant for a live runtime (it knew every layout
     /// before it called bufferize); carried so plans are SELF-CONTAINED
     /// for `load_plan`/hand-built callers, who may read this instead of a
@@ -192,7 +192,7 @@ pub struct OutputBinding<L: PlanLayout> {
     pub value: ClassId,
     pub buffer: BufferId,
     /// PROTOTYPE (Option B): the output value's elected layout, carried
-    /// VERBATIM from the runtime's rendered table — for a view election,
+    /// VERBATIM from the runtime's decoded table — for a view election,
     /// the view's COMPOSED layout as the e-graph minted it, already
     /// addressing the backing buffer's bytes. Redundant for a live
     /// runtime; self-containment for loaded plans.
@@ -232,7 +232,7 @@ pub struct BufferEdge {
 // (corrected contract, 2026-08-31): recording per-slot view-fold chains
 // was the planner COMPOSING layout knowledge — the e-graph already mints
 // every view value's composed layout at view creation, and the runtime's
-// rendered `L` for that value IS the read path. The planner records
+// decoded `L` for that value IS the read path. The planner records
 // assignment, never access expressions.
 
 /// Per-slot descriptor on a plan node: the VALUE occupying an
@@ -249,7 +249,7 @@ pub struct SlotDescriptor<L: PlanLayout> {
     /// The buffer backing the slot (same entry as `reads`/`writes`).
     pub buffer: BufferId,
     /// PROTOTYPE (Option B): the slot value's elected layout, carried
-    /// VERBATIM from the runtime's rendered table (TOTAL: every
+    /// VERBATIM from the runtime's decoded table (TOTAL: every
     /// LayoutTensor carries a layout by construction; a missing row bails
     /// at lowering, never defaults). For an operand reading through
     /// folded views this is the view's COMPOSED layout as the e-graph
@@ -1532,13 +1532,13 @@ fn validate_input_program(graph: &ExtractedGraph) -> Result<()> {
 /// [`BufferIrGraph`] whose values are buffers and whose copies are real nodes. The
 /// source `graph` is borrowed and left untouched.
 ///
-/// `layouts` is the rendered-layout table, keyed by LAYOUT e-class (each
-/// value's `LayoutTensorInfo::layout.eclass`): the runtime's renderer
+/// `layouts` is the decoded-layout table, keyed by LAYOUT e-class (each
+/// value's `LayoutTensorInfo::layout.eclass`): the runtime's decoder
 /// produced one opaque `L` per layout class it elected (see
-/// [`crate::extractor::rendered_layout_table`]). The table must cover
+/// [`crate::extractor::decoded_layout_table`]). The table must cover
 /// every value's layout class — a miss is a loud error, never a default
 /// (every LayoutTensor carries a Layout by construction, so a missing
-/// row means the renderer refused and the plan must too). Keying by
+/// row means the decoder refused and the plan must too). Keying by
 /// layout class also covers the DPS poisons for free: `dps_rewrite`
 /// clones the tied result's layout (e-class included) onto each poison
 /// destination, so the poison's `L` IS the result's.
@@ -1546,17 +1546,17 @@ pub fn bufferize<L: PlanLayout>(
     graph: &ExtractedGraph,
     layouts: &HashMap<ClassId, L>,
 ) -> Result<BufferIrGraph<L>> {
-    // `layouts` is keyed by VALUE e-class (the runtime's rendered table,
-    // [`crate::extractor::rendered_layout_table`]).
+    // `layouts` is keyed by VALUE e-class (the runtime's decoded table,
+    // [`crate::extractor::decoded_layout_table`]).
     let value_layouts = extraction_layouts(graph, layouts)?;
     let mut plan = lower(buffer_tensor_plan(graph, &value_layouts)?, &value_layouts)?;
     annotate_boundary_lits(&mut plan, graph);
     Ok(plan)
 }
 
-/// Every extraction VALUE's rendered layout, keyed by value e-class —
+/// Every extraction VALUE's decoded layout, keyed by value e-class —
 /// TOTAL: every LayoutTensor carries a Layout by construction, so a value
-/// with no rendered row is a loud refusal, never a default. This is the
+/// with no decoded row is a loud refusal, never a default. This is the
 /// ONE per-value fact the planner transports; dims, element bits, and
 /// dtype are the runtime's own extraction-side knowledge and never enter
 /// the plan (corrected contract, 2026-08-31).
@@ -1573,9 +1573,9 @@ pub(crate) fn extraction_layouts<L: PlanLayout>(
         }
         let layout = layouts.get(&value.eclass).cloned().ok_or_else(|| {
             anyhow::anyhow!(
-                "value {} (layout class {}) has no row in the rendered \
+                "value {} (layout class {}) has no row in the decoded \
                  layout table — every LayoutTensor carries a Layout by \
-                 construction, so the renderer must cover it or the plan \
+                 construction, so the decoder must cover it or the plan \
                  must refuse",
                 value.eclass,
                 value.layout.eclass,
@@ -1787,7 +1787,7 @@ impl<L: PlanLayout> Bufferizer<L> {
         let layout_of = |value: &ClassId| -> Result<L> {
             value_layouts.get(value).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "value {value} has no rendered layout — every graph \
+                    "value {value} has no decoded layout — every graph \
                      value records one before assignment"
                 )
             })
@@ -2072,10 +2072,10 @@ pub(crate) fn lower<L: PlanLayout>(
 
     // Per-slot descriptor: the assignment restated per slot — (value,
     // buffer) identity from the BufferTensor pair, plus the Option-B
-    // carried layout from the rendered table.
+    // carried layout from the decoded table.
     let describe = |tensor: &BufferTensor| -> Result<SlotDescriptor<L>> {
         // PROTOTYPE (Option B): the slot's layout is TOTAL. Every
-        // EXTRACTION value has a rendered-layout row; the one legal miss
+        // EXTRACTION value has a decoded-layout row; the one legal miss
         // is a planner-SYNTHESIZED undefined value (a BufferAlloc poison
         // minted by `optimize` — never read, never returned), whose slot
         // carries its residence buffer's mint-seed layout (also total).
@@ -2088,7 +2088,7 @@ pub(crate) fn lower<L: PlanLayout>(
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "lowering: value {} occupies a slot with neither a \
-                         rendered-layout row nor an interned buffer — a \
+                         decoded-layout row nor an interned buffer — a \
                          layoutless slot is unrepresentable (fail-closed)",
                         tensor.value
                     )
@@ -2182,7 +2182,7 @@ pub(crate) fn lower<L: PlanLayout>(
                         let parent = &operands[derives(result).expect("checked by is_view")];
                         // The fold records NO access expression (corrected
                         // contract, 2026-08-31): the view value's own
-                        // rendered layout — already composed by the
+                        // decoded layout — already composed by the
                         // e-graph at view creation — is how its readers
                         // address the parent residence's bytes. Only the
                         // fold ROOT is tracked, for the base-storage copy
@@ -2314,7 +2314,7 @@ pub(crate) fn lower<L: PlanLayout>(
                 // EVERY slot carries its elected layout uniformly: a view
                 // output is fulfilled STRUCTURALLY (its buffer is its
                 // parent's backing storage — zero-copy by construction),
-                // and the returned layout is the slot value's own rendered
+                // and the returned layout is the slot value's own decoded
                 // `L`, verbatim. Total, loud on a miss.
                 let bindings: Vec<OutputBinding<L>> = slots
                     .iter()
@@ -2323,7 +2323,7 @@ pub(crate) fn lower<L: PlanLayout>(
                         let Some(layout) = value_layouts.get(&slot.value) else {
                             anyhow::bail!(
                                 "lowering: output slot value {} has no \
-                                 rendered-layout row (fail-closed)",
+                                 decoded-layout row (fail-closed)",
                                 slot.value
                             );
                         };
@@ -3330,13 +3330,13 @@ mod tests {
     // -------------------------------------------------------------------------
     // View folds: the slot carries the view value's OWN layout (corrected
     // contract, 2026-08-31 — the hop machinery is deleted; the e-graph
-    // mints every view's composed layout, and the rendered `L` is the
+    // mints every view's composed layout, and the decoded `L` is the
     // read path).
     // -------------------------------------------------------------------------
 
     /// A folded view redirects its consumer to the parent's buffer while
     /// the slot keeps the VIEW's identity: its value, and its own
-    /// rendered layout, verbatim from the table.
+    /// decoded layout, verbatim from the table.
     #[test]
     fn folded_view_slot_carries_the_views_own_layout() {
         use crate::index_expr::IotaExpr;
@@ -3388,7 +3388,7 @@ mod tests {
         let table = crate::test_support::mock_layout_table(&graph);
         assert_eq!(
             &operand_info[0].layout, &table[&v],
-            "the slot carries the VIEW's own rendered layout, verbatim"
+            "the slot carries the VIEW's own decoded layout, verbatim"
         );
         assert_eq!(
             &result_info[0].layout, &table[&r],
@@ -3399,7 +3399,7 @@ mod tests {
 
     /// A two-hop view chain still lowers to ONE producer redirect: the
     /// consumer's slot is anchored on the ROOT parent's buffer, and the
-    /// slot's layout is the OUTER view's own rendered layout (the
+    /// slot's layout is the OUTER view's own decoded layout (the
     /// e-graph minted the composition; the planner records nothing).
     #[test]
     fn two_hop_view_chain_redirects_to_the_root_parent() {
@@ -3465,9 +3465,9 @@ mod tests {
     }
 
     /// A view op WITHOUT a numeric map still folds structurally — the
-    /// read path is the view VALUE's own rendered layout, so there is no
+    /// read path is the view VALUE's own decoded layout, so there is no
     /// per-op map to lose (fail-closure moved to RENDER time: a layout
-    /// class the renderer cannot render refuses the whole plan).
+    /// class the decoder cannot decode refuses the whole plan).
     #[test]
     fn mapless_view_fold_still_redirects_with_the_views_layout() {
         use crate::test_support::{MockView, TestGraph};
@@ -3524,7 +3524,7 @@ mod tests {
     /// the slot is backed by the input buffer itself and the declared
     /// output buffer goes unused (dropped by DCE — runtimes never allocate
     /// it). Option B's addition: the binding also CARRIES the view value's
-    /// elected layout `L`, verbatim from the rendered table, so an
+    /// elected layout `L`, verbatim from the decoded table, so an
     /// externally loaded plan can read the delivery geometry without the
     /// table a live runtime already has.
     #[test]
@@ -3579,7 +3579,7 @@ mod tests {
             "the input buffer's assignment row still names the tensor it backs"
         );
         // Option B's disclosure: the slot carries the VIEW value's own
-        // elected layout, verbatim from the rendered table.
+        // elected layout, verbatim from the decoded table.
         let table = crate::test_support::mock_layout_table(&graph);
         assert_eq!(
             &slot.layout, &table[&v],
@@ -4183,7 +4183,7 @@ mod tests {
             &mock_geometry,
         )
         .expect("construction survives the rejected tie");
-        // Lowering takes the rendered layout table directly — there is no
+        // Lowering takes the decoded layout table directly — there is no
         // second, geometry-bearing table to build, and no annotation pass
         // to run afterwards.
         let plan = lower(bt, &mock_geometry).expect("the base-storage copy lowers");

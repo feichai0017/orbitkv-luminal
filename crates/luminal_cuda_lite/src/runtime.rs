@@ -266,7 +266,7 @@ impl CudaRuntime {
                 Self::allow_list()
             }),
             self.matchers(),
-            &crate::layouts::CudaLayoutRenderer,
+            &crate::layouts::CudaLayoutDecoder,
             &mut luminal::implementation_search::StaticProfiler,
         )?;
 

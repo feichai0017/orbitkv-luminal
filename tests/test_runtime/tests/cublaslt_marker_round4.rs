@@ -227,12 +227,12 @@ fn t6a_bufferize_all_four_forms() {
         );
         // THE DISCLOSURE (Option B, corrected contract): the binding
         // carries the slot VALUE's own elected layout `L`, verbatim from
-        // the rendered table — for this weld, the transpose view's
+        // the decoded table — for this weld, the transpose view's
         // composed layout. Mock plans transport `MockLayout` (the layout
         // class identity), so the pin here is IDENTITY: the returned L
         // is the value's own table row, and the ASSIGNMENT is queryable
         // (the escaping buffer backs a real tensor whose buffer is the
-        // slot's). Element-level walkability of real rendered layouts is
+        // slot's). Element-level walkability of real decoded layouts is
         // pinned in `test_runtime::test_equality`'s own tests.
         let table = luminal::test_support::mock_layout_table(&dps_graph);
         assert_eq!(

@@ -1436,13 +1436,13 @@ mod tests {
         .expect("extracts")
         .expect("plan");
         let dps = luminal::dps::dps_rewrite(&extracted);
-        let layouts = luminal::extractor::rendered_layout_table(
+        let layouts = luminal::extractor::decoded_layout_table(
             &serialized,
             &dps,
-            &crate::layouts::ReferenceLayoutRenderer,
+            &crate::layouts::ReferenceLayoutDecoder,
             &mut std::collections::HashMap::new(),
         )
-        .expect("layouts render");
+        .expect("layouts decode");
         let plan = luminal::bufferize::bufferize(&dps, &layouts).expect("bufferizes");
         let mut rt = crate::ReferenceRuntime::default();
         rt.stage_slots(&program.input_slots, &program.output_slots);

@@ -663,8 +663,8 @@ mod strided {
     // =======================================================================
     // THE TWO-SPELLING PROOF (ruling 2026-08-31).
     //
-    // The e-graph may hand the renderer ANY spelling of a layout class —
-    // all spellings of a class denote one function, and `render_layout`
+    // The e-graph may hand the decoder ANY spelling of a layout class —
+    // all spellings of a class denote one function, and `decode_layout`
     // only states a PREFERENCE among the ones it finds. So the read
     // decision may not be made on a spelling. These tests state one dense
     // function five ways and require the emitted CUDA source to be

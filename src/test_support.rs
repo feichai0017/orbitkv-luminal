@@ -146,11 +146,11 @@ use crate::layout_ir::{
 /// equality join was dropped — layout equality is enforced in the
 /// e-graph); the `PartialEq` derive here is test-assertion convenience,
 /// not a bound the planner uses. Core never constructs one outside test
-/// support; runtimes bring their own rendered types.
+/// support; runtimes bring their own decoded types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockLayout(pub ClassId);
 
-/// The mock rendered-layout table for a built graph, keyed by VALUE
+/// The mock decoded-layout table for a built graph, keyed by VALUE
 /// e-class (the [`crate::bufferize::bufferize`] contract): every value
 /// maps to the identity of its layout class. Works for hand-built
 /// [`TestGraph`]s and real extractions alike.
@@ -177,7 +177,7 @@ pub fn mock_layout_table(graph: &ExtractedGraph) -> HashMap<ClassId, MockLayout>
 
 /// [`crate::bufferize::bufferize`] under the mock table — the test-side
 /// one-argument convenience every suite that does not exercise a real
-/// renderer plans through.
+/// decoder plans through.
 pub fn bufferize_mock(
     graph: &ExtractedGraph,
 ) -> anyhow::Result<crate::bufferize::BufferIrGraph<MockLayout>> {
@@ -1455,7 +1455,7 @@ mod harness_tests {
     /// the bounds-row encoding), but they NO LONGER thread onto plan
     /// buffers: `PlanDtype` left the plan and bufferizer vocabulary
     /// entirely. What they thread onto is the RUNTIME'S OWN `L` — here
-    /// `RefLayout { mirror, dtype }` — which the reference renderer folds
+    /// `RefLayout { mirror, dtype }` — which the reference decoder folds
     /// at extraction time and which Option B then carries on each
     /// assignment entry.
     ///
@@ -1472,13 +1472,13 @@ mod harness_tests {
         let egraph = serialize_fixture("boundary_gather.egg");
         let graph = luminal::dps::dps_rewrite(&extract_fixture("boundary_gather.egg"));
         let mut cache = std::collections::HashMap::new();
-        let table = luminal::extractor::rendered_layout_table(
+        let table = luminal::extractor::decoded_layout_table(
             &egraph,
             &graph, // the POST-DPS graph: value-keyed tables cover poisons
-            &luminal_reference::ReferenceLayoutRenderer,
+            &luminal_reference::ReferenceLayoutDecoder,
             &mut cache,
         )
-        .expect("the reference renderer covers every elected value");
+        .expect("the reference decoder covers every elected value");
         let plan = bufferize::bufferize(&graph, &table).expect("mixed-dtype plan bufferizes");
 
         let mut by_lit: std::collections::HashMap<i64, PlanDtype> = Default::default();
@@ -1488,11 +1488,11 @@ mod harness_tests {
                 panic!("buffer {} carries no dtype fact in its L", buffer.label)
             });
             // TRANSPORT, not derivation: the row on the buffer's carried
-            // layout IS the row the renderer put on the BACKED tensor.
+            // layout IS the row the decoder put on the BACKED tensor.
             assert_eq!(
                 Some(&buffer.layout),
                 table.get(&buffer.backs),
-                "buffer {} carries its backed tensor's own rendered layout",
+                "buffer {} carries its backed tensor's own decoded layout",
                 buffer.label
             );
             if let Some(lit) = buffer.lit {
@@ -3901,7 +3901,7 @@ mod escape_execution_tests {
     //! calls `bufferize`, so the plan tells it nothing new. These plans
     //! have NO such runtime behind them: they are the surface `load_plan`
     //! accepts, built by hand, with no e-graph, no recorder and no
-    //! rendered table anywhere. Under Option B they need no companion
+    //! decoded table anywhere. Under Option B they need no companion
     //! argument, because the boundary/layout knowledge a live runtime
     //! would have had rides the plan itself: `Buffer::layout` sizes every
     //! allocation and `OutputBinding::layout` describes every delivery.

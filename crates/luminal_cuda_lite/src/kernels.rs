@@ -35,7 +35,7 @@ use std::any::TypeId;
 /// hop-chain
 /// machinery is fully retired (corrected contract, 2026-08-31): the
 /// e-graph mints every view's composed layout at view creation, and the
-/// runtime's rendered `L` IS the read path.
+/// runtime's decoded `L` IS the read path.
 #[derive(Debug)]
 pub struct CodegenCtx {
     pub operand_dims: Vec<Vec<usize>>,
@@ -43,7 +43,7 @@ pub struct CodegenCtx {
     pub dest_dims: Vec<Vec<usize>>,
     pub dest_dtypes: Vec<PlanDtype>,
     /// Per-operand slot layouts, parallel to `operand_dims` — each
-    /// operand's OWN elected layout as the runtime's renderer minted it
+    /// operand's OWN elected layout as the runtime's decoder minted it
     /// (for a folded operand, the view's COMPOSED layout, addressing
     /// the residence's bytes directly).
     pub operand_layouts: Vec<CudaLayout>,
@@ -142,7 +142,7 @@ impl CodegenCtx {
 // PROTOTYPE (Option B): reading operands through their SLOT LAYOUTS.
 //
 // The slot's own elected layout (`SlotDescriptor::layout`, the runtime's
-// rendered `MirrorLayout`) is the ONE vocabulary for how a value
+// decoded `MirrorLayout`) is the ONE vocabulary for how a value
 // addresses its residence — for a folded operand it is the view's
 // COMPOSED layout, which the e-graph already minted (preamble view
 // BitOffset composition / native strided chains). The elementwise family
@@ -212,11 +212,11 @@ impl CodegenCtx {
 //
 // What died here: `layout_is_direct`, which answered the same question
 // by matching the mirror CONSTRUCTOR (`RightMajor` and nothing else).
-// Its own doc comment admitted the hole — "a dense class rendering
+// Its own doc comment admitted the hole — "a dense class decoding
 // otherwise takes the (correct, slower) expression read" — and a
 // decision made on a SPELLING is exactly what the e-graph is entitled
 // to break: every spelling in a layout class denotes ONE function, and
-// the renderer hands us whichever it finds. `layout_read_index` below
+// the decoder hands us whichever it finds. `layout_read_index` below
 // lowers the FUNCTION, and whatever it simplifies to is what is
 // emitted — there is no verdict to consult.
 // ===========================================================================
@@ -360,7 +360,7 @@ fn affine_of_term(expr: &luminal::layouts::IntExprTerm, rank: usize) -> Option<A
 /// value's coordinates — one `Affine` per mirror spelling, never a
 /// classification of the spelling itself. The layout's own domain must
 /// be literal and equal `dims` (its domain IS the value's shape); a
-/// foreign domain is a planner/renderer incoherence and is refused
+/// foreign domain is a planner/decoder incoherence and is refused
 /// downstream, so it yields `None` here rather than a read.
 fn read_affine(layout: &CudaLayout, dims: &[usize]) -> Option<Affine> {
     use luminal::layouts::MirrorLayout as M;
@@ -480,7 +480,7 @@ impl<'a> Coords<'a> {
 /// else — no bounds check is emitted, deliberately (see the NO RUNTIME
 /// BOUNDS TRAPS note above for what used to be here and why). The
 /// layout's own domain (its shape) must be LITERAL and equal the slot's
-/// value dims — a foreign-domain layout is a planner/renderer
+/// value dims — a foreign-domain layout is a planner/decoder
 /// incoherence and refuses loudly.
 ///
 /// THIS IS THE ONLY READ PATH, and there is no predicate in front of it.
