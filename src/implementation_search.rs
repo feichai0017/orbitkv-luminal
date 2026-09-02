@@ -17,13 +17,14 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow, ensure};
+use egraph_serialize::ClassId;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
 
 use crate::bufferize::BufferIrGraph;
-use crate::extractor::{self, Genome};
+use crate::extractor::{self, Genome, ProducerChoice, SamplingSpace};
 use crate::graph::LogicalProgram;
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,15 @@ pub struct RefusalBreakdown {
     pub extract_refusals: usize,
     /// ...of those, how many involved a CHOICE-CYCLE (the genome's
     /// chosen producers block on each other).
+    ///
+    /// INVARIANT (2026-09-02): sampling and mutation both keep a
+    /// genome's chosen-edge graph acyclic, so for a SAMPLED genome this
+    /// can only be nonzero through the sampler's documented full-list
+    /// fallback — a component position with no acyclic option at all.
+    /// A choice cycle on an acyclic chosen-edge graph is a sampler bug
+    /// and stops the search (see `search_implementations_with_runtime`).
+    /// Genomes assembled by hand (the election boards) are of course
+    /// still free to name cycles, and are still counted here.
     pub with_choice_cycles: usize,
     /// ...and how many involved a DEAD-END (an unplanned class with no
     /// candidate at all).
@@ -176,6 +186,306 @@ impl<L: crate::bufferize::PlanLayout> PlanProfiler<L> for StaticProfiler {
     }
 }
 
+/// Producer index shorthand: class -> its candidate `(constructor
+/// name, choice)` entries, in the index's own deterministic order.
+pub type ProducerIndex = BTreeMap<ClassId, Vec<(String, ProducerChoice)>>;
+
+/// Pick a position: uniformly among `allowed`, or — when nothing is
+/// admissible — uniformly over the FULL candidate list.
+///
+/// THE FALLBACK is deliberate and unchanged from the 2026-08-07
+/// sampler: a class every one of whose candidates sources from a member
+/// of its own component that is not yet assigned has no acyclic option
+/// at this position, which means its component holds no acyclic genome
+/// at all through this class. Refusing to choose would silently shrink
+/// the space; choosing anyway keeps the refusal accounting (and the
+/// blockage anatomy) as the loud diagnosis for that corner.
+fn choose_position(rng: &mut StdRng, allowed: &[usize], total: usize) -> usize {
+    if allowed.is_empty() {
+        rng.random_range(0..total)
+    } else {
+        allowed[rng.random_range(0..allowed.len())]
+    }
+}
+
+/// GENERATION-0 SAMPLING: a FOREST inside every component.
+///
+/// Each component's members are assigned in a random order built one
+/// step at a time. A member may elect a candidate with
+/// intra-component sources only when ALL of them are already assigned,
+/// so every chosen intra-component edge points BACKWARD along the
+/// order — acyclic by construction.
+///
+/// THE ORDER IS DRAWN FROM THE ADMISSIBLE ONES: at each step the next
+/// member is picked uniformly among those that still HAVE an
+/// admissible candidate, so the first member always progresses and no
+/// member is forced into the fallback by an unlucky shuffle. (A
+/// uniformly random order over all members would sometimes lead with a
+/// member that cannot progress — e.g. a layout copy whose only sources
+/// are its own component — and then the fallback could weld a cycle
+/// the 2026-08-07 sampler would have refused. Restricting to
+/// admissible orders removes no genome: see COVERAGE.)
+///
+/// COVERAGE. This admits chains and forests, not just the 2026-08-07
+/// star (one elected primary, everyone else copying it): for any
+/// acyclic assignment of intra-component candidates there is a
+/// topological order of the chosen edges, at every prefix of which the
+/// next member's own chosen candidate is admissible — so that member
+/// is in the pool, and the assignment is reachable. The only genomes
+/// excluded are the cyclic ones. Classes outside every component are
+/// sampled freely: their candidates' edges all leave the component,
+/// and the condensation of the SCC decomposition is a DAG.
+pub fn sample_genome(index: &ProducerIndex, space: &SamplingSpace, rng: &mut StdRng) -> Genome {
+    sample_genome_reporting(index, space, rng).0
+}
+
+/// [`sample_genome`] plus the classes that had to take the full-list
+/// fallback, in the order they took it — the sampler's own account of
+/// where its acyclicity invariant was unenforceable. An EMPTY list is
+/// the guarantee: the genome's chosen-edge graph is acyclic.
+pub fn sample_genome_reporting(
+    index: &ProducerIndex,
+    space: &SamplingSpace,
+    rng: &mut StdRng,
+) -> (Genome, Vec<ClassId>) {
+    let mut genome = Genome::default();
+    let mut fallbacks: Vec<ClassId> = Vec::new();
+    for members in &space.components {
+        // Per member, per candidate: how many of its intra-component
+        // sources are still unassigned. Zero = admissible now. (Sources
+        // are deduplicated, so one decrement each.)
+        let mut pending: Vec<Vec<usize>> = members
+            .iter()
+            .map(|class| {
+                space.intra_sources[class]
+                    .iter()
+                    .map(Vec::len)
+                    .collect::<Vec<usize>>()
+            })
+            .collect();
+        // How many admissible candidates each member currently has.
+        let mut admissible: Vec<usize> = pending
+            .iter()
+            .map(|per_candidate| per_candidate.iter().filter(|left| **left == 0).count())
+            .collect();
+        // source class -> the (member, candidate) counters it releases.
+        let mut dependents: std::collections::BTreeMap<&ClassId, Vec<(usize, usize)>> =
+            std::collections::BTreeMap::new();
+        for (member, class) in members.iter().enumerate() {
+            for (candidate, sources) in space.intra_sources[class].iter().enumerate() {
+                for source in sources {
+                    dependents
+                        .entry(source)
+                        .or_default()
+                        .push((member, candidate));
+                }
+            }
+        }
+
+        let mut assigned = vec![false; members.len()];
+        for _ in 0..members.len() {
+            // The next member: uniform over those that can still choose
+            // admissibly, or — when none can — over whoever is left,
+            // which is the full-list fallback.
+            let mut pool: Vec<usize> = (0..members.len())
+                .filter(|member| !assigned[*member] && admissible[*member] > 0)
+                .collect();
+            let forced = pool.is_empty();
+            if forced {
+                pool = (0..members.len())
+                    .filter(|member| !assigned[*member])
+                    .collect();
+            }
+            let member = pool[rng.random_range(0..pool.len())];
+            let class = &members[member];
+            let candidates = &index[class];
+            let allowed: Vec<usize> = (0..candidates.len())
+                .filter(|position| pending[member][*position] == 0)
+                .collect();
+            debug_assert_eq!(allowed.is_empty(), forced);
+            if forced {
+                fallbacks.push(class.clone());
+            }
+            let position = choose_position(rng, &allowed, candidates.len());
+            genome
+                .choices
+                .insert(class.clone(), candidates[position].1.clone());
+            assigned[member] = true;
+            for (other, candidate) in dependents.get(class).into_iter().flatten() {
+                pending[*other][*candidate] -= 1;
+                if pending[*other][*candidate] == 0 {
+                    admissible[*other] += 1;
+                }
+            }
+        }
+    }
+    for (class, candidates) in index {
+        if genome.choices.contains_key(class) {
+            continue;
+        }
+        let position = rng.random_range(0..candidates.len());
+        genome
+            .choices
+            .insert(class.clone(), candidates[position].1.clone());
+    }
+    (genome, fallbacks)
+}
+
+/// Would routing `class` through `sources` close a cycle in the genome's
+/// chosen intra-component edge graph? A DFS from each source over the
+/// OTHER members' current choices; reaching `class` again — or a source
+/// that IS `class` — is the cycle. Intra-component edges never leave the
+/// component, so the walk is component-local and small.
+fn flip_closes_cycle(
+    index: &ProducerIndex,
+    space: &SamplingSpace,
+    genome: &Genome,
+    class: &ClassId,
+    sources: &[ClassId],
+) -> bool {
+    let mut stack: Vec<ClassId> = sources.to_vec();
+    let mut seen: FxHashSet<ClassId> = FxHashSet::default();
+    while let Some(node) = stack.pop() {
+        if &node == class {
+            return true;
+        }
+        if !seen.insert(node.clone()) {
+            continue;
+        }
+        let Some(position) = space.chosen_position(index, genome, &node) else {
+            continue;
+        };
+        if let Some(next) = space
+            .intra_sources
+            .get(&node)
+            .and_then(|per_candidate| per_candidate.get(position))
+        {
+            stack.extend(next.iter().cloned());
+        }
+    }
+    false
+}
+
+/// POINT MUTATION under the same invariant: a flip of one class to one
+/// candidate is admissible exactly when the resulting chosen-edge graph
+/// closes no cycle through that class (see [`flip_closes_cycle`]).
+/// Progressing candidates have no intra-component sources and so are
+/// always admissible; a candidate sourcing from its own class never is.
+/// Mutations hit ANY producer class, dead rows included (deliberately —
+/// a dead-row mutation is free now and pre-stages the choice a later
+/// route flip lands on).
+pub fn mutate_genome(
+    parent: &Genome,
+    index: &ProducerIndex,
+    space: &SamplingSpace,
+    classes: &[ClassId],
+    rng: &mut StdRng,
+    count: usize,
+) -> Genome {
+    mutate_genome_reporting(parent, index, space, classes, rng, count).0
+}
+
+/// [`mutate_genome`] plus the classes whose flip found NO admissible
+/// candidate and took the full-list fallback (see
+/// [`sample_genome_reporting`]).
+pub fn mutate_genome_reporting(
+    parent: &Genome,
+    index: &ProducerIndex,
+    space: &SamplingSpace,
+    classes: &[ClassId],
+    rng: &mut StdRng,
+    count: usize,
+) -> (Genome, Vec<ClassId>) {
+    let mut child = parent.clone();
+    let mut fallbacks: Vec<ClassId> = Vec::new();
+    if classes.is_empty() {
+        return (child, fallbacks); // one-point genome space: nothing to mutate
+    }
+    for _ in 0..count {
+        let class = &classes[rng.random_range(0..classes.len())];
+        let candidates = &index[class];
+        let sources = &space.intra_sources[class];
+        let allowed: Vec<usize> = (0..candidates.len())
+            .filter(|&position| !flip_closes_cycle(index, space, &child, class, &sources[position]))
+            .collect();
+        if allowed.is_empty() {
+            fallbacks.push(class.clone());
+        }
+        let position = choose_position(rng, &allowed, candidates.len());
+        child
+            .choices
+            .insert(class.clone(), candidates[position].1.clone());
+    }
+    (child, fallbacks)
+}
+
+/// [`sample_genome_reporting`] from a seed — the entry the
+/// sampler-invariant boards use, so a test crate needs no `rand` of its
+/// own. Returns the genome and its fallback classes.
+pub fn sample_genome_with_seed(
+    index: &ProducerIndex,
+    space: &SamplingSpace,
+    seed: u64,
+) -> (Genome, Vec<ClassId>) {
+    sample_genome_reporting(index, space, &mut StdRng::seed_from_u64(seed))
+}
+
+/// [`mutate_genome_reporting`] from a seed (see
+/// [`sample_genome_with_seed`]).
+pub fn mutate_genome_with_seed(
+    parent: &Genome,
+    index: &ProducerIndex,
+    space: &SamplingSpace,
+    count: usize,
+    seed: u64,
+) -> (Genome, Vec<ClassId>) {
+    let classes: Vec<ClassId> = index.keys().cloned().collect();
+    mutate_genome_reporting(
+        parent,
+        index,
+        space,
+        &classes,
+        &mut StdRng::seed_from_u64(seed),
+        count,
+    )
+}
+
+/// THE BUFFERIZE TRIPWIRE (2026-09-02), the second half of the sampler
+/// invariant. Sampling and mutation keep a genome's chosen intra-component
+/// edges acyclic, and the extractor plans an input terminal from the
+/// boundary rather than from any producer, so no sampled or mutated genome
+/// can extract a graph with a cycle in it. If one reaches bufferize anyway,
+/// the sampler's candidate graph has drifted from the plan the extractor
+/// actually emits: the search STOPS and names the genome's own chosen
+/// intra-component edges alongside the cycle bufferize found, instead of
+/// quietly losing that genome as an ordinary refusal. Every other
+/// bufferize refusal (dead ends, unsupported ownership, unschedulable
+/// anti-edges) passes through untouched.
+fn bufferize_cycle_tripwire(
+    err: &anyhow::Error,
+    index: &ProducerIndex,
+    space: &SamplingSpace,
+    genome: &Genome,
+) -> Result<()> {
+    let text = format!("{err:#}");
+    if !text.contains(crate::bufferize::EXTRACTED_GRAPH_CYCLE) {
+        return Ok(());
+    }
+    let intra = space.chosen_intra_edges(index, genome);
+    let intra: Vec<String> = intra
+        .iter()
+        .map(|(class, sources)| format!("{class} <- {sources:?}"))
+        .collect();
+    Err(anyhow!(
+        "sampler invariant violated: a sampled genome extracted a CYCLIC graph \
+         (bufferize refused it). Sampling and mutation keep the chosen \
+         intra-component edges acyclic and input terminals are planned from the \
+         boundary, so this means the sampler's candidate graph disagrees with the \
+         plan the extractor emitted. Chosen intra-component edges: [{}]. {text}",
+        intra.join("; ")
+    ))
+}
+
 /// The runtime-owned search entry (ruling 2026-08-17): the caller
 /// supplies its OWN matcher set (None = the in-core reference
 /// registry, which Step B moves out) and its OWN profiler.
@@ -223,131 +533,23 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
     let classes: Vec<_> = index.keys().cloned().collect();
     let mut rng = StdRng::seed_from_u64(options.seed);
 
-    // TWO-PHASE SAMPLING (ruling 2026-08-07): the genome searches
-    // PROGRESSING candidates — ops whose inputs are other logical
-    // values — freely; sibling-sourced candidates (layout copies within
-    // one logical value) are subordinate plumbing. Generation 0 elects
-    // one progressing PRIMARY per sibling group; the other members
-    // choose uniformly between their progressing candidates and copies
-    // sourced from the primary. Mutation preserves the same invariant
-    // locally: a sibling-sourced choice needs its source to currently
-    // progress, and a member some sibling currently copies must keep
-    // progressing. Copy⟷Copy welds and copy chains are therefore
-    // unconstructible, while recompute-at-every-layout and
-    // copy-from-boundary-input plans stay in the space. A class whose
-    // allowed set comes up empty falls back to its full candidate list
-    // (same space as the old free sampler); the refusal accounting
-    // stays the loud diagnosis for that corner.
-    let space = extractor::sampling_space(egraph, &index);
-    let group_of: FxHashMap<_, usize> = space
-        .groups
-        .iter()
-        .enumerate()
-        .flat_map(|(group, members)| members.iter().map(move |member| (member.clone(), group)))
-        .collect();
+    // TWO-PHASE SAMPLING over the candidate graph's COMPONENTS
+    // (ruling 2026-08-07, generalized 2026-09-02). See
+    // [`extractor::SamplingSpace`] for the criterion: a choice cycle
+    // can only close inside a strongly connected component of the
+    // candidate graph, so components ARE the re-description groups —
+    // Copy⟷Copy layout welds and the cuBLASLt collapse's
+    // `x ≡ Tᵀ(x)` two-logical-value 2-cycle alike, with no op-name
+    // pattern list anywhere. Generation 0 samples a FOREST inside each
+    // component (see [`sample_genome`]); mutation admits a flip only
+    // when it closes no cycle (see [`mutate_genome`]). Everything
+    // outside a component is sampled freely: its edges leave the
+    // component and the condensation is a DAG.
+    let space = session.sampling_space(&index);
 
-    let random_genome = |rng: &mut StdRng| {
-        let mut genome = Genome::default();
-        let mut primary_of: FxHashMap<_, _> = FxHashMap::default();
-        for members in &space.groups {
-            let eligible: Vec<_> = members
-                .iter()
-                .filter(|member| {
-                    space.sibling_sources[*member]
-                        .iter()
-                        .any(|sources| sources.is_empty())
-                })
-                .cloned()
-                .collect();
-            if eligible.is_empty() {
-                continue; // copy-only group: full-list fallback below
-            }
-            let primary = eligible[rng.random_range(0..eligible.len())].clone();
-            for member in members {
-                primary_of.insert(member.clone(), primary.clone());
-            }
-        }
-        for (class, candidates) in &index {
-            let sources_per_candidate = &space.sibling_sources[class];
-            let allowed: Vec<usize> = match primary_of.get(class) {
-                Some(primary) if class == primary => (0..candidates.len())
-                    .filter(|&position| sources_per_candidate[position].is_empty())
-                    .collect(),
-                Some(primary) => (0..candidates.len())
-                    .filter(|&position| {
-                        sources_per_candidate[position]
-                            .iter()
-                            .all(|source| source == primary)
-                    })
-                    .collect(),
-                None => (0..candidates.len()).collect(),
-            };
-            let position = if allowed.is_empty() {
-                rng.random_range(0..candidates.len())
-            } else {
-                allowed[rng.random_range(0..allowed.len())]
-            };
-            genome
-                .choices
-                .insert(class.clone(), candidates[position].1.clone());
-        }
-        genome
-    };
-    // Whether a class's CURRENT choice progresses (boundary classes
-    // without genome rows are leaves — they trivially progress).
-    let progresses = |child: &Genome, class: &egraph_serialize::ClassId| -> bool {
-        let (Some(choice), Some(candidates)) = (child.choices.get(class), index.get(class)) else {
-            return true;
-        };
-        candidates
-            .iter()
-            .position(|(_, candidate)| candidate == choice)
-            .is_none_or(|position| space.sibling_sources[class][position].is_empty())
-    };
+    let random_genome = |rng: &mut StdRng| sample_genome(&index, &space, rng);
     let mutate = |parent: &Genome, rng: &mut StdRng, count: usize| {
-        let mut child = parent.clone();
-        if classes.is_empty() {
-            return child; // one-point genome space: nothing to mutate
-        }
-        for _ in 0..count {
-            let class = &classes[rng.random_range(0..classes.len())];
-            let candidates = &index[class];
-            let sources_per_candidate = &space.sibling_sources[class];
-            let copied_by_sibling = group_of.get(class).is_some_and(|group| {
-                space.groups[*group].iter().any(|member| {
-                    member != class
-                        && child.choices.get(member).is_some_and(|choice| {
-                            index[member]
-                                .iter()
-                                .position(|(_, candidate)| candidate == choice)
-                                .is_some_and(|position| {
-                                    space.sibling_sources[member][position]
-                                        .iter()
-                                        .any(|source| source == class)
-                                })
-                        })
-                })
-            });
-            let allowed: Vec<usize> = (0..candidates.len())
-                .filter(|&position| {
-                    let sources = &sources_per_candidate[position];
-                    sources.is_empty()
-                        || (!copied_by_sibling
-                            && sources
-                                .iter()
-                                .all(|source| source != class && progresses(&child, source)))
-                })
-                .collect();
-            let position = if allowed.is_empty() {
-                rng.random_range(0..candidates.len())
-            } else {
-                allowed[rng.random_range(0..allowed.len())]
-            };
-            child
-                .choices
-                .insert(class.clone(), candidates[position].1.clone());
-        }
-        child
+        mutate_genome(parent, &index, &space, &classes, rng, count)
     };
 
     // fingerprint → measured nanos (the dedup cache).
@@ -403,6 +605,25 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
                     let (cycle, dead_end, summary) = session.failure_breakdown();
                     if cycle {
                         breakdown.with_choice_cycles += 1;
+                        // THE SAMPLER INVARIANT (2026-09-02). Sampling
+                        // and mutation both keep the genome's
+                        // chosen-edge graph acyclic, so the ONLY way a
+                        // sampled genome can reach the extractor with a
+                        // choice cycle is the documented full-list
+                        // fallback (a component position with no
+                        // acyclic option at all — its own diagnosis).
+                        // A choice cycle on an ACYCLIC chosen-edge
+                        // graph means the sampler's notion of a
+                        // candidate's inputs has drifted from the
+                        // planner's: a bug, and it stops the search
+                        // instead of quietly costing genomes.
+                        let edges = space.chosen_edges(&index, &genome);
+                        ensure!(
+                            extractor::edges_have_cycle(&edges),
+                            "sampler invariant violated: choice cycle in a sampled genome \
+                             whose chosen-edge graph is acyclic — the sampler's candidate \
+                             inputs disagree with the extractor's; {summary}"
+                        );
                     }
                     if dead_end {
                         breakdown.with_dead_ends += 1;
@@ -449,6 +670,10 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
                     let plan = match built {
                         Ok(plan) => plan,
                         Err(err) => {
+                            // THE BUFFERIZE TRIPWIRE (2026-09-02): a
+                            // cyclic extracted graph from a SAMPLED
+                            // genome is a sampler bug, not a refusal.
+                            bufferize_cycle_tripwire(&err, &index, &space, &genome)?;
                             breakdown.plan_build_refusals += 1;
                             if refusals.len() < 8 {
                                 refusals.push(format!("bufferize: {err:#}"));
@@ -503,8 +728,12 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
                 )
                 .and_then(|table| crate::bufferize::bufferize(&dps, &table));
                 timings.plan_build_nanos += build_start.elapsed().as_nanos();
-                let Ok(plan) = built else {
-                    continue;
+                let plan = match built {
+                    Ok(plan) => plan,
+                    Err(err) => {
+                        bufferize_cycle_tripwire(&err, &index, &space, &genome)?;
+                        continue;
+                    }
                 };
                 best = Some((nanos, genome.clone(), plan));
             }
@@ -877,5 +1106,481 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+/// THE SAMPLER-INVARIANT UNIT BOARD (2026-09-02): components, forest
+/// sampling and the mutation cycle check on hand-built candidate
+/// graphs — no e-graph, no runtime, so the rule itself is under test
+/// rather than a graph that happens to exercise it.
+///
+/// CRATE-LOCAL types only (`crate::`, never `luminal::`): the sibling
+/// `mod tests` above is a DEP-WORLD suite driving the reference runtime
+/// through the cyclic dev-dependency, which compiles this library twice
+/// and does not unify the two builds' types. These tests touch neither.
+#[cfg(test)]
+mod sampler_tests {
+    use std::collections::BTreeMap;
+
+    use egraph_serialize::{ClassId, NodeId};
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    use crate::extractor::{
+        Genome, ProducerChoice, SamplingSpace, contract_candidate_inputs, edges_have_cycle,
+    };
+
+    use super::{ProducerIndex, bufferize_cycle_tripwire, mutate_genome, sample_genome};
+
+    fn class(name: &str) -> ClassId {
+        ClassId::from(name)
+    }
+
+    /// One candidate of one class: `(candidate name, input classes)`.
+    type CandidateRow<'a> = (&'a str, &'a [&'a str]);
+    /// One class of a hand-built board: `(class, its candidates)`.
+    type BoardRow<'a> = (&'a str, &'a [CandidateRow<'a>]);
+
+    /// A producer index and its candidate graph from one table:
+    /// `(class, [(candidate name, [input classes])])`. Candidate
+    /// positions line up between the two by construction — the same
+    /// parallelism `SamplingSpace` assumes of the real index.
+    fn build(table: &[BoardRow<'_>]) -> (ProducerIndex, SamplingSpace) {
+        let mut index: ProducerIndex = BTreeMap::new();
+        let mut inputs: BTreeMap<ClassId, Vec<Vec<ClassId>>> = BTreeMap::new();
+        for (owner, candidates) in table {
+            index.insert(
+                class(owner),
+                candidates
+                    .iter()
+                    .map(|(name, _)| {
+                        (
+                            (*name).to_string(),
+                            ProducerChoice {
+                                enode: NodeId::from(format!("{owner}::{name}")),
+                                output_index: 0,
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            inputs.insert(
+                class(owner),
+                candidates
+                    .iter()
+                    .map(|(_, sources)| sources.iter().map(|s| class(s)).collect())
+                    .collect(),
+            );
+        }
+        let space = SamplingSpace::from_candidate_inputs(inputs);
+        (index, space)
+    }
+
+    /// [`build`] with ROW-LESS classes in the picture: `rows` is the
+    /// board's producer index as above, and `row_less` names classes the
+    /// index has NO row for together with what each DEMANDS. Candidate
+    /// inputs are contracted exactly as `ExtractionSession::sampling_space`
+    /// contracts them, so the edges under test are the ones the real
+    /// analysis draws.
+    fn build_with_row_less(
+        rows: &[BoardRow<'_>],
+        row_less: &[(&str, &[&str])],
+    ) -> (ProducerIndex, SamplingSpace) {
+        let (index, _) = build(rows);
+        let demands: BTreeMap<ClassId, Vec<ClassId>> = row_less
+            .iter()
+            .map(|(owner, demanded)| {
+                (
+                    class(owner),
+                    demanded.iter().map(|name| class(name)).collect(),
+                )
+            })
+            .collect();
+        let inputs: BTreeMap<ClassId, Vec<Vec<ClassId>>> = rows
+            .iter()
+            .map(|(owner, candidates)| {
+                (
+                    class(owner),
+                    candidates
+                        .iter()
+                        .map(|(_, sources)| {
+                            let raw: Vec<ClassId> =
+                                sources.iter().map(|name| class(name)).collect();
+                            contract_candidate_inputs(
+                                &raw,
+                                &|input| index.contains_key(input),
+                                &|input| demands.get(input).cloned().unwrap_or_default(),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        let space = SamplingSpace::from_candidate_inputs(inputs);
+        (index, space)
+    }
+
+    /// The genome electing the named candidate per class — the hand-built
+    /// genome a FREE sampler (uniform over every candidate, no invariant)
+    /// is free to draw.
+    fn genome_electing(index: &ProducerIndex, picks: &[(&str, &str)]) -> Genome {
+        let mut genome = Genome::default();
+        for (owner, name) in picks {
+            let (_, choice) = index[&class(owner)]
+                .iter()
+                .find(|(candidate, _)| candidate == name)
+                .expect("the board names this candidate");
+            genome.choices.insert(class(owner), choice.clone());
+        }
+        genome
+    }
+
+    /// The candidate NAME the genome elected per class, sorted by class
+    /// — a readable genome identity for coverage assertions.
+    fn spelling(index: &ProducerIndex, genome: &Genome) -> Vec<String> {
+        index
+            .iter()
+            .map(|(owner, candidates)| {
+                let choice = &genome.choices[owner];
+                let (name, _) = candidates
+                    .iter()
+                    .find(|(_, candidate)| candidate == choice)
+                    .expect("the genome names an index entry");
+                format!("{owner}={name}")
+            })
+            .collect()
+    }
+
+    fn cyclic(index: &ProducerIndex, space: &SamplingSpace, genome: &Genome) -> bool {
+        edges_have_cycle(&space.chosen_edges(index, genome))
+    }
+
+    /// (i) TWO CLASSES RE-DESCRIBING EACH OTHER — the cuBLASLt
+    /// collapse's shape in miniature. One component of size 2; over 200
+    /// seeds the (intra, intra) pair never appears and all three acyclic
+    /// combinations do.
+    #[test]
+    fn mutual_re_description_is_one_component_and_only_the_cycle_is_excluded() {
+        let (index, space) = build(&[
+            ("a", &[("prog", &[]), ("reads_b", &["b"])]),
+            ("b", &[("prog", &[]), ("reads_a", &["a"])]),
+        ]);
+        assert_eq!(
+            space.components,
+            vec![vec![class("a"), class("b")]],
+            "two classes reading each other are one non-trivial component"
+        );
+
+        let mut seen: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
+        for seed in 0..200u64 {
+            let genome = sample_genome(&index, &space, &mut StdRng::seed_from_u64(seed));
+            assert!(
+                !cyclic(&index, &space, &genome),
+                "seed {seed} sampled a cyclic genome: {:?}",
+                spelling(&index, &genome)
+            );
+            seen.insert(spelling(&index, &genome));
+        }
+        let expected: std::collections::BTreeSet<Vec<String>> = [
+            vec!["a=prog".to_string(), "b=prog".to_string()],
+            vec!["a=prog".to_string(), "b=reads_a".to_string()],
+            vec!["a=reads_b".to_string(), "b=prog".to_string()],
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            seen, expected,
+            "exactly the three acyclic genomes are reachable"
+        );
+    }
+
+    /// (ii) COVERAGE OF CHAINS: a 3-cycle of re-descriptions
+    /// (a<-c, b<-a, c<-b) with a progressing option each. The CHAIN
+    /// genome — a progresses, b reads a, c reads b — is a forest, not
+    /// a star, and the 2026-08-07 sampler could not build it. It must
+    /// be reachable; the all-intra 3-cycle must not be.
+    #[test]
+    fn chains_inside_a_component_are_reachable() {
+        let (index, space) = build(&[
+            ("a", &[("prog", &[]), ("reads_c", &["c"])]),
+            ("b", &[("prog", &[]), ("reads_a", &["a"])]),
+            ("c", &[("prog", &[]), ("reads_b", &["b"])]),
+        ]);
+        assert_eq!(
+            space.components,
+            vec![vec![class("a"), class("b"), class("c")]],
+            "the 3-cycle is one component"
+        );
+
+        let chain = vec![
+            "a=prog".to_string(),
+            "b=reads_a".to_string(),
+            "c=reads_b".to_string(),
+        ];
+        let mut chain_seen = false;
+        for seed in 0..200u64 {
+            let genome = sample_genome(&index, &space, &mut StdRng::seed_from_u64(seed));
+            assert!(
+                !cyclic(&index, &space, &genome),
+                "seed {seed} sampled a cyclic genome: {:?}",
+                spelling(&index, &genome)
+            );
+            chain_seen |= spelling(&index, &genome) == chain;
+        }
+        assert!(
+            chain_seen,
+            "the chain genome (a progresses, b reads a, c reads b) must be sampled"
+        );
+    }
+
+    /// (iii) A COMPONENT WITH NO PROGRESSING MEMBER: every candidate of
+    /// every member is intra-component, so the first member processed
+    /// has no admissible candidate and takes the documented full-list
+    /// fallback. The sampler must produce a total genome and not panic;
+    /// the resulting cycle is the refusal accounting's business.
+    #[test]
+    fn a_component_with_no_progressing_member_falls_back() {
+        let (index, space) = build(&[("a", &[("reads_b", &["b"])]), ("b", &[("reads_a", &["a"])])]);
+        assert_eq!(space.components, vec![vec![class("a"), class("b")]]);
+        for seed in 0..32u64 {
+            let genome = sample_genome(&index, &space, &mut StdRng::seed_from_u64(seed));
+            assert_eq!(genome.choices.len(), 2, "the genome stays total");
+            assert!(
+                cyclic(&index, &space, &genome),
+                "the fallback is the ONLY route to a cyclic sample, and here it is forced"
+            );
+        }
+    }
+
+    /// MUTATION keeps the invariant: from every acyclic parent, 500
+    /// mutated children over the two-class and three-class boards are
+    /// acyclic — and the flip check is not merely refusing everything,
+    /// since the children do move.
+    #[test]
+    fn mutation_never_closes_a_cycle() {
+        for table in [
+            &[
+                (
+                    "a",
+                    &[("prog", &[] as &[&str]), ("reads_b", &["b"] as &[&str])]
+                        as &[(&str, &[&str])],
+                ),
+                ("b", &[("prog", &[]), ("reads_a", &["a"])]),
+            ] as &[(&str, &[(&str, &[&str])])],
+            &[
+                ("a", &[("prog", &[]), ("reads_c", &["c"])]),
+                ("b", &[("prog", &[]), ("reads_a", &["a"])]),
+                ("c", &[("prog", &[]), ("reads_b", &["b"])]),
+            ],
+        ] {
+            let (index, space) = build(table);
+            let classes: Vec<ClassId> = index.keys().cloned().collect();
+            let mut moved = 0usize;
+            for seed in 0..500u64 {
+                let mut rng = StdRng::seed_from_u64(seed);
+                let parent = sample_genome(&index, &space, &mut rng);
+                let child = mutate_genome(&parent, &index, &space, &classes, &mut rng, 2);
+                assert!(
+                    !cyclic(&index, &space, &child),
+                    "seed {seed}: mutation closed a cycle: {:?} -> {:?}",
+                    spelling(&index, &parent),
+                    spelling(&index, &child)
+                );
+                if spelling(&index, &child) != spelling(&index, &parent) {
+                    moved += 1;
+                }
+            }
+            assert!(moved > 0, "mutation must actually move the genome");
+        }
+    }
+
+    /// A class whose candidate sources from ITSELF is a self-loop: a
+    /// one-member component, and the sampler must never elect it.
+    #[test]
+    fn a_self_sourcing_candidate_is_never_elected() {
+        let (index, space) = build(&[("a", &[("prog", &[]), ("reads_self", &["a"])])]);
+        assert_eq!(
+            space.components,
+            vec![vec![class("a")]],
+            "a self-loop is a non-trivial component of one"
+        );
+        let classes: Vec<ClassId> = index.keys().cloned().collect();
+        for seed in 0..200u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let genome = sample_genome(&index, &space, &mut rng);
+            assert_eq!(spelling(&index, &genome), vec!["a=prog".to_string()]);
+            let child = mutate_genome(&genome, &index, &space, &classes, &mut rng, 3);
+            assert_eq!(spelling(&index, &child), vec!["a=prog".to_string()]);
+        }
+    }
+
+    /// (vi) A CYCLE THAT CLOSES THROUGH A ROW-LESS CLASS. `a` reads `d`,
+    /// which the genome index has no row for; `d` demands `b`; `b` reads
+    /// `a`. Nothing chooses anything at `d` — it is planned whichever way
+    /// the two ends go — so `a -> d -> b` IS the edge `a -> b` and the
+    /// only cycle in the board runs a -> b -> a. Contracting `d` is what
+    /// makes the component visible; leaving `d` out (round 1) left `a`
+    /// with no edges at all, no component, and the cyclic pair reachable.
+    #[test]
+    fn a_cycle_through_a_row_less_class_is_one_component() {
+        let (index, space) = build_with_row_less(
+            &[
+                ("a", &[("prog", &[]), ("reads_d", &["d"])]),
+                ("b", &[("prog", &[]), ("reads_a", &["a"])]),
+            ],
+            &[("d", &["b"])],
+        );
+        assert_eq!(
+            space.candidate_inputs[&class("a")],
+            vec![vec![], vec![class("b")]],
+            "`d` holds no row, so `a`'s second candidate depends on what `d` demands"
+        );
+        assert_eq!(
+            space.components,
+            vec![vec![class("a"), class("b")]],
+            "the cycle closes through a row-less class, and the component must contain \
+             both classes that DO hold rows"
+        );
+
+        // THE FREE SAMPLER REACHES IT: uniform over every candidate, the
+        // cyclic pair is one of the four combinations, and it is cyclic.
+        let free = genome_electing(&index, &[("a", "reads_d"), ("b", "reads_a")]);
+        assert!(
+            cyclic(&index, &space, &free),
+            "the (reads_d, reads_a) pair is the cycle this board is made of"
+        );
+
+        // THE FOREST SAMPLER NEVER DOES, and still reaches everything else.
+        let mut seen: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
+        for seed in 0..200u64 {
+            let genome = sample_genome(&index, &space, &mut StdRng::seed_from_u64(seed));
+            assert!(
+                !cyclic(&index, &space, &genome),
+                "seed {seed} sampled the cycle through the row-less class: {:?}",
+                spelling(&index, &genome)
+            );
+            seen.insert(spelling(&index, &genome));
+        }
+        let expected: std::collections::BTreeSet<Vec<String>> = [
+            vec!["a=prog".to_string(), "b=prog".to_string()],
+            vec!["a=prog".to_string(), "b=reads_a".to_string()],
+            vec!["a=reads_d".to_string(), "b=prog".to_string()],
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            seen, expected,
+            "exactly the three acyclic genomes stay reachable"
+        );
+    }
+
+    /// CONTRACTION IS TRANSITIVE AND TERMINATES: `a` reads `d`, `d`
+    /// demands `e`, `e` demands `b` AND `d` (a ring among the row-less
+    /// classes). The contraction must walk through both and stop, and
+    /// the edge that comes out is `a -> b`.
+    #[test]
+    fn contraction_walks_chains_of_row_less_classes_and_terminates() {
+        let (_index, space) = build_with_row_less(
+            &[
+                ("a", &[("prog", &[]), ("reads_d", &["d"])]),
+                ("b", &[("prog", &[]), ("reads_a", &["a"])]),
+            ],
+            &[("d", &["e"]), ("e", &["b", "d"])],
+        );
+        assert_eq!(
+            space.candidate_inputs[&class("a")],
+            vec![vec![], vec![class("b")]],
+            "a -> d -> e -> b contracts to a -> b, and the d/e ring does not hang"
+        );
+        assert_eq!(space.components, vec![vec![class("a"), class("b")]]);
+    }
+
+    /// A ROW-LESS CLASS THAT DEMANDS NOTHING IS A LEAF — the input
+    /// terminal's shape (produced by nothing, planned from the boundary).
+    /// Its readers keep no edge at all, so no component forms.
+    #[test]
+    fn a_row_less_class_that_demands_nothing_is_a_leaf() {
+        let (index, space) = build_with_row_less(
+            &[
+                ("a", &[("prog", &[]), ("reads_t", &["t"])]),
+                ("b", &[("prog", &[]), ("reads_a", &["a"])]),
+            ],
+            &[("t", &[])],
+        );
+        assert_eq!(
+            space.candidate_inputs[&class("a")],
+            vec![vec![], vec![]],
+            "a terminal demands nothing, so reading one draws no edge"
+        );
+        assert!(space.components.is_empty());
+        let mut seen: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
+        for seed in 0..200u64 {
+            seen.insert(spelling(
+                &index,
+                &sample_genome(&index, &space, &mut StdRng::seed_from_u64(seed)),
+            ));
+        }
+        assert_eq!(seen.len(), 4, "all four combinations stay reachable");
+    }
+
+    /// THE BUFFERIZE TRIPWIRE fires on the cyclic-graph refusal and on
+    /// nothing else, and it prints the genome's own chosen
+    /// intra-component edges — the evidence for "the sampler's candidate
+    /// graph disagrees with the plan the extractor emitted".
+    #[test]
+    fn the_bufferize_tripwire_fires_only_on_the_cycle_refusal() {
+        let (index, space) = build(&[
+            ("a", &[("prog", &[]), ("reads_b", &["b"])]),
+            ("b", &[("prog", &[]), ("reads_a", &["a"])]),
+        ]);
+        let genome = genome_electing(&index, &[("a", "reads_b"), ("b", "prog")]);
+
+        let ordinary = anyhow::anyhow!("op declares result 0 as internally allocated");
+        assert!(
+            bufferize_cycle_tripwire(&ordinary, &index, &space, &genome).is_ok(),
+            "every other bufferize refusal stays an ordinary refusal"
+        );
+
+        let cyclic = anyhow::anyhow!(
+            "{}; cannot bufferize: the cycle runs through 2 node(s): [Copy -> a | Copy -> b]",
+            crate::bufferize::EXTRACTED_GRAPH_CYCLE
+        );
+        let err = bufferize_cycle_tripwire(&cyclic, &index, &space, &genome)
+            .expect_err("a cyclic extracted graph from a sampled genome stops the search");
+        let text = format!("{err:#}");
+        assert!(text.contains("sampler invariant violated"), "{text}");
+        assert!(
+            text.contains("a <- [ClassId(\"b\")]") && text.contains("b <- []"),
+            "the bail names the genome's chosen intra-component edges: {text}"
+        );
+        assert!(
+            text.contains("the cycle runs through 2 node(s)"),
+            "and carries bufferize's cycle members: {text}"
+        );
+    }
+
+    /// Classes OUTSIDE every component are free: a plain DAG of
+    /// candidates yields no components and full-list sampling.
+    #[test]
+    fn an_acyclic_candidate_graph_has_no_components() {
+        let (index, space) = build(&[
+            ("a", &[("prog", &[])]),
+            ("b", &[("prog", &[]), ("reads_a", &["a"])]),
+            ("c", &[("reads_a", &["a"]), ("reads_b", &["b"])]),
+        ]);
+        assert!(space.components.is_empty());
+        for per_candidate in space.intra_sources.values() {
+            for sources in per_candidate {
+                assert!(sources.is_empty(), "no component, no intra sources");
+            }
+        }
+        let mut seen: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
+        for seed in 0..200u64 {
+            seen.insert(spelling(
+                &index,
+                &sample_genome(&index, &space, &mut StdRng::seed_from_u64(seed)),
+            ));
+        }
+        assert_eq!(seen.len(), 4, "all 1x2x2 combinations stay reachable");
     }
 }
