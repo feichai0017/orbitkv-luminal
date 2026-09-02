@@ -59,8 +59,8 @@ mod tests {
     use super::{ReLU, Sigmoid};
     use luminal::prelude::*;
 
-    /// The M3 ladder end-to-end (full genetic search; scalar-constant
-    /// broadcasts route via materialize — rediagnosis 2026-08-12).
+    /// Exercise a unary activation through implementation search and
+    /// reference execution.
     fn run_unary(build: impl Fn(GraphTensor) -> GraphTensor, input: Vec<f32>) -> Vec<f32> {
         let mut cx = Graph::new();
         let x = cx.tensor(input.len());
