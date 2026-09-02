@@ -251,15 +251,25 @@ impl<'a> ExtractionSession<'a> {
         if extractor.blocked.is_empty() && extractor.no_candidates.is_empty() {
             return (false, false, "no blockage recorded".to_string());
         }
-        let class_label = |class: &ClassId| -> String {
+        // SUBSUMED SPELLINGS ARE NOT CANDIDATES (cleanup stratum,
+        // 2026-09-02): the diagnosis names what the walk could have
+        // chosen, so a retired term must never appear as one. The
+        // last-resort arm keeps a label for a class that is entirely
+        // subsumed rather than printing "?".
+        let live_ops = |class: &ClassId| {
             extractor
                 .class_nodes
                 .get(class)
                 .into_iter()
                 .flatten()
                 .filter_map(|id| extractor.egraph.nodes.get(id))
+                .filter(|node| !node.subsumed)
                 .map(|node| node.op.as_str())
+        };
+        let class_label = |class: &ClassId| -> String {
+            live_ops(class)
                 .find(|op| op.starts_with("LayoutTensorOp"))
+                .or_else(|| live_ops(class).next())
                 .or_else(|| {
                     extractor
                         .class_nodes
@@ -955,6 +965,35 @@ impl<'a> Extractor<'a> {
         // OTHER classes that READ a terminal are untouched — that is how
         // copy-from-a-boundary-input plans exist.
         producer_index.retain(|class, _| !input_terminals.contains_key(class));
+
+        // ONE LEAF NOTION, CHECKED (cleanup stratum, ruling 2026-09-02).
+        // The `cleanup` ruleset marks with `input-producer` every
+        // LayoutTensorOp whose OUTPUT list holds a boundary input's LEAF
+        // layout tensor, and the estate strips those spellings. The
+        // extractor independently refuses producers for a class it seeds
+        // as an input terminal (the retain above). Both are kept — belt
+        // and braces — but they must agree about what a leaf IS, so the
+        // fact set may add nothing the retain would not already take:
+        // every class produced by a marked op has to be an input
+        // terminal. A violation means the estate marked an op whose
+        // output the extractor does NOT read as a launch-time leaf (or
+        // vice versa), which is a representation disagreement, not a
+        // cost accident. One pass, only when the relation is non-empty.
+        let input_producer_ops = collect_input_producer_ops(egraph);
+        if !input_producer_ops.is_empty() {
+            for (class, producers) in &producer_index {
+                for producer in producers {
+                    assert!(
+                        !input_producer_ops.contains(&producer.op_class),
+                        "input-producer tripwire: op class {:?} carries the `input-producer` \
+                         fact but its output class {:?} is not an input terminal — the estate \
+                         and the extractor disagree about what a launch-time leaf is",
+                        producer.op_class,
+                        class,
+                    );
+                }
+            }
+        }
 
         Self {
             egraph,
@@ -3644,6 +3683,50 @@ fn render_class_nodes(egraph: &EGraph) -> HashMap<ClassId, Vec<NodeId>> {
             .push(node_id.clone());
     }
     classes
+}
+
+/// THE INPUT-PRODUCER FACT (cleanup stratum, ruling 2026-09-02): the
+/// LayoutTensorOp classes the `cleanup` ruleset marked — every op whose
+/// OUTPUT list holds a boundary input's LEAF layout tensor, the one a
+/// `BufferInputLit` binding names. Those are precisely the classes
+/// `collect_input_terminals` seeds as `PlanKind::Input`, so the
+/// invariant is "a class the plan reads as a launch-time leaf offers no
+/// producer".
+///
+/// A boundary input is a LEAF: it exists at launch. No producer of that
+/// class is ever needed, and none can ever be cheaper than reading the
+/// leaf — but sound unions do mint such producers (the cuBLASLt
+/// double-transpose collapse puts a view op's output into the input's
+/// own layout-tensor class), and a zero-cost view then wins the
+/// `is_better` tie against the zero-cost terminal on `plan_label`,
+/// erasing the BufferInput and handing bufferize a cyclic graph.
+///
+/// The extractor does not filter on this fact: `Extractor::new_with_matchers`
+/// already drops every producer row of a class it seeds as an input
+/// terminal, which is the same cut expressed in the extractor's own
+/// vocabulary. The fact is read as a TRIPWIRE instead — one leaf notion,
+/// checked — so that an estate that marks an op the extractor still
+/// plans as produced fails loudly rather than silently re-minting the
+/// cycle.
+///
+/// The relation serializes like every other egglog fact: one node per
+/// row whose op is the relation name and whose child 0 is the argument.
+/// We read the FACT — enode-anchored and class-invariant — and never the
+/// spelling: `(subsume (LayoutTensorOpLit ...))` retires only the
+/// generic term, while each runtime op's `match_functional.egg` unions
+/// its own constructor into that same class and a core rule cannot name
+/// them all.
+fn collect_input_producer_ops(egraph: &EGraph) -> HashSet<ClassId> {
+    let mut ops = HashSet::new();
+    for node in egraph.nodes.values() {
+        if node.subsumed || node.op != "input-producer" {
+            continue;
+        }
+        if let Some(op_class) = child_class(egraph, node, 0) {
+            ops.insert(op_class);
+        }
+    }
+    ops
 }
 
 fn collect_op_specs(
