@@ -670,9 +670,8 @@ mod tests {
 
     /// Full paged attention, decode step: one new token (s=1) after one
     /// cached token, 2 KV heads with no grouping (kv_groups=1), head_dim 2.
-    /// Reference computed by scalar loops below; run_reference drives the full
-    /// search ladder (rediagnosis 2026-08-12: it is not a plain
-    /// extraction shortcut).
+    /// The scalar loops below provide the reference for the plan selected by
+    /// implementation search and executed by the reference runtime.
     #[test]
     fn paged_attention_decode_step_matches_scalar_reference() {
         const N_HEADS: usize = 2;
