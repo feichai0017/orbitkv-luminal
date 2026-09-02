@@ -121,19 +121,21 @@ pub fn cuda_registry() -> Vec<RegisteredOp> {
 /// execution row is a HOST LIBRARY CALL (`cublasLtMatmul`), never an
 /// NVRTC kernel — the third claim class (see `CudaRuntime::allow_list`).
 ///
-/// WHY A SEPARATE SURFACE (measured, Train 3): splicing the marker
-/// vocabulary into EVERY CL assembly detonates the `view-arity-lock`
-/// coherence tripwire ("Illegal merge attempted") at saturation on ALL
-/// seven runnable Train-2 minis and the ladder's llama blocks — the
-/// marker's canonicalization/sandwich rewrites weld transpose-view
-/// apply spellings into logical classes that already carry apply
-/// spellings of a different parent rank (extent-1 weld corners on real
-/// decode-step graphs; the synthetic 2D marker-board fixtures never
-/// exercise this). The .egg rule text is frozen (egglog-level design
-/// wins unmodified; changes need Austin's explicit approval), so until
-/// that ruling lands the marker joins an assembly only through this
-/// EXPLICIT seam ([`crate::CudaRuntime::load_with_cublaslt`]) — the
-/// default vocabulary stays exactly the Train-2 set, and the 2D
+/// WHY A SEPARATE SURFACE, as of 2026-09-01: the marker is RULED
+/// always-on, and the tripwire that blocked it is fixed — splicing the
+/// marker vocabulary into every assembly used to detonate the
+/// `view-arity-lock` (`Illegal merge attempted`) on all seven minis,
+/// because that lock keyed a ROUTE fact (an apply's parent rank) on a
+/// VALUE (its output class) and the collapse rule's sound union
+/// `x ≡ Tᵀ(x)` put two different-parent-rank spellings in one class.
+/// The check now lives on the `IndexMapLit` (entry count == rank of the
+/// source-shape tag) and saturation succeeds. What still keeps the
+/// default vocabulary at the Train-2 set is the SEARCH: the same union
+/// is a re-description 2-cycle, and at the 2×4 harness budget the
+/// sampler exhausts on unfit genomes on real graphs (they elect at
+/// 12×16). Until the budget/sampler decision lands, the marker joins an
+/// assembly through this EXPLICIT seam
+/// ([`crate::CudaRuntime::load_with_cublaslt`]), and the 2D
 /// canonical-form election pin runs marker-enabled.
 pub fn cuda_registry_with_cublaslt() -> Vec<RegisteredOp> {
     let mut registry = cuda_registry();

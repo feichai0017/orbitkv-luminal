@@ -4422,12 +4422,36 @@
 ; A check whose lookup finds nothing fails the program loudly at the
 ; fixpoint.
 
-; VIEW ARITY LOCK: an index map's entry count IS its input's rank. Both
-; sides are i64 primitives (lengths and ranks are computed totally for
-; every list), and primitives never sit pending-equal — but the lock
-; stays in this stratum with its peers: one discipline, one home. A
-; mismatch is a genuine authoring error and collides loudly.
-(function view-arity-lock (LogicalTensor) i64 :no-merge)
+; VIEW ARITY LOCK: an index map's entry count IS the rank of its
+; source-shape tag. That is a property of the LITERAL, and it is checked
+; on the literal: one rule, one e-node, both numbers bound from the same
+; term, no cell keyed on a LogicalTensor class. Together with MAP-TAG
+; COHERENCE below (tag == the applied parent's shape) this yields
+; entries == rank(parent) for every apply — the per-node guarantee the
+; lock always meant.
+;
+; WHY NOT A :no-merge CELL KEYED ON THE APPLY'S OUTPUT (the previous
+; form, retired 2026-09-01): the output e-class is a VALUE, and parent
+; rank is a property of the ROUTE to that value, not of the value. One
+; value legitimately has two apply spellings from parents of different
+; rank — x2 = x3[0,:,:] (3 entries, rank-3 parent) and y = x2 read
+; through the identity map (2 entries, rank-2 parent) are the same
+; tensor by definition, and their output shape/rank is one and the same
+; (shape-of is class-invariant). A class-keyed cell stored a route fact
+; in a value slot, so the first rule that ever unioned two such
+; spellings (the cuBLASLt marker's double-transpose collapse) tripped it
+; on a sound equivalence. Never store an e-node-anchored fact under a
+; class key ("never depend on spelling").
+(rule
+  (
+    (= ?map (IndexMapLit ?entries ?tag))
+    (= ?entry_count (expr-list-length-of ?entries))
+    (= ?tag_rank (rank-of ?tag))
+    (!= ?entry_count ?tag_rank)
+  )
+  ((panic "IndexMapLit entry count disagrees with the rank of its source-shape tag"))
+  :ruleset fixpoint-invariants
+)
 
 ; COORDINATE-EXTENT LOCK: DELETED (scoped-CoordVar spike). A
 ; coordinate now carries its owner shape and its extent IS the owner's

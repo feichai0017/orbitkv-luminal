@@ -42,17 +42,24 @@ fn weights(n: usize, seed: usize) -> Vec<f32> {
 enum Row {
     /// Search completed: (marker computes elected, total computes).
     Searched { elected: usize, computes: usize },
-    /// Search died at saturation (the view-arity-lock conflict) — a
-    /// LOUD error from the runtime, never a wrong plan.
-    SaturationDied(String),
+    /// Search died before producing a plan — a LOUD error from the
+    /// runtime, never a wrong plan. Since the view-arity tripwire moved
+    /// onto the map literal (ruling 2026-09-01) saturation SUCCEEDS on
+    /// every mini; the death that remains at the harness budget is the
+    /// SEARCH refusing: no sampled genome produced an executable plan,
+    /// because the collapse's `x ≡ Tᵀ(x)` re-description 2-cycle eats the
+    /// 2×4 budget. That is a budget/sampler finding, recorded as a row.
+    SearchDied(String),
 }
 
 /// Record → load WITH the marker vocabulary → bind dyn pins → search,
-/// then count elected CublasLt* compute nodes. A saturation death is
-/// RETURNED, not panicked: on real model graphs the marker rewrites
-/// currently detonate the `view-arity-lock` coherence tripwire (the
-/// measured Train-3 finding; see `ops::cuda_registry_with_cublaslt`),
-/// and the table must record that honestly.
+/// then count elected CublasLt* compute nodes. A search death is
+/// RETURNED, not panicked, so the table records it honestly — but a
+/// SATURATION death is a hard failure: the view-arity tripwire that used
+/// to fire here was a class-keyed cell asserting a route fact (parent
+/// rank) per value, retired 2026-09-01 (`view_arity_lock.rs` in
+/// test_runtime pins both sides). If "Illegal merge" ever returns, a
+/// new class-keyed invariant has been introduced somewhere.
 fn search_and_count(name: &str, cx: &Graph, pairs: &[(NodeIndex, TypedBuffer)]) -> Row {
     search_and_count_opts(
         name,
@@ -80,13 +87,18 @@ fn search_and_count_opts(
         Ok(outcome) => outcome,
         Err(e) => {
             let msg = format!("{e:#}");
-            println!("ELECTION-TABLE {name}: marker_elected=NO — SEARCH DIED AT SATURATION: {msg}");
+            println!("ELECTION-TABLE {name}: marker_elected=NO — SEARCH DIED: {msg}");
             assert!(
-                msg.contains("view-arity-lock"),
-                "{name}: search died for a reason OTHER than the known \
-                 view-arity-lock conflict — investigate: {msg}"
+                !msg.contains("Illegal merge") && !msg.contains("saturation failed"),
+                "{name}: saturation died — a class-keyed :no-merge invariant is firing on a \
+                 sound union again (the retired view-arity-lock failure mode): {msg}"
             );
-            return Row::SaturationDied(msg);
+            assert!(
+                msg.contains("no candidate genome produced an executable plan"),
+                "{name}: search died for a reason OTHER than the known budget exhaustion on \
+                 the collapse's re-description 2-cycle — investigate: {msg}"
+            );
+            return Row::SearchDied(msg);
         }
     };
     // REFUSALS ARE REPORTED, NOT ASSERTED ZERO: the marker's
@@ -123,8 +135,10 @@ fn search_and_count_opts(
 // REGISTRY MEMBERSHIP: the four contracts are registered CL ops and the
 // marker-enabled claim set admits them through the host-call class
 // (never a codegen row, never plan-transparency). The DEFAULT claim set
-// excludes them — the vocabulary joins an assembly only through the
-// explicit `load_with_cublaslt` seam until the view-arity-lock ruling.
+// excludes them FOR NOW — the tripwire that blocked always-on is fixed;
+// what remains is that at the 2×4 harness budget the collapse's
+// re-description 2-cycle exhausts the sampler on real graphs (they elect
+// at 12×16). Always-on lands with the budget/sampler decision.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -139,8 +153,8 @@ fn cublaslt_contracts_are_registered_host_call_claims() {
         );
         assert!(
             !default.contains(&ctor),
-            "{ctor} in the DEFAULT claim set — the marker vocabulary must stay \
-             opt-in until the view-arity-lock ruling"
+            "{ctor} in the DEFAULT claim set — the marker vocabulary stays \
+             opt-in until the budget/sampler decision lands (always-on is ruled)"
         );
     }
     // The claim is host-call-derived: no codegen row exists for the labels.
@@ -183,7 +197,7 @@ fn canonical_2d_matmul_elects_the_marker() {
     };
     let row = search_and_count_opts("matmul_2d(4x8 . 8x3)", &cx, &pairs, &options);
     let Row::Searched { elected, computes } = row else {
-        let Row::SaturationDied(msg) = row else {
+        let Row::SearchDied(msg) = row else {
             unreachable!()
         };
         panic!(
