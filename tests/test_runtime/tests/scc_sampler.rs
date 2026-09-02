@@ -29,6 +29,15 @@
 //!    is recorded there: because b = y is a BOUND INPUT, and an
 //!    input-terminal class is planned unconditionally, the weld is not
 //!    a cycle at all and the sampler is free.
+//!
+//!  * `an_input_terminal_*` — the leaf rule itself (2026-09-02). The
+//!    double-transpose collapse gives the marker's BOUND INPUTS
+//!    producers of their own, and a zero-byte view used to win the
+//!    input class on the `plan_label` tie-break — 11 of 64 sampled
+//!    genomes then extracted a plan that computed an input from a value
+//!    reading it back, which only bufferize's toposort caught. An input
+//!    terminal is a leaf: no genome row, no candidate, and every sample
+//!    reads it as a `BufferInput`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -461,12 +470,13 @@ fn re_description_program() -> String {
 ///
 /// The weld is real — class(a) reads class(b = y) and class(b = y)'s
 /// `a + (-1) * x` producer reads class(a) — but `b = y`'s class is a
-/// BOUND INPUT, and `relax_to_fixpoint` seeds every input-terminal
-/// class's plan from the boundary on the first pass, at cost 0 and with
-/// no children. Such a class can never block, so no edge out of it can
-/// join a blocking cycle, and the candidate graph draws none. The
-/// cross-logical re-description that DOES make a component is on the
-/// `marker_*` board, where neither member is a boundary value.
+/// BOUND INPUT: it is produced by nothing, so it holds no genome row,
+/// offers no candidate, and is planned from the boundary on
+/// `relax_to_fixpoint`'s first pass. It is not a node of the candidate
+/// graph at all, and a class that demands nothing contracts to nothing
+/// for its readers either, so no edge and no cycle. The cross-logical
+/// re-description that DOES make a component is on the `marker_*`
+/// board, where neither member is a boundary value.
 #[test]
 fn union_of_b_and_y_is_a_leaf_weld_not_a_cycle() {
     let egraph = test_runtime::serialize_fixture(&re_description_program());
@@ -511,11 +521,12 @@ fn union_of_b_and_y_is_a_leaf_weld_not_a_cycle() {
 ///
 /// ROUTES, honestly: only ONE of the two routes for `c` is electable,
 /// and the reason is not the sampler. `b = y`'s class is a bound INPUT,
-/// and `relax_to_fixpoint` seeds every input-terminal class's plan
-/// from the input at `heuristic_cost` 0 REGARDLESS of the genome, so
-/// `is_better` can never prefer the recomputed `a - x`. Every plan here
-/// is therefore two adds — `a` from x and y, and `c` from z and the
-/// same class — with `b`'s -1 constant/mul chain never planned.
+/// so it is a LEAF — no genome row, no candidate, planned from the
+/// boundary at `heuristic_cost` 0 whatever the genome says. The
+/// recomputed `a - x` is not something `is_better` could prefer; it is
+/// not offered at all. Every plan here is therefore two adds — `a` from
+/// x and y, and `c` from z and the same class — with `b`'s -1
+/// constant/mul chain never planned.
 #[test]
 fn union_extraction_never_cycles() {
     let egraph = test_runtime::serialize_fixture(&re_description_program());
@@ -580,5 +591,196 @@ fn union_extraction_never_cycles() {
                 "both ops are adds (b's -1 constant/mul chain is never planned): {labels:?}"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D. AN INPUT TERMINAL IS A LEAF: no genome row, no producer, no cycle.
+// ---------------------------------------------------------------------------
+
+/// The extractor's own input-terminal rule replicated on the raw
+/// e-graph (`collect_input_terminals`): the LayoutTensor child of every
+/// `BufferTensorLit` whose BufferTensor class is one of the program's
+/// bound inputs.
+fn input_terminal_classes(egraph: &EGraph) -> BTreeSet<ClassId> {
+    let buffer_list = |root_op: &str| -> BTreeSet<ClassId> {
+        let mut out = BTreeSet::new();
+        for node in egraph.nodes.values().filter(|node| node.op == root_op) {
+            let mut cursor = node
+                .children
+                .first()
+                .and_then(|id| egraph.nodes.get(id))
+                .map(|child| child.eclass.clone());
+            while let Some(list) = cursor {
+                let Some(cons) = egraph
+                    .nodes
+                    .values()
+                    .find(|node| node.eclass == list && node.op == "BufferTensorCons")
+                else {
+                    break;
+                };
+                if let Some(head) = cons.children.first().and_then(|id| egraph.nodes.get(id)) {
+                    out.insert(head.eclass.clone());
+                }
+                cursor = cons
+                    .children
+                    .get(1)
+                    .and_then(|id| egraph.nodes.get(id))
+                    .map(|child| child.eclass.clone());
+            }
+        }
+        out
+    };
+    let inputs = buffer_list("BufferInputLit");
+    let outputs = buffer_list("BufferOutputLit");
+    let mut terminals = BTreeSet::new();
+    for node in egraph
+        .nodes
+        .values()
+        .filter(|node| !node.subsumed && node.op == "BufferTensorLit")
+    {
+        if if inputs.is_empty() {
+            outputs.contains(&node.eclass)
+        } else {
+            !inputs.contains(&node.eclass)
+        } {
+            continue;
+        }
+        if let Some(tensor) = node.children.first().and_then(|id| egraph.nodes.get(id)) {
+            terminals.insert(tensor.eclass.clone());
+        }
+    }
+    terminals
+}
+
+/// The implementation op names that PRODUCE `class` in the e-graph: for
+/// every `LayoutTensorOpLit` spec whose output list contains it, the
+/// `LayoutTensorOp*` spellings of the op class it belongs to. This is
+/// the board's non-vacuity witness — the rows the producer index used
+/// to carry for an input terminal.
+fn producer_op_names(egraph: &EGraph, class: &ClassId) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for node in egraph
+        .nodes
+        .values()
+        .filter(|node| node.op == "LayoutTensorOpLit")
+    {
+        let Some(outputs) = node.children.get(1).and_then(|id| egraph.nodes.get(id)) else {
+            continue;
+        };
+        let mut cursor = Some(outputs.eclass.clone());
+        let mut produces = false;
+        while let Some(list) = cursor {
+            let Some(cons) = egraph
+                .nodes
+                .values()
+                .find(|node| node.eclass == list && node.op == "LayoutTensorCons")
+            else {
+                break;
+            };
+            if let Some(head) = cons.children.first().and_then(|id| egraph.nodes.get(id)) {
+                produces |= &head.eclass == class;
+            }
+            cursor = cons
+                .children
+                .get(1)
+                .and_then(|id| egraph.nodes.get(id))
+                .map(|child| child.eclass.clone());
+        }
+        if !produces {
+            continue;
+        }
+        for sibling in egraph
+            .nodes
+            .values()
+            .filter(|sibling| sibling.eclass == node.eclass && !sibling.subsumed)
+        {
+            if sibling.op.starts_with("LayoutTensorOp") && sibling.op != "LayoutTensorOpLit" {
+                names.insert(sibling.op.clone());
+            }
+        }
+    }
+    names
+}
+
+/// THE GAP-A BOARD (2026-09-02). The double-transpose collapse gives
+/// the marker matmul's bound INPUTS producers of their own — `x` is in
+/// the class of `Tᵀ(T(x))`, whose producer is a view. A view moves no
+/// bytes, so its plan ties the input plan at `heuristic_cost` 0 and the
+/// `plan_label` tie-break ("IndexMapApplyViewGeneric" sorts before
+/// "Input:…") HANDED THE INPUT CLASS TO THE VIEW: the extractor emitted
+/// a plan in which a program input is computed from a value that reads
+/// it back, and only bufferize's toposort noticed.
+///
+/// An input terminal is a leaf by definition — its value exists at
+/// launch. So: no genome row for it (the producer index drops them), no
+/// candidate for it (`candidates_for_class` returns none), and every
+/// sampled genome extracts a graph that reads it as a `BufferInput` and
+/// bufferizes.
+#[test]
+fn an_input_terminal_keeps_its_buffer_input_and_never_a_producer() {
+    let egraph = test_runtime::serialize_fixture(&marker_matmul_program());
+    let terminals = input_terminal_classes(&egraph);
+    assert_eq!(
+        terminals.len(),
+        2,
+        "the 2D matmul binds two inputs: {terminals:?}"
+    );
+
+    // NON-VACUITY: the collapse really does offer these classes producers.
+    let mut with_producers = 0usize;
+    for terminal in &terminals {
+        let names = producer_op_names(&egraph, terminal);
+        println!("SCC-TERMINAL {terminal} producers {names:?}");
+        with_producers += usize::from(!names.is_empty());
+    }
+    assert!(
+        with_producers > 0,
+        "the board is vacuous unless some input terminal has a producer spelling"
+    );
+
+    let mut session =
+        ExtractionSession::new_with_matcher_set(&egraph, None, test_runtime::matchers());
+    let index = session.producer_index();
+    for terminal in &terminals {
+        assert!(
+            !index.contains_key(terminal),
+            "{terminal} is an input terminal: the producer index must carry NO genome \
+             row for it (a row is dead weight the extractor must never honour)"
+        );
+    }
+    let space = session.sampling_space(&index);
+
+    for seed in 0..64u64 {
+        let (genome, _fallbacks) = sample_genome_with_seed(&index, &space, seed);
+        let graph = match session.extract_with_genome(&genome) {
+            Ok(Some(graph)) => graph,
+            Ok(None) => panic!("seed {seed}: extraction reached no boundary"),
+            Err(err) => {
+                let (cycle, dead_end, summary) = session.failure_breakdown();
+                panic!(
+                    "seed {seed}: extraction refused (choice-cycle {cycle}, dead-end \
+                     {dead_end}; {summary}): {err:#}"
+                );
+            }
+        };
+        let read_as_inputs: BTreeSet<ClassId> = graph
+            .dag
+            .node_weights()
+            .filter_map(|node| match node {
+                ExtractedNode::BufferInput(input) => Some(input.value.eclass.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            read_as_inputs, terminals,
+            "seed {seed}: every bound input must reach the plan as a BufferInput, never \
+             as the result of a producer"
+        );
+        // AND THE PLAN IS ACYCLIC: the cycle this bug produced was only
+        // ever caught here, by bufferize's toposort.
+        let dps = luminal::dps::dps_rewrite(&graph);
+        luminal::test_support::bufferize_mock(&dps)
+            .unwrap_or_else(|err| panic!("seed {seed}: bufferize refused the plan: {err:#}"));
     }
 }

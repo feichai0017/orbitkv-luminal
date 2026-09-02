@@ -1638,6 +1638,48 @@ fn annotate_boundary_lits<L: PlanLayout>(plan: &mut BufferIrGraph<L>, graph: &Ex
     }
 }
 
+/// The stable marker of the cyclic-extracted-graph refusal — matched by
+/// the implementation search's sampler tripwire, which treats a cycle
+/// reaching bufferize as a SAMPLER BUG (the genome's chosen edges were
+/// supposed to be acyclic) rather than as an ordinary refusal.
+pub const EXTRACTED_GRAPH_CYCLE: &str = "extracted graph has a cycle";
+
+/// NAME THE CYCLE (2026-09-02). `toposort` hands back one node it could
+/// not order; the cycle is inside that node's strongly connected
+/// component, so report the whole component's nodes — a plan whose input
+/// is computed from something that reads it back says so by name instead
+/// of by "there is a cycle somewhere".
+fn describe_cycle(graph: &ExtractedGraph, seed: petgraph::graph::NodeIndex) -> String {
+    let label = |index: petgraph::graph::NodeIndex| -> String {
+        match &graph.dag[index] {
+            ExtractedNode::BufferInput(input) => {
+                format!("input {}", input.value.label)
+            }
+            ExtractedNode::LayoutOp(op) => {
+                let outputs: Vec<&str> = op
+                    .outputs
+                    .iter()
+                    .map(|output| output.label.as_str())
+                    .collect();
+                format!("{} -> {}", op.op.label(), outputs.join(", "))
+            }
+            ExtractedNode::BufferOutput(output) => format!("output {}", output.label),
+        }
+    };
+    let members: Vec<String> = petgraph::algo::tarjan_scc(&graph.dag)
+        .into_iter()
+        .find(|scc| scc.contains(&seed))
+        .unwrap_or_else(|| vec![seed])
+        .into_iter()
+        .map(label)
+        .collect();
+    format!(
+        "the cycle runs through {} node(s): [{}]",
+        members.len(),
+        members.join(" | ")
+    )
+}
+
 /// The PLANNING half of [`bufferize`]: validate the input program, analyze,
 /// assign, build the BufferTensor graph, install anti-dependence ordering,
 /// certify, and run the storage-level rewrites — everything semantic. The
@@ -1649,8 +1691,12 @@ pub(crate) fn buffer_tensor_plan<L: PlanLayout>(
     value_layouts: &HashMap<ClassId, L>,
 ) -> Result<crate::buffer_tensor_ir::BufferTensorIrGraph<L>> {
     validate_input_program(graph)?;
-    let order = toposort(&graph.dag, None)
-        .map_err(|_| anyhow::anyhow!("extracted graph has a cycle; cannot bufferize"))?;
+    let order = toposort(&graph.dag, None).map_err(|cycle| {
+        anyhow::anyhow!(
+            "{EXTRACTED_GRAPH_CYCLE}; cannot bufferize: {}",
+            describe_cycle(graph, cycle.node_id())
+        )
+    })?;
 
     // Collect the ops (in topo order, one dense position each) and the boundary
     // facts the analyzer needs.
@@ -2520,6 +2566,73 @@ mod tests {
 
     fn cid(s: &str) -> ClassId {
         ClassId::from(s)
+    }
+
+    /// THE CYCLE IS NAMED (2026-09-02). `toposort` only says "there is a
+    /// cycle"; the refusal now walks the strongly connected component the
+    /// unorderable node sits in and prints its members, so the plan that
+    /// computes a value from something that reads it back says WHICH ops
+    /// those are. (Since input terminals became leaves the extractor no
+    /// longer emits such a graph — this board builds one by hand, which is
+    /// also what the implementation search's tripwire watches for.)
+    #[test]
+    fn a_cyclic_extracted_graph_names_the_cycle_members() {
+        use crate::layout_ir::ExtractedEdge;
+        use crate::test_support::TestGraph;
+
+        let mut g = TestGraph::new();
+        let x = g.input("x", "A", Access::ReadOnly, "rm");
+        let y = g.op(
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
+            &[&x],
+            &[("y", "rm")],
+        )[0]
+        .clone();
+        let z = g.op(
+            Box::new(MockOp {
+                reads: vec![true],
+                ..Default::default()
+            }),
+            &[&y],
+            &[("z", "rm")],
+        )[0]
+        .clone();
+        g.output(&z, "D");
+        let mut graph = g.build();
+
+        let node_of = |graph: &ExtractedGraph, label: &str| {
+            graph
+                .dag
+                .node_indices()
+                .find(|index| match &graph.dag[*index] {
+                    ExtractedNode::LayoutOp(op) => op.outputs.iter().any(|out| out.label == label),
+                    _ => false,
+                })
+                .expect("the board built this op")
+        };
+        let (writes_y, writes_z) = (node_of(&graph, "y"), node_of(&graph, "z"));
+        graph.dag.add_edge(
+            writes_z,
+            writes_y,
+            ExtractedEdge {
+                value: z.clone(),
+                port: "in0".to_string(),
+            },
+        );
+
+        let err = crate::test_support::bufferize_mock(&graph).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(EXTRACTED_GRAPH_CYCLE),
+            "the refusal keeps its stable marker: {text}"
+        );
+        assert!(
+            text.contains("-> y") && text.contains("-> z"),
+            "the refusal names both ops in the cycle: {text}"
+        );
     }
 
     /// A write-only destination whose operand value has no other reader: the old
