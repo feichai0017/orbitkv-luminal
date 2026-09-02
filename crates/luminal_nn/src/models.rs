@@ -710,6 +710,7 @@ mod tests {
             mutations: 2,
             trials: 1,
             seed: 0,
+            search_log: false,
         };
         eprintln!(
             "config | wall | saturation | extract | exec(best) | genomes refused (cycles/dead-ends)"
@@ -880,6 +881,7 @@ mod tests {
                     mutations: 0,
                     trials: 1,
                     seed,
+                    search_log: false,
                 },
             );
             match outcome {

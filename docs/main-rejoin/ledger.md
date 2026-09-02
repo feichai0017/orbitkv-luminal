@@ -27,9 +27,9 @@ Dispositions:
 | `cd0aa58f` | #384 | translate_sdpa: close the SDPA surface — precision, masks, GQA, dynamic shapes | FILE-LEVEL | PR #445 (branch `e2f5cd0a`) | — |
 | `aa5664bb` | #385 | luminal_python: honor the in-place mutation contract (write-back outputs) | FILE-LEVEL | PR #448 (branch `16fbb5bd`) | — |
 | `be3e2fe5` | #387 | translator: robustness fixes — dtype promotion, rank-extending expand, norm opmath | RE-EXPRESSED (movement / unary) | PR #448 (branch `5817a012`) | — |
-| `7423ca37` | #391 | compile search progress UI | INTENT-ONLY | nothing landed — this row | see **#391 progress UI** below |
+| `7423ca37` | #391 | compile search progress UI | RE-EXPRESSED (`search_log` + Start/Faster/Slower) | branch `merge/main-391-search-ui` (this commit) | see **#391 progress UI** below |
 
-## #391 progress UI — the requirement, for `src/implementation_search.rs`
+## #391 progress UI — re-expressed in `src/implementation_search.rs`
 
 Main's diff patches the LLIR compile-search loop in `src/graph.rs` (main's
 `Graph::search`, ~lines 2380–2660). That region does not exist on this branch:
@@ -70,16 +70,45 @@ printed, and `slower_line_visible = !new_best` records whether a transient line
 now sits above the bars. The bars are re-rendered afterwards. Two bits of state
 carry all of it: `slower_since_faster: usize` and `slower_line_visible: bool`.
 
-**What satisfying this on the branch would mean.** `search_implementations` /
-`search_implementations_with_runtime` would need (a) a log-enable option on
-`ImplementationSearchOptions` (default off is the safer branch default — the
-branch's search is called from tests and examples that expect quiet output), and
-(b) the same three-state reporting driven by the selection loop's existing
-bookkeeping: the initial baseline candidate → `Start`; `nanos < *best_nanos`
-(the loop already computes exactly this against `best: Option<(nanos, genome,
-plan)>`) → `Faster` plus a permanent line; otherwise → a transient
-`Slower x{n}`. There are no progress *bars* on the branch to move the cursor
-relative to, so a port must either add a bar row (generations × generation_size
-is a known total, so a bar is well defined) or drop the cursor arithmetic and
-print plain lines. Nothing about correctness depends on this: it is console UX
-only, with no tests or goldens attached on main.
+**What landed here (ruling 5, 2026-09-02: match main).**
+`ImplementationSearchOptions` gains `search_log: bool`, default `true` — main's
+default, not the quieter one this row originally proposed — with the builder
+`.search_log(enabled)` and the same env override, through a local
+`log_channel_enabled(self.search_log, "SEARCH_LOG")` copied from main's
+`src/egglog_utils/mod.rs` (this branch had no log-channel helper at all, so the
+`LUMINAL_LOG=1` force-on and the `1/true/yes/on` flag parsing come across with
+it). `search_implementations_with_runtime` builds a `SearchProgress` writer when
+the channel is on, and reports on each PROFILED candidate (fingerprint-cache
+hits are not candidates that ran, and can never improve the best): the first one
+→ `Start` with the baseline metric; afterwards `nanos < *best_nanos` → a
+permanent `Faster` line, otherwise the transient `Slower x{n}` counter, reset by
+every improvement. Output goes to **stderr**, not main's stdout, so it never
+contaminates a caller's data stream — and through a `CaptureAwareStderr`
+adapter whose `Write::write` routes the bytes through `eprint!` rather than a
+raw `Stderr` handle, because libtest's output capture intercepts the macro and
+not the handle. Real runs print exactly as before; test runs are silent unless
+`--nocapture`.
+
+Two deliberate divergences from main, both console-only:
+
+- **No cursor arithmetic.** Main walks the cursor up over its progress bars
+  (`\x1b[1A` per bar row) before printing. This branch draws no bars, so that is
+  dropped; the transient `Slower` line is written WITHOUT a newline and every
+  later line begins by clearing it in place (`\r\x1b[2K`). A `Faster` line
+  therefore replaces the pending `Slower` line instead of being appended below
+  it, and `finish()` clears a still-pending one at the end of the search.
+- **The harness stays quiet.** The DEFAULT matches main (`true`), and the suites
+  are quiet anyway because the writer goes through the capture-aware macro; on
+  top of that, `harness_search_options()` (`src/test_support.rs`) sets
+  `search_log: false`, and so do the ten other struct-literal call sites the new
+  field made exhaustive-literal-incomplete (all under `#[cfg(test)]`), so those
+  searches do not even build a reporter. Nothing here rests on main's tests being
+  noisy — main printed through `println!`, which libtest captures, so main's
+  tests were silent too.
+
+Unit test: `implementation_search::progress_tests::
+progress_prints_start_once_faster_per_improvement_and_a_resetting_slower_counter`
+drives the reporter over an in-memory writer and pins `Start` exactly once (with
+the baseline metric), one `Faster` carrying the new best, the `x1 → x2` climb,
+the reset back to `x1` after an improvement, and the five `\r\x1b[2K` in-place
+rewrites. It strips ANSI so it passes whether or not `colored` colorizes.

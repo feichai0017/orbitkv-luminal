@@ -2127,6 +2127,7 @@ pub fn harness_search_options() -> crate::implementation_search::ImplementationS
         mutations: 2,
         trials: 1,
         seed: 0,
+        search_log: false,
     }
 }
 

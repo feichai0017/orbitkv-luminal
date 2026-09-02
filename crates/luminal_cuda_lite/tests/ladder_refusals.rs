@@ -133,6 +133,7 @@ fn run_rung(layers: usize, d: usize, default_budget: bool) -> (usize, usize, usi
             mutations: 2,
             trials: 1,
             seed: 0,
+            search_log: false,
         }
     };
     let start = std::time::Instant::now();
