@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use anyhow::{Context, Result, bail};
 use egraph_serialize::{ClassId, EGraph, Node, NodeId};
@@ -6,8 +8,8 @@ use petgraph::graph::{DiGraph, NodeIndex};
 
 use crate::layout_ir::{
     Access, BufferInfo, ExtractedDag, ExtractedEdge, ExtractedGraph, ExtractedNode, ExtractionSite,
-    FreedBy, InputNode, LayoutInfo, LayoutIrOp, LayoutTensorInfo, LogicalInfo, OpInput, OpMatcher,
-    OpNode, OutputNode, OutputSlot,
+    FreedBy, InputNode, LayoutInfo, LayoutIrOp, LayoutTensorInfo, LazyText, LogicalInfo, OpInput,
+    OpMatcher, OpNode, OutputNode, OutputSlot,
 };
 use crate::logical_op::{LogicalRender, logical_op_for};
 
@@ -25,7 +27,11 @@ struct Extractor<'a> {
     /// has no entry here simply offers no implementation candidate.
     matchers: HashMap<&'static str, Box<dyn OpMatcher>>,
     class_nodes: HashMap<ClassId, Vec<NodeId>>,
-    render_class_nodes: HashMap<ClassId, Vec<NodeId>>,
+    /// The shared rendering state: the render-time class index and the
+    /// per-(class, depth, preference) render memo, behind an `Rc` so the
+    /// lazy text closures the extraction hands out can keep it alive
+    /// after this borrow of the caller's e-graph ends.
+    render: Rc<RenderCtx>,
     op_specs: HashMap<ClassId, Vec<OpSpec>>,
     producer_index: HashMap<ClassId, Vec<ProducerRef>>,
     input_terminals: HashMap<ClassId, InputInfo>,
@@ -105,6 +111,21 @@ struct PlanChild {
 struct PlanMeta {
     name: &'static str,
     class: ClassId,
+}
+
+/// Everything `ClassRenderer::op_tooltip` reads out of a [`Plan`], cloned
+/// at emission time so the DEFERRED tooltip can render long after the
+/// plan (an extractor-internal value) is gone.
+#[derive(Debug, Clone)]
+struct OpTooltipSeed {
+    class: ClassId,
+    source_eclass: Option<ClassId>,
+    source_enode: Option<NodeId>,
+    selected_output_index: Option<usize>,
+    heuristic_cost: u64,
+    input_list: Vec<ClassId>,
+    output_list: Vec<ClassId>,
+    metadata: Vec<PlanMeta>,
 }
 
 /// Extractor-internal ONLY. `PlanKind` is the selection/cost IR at *e-graph*
@@ -730,22 +751,18 @@ impl<'a> Extractor<'a> {
             .map(|matcher| (matcher.egglog_constructor(), matcher))
             .collect();
         let class_nodes = class_nodes(egraph);
-        let render_class_nodes = render_class_nodes(egraph);
-        let (op_specs, producer_index) = collect_op_specs(egraph, &render_class_nodes);
+        let render = Rc::new(RenderCtx::new(egraph));
+        let (op_specs, producer_index) = collect_op_specs(egraph, &render.class_nodes);
         let output_buffer_classes = collect_output_buffer_classes(egraph, &class_nodes);
         let input_buffer_classes = collect_input_buffer_classes(egraph, &class_nodes);
-        let input_terminals = collect_input_terminals(
-            egraph,
-            &render_class_nodes,
-            &output_buffer_classes,
-            &input_buffer_classes,
-        );
+        let input_terminals =
+            collect_input_terminals(&render, &output_buffer_classes, &input_buffer_classes);
 
         Self {
             egraph,
             matchers,
             class_nodes,
-            render_class_nodes,
+            render,
             op_specs,
             producer_index,
             input_terminals,
@@ -1280,86 +1297,20 @@ impl<'a> Extractor<'a> {
             .map(|child| child.eclass.clone())
     }
 
-    fn render_buffer_id(&self, class: &ClassId) -> String {
-        self.render_class_prefer(class, 3, Some("BufferLit"))
-    }
-
-    fn layout_tensor_details(&self, class: &ClassId) -> Vec<(String, String)> {
-        self.renderer().layout_tensor_details(class)
-    }
+    // The remaining renderer delegates are the ones the EXTRACTION path
+    // still reads. Everything the tooltips used moved onto
+    // `ClassRenderer` with them (see `Extractor::lazy_text`).
 
     fn layout_tensor_parts(&self, class: &ClassId) -> Option<(ClassId, ClassId)> {
         self.renderer().layout_tensor_parts(class)
-    }
-
-    fn buffer_tensor_parts(&self, class: &ClassId) -> Option<(ClassId, ClassId)> {
-        self.renderer().buffer_tensor_parts(class)
     }
 
     fn class_let_name(&self, class: &ClassId) -> Option<String> {
         self.renderer().class_let_name(class)
     }
 
-    fn class_type(&self, class: &ClassId) -> Option<String> {
-        self.renderer().class_type(class)
-    }
-
-    fn layout_tensor_label(&self, class: &ClassId) -> String {
-        self.renderer().layout_tensor_label(class)
-    }
-
-    fn logical_label(&self, class: &ClassId) -> String {
-        self.renderer().logical_label(class)
-    }
-
-    fn logical_details(&self, class: &ClassId) -> Vec<(String, String)> {
-        self.renderer().logical_details(class)
-    }
-
     fn logical_children(&self, class: &ClassId) -> Vec<(&'static str, ClassId)> {
         self.renderer().logical_children(class)
-    }
-
-    fn layout_label(&self, class: &ClassId) -> String {
-        self.renderer().layout_label(class)
-    }
-
-    fn canonical_layout(&self, class: &ClassId) -> String {
-        self.renderer().canonical_layout(class)
-    }
-
-    fn layout_details(&self, class: &ClassId) -> Vec<(String, String)> {
-        self.renderer().layout_details(class)
-    }
-
-    fn readable_shape(&self, class: &ClassId) -> Option<String> {
-        self.renderer().readable_shape(class)
-    }
-
-    fn readable_index_map(&self, class: &ClassId) -> Option<String> {
-        self.renderer().readable_index_map(class)
-    }
-
-    fn render_class_prefer(
-        &self,
-        class: &ClassId,
-        depth: usize,
-        preferred_op: Option<&str>,
-    ) -> String {
-        self.renderer()
-            .render_class_prefer(class, depth, preferred_op)
-    }
-
-    fn render_layout_tensor_list(&self, classes: &[ClassId]) -> String {
-        let items = classes
-            .iter()
-            .enumerate()
-            .map(|(index, class)| {
-                format!("{index}:{}", self.renderer().layout_tensor_summary(class))
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("[{items}]")
     }
 
     /// Plan preference: (cost, copies, label) as before, then a CONTENT-based
@@ -1403,10 +1354,20 @@ impl<'a> Extractor<'a> {
     }
 
     fn renderer(&self) -> ClassRenderer<'_> {
-        ClassRenderer {
-            egraph: self.egraph,
-            class_nodes: &self.render_class_nodes,
-        }
+        self.render.renderer()
+    }
+
+    /// Defer one display-text field (ruling 2026-09-01). The closure
+    /// captures an `Rc<RenderCtx>` — which owns its e-graph — so it can
+    /// still run after this `Extractor`'s borrow of the caller's e-graph
+    /// is gone, which is the normal case: the fixture harnesses drop the
+    /// deserialized e-graph the moment extraction returns, and the
+    /// visualizer reads the text long afterwards. `build` must be the
+    /// SAME code the eager version ran, so the deferred string is the
+    /// eager string.
+    fn lazy_text(&self, build: impl Fn(&ClassRenderer<'_>) -> String + 'static) -> LazyText {
+        let ctx = Rc::clone(&self.render);
+        LazyText::deferred(move || build(&ctx.renderer()))
     }
 
     // ---- bytes-moved heuristic pricing (ruling 2026-08-10): the
@@ -1691,9 +1652,59 @@ impl Candidate {
     }
 }
 
+/// The render memo's key: an e-class, the remaining render depth, and the
+/// preferred constructor. `preferred_op` is `&'static str` because every
+/// caller names a constructor literally (or goes through
+/// [`metadata_preferred_op`]), so a lookup allocates nothing; `ClassId` is
+/// an `Arc<str>`, whose clone is a refcount bump.
+type RenderKey = (ClassId, usize, Option<&'static str>);
+
+/// The rendering state every renderer view shares: the e-graph, the
+/// render-time class index (subsumed nodes INCLUDED — see
+/// [`render_class_nodes`]), and the render memo.
+///
+/// A MEMO, NEVER A SKIP (ruling 2026-09-01). Rendered text is not only
+/// display: `stable_key` renders a plan's source e-node to break
+/// selection ties, so a cached render must return EXACTLY the string the
+/// uncached computation would have produced. A class's members never
+/// change within a session, so one entry serves every genome — the ctx
+/// outlives `ExtractionSession::extract_with_genome`'s cache clearing,
+/// exactly like `op_cache` and `stable_key_cache`.
+///
+/// The e-graph here is OWNED (a clone of the caller's). Lazy text
+/// closures hold an `Rc<RenderCtx>` and are forced after extraction
+/// returns, by which time the caller's `&EGraph` is frequently gone (the
+/// fixture harnesses drop the deserialized e-graph on return), so a
+/// borrow could not carry them.
+#[derive(Debug)]
+struct RenderCtx {
+    egraph: EGraph,
+    class_nodes: HashMap<ClassId, Vec<NodeId>>,
+    memo: RefCell<HashMap<RenderKey, Rc<str>>>,
+}
+
+impl RenderCtx {
+    fn new(egraph: &EGraph) -> Self {
+        Self {
+            class_nodes: render_class_nodes(egraph),
+            egraph: egraph.clone(),
+            memo: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn renderer(&self) -> ClassRenderer<'_> {
+        ClassRenderer {
+            egraph: &self.egraph,
+            class_nodes: &self.class_nodes,
+            memo: &self.memo,
+        }
+    }
+}
+
 struct ClassRenderer<'a> {
     egraph: &'a EGraph,
     class_nodes: &'a HashMap<ClassId, Vec<NodeId>>,
+    memo: &'a RefCell<HashMap<RenderKey, Rc<str>>>,
 }
 
 /// The renderer's implementation of the [`LogicalRender`] callbacks: the
@@ -1726,7 +1737,7 @@ impl LogicalRender for LogicalRenderCtx<'_, '_, '_> {
         node: &Node,
         index: usize,
         depth: usize,
-        prefer: Option<&str>,
+        prefer: Option<&'static str>,
     ) -> Option<String> {
         child_class(self.renderer.egraph, node, index)
             .map(|class| self.renderer.render_class_prefer(&class, depth, prefer))
@@ -1764,24 +1775,45 @@ impl<'a> ClassRenderer<'a> {
             .and_then(|data| data.typ.clone())
     }
 
+    /// MEMOIZED per (class, depth, preference) for the session
+    /// (2026-09-01). Rendering recurses into every child class at
+    /// `depth - 1`, so on a convergent DAG the uncached walk re-rendered
+    /// shared subterms once per path — exponential in depth, and the
+    /// extraction wall on the deep model fixtures. A memo is the only
+    /// legal fix: the text feeds `stable_key`, so skipping or truncating
+    /// a render would change plan election. Returns the stored string
+    /// verbatim.
     fn render_class_prefer(
         &self,
         class: &ClassId,
         depth: usize,
-        preferred_op: Option<&str>,
+        preferred_op: Option<&'static str>,
     ) -> String {
         if depth == 0 {
             return class.to_string();
         }
 
-        let Some(node_ids) = self.class_nodes.get(class) else {
-            return class.to_string();
-        };
-        let Some(node_id) = choose_render_node(self.egraph, node_ids, preferred_op) else {
-            return class.to_string();
-        };
+        let key = (class.clone(), depth, preferred_op);
+        // Two statements on purpose: the `Ref` must die at this
+        // semicolon, because `render_node` below recurses straight back
+        // into this function and a live borrow would panic.
+        let hit = self.memo.borrow().get(&key).cloned();
+        if let Some(hit) = hit {
+            return hit.to_string();
+        }
 
-        self.render_node(node_id, depth)
+        let rendered = match self
+            .class_nodes
+            .get(class)
+            .and_then(|node_ids| choose_render_node(self.egraph, node_ids, preferred_op))
+        {
+            Some(node_id) => self.render_node(node_id, depth),
+            None => class.to_string(),
+        };
+        self.memo
+            .borrow_mut()
+            .insert(key, Rc::from(rendered.as_str()));
+        rendered
     }
 
     fn render_class_with_op(&self, class: &ClassId, depth: usize, op: &str) -> Option<String> {
@@ -2354,26 +2386,55 @@ impl<'a> ClassRenderer<'a> {
         details
     }
 
-    fn layout_tensor_details(&self, class: &ClassId) -> Vec<(String, String)> {
-        let Some(node_ids) = self.class_nodes.get(class) else {
-            return Vec::new();
-        };
-
-        for node_id in node_ids {
+    /// The `LayoutTensorLit` member the DETAILS table describes: the
+    /// first one whose logical and layout children both read. Distinct
+    /// from [`Self::layout_tensor_parts`], which stops at the first
+    /// `LayoutTensorLit` even when a child is missing; sharing this one
+    /// selector is what keeps [`Self::layout_tensor_shape_dtype`]
+    /// byte-identical to the `find_detail` lookup it replaced.
+    fn layout_tensor_detail_parts(&self, class: &ClassId) -> Option<(ClassId, ClassId)> {
+        for node_id in self.class_nodes.get(class)? {
             let Some(node) = self.egraph.nodes.get(node_id) else {
                 continue;
             };
             if node.op != "LayoutTensorLit" {
                 continue;
             }
-
             let Some(logical_class) = child_class(self.egraph, node, 0) else {
                 continue;
             };
             let Some(layout_class) = child_class(self.egraph, node, 1) else {
                 continue;
             };
+            return Some((logical_class, layout_class));
+        }
+        None
+    }
 
+    /// The `shape` and `dtype` a value's info carries — EXACTLY what
+    /// `find_detail(&layout_tensor_details(class), "shape"/"dtype")`
+    /// returned: the same member node, the logical side first, the
+    /// layout side only when the logical side offers none. Split out so
+    /// the two eager fields no longer force the whole details table
+    /// (whose `canonical`/`bit_offset` entries are full-depth renders).
+    fn layout_tensor_shape_dtype(&self, class: &ClassId) -> (Option<String>, Option<String>) {
+        let Some((logical_class, layout_class)) = self.layout_tensor_detail_parts(class) else {
+            return (None, None);
+        };
+        (
+            self.logical_shape(&logical_class)
+                .or_else(|| self.layout_shape(&layout_class)),
+            self.logical_dtype(&logical_class)
+                .or_else(|| self.layout_dtype(&layout_class)),
+        )
+    }
+
+    fn layout_tensor_details(&self, class: &ClassId) -> Vec<(String, String)> {
+        let Some((logical_class, layout_class)) = self.layout_tensor_detail_parts(class) else {
+            return Vec::new();
+        };
+
+        {
             let mut details = self.class_details(class);
             details.push(("logical".to_string(), self.logical_label(&logical_class)));
             details.push(("logical_eclass".to_string(), logical_class.to_string()));
@@ -2395,10 +2456,8 @@ impl<'a> ClassRenderer<'a> {
             }
             details.push(("layout".to_string(), self.canonical_layout(&layout_class)));
             details.push(("layout_eclass".to_string(), layout_class.to_string()));
-            return details;
+            details
         }
-
-        Vec::new()
     }
 
     fn logical_shape(&self, class: &ClassId) -> Option<String> {
@@ -2556,6 +2615,152 @@ impl<'a> ClassRenderer<'a> {
         }
         None
     }
+
+    // ---- tooltip builders (ported from the former GraphBuilder; they
+    // live on the renderer, not the extractor, so a DEFERRED text field
+    // can run them with nothing but the render ctx — see
+    // `Extractor::lazy_text`).
+
+    fn source_lines(&self, eclass: Option<&ClassId>, enode: Option<&NodeId>) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(eclass) = eclass {
+            push_detail(&mut lines, "eclass", eclass);
+            if let Some(typ) = self.class_type(eclass) {
+                push_detail(&mut lines, "type", typ);
+            }
+            if let Some(name) = self.class_let_name(eclass) {
+                push_detail(&mut lines, "let", name);
+            }
+        }
+        if let Some(enode) = enode {
+            push_detail(&mut lines, "enode", enode);
+        }
+        lines
+    }
+
+    fn render_buffer_id(&self, class: &ClassId) -> String {
+        self.render_class_prefer(class, 3, Some("BufferLit"))
+    }
+
+    fn render_layout_tensor_list(&self, classes: &[ClassId]) -> String {
+        let items = classes
+            .iter()
+            .enumerate()
+            .map(|(index, class)| format!("{index}:{}", self.layout_tensor_summary(class)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("[{items}]")
+    }
+
+    fn layout_tensor_tooltip(&self, class: &ClassId) -> String {
+        let mut lines = self.source_lines(Some(class), None);
+        push_details(&mut lines, &self.layout_tensor_details(class));
+        join_tooltip(lines)
+    }
+
+    fn logical_tooltip(&self, class: &ClassId) -> String {
+        let mut lines = self.source_lines(Some(class), None);
+        push_details(&mut lines, &self.logical_details(class));
+        join_tooltip(lines)
+    }
+
+    fn layout_tooltip(&self, class: &ClassId) -> String {
+        let mut lines = self.source_lines(Some(class), None);
+        push_details(&mut lines, &self.layout_details(class));
+        join_tooltip(lines)
+    }
+
+    fn buffer_tensor_tooltip(
+        &self,
+        class: &ClassId,
+        source_enode: Option<&NodeId>,
+        tensor: &ClassId,
+        buffer_id: &ClassId,
+    ) -> String {
+        let mut lines = self.source_lines(Some(class), source_enode);
+        push_detail(&mut lines, "tensor_eclass", tensor);
+        push_detail(&mut lines, "buffer_id_eclass", buffer_id);
+        if let Some((literal_tensor, literal_buffer_id)) = self.buffer_tensor_parts(class) {
+            push_detail(&mut lines, "literal_tensor_eclass", literal_tensor);
+            push_detail(&mut lines, "literal_buffer_id_eclass", literal_buffer_id);
+        }
+        push_detail(&mut lines, "buffer_id", self.render_buffer_id(buffer_id));
+        push_details(&mut lines, &self.layout_tensor_details(tensor));
+        join_tooltip(lines)
+    }
+
+    fn buffer_id_tooltip(&self, class: &ClassId) -> String {
+        let mut lines = self.source_lines(Some(class), None);
+        push_detail(&mut lines, "value", self.render_buffer_id(class));
+        join_tooltip(lines)
+    }
+
+    fn output_tooltip(&self, class: &ClassId, source_enode: Option<&NodeId>) -> String {
+        join_tooltip(self.source_lines(Some(class), source_enode))
+    }
+
+    /// The op tooltip, from a [`OpTooltipSeed`] rather than the `Plan`:
+    /// the plan is extractor-internal and gone by the time a deferred
+    /// tooltip renders, so `ensure_value` clones the handful of fields
+    /// this reads.
+    fn op_tooltip(&self, seed: &OpTooltipSeed) -> String {
+        let mut lines = Vec::new();
+        push_detail(&mut lines, "selected_output_eclass", &seed.class);
+        if let Some(op_eclass) = &seed.source_eclass {
+            push_detail(&mut lines, "op_eclass", op_eclass);
+        }
+        if let Some(enode) = &seed.source_enode {
+            push_detail(&mut lines, "concrete_enode", enode);
+        }
+        if let Some(index) = seed.selected_output_index {
+            push_detail(&mut lines, "selected_output_index", index);
+        }
+        push_detail(&mut lines, "heuristic_cost", seed.heuristic_cost);
+        push_details(&mut lines, &self.layout_tensor_details(&seed.class));
+        if !seed.input_list.is_empty() {
+            push_detail(
+                &mut lines,
+                "input_layout_tensors",
+                self.render_layout_tensor_list(&seed.input_list),
+            );
+        }
+        if !seed.output_list.is_empty() {
+            push_detail(
+                &mut lines,
+                "output_layout_tensors",
+                self.render_layout_tensor_list(&seed.output_list),
+            );
+        }
+        for meta in &seed.metadata {
+            let value = if is_layout_metadata(meta.name) {
+                self.canonical_layout(&meta.class)
+            } else if meta.name == "shape" {
+                self.readable_shape(&meta.class).unwrap_or_else(|| {
+                    self.render_class_prefer(
+                        &meta.class,
+                        metadata_render_depth(meta.name),
+                        metadata_preferred_op(meta.name),
+                    )
+                })
+            } else if meta.name == "index_map" {
+                self.readable_index_map(&meta.class).unwrap_or_else(|| {
+                    self.render_class_prefer(
+                        &meta.class,
+                        metadata_render_depth(meta.name),
+                        metadata_preferred_op(meta.name),
+                    )
+                })
+            } else {
+                self.render_class_prefer(
+                    &meta.class,
+                    metadata_render_depth(meta.name),
+                    metadata_preferred_op(meta.name),
+                )
+            };
+            push_detail(&mut lines, meta.name, value);
+        }
+        join_tooltip(lines)
+    }
 }
 
 impl<'a> Extractor<'a> {
@@ -2586,13 +2791,16 @@ impl<'a> Extractor<'a> {
     // ---- structured info builders for the Layout IR DAG ----
 
     fn layout_tensor_info(&self, class: &ClassId) -> LayoutTensorInfo {
-        let label = self.layout_tensor_label(class);
-        let details = self.layout_tensor_details(class);
-        let shape = find_detail(&details, "shape");
-        let dtype = find_detail(&details, "dtype");
-        let mut lines = self.source_lines(Some(class), None);
-        push_details(&mut lines, &details);
-        let tooltip = join_tooltip(lines);
+        let renderer = self.renderer();
+        let label = renderer.layout_tensor_label(class);
+        // `shape`/`dtype` stay eager but no longer force the details
+        // table: `layout_tensor_shape_dtype` reproduces exactly what
+        // `find_detail(&details, ..)` returned.
+        let (shape, dtype) = renderer.layout_tensor_shape_dtype(class);
+        let tooltip = {
+            let class = class.clone();
+            self.lazy_text(move |renderer| renderer.layout_tensor_tooltip(&class))
+        };
 
         let (logical, layout) = match self.layout_tensor_parts(class) {
             Some((logical_class, layout_class)) => (
@@ -2602,22 +2810,21 @@ impl<'a> Extractor<'a> {
             None => (
                 LogicalInfo {
                     eclass: class.clone(),
-                    label: class.to_string(),
-                    tooltip: String::new(),
+                    label: LazyText::eager(class.to_string()),
+                    tooltip: LazyText::default(),
                     op: None,
                     children: Vec::new(),
                 },
                 LayoutInfo {
                     eclass: class.clone(),
-                    label: class.to_string(),
-                    tooltip: String::new(),
+                    label: LazyText::eager(class.to_string()),
+                    tooltip: LazyText::default(),
                 },
             ),
         };
 
         let (dims, element_bits, dtype_enum) = match self.layout_tensor_parts(class) {
             Some((logical_class, layout_class)) => {
-                let renderer = self.renderer();
                 (
                     renderer.numeric_layout_dims(&layout_class),
                     renderer.numeric_layout_bits(&layout_class),
@@ -2656,8 +2863,14 @@ impl<'a> Extractor<'a> {
         visiting: &mut HashSet<ClassId>,
         depth: usize,
     ) -> LogicalInfo {
-        let label = self.logical_label(class);
-        let tooltip = self.logical_tooltip(class);
+        let label = {
+            let class = class.clone();
+            self.lazy_text(move |renderer| renderer.logical_label(&class))
+        };
+        let tooltip = {
+            let class = class.clone();
+            self.lazy_text(move |renderer| renderer.logical_tooltip(&class))
+        };
         let children = if depth > 0 && visiting.insert(class.clone()) {
             let children = self
                 .logical_children(class)
@@ -2695,8 +2908,14 @@ impl<'a> Extractor<'a> {
     fn layout_info(&self, class: &ClassId) -> LayoutInfo {
         LayoutInfo {
             eclass: class.clone(),
-            label: self.layout_label(class),
-            tooltip: self.layout_tooltip(class),
+            label: {
+                let class = class.clone();
+                self.lazy_text(move |renderer| renderer.layout_label(&class))
+            },
+            tooltip: {
+                let class = class.clone();
+                self.lazy_text(move |renderer| renderer.layout_tooltip(&class))
+            },
         }
     }
 
@@ -2707,23 +2926,32 @@ impl<'a> Extractor<'a> {
         tensor_class: &ClassId,
         buffer_id_class: &ClassId,
     ) -> BufferInfo {
-        let tensor_label = self
+        let renderer = self.renderer();
+        let tensor_label = renderer
             .class_let_name(buffer_tensor_class)
             .unwrap_or_else(|| buffer_tensor_class.to_string());
-        let tensor_tooltip = self.buffer_tensor_tooltip(
-            buffer_tensor_class,
-            buffer_tensor_enode,
-            tensor_class,
-            buffer_id_class,
-        );
-        let rendered = self.render_buffer_id(buffer_id_class);
-        let id_label = match self.class_let_name(buffer_id_class) {
+        let tensor_tooltip = {
+            let (class, enode, tensor, buffer_id) = (
+                buffer_tensor_class.clone(),
+                buffer_tensor_enode.cloned(),
+                tensor_class.clone(),
+                buffer_id_class.clone(),
+            );
+            self.lazy_text(move |renderer| {
+                renderer.buffer_tensor_tooltip(&class, enode.as_ref(), &tensor, &buffer_id)
+            })
+        };
+        let rendered = renderer.render_buffer_id(buffer_id_class);
+        let id_label = match renderer.class_let_name(buffer_id_class) {
             Some(name) if name != rendered => format!("{name}\n{rendered}"),
             Some(name) => name,
             None => rendered,
         };
-        let id_tooltip = self.buffer_id_tooltip(buffer_id_class);
-        let lit = self.renderer().numeric_buffer_lit(buffer_id_class);
+        let id_tooltip = {
+            let class = buffer_id_class.clone();
+            self.lazy_text(move |renderer| renderer.buffer_id_tooltip(&class))
+        };
+        let lit = renderer.numeric_buffer_lit(buffer_id_class);
         BufferInfo {
             tensor_eclass: buffer_tensor_class.clone(),
             tensor_label,
@@ -2793,123 +3021,8 @@ impl<'a> Extractor<'a> {
         None
     }
 
-    // ---- tooltip builders (ported from the former GraphBuilder) ----
-
-    fn source_lines(&self, eclass: Option<&ClassId>, enode: Option<&NodeId>) -> Vec<String> {
-        let mut lines = Vec::new();
-        if let Some(eclass) = eclass {
-            push_detail(&mut lines, "eclass", eclass);
-            if let Some(typ) = self.class_type(eclass) {
-                push_detail(&mut lines, "type", typ);
-            }
-            if let Some(name) = self.class_let_name(eclass) {
-                push_detail(&mut lines, "let", name);
-            }
-        }
-        if let Some(enode) = enode {
-            push_detail(&mut lines, "enode", enode);
-        }
-        lines
-    }
-
-    fn logical_tooltip(&self, class: &ClassId) -> String {
-        let mut lines = self.source_lines(Some(class), None);
-        push_details(&mut lines, &self.logical_details(class));
-        join_tooltip(lines)
-    }
-
-    fn layout_tooltip(&self, class: &ClassId) -> String {
-        let mut lines = self.source_lines(Some(class), None);
-        push_details(&mut lines, &self.layout_details(class));
-        join_tooltip(lines)
-    }
-
-    fn buffer_tensor_tooltip(
-        &self,
-        class: &ClassId,
-        source_enode: Option<&NodeId>,
-        tensor: &ClassId,
-        buffer_id: &ClassId,
-    ) -> String {
-        let mut lines = self.source_lines(Some(class), source_enode);
-        push_detail(&mut lines, "tensor_eclass", tensor);
-        push_detail(&mut lines, "buffer_id_eclass", buffer_id);
-        if let Some((literal_tensor, literal_buffer_id)) = self.buffer_tensor_parts(class) {
-            push_detail(&mut lines, "literal_tensor_eclass", literal_tensor);
-            push_detail(&mut lines, "literal_buffer_id_eclass", literal_buffer_id);
-        }
-        push_detail(&mut lines, "buffer_id", self.render_buffer_id(buffer_id));
-        push_details(&mut lines, &self.layout_tensor_details(tensor));
-        join_tooltip(lines)
-    }
-
-    fn buffer_id_tooltip(&self, class: &ClassId) -> String {
-        let mut lines = self.source_lines(Some(class), None);
-        push_detail(&mut lines, "value", self.render_buffer_id(class));
-        join_tooltip(lines)
-    }
-
     fn output_tooltip(&self, class: &ClassId, source_enode: Option<&NodeId>) -> String {
-        join_tooltip(self.source_lines(Some(class), source_enode))
-    }
-
-    fn op_tooltip(&self, class: &ClassId, plan: &Plan) -> String {
-        let mut lines = Vec::new();
-        push_detail(&mut lines, "selected_output_eclass", class);
-        if let Some(op_eclass) = &plan.source_eclass {
-            push_detail(&mut lines, "op_eclass", op_eclass);
-        }
-        if let Some(enode) = &plan.source_enode {
-            push_detail(&mut lines, "concrete_enode", enode);
-        }
-        if let Some(index) = plan.selected_output_index {
-            push_detail(&mut lines, "selected_output_index", index);
-        }
-        push_detail(&mut lines, "heuristic_cost", plan.heuristic_cost);
-        push_details(&mut lines, &self.layout_tensor_details(class));
-        if !plan.input_list.is_empty() {
-            push_detail(
-                &mut lines,
-                "input_layout_tensors",
-                self.render_layout_tensor_list(&plan.input_list),
-            );
-        }
-        if !plan.output_list.is_empty() {
-            push_detail(
-                &mut lines,
-                "output_layout_tensors",
-                self.render_layout_tensor_list(&plan.output_list),
-            );
-        }
-        for meta in &plan.metadata {
-            let value = if is_layout_metadata(meta.name) {
-                self.canonical_layout(&meta.class)
-            } else if meta.name == "shape" {
-                self.readable_shape(&meta.class).unwrap_or_else(|| {
-                    self.render_class_prefer(
-                        &meta.class,
-                        metadata_render_depth(meta.name),
-                        metadata_preferred_op(meta.name),
-                    )
-                })
-            } else if meta.name == "index_map" {
-                self.readable_index_map(&meta.class).unwrap_or_else(|| {
-                    self.render_class_prefer(
-                        &meta.class,
-                        metadata_render_depth(meta.name),
-                        metadata_preferred_op(meta.name),
-                    )
-                })
-            } else {
-                self.render_class_prefer(
-                    &meta.class,
-                    metadata_render_depth(meta.name),
-                    metadata_preferred_op(meta.name),
-                )
-            };
-            push_detail(&mut lines, meta.name, value);
-        }
-        join_tooltip(lines)
+        self.renderer().output_tooltip(class, source_enode)
     }
 }
 
@@ -3007,7 +3120,20 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
                         value: child.class.clone(),
                     })
                     .collect::<Vec<_>>();
-                let tooltip = self.extractor.op_tooltip(class, &plan);
+                let tooltip = {
+                    let seed = OpTooltipSeed {
+                        class: class.clone(),
+                        source_eclass: plan.source_eclass.clone(),
+                        source_enode: plan.source_enode.clone(),
+                        selected_output_index: plan.selected_output_index,
+                        heuristic_cost: plan.heuristic_cost,
+                        input_list: plan.input_list.clone(),
+                        output_list: plan.output_list.clone(),
+                        metadata: plan.metadata.clone(),
+                    };
+                    self.extractor
+                        .lazy_text(move |renderer| renderer.op_tooltip(&seed))
+                };
                 let node = OpNode {
                     op: op.clone(),
                     provenance: crate::layout_ir::Provenance::Extracted {
@@ -3135,13 +3261,6 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
             other => bail!("expected BufferTensorLit at output {class}, found {other:?}"),
         }
     }
-}
-
-fn find_detail(details: &[(String, String)], key: &str) -> Option<String> {
-    details
-        .iter()
-        .find(|(name, _)| name == key)
-        .map(|(_, value)| value.clone())
 }
 
 fn only_child(plan: &Plan, port: &str) -> Result<ClassId> {
@@ -3460,16 +3579,15 @@ fn collect_buffer_list(
 }
 
 fn collect_input_terminals(
-    egraph: &EGraph,
-    class_nodes: &HashMap<ClassId, Vec<NodeId>>,
+    render: &RenderCtx,
     output_buffer_classes: &HashSet<ClassId>,
     input_buffer_classes: &HashSet<ClassId>,
 ) -> HashMap<ClassId, InputInfo> {
     let mut terminals = HashMap::new();
-    let renderer = ClassRenderer {
-        egraph,
-        class_nodes,
-    };
+    let egraph = &render.egraph;
+    // Through the session's renderer, so these session-start renders
+    // populate (and later hit) the same memo as everything else.
+    let renderer = render.renderer();
     let has_explicit_inputs = !input_buffer_classes.is_empty();
 
     for (node_id, node) in egraph
@@ -3706,4 +3824,111 @@ pub fn chain_strides(egraph: &EGraph, layout: &ClassId) -> Option<Vec<Option<Cha
 fn child_class(egraph: &EGraph, node: &Node, index: usize) -> Option<ClassId> {
     let child_id = node.children.get(index)?;
     egraph.nodes.get(child_id).map(|child| child.eclass.clone())
+}
+
+#[cfg(test)]
+mod render_memo_tests {
+    //! The render memo's two obligations (ruling 2026-09-01): it must
+    //! return the string the uncached walk would have returned, and it
+    //! must not deadlock on its own recursion.
+
+    use egraph_serialize::{ClassId, EGraph, Node, NodeId};
+
+    use super::{ClassRenderer, RenderCtx};
+
+    /// A chain `a4(a3(a2(a1(leaf, leaf), leaf), leaf), leaf)` — every level
+    /// shares one leaf class, which is exactly the shape (a convergent DAG)
+    /// that made the uncached renderer exponential in depth.
+    fn shared_child_chain() -> EGraph {
+        let mut egraph = EGraph::default();
+        let mut add = |id: &str, op: &str, children: Vec<&str>| {
+            egraph.add_node(
+                NodeId::from(id),
+                Node {
+                    op: op.to_string(),
+                    children: children.into_iter().map(NodeId::from).collect(),
+                    eclass: ClassId::from(format!("class-{id}")),
+                    cost: ordered_float::NotNan::new(1.0).unwrap(),
+                    subsumed: false,
+                },
+            );
+        };
+        add("leaf", "Leaf", vec![]);
+        add("a1", "A1", vec!["leaf", "leaf"]);
+        add("a2", "A2", vec!["a1", "leaf"]);
+        add("a3", "A3", vec!["a2", "leaf"]);
+        add("a4", "A4", vec!["a3", "leaf"]);
+        egraph
+    }
+
+    /// The memo returns the SAME text on the second call, and adds no
+    /// entries — the second call is pure lookup. (Identity is what the
+    /// ruling turns on: this text feeds `stable_key`, which breaks plan
+    /// selection ties.)
+    #[test]
+    fn memo_is_output_identical_and_does_no_second_walk() {
+        let ctx = RenderCtx::new(&shared_child_chain());
+        let renderer = ctx.renderer();
+        let root = ClassId::from("class-a4");
+
+        let first = renderer.render_class_prefer(&root, 3, None);
+        let filled = ctx.memo.borrow().len();
+        let second = renderer.render_class_prefer(&root, 3, None);
+
+        assert_eq!(first, second, "a memo hit must reproduce the render");
+        assert_eq!(
+            ctx.memo.borrow().len(),
+            filled,
+            "the second call walked the graph again instead of hitting the memo"
+        );
+        assert!(filled > 0, "nothing was memoized");
+        // Spelled out, so a change to the render grammar has to face this
+        // test rather than silently re-electing plans.
+        assert_eq!(first, "A4(A3(A2(class-a1, class-leaf), Leaf), Leaf)");
+    }
+
+    /// Depth is part of the key: the same class at a shallower depth is a
+    /// DIFFERENT string, and a memo that dropped depth would serve the
+    /// deep answer to a shallow caller.
+    #[test]
+    fn memo_keys_on_depth_and_preference() {
+        let ctx = RenderCtx::new(&shared_child_chain());
+        let renderer = ctx.renderer();
+        let root = ClassId::from("class-a4");
+
+        assert_eq!(
+            renderer.render_class_prefer(&root, 1, None),
+            "A4(class-a3, class-leaf)"
+        );
+        assert_eq!(
+            renderer.render_class_prefer(&root, 2, None),
+            "A4(A3(class-a2, class-leaf), Leaf)"
+        );
+        assert_eq!(renderer.render_class_prefer(&root, 0, None), "class-a4");
+    }
+
+    /// `render_class_prefer` recurses into itself through `render_node`.
+    /// Holding the memo's `Ref` across that call is a `BorrowMutError` at
+    /// runtime, not a compile error, so a deep render is the guard.
+    #[test]
+    fn deep_render_does_not_double_borrow_the_memo() {
+        let ctx = RenderCtx::new(&shared_child_chain());
+        let rendered = ctx
+            .renderer()
+            .render_class_prefer(&ClassId::from("class-a4"), 32, None);
+        assert!(rendered.starts_with("A4("));
+    }
+
+    /// Both renderer views over one ctx share the memo — the guarantee
+    /// that a deferred tooltip rendered later reuses the session's work.
+    #[test]
+    fn views_over_one_ctx_share_the_memo() {
+        let ctx = RenderCtx::new(&shared_child_chain());
+        let root = ClassId::from("class-a4");
+        let first = ClassRenderer::render_class_prefer(&ctx.renderer(), &root, 3, None);
+        let filled = ctx.memo.borrow().len();
+        let second = ClassRenderer::render_class_prefer(&ctx.renderer(), &root, 3, None);
+        assert_eq!(first, second);
+        assert_eq!(ctx.memo.borrow().len(), filled);
+    }
 }

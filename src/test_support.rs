@@ -417,7 +417,7 @@ impl TestGraph {
         LayoutTensorInfo {
             eclass: ClassId::from(format!("val${name}")),
             label: name.to_string(),
-            tooltip: String::new(),
+            tooltip: Default::default(),
             shape: None,
             dtype: None,
             dtype_enum: None,
@@ -425,15 +425,15 @@ impl TestGraph {
             element_bits: None,
             logical: LogicalInfo {
                 eclass: ClassId::from(format!("logical${name}")),
-                label: name.to_string(),
-                tooltip: String::new(),
+                label: name.to_string().into(),
+                tooltip: Default::default(),
                 op: None,
                 children: Vec::new(),
             },
             layout: LayoutInfo {
                 eclass: ClassId::from(format!("layout${layout}")),
-                label: layout.to_string(),
-                tooltip: String::new(),
+                label: layout.to_string().into(),
+                tooltip: Default::default(),
             },
         }
     }
@@ -452,10 +452,10 @@ impl TestGraph {
             lit: None,
             tensor_eclass: ClassId::from(format!("buftensor${n}")),
             tensor_label: buffer.to_string(),
-            tensor_tooltip: String::new(),
+            tensor_tooltip: Default::default(),
             id_eclass: ClassId::from(format!("buf${buffer}")),
             id_label: buffer.to_string(),
-            id_tooltip: String::new(),
+            id_tooltip: Default::default(),
             access,
             freed_by,
         }
@@ -520,7 +520,7 @@ impl TestGraph {
             provenance: crate::layout_ir::Provenance::Synthesized { id: n },
             inputs: op_inputs,
             outputs: output_infos,
-            tooltip: String::new(),
+            tooltip: Default::default(),
             heuristic_cost: 1,
         }));
         for (index, value) in inputs.iter().enumerate() {
@@ -4158,5 +4158,88 @@ mod escape_execution_tests {
             err.to_string().contains("NON-ESCAPING") && err.to_string().contains("Caller"),
             "the guard names the violation and the owner: {err:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod deferred_display_text {
+    //! The deferral half of the render ruling (2026-09-01): the info
+    //! structs' display text is built on FIRST READ, not during
+    //! extraction. These pin both halves of that promise — nothing is
+    //! rendered until asked, and asking produces the real text.
+
+    use luminal::layout_ir::ExtractedNode;
+    use luminal_reference::harness::extract_fixture;
+
+    /// Extraction leaves the display text UNBUILT, and reading it builds
+    /// it. If a search-path caller starts forcing these again, the first
+    /// assertion is what notices.
+    #[test]
+    fn extraction_defers_display_text_until_it_is_read() {
+        let graph = extract_fixture("boundary_gather.egg");
+
+        let value = graph
+            .dag
+            .node_weights()
+            .find_map(|node| match node {
+                ExtractedNode::LayoutOp(op) => op.outputs.first(),
+                _ => None,
+            })
+            .expect("the fixture has an op with an output");
+
+        assert!(
+            !value.tooltip.is_rendered(),
+            "extraction rendered a value tooltip that nobody asked for"
+        );
+        assert!(
+            !value.layout.tooltip.is_rendered(),
+            "extraction rendered a layout tooltip that nobody asked for"
+        );
+
+        let tooltip = value.tooltip.to_string();
+        assert!(
+            tooltip.contains(&format!("eclass={}", value.eclass)),
+            "the deferred tooltip did not build its real text: {tooltip:?}"
+        );
+        assert!(value.tooltip.is_rendered());
+        assert_eq!(
+            tooltip,
+            value.tooltip.to_string(),
+            "a second read must return the first read's text"
+        );
+    }
+
+    /// `to_dot` forces EVERY deferred field on a real extracted graph.
+    /// That is also the runtime guard on the render memo's recursion
+    /// (`render_class_prefer` → `render_node` → `render_class_prefer`):
+    /// a `RefCell` borrow held across it is a `BorrowMutError`, and the
+    /// depth-16/32 layout tooltips are where it would fire.
+    #[test]
+    fn to_dot_forces_every_deferred_field() {
+        for script in [
+            "boundary_gather.egg",
+            "boundary_pass_through.egg",
+            "boundary_iota.egg",
+        ] {
+            let graph = extract_fixture(script);
+            let dot = graph.to_dot();
+            assert!(
+                dot.contains("tooltip=\"eclass="),
+                "{script}: no rendered tooltip reached the dot output"
+            );
+            for node in graph.dag.node_weights() {
+                if let ExtractedNode::LayoutOp(op) = node {
+                    assert!(
+                        op.tooltip.is_rendered(),
+                        "{script}: to_dot left an op tooltip unrendered"
+                    );
+                    for output in &op.outputs {
+                        assert!(output.tooltip.is_rendered());
+                        assert!(output.logical.label.is_rendered());
+                        assert!(output.layout.tooltip.is_rendered());
+                    }
+                }
+            }
+        }
     }
 }

@@ -359,7 +359,7 @@ impl DimsGraph {
         LayoutTensorInfo {
             eclass: luminal::prelude::egraph_serialize::ClassId::from(format!("val${name}")),
             label: name.to_string(),
-            tooltip: String::new(),
+            tooltip: Default::default(),
             shape: None,
             dtype: None,
             dtype_enum: Some(PlanDtype::F32),
@@ -369,8 +369,8 @@ impl DimsGraph {
                 eclass: luminal::prelude::egraph_serialize::ClassId::from(format!(
                     "logical${name}"
                 )),
-                label: name.to_string(),
-                tooltip: String::new(),
+                label: name.to_string().into(),
+                tooltip: Default::default(),
                 op: None,
                 children: Vec::new(),
             },
@@ -378,8 +378,8 @@ impl DimsGraph {
                 eclass: luminal::prelude::egraph_serialize::ClassId::from(format!(
                     "layout${layout}"
                 )),
-                label: layout.to_string(),
-                tooltip: String::new(),
+                label: layout.to_string().into(),
+                tooltip: Default::default(),
             },
         }
     }
@@ -391,10 +391,10 @@ impl DimsGraph {
                 "buftensor${n}"
             )),
             tensor_label: name.to_string(),
-            tensor_tooltip: String::new(),
+            tensor_tooltip: Default::default(),
             id_eclass: luminal::prelude::egraph_serialize::ClassId::from(format!("buf${name}")),
             id_label: name.to_string(),
-            id_tooltip: String::new(),
+            id_tooltip: Default::default(),
             access: Some(Access::ReadWrite),
             freed_by: Some(FreedBy::Caller),
         }
@@ -434,7 +434,7 @@ impl DimsGraph {
             provenance: Provenance::Synthesized { id: n },
             inputs: op_inputs,
             outputs: vec![out.clone()],
-            tooltip: String::new(),
+            tooltip: Default::default(),
             heuristic_cost: 1,
         }));
         for (i, value) in inputs.iter().enumerate() {
