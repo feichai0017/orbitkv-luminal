@@ -1155,9 +1155,7 @@ class Gpt2ApproxGeluModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         cubic = x.pow(3.0)
-        return 0.5 * x * (
-            1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * cubic))
-        )
+        return 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * cubic)))
 
 
 # ========== Where Node Test Models ==========

@@ -1495,9 +1495,7 @@ def test_pow_by_constant(device: torch.device):
 
 
 @pytest.mark.parametrize("exponent", [0.0, 1.0, 2.0, 3.0, 4.0, -3.0])
-def test_pow_by_integral_scalar_preserves_sign(
-    device: torch.device, exponent: float
-):
+def test_pow_by_integral_scalar_preserves_sign(device: torch.device, exponent: float):
     """Integral scalar powers preserve negative bases and reciprocal signs."""
     model: torch.nn.Module = PowByScalarModel(exponent).to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
