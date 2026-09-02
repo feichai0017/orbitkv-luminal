@@ -36,10 +36,10 @@ struct NativeParts {
 pub struct CudaRuntime {
     native: Option<NativeParts>,
     /// Train 3: assemble/search with the cuBLASLt marker vocabulary.
-    /// OFF by default — the unconditional splice detonates the
-    /// `view-arity-lock` tripwire on real model graphs (see
-    /// [`crate::ops::cuda_registry_with_cublaslt`]); enabled through
-    /// [`CudaRuntime::load_with_cublaslt`].
+    /// RULED always-on (2026-09-01); still OFF by default only until the
+    /// search budget/sampler catches up with the collapse's
+    /// re-description 2-cycle (see [`crate::ops::cuda_registry_with_cublaslt`]);
+    /// enabled through [`CudaRuntime::load_with_cublaslt`].
     cublaslt: bool,
     plan: Option<BufferIrGraph<CudaLayout>>,
     /// Host-staged input payloads by BufferLit id, H2D'd at execute.
@@ -77,12 +77,13 @@ impl CudaRuntime {
 
     /// [`CudaRuntime::load`] with the cuBLASLt marker vocabulary
     /// enabled: search assembles the marker's egg snippets and may
-    /// elect the four host-call contracts. EXPLICIT OPT-IN (Train 3):
-    /// on real model graphs the marker's canonicalization rewrites
-    /// currently detonate the `view-arity-lock` coherence tripwire at
-    /// saturation (measured on all seven Train-2 minis); callers get a
-    /// loud saturation error, never a wrong plan. The 2D canonical
-    /// matmul form searches and elects green.
+    /// elect the four host-call contracts. EXPLICIT OPT-IN for now: the
+    /// view-arity tripwire that used to kill saturation on real graphs
+    /// is fixed (it now checks the map literal); at the 2×4 harness
+    /// budget the search can still die of exhaustion on the collapse's
+    /// re-description 2-cycle — loudly, never a wrong plan. The 2D
+    /// canonical matmul form searches and elects green; real graphs
+    /// elect at 12×16.
     pub fn load_with_cublaslt(graph: &graph::Graph) -> Result<Self> {
         let mut rt = Self::load(graph)?;
         rt.cublaslt = true;

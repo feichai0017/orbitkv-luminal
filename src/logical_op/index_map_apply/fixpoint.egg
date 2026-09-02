@@ -1,10 +1,6 @@
-(rule
-  (
-    (= ?out_logical (LogicalIndexMapApply ?in_logical (IndexMapLit ?entry_list ?map_source_shape) ?out_shape))
-    (= ?entry_count (expr-list-length-of ?entry_list))
-  )
-  (
-    (set (view-arity-lock ?out_logical) ?entry_count)
-  )
-  :ruleset fixpoint-invariants
-)
+; The view-arity check lives in the preamble (VIEW ARITY LOCK): it is a
+; property of the IndexMapLit — entry count == rank of the source-shape
+; tag — and is checked on the literal. The per-output-class :no-merge
+; setter that used to live here was retired 2026-09-01: it keyed a route
+; fact (parent rank) on a value (the apply's output class) and fired on
+; sound unions of two apply spellings with different-rank parents.
