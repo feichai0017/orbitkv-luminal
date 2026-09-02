@@ -207,13 +207,17 @@ impl<'a> ExtractionSession<'a> {
     /// extractor's OWN per-candidate input enumeration (so the sampler
     /// and the planner agree on what an input is, by construction).
     ///
-    /// ONE LEAF NOTION: a class with no genome row. Input terminals are
-    /// leaves because they hold no row (they are produced by nothing —
-    /// see `Extractor::candidates_for_class`), not by a special case
-    /// here; every other row-less class is CONTRACTED rather than
-    /// dropped, so the dependency `C -> D(no row) -> E(row)` shows up as
-    /// the edge `C -> E` it really is and a cycle closing through `D`
-    /// cannot hide from the component analysis.
+    /// ONE LEAF NOTION: a class with no genome row. Edges are the
+    /// candidate's input classes FILTERED to the classes that hold a
+    /// row; a row-less input is simply dropped, never contracted
+    /// through. That is sound because after `apply_viability_filter`
+    /// the genome index's keys ARE the producer index's keys, so a
+    /// row-less class an `OpSpec` input names is either an INPUT
+    /// TERMINAL — produced by nothing, planned from the boundary on
+    /// `relax_to_fixpoint`'s first pass, never blocked, and holding no
+    /// row for exactly that reason (see
+    /// `Extractor::candidates_for_class`) — or a DEAD END with no
+    /// candidate at all, which no cycle can run through.
     pub fn sampling_space(
         &self,
         index: &std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>>,
@@ -224,11 +228,9 @@ impl<'a> ExtractionSession<'a> {
                 let per_candidate = entries
                     .iter()
                     .map(|(_, choice)| {
-                        contract_candidate_inputs(
-                            &self.extractor.choice_input_classes(class, choice),
-                            &|input| index.contains_key(input),
-                            &|input| self.extractor.demanded_input_classes(input),
-                        )
+                        let mut inputs = self.extractor.choice_input_classes(class, choice);
+                        inputs.retain(|input| index.contains_key(input));
+                        inputs
                     })
                     .collect();
                 (class.clone(), per_candidate)
@@ -640,15 +642,16 @@ fn producer_index_from(
 /// inputs include `D` (see [`Extractor::choice_input_classes`] — the
 /// SAME `OpSpec::inputs` enumeration `producer_candidates_for_output`
 /// hands the planner, never a second notion of "input"). A class the
-/// genome index has no row for is not a node; it is CONTRACTED, not
-/// dropped — the candidate reading it inherits its demands (see
-/// [`contract_candidate_inputs`]), so `C -> D(no row) -> E(row)` draws
-/// the edge `C -> E`. THE ONLY LEAVES are therefore the classes that
-/// demand nothing, which after contraction means the INPUT TERMINALS:
-/// produced by nothing, planned from the boundary on
+/// genome index has no row for is not a node, and an input naming one
+/// is simply dropped from the edge list. Nothing is contracted through
+/// such a class, and nothing needs to be: after
+/// `Extractor::apply_viability_filter` the genome index's keys are the
+/// producer index's keys, so a row-less input class is either an INPUT
+/// TERMINAL — produced by nothing, planned from the boundary on
 /// `relax_to_fixpoint`'s first pass, never blocked, and so never part
-/// of a blocking cycle. They hold no genome row either (the producer
-/// index drops them), which is the same fact, not a second rule.
+/// of a blocking cycle — or a DEAD END with no candidate at all. Both
+/// are leaves; the row-less-ness is the same fact as the leaf-ness,
+/// not a second rule.
 ///
 /// THE COMPONENT CRITERION. A choice cycle is possible only where the
 /// candidate graph has a cycle, so the re-description groups are
@@ -823,50 +826,6 @@ impl SamplingSpace {
             })
             .collect()
     }
-}
-
-/// CONTRACT THE ROW-LESS CLASSES out of one candidate's input list.
-///
-/// The candidate graph has a node per class holding a genome row, so an
-/// input that holds no row is not a node — but it is not necessarily a
-/// LEAF either. A row-less class is planned WITHOUT a choice (there is
-/// nothing to choose), yet whatever it demands, the candidate reading it
-/// demands transitively: `C -> D(no row) -> E(row)` IS the edge
-/// `C -> E`, and a cycle closing through `D` would otherwise be
-/// invisible to the component analysis and survive sampling.
-///
-/// So each row-less input is replaced by what it demands (`demanded`),
-/// transitively — a row-less class may lead to further row-less classes
-/// — with a visited set so a re-description ring among row-less classes
-/// terminates. Input terminals demand NOTHING (they are produced by
-/// nothing), which is what makes them leaves; no leaf case is written
-/// here.
-///
-/// `has_row`: does this class hold a genome row (is it a node)?
-/// `demanded`: what does this row-less class demand? Both are supplied
-/// by the caller so the rule is testable without an e-graph.
-pub fn contract_candidate_inputs(
-    inputs: &[ClassId],
-    has_row: &dyn Fn(&ClassId) -> bool,
-    demanded: &dyn Fn(&ClassId) -> Vec<ClassId>,
-) -> Vec<ClassId> {
-    let mut out: Vec<ClassId> = Vec::new();
-    let mut stack: Vec<ClassId> = inputs.to_vec();
-    let mut expanded: HashSet<ClassId> = HashSet::new();
-    while let Some(input) = stack.pop() {
-        if has_row(&input) {
-            if !out.contains(&input) {
-                out.push(input);
-            }
-            continue;
-        }
-        if !expanded.insert(input.clone()) {
-            continue;
-        }
-        stack.extend(demanded(&input));
-    }
-    out.sort();
-    out
 }
 
 /// Does a chosen-edge graph close a cycle? (Iterative three-colour DFS;
@@ -1465,36 +1424,6 @@ impl<'a> Extractor<'a> {
             {
                 continue;
             }
-            let Some(spec) = self
-                .op_specs
-                .get(&producer.op_class)
-                .and_then(|specs| specs.get(producer.spec_index))
-            else {
-                continue;
-            };
-            inputs.extend(spec.inputs.iter().cloned());
-        }
-        inputs.sort();
-        inputs.dedup();
-        inputs
-    }
-
-    /// What a class the genome index has NO row for demands, for the
-    /// candidate-graph contraction (see [`contract_candidate_inputs`]).
-    ///
-    /// Such a class is planned without a choice, so every route the
-    /// planner might take through it counts: the union of `OpSpec::inputs`
-    /// over all its producers — the same enumeration
-    /// [`Extractor::choice_input_classes`] restricts to one chosen enode.
-    /// An INPUT TERMINAL demands nothing, for the one reason it has no
-    /// row either: it is produced by nothing (see
-    /// [`Extractor::candidates_for_class`]).
-    fn demanded_input_classes(&self, class: &ClassId) -> Vec<ClassId> {
-        if self.is_input_terminal(class) {
-            return Vec::new();
-        }
-        let mut inputs: Vec<ClassId> = Vec::new();
-        for producer in self.producer_index.get(class).into_iter().flatten() {
             let Some(spec) = self
                 .op_specs
                 .get(&producer.op_class)
