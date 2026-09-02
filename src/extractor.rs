@@ -202,6 +202,58 @@ impl<'a> ExtractionSession<'a> {
         producer_index_from(&self.extractor)
     }
 
+    /// The [`SamplingSpace`] over this session's producer index — the
+    /// candidate graph's strongly connected components, built from the
+    /// extractor's OWN per-candidate input enumeration (so the sampler
+    /// and the planner agree on what an input is, by construction).
+    pub fn sampling_space(
+        &self,
+        index: &std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>>,
+    ) -> SamplingSpace {
+        let candidate_inputs = index
+            .iter()
+            .map(|(class, entries)| {
+                // AN INPUT-TERMINAL CLASS IS A LEAF, whatever its genome
+                // row says. `relax_to_fixpoint` seeds every such class's
+                // plan from the boundary input on the FIRST pass, at
+                // cost 0 and with no children — it is planned before any
+                // candidate is considered, so it never enters `blocked`
+                // and no edge out of it can join a blocking cycle (a
+                // choice cycle IS an SCC among blocked classes; see
+                // `ExtractionSession::failure_breakdown`). Drawing those
+                // edges would invent components the planner does not
+                // have, and the forest rule would then eliminate
+                // genomes that extract perfectly well.
+                //
+                // MEASURED BOTH WAYS 2026-09-02 (the boards in
+                // `tests/test_runtime/tests/scc_sampler.rs`). With the
+                // edges drawn: `basic_program.egg` grows a THIRD
+                // component of 1 combination and 0 acyclic, so the
+                // documented fallback fires on 2000/2000 samples and
+                // the free sampler reads 0/500 acyclic; the `b = y`
+                // union board grows a 36-combination component with 0
+                // acyclic (2000/2000 fallbacks); and the cuBLASLt
+                // matmul's operand weld grows from 3 members to 4, one
+                // of which has no progressing candidate at all. With
+                // them omitted, every component on both boards offers
+                // acyclic combinations and no sample falls back.
+                if self.extractor.is_input_terminal(class) {
+                    return (class.clone(), vec![Vec::new(); entries.len()]);
+                }
+                let per_candidate = entries
+                    .iter()
+                    .map(|(_, choice)| {
+                        let mut inputs = self.extractor.choice_input_classes(class, choice);
+                        inputs.retain(|input| index.contains_key(input));
+                        inputs
+                    })
+                    .collect();
+                (class.clone(), per_candidate)
+            })
+            .collect();
+        SamplingSpace::from_candidate_inputs(candidate_inputs)
+    }
+
     /// Classify the last failed extraction's blockage (diagnosis ruling
     /// 2026-08-07: understand refusals, never auto-repair). Returns
     /// (has_choice_cycle, has_dead_end, summary): choice-cycles are
@@ -595,89 +647,206 @@ fn producer_index_from(
     index
 }
 
-/// The sibling anatomy of a producer index — what two-phase sampling
-/// ("select the logical progressing ops first, insert copies as
-/// plumbing", ruling 2026-08-07) consumes. A candidate's SIBLING
-/// SOURCES are its input classes that instantiate the SAME logical
-/// value as the candidate's own class and hold genome rows themselves —
-/// exactly what a layout copy reads. A candidate with no sibling
-/// sources PROGRESSES the computation: its inputs are other logical
-/// values, and since the logical graph is a DAG, per-class choices over
-/// progressing candidates can never close a choice cycle. Every
-/// measured extraction deadlock was a Copy⟷Copy weld between two
-/// layout siblings of one logical value (dossier 2026-08-07); keeping
-/// sibling-sourced candidates subordinate to a progressing producer
-/// removes that whole failure class by construction. Same-logical
-/// inputs WITHOUT genome rows (boundary inputs) are deliberately not
-/// sibling sources: they are leaves, always available, and copying
-/// them can never cycle.
-#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
+/// The RE-DESCRIPTION anatomy of a producer index — what two-phase
+/// sampling ("elect the progressing producers first, insert the
+/// re-describing ones as plumbing", ruling 2026-08-07, generalized
+/// 2026-09-02) consumes.
+///
+/// THE CANDIDATE GRAPH. One node per class holding a genome row; one
+/// edge `C -> D` for every candidate of `C` whose extractor-demanded
+/// inputs include `D` (see [`Extractor::choice_input_classes`] — the
+/// SAME `OpSpec::inputs` enumeration `producer_candidates_for_output`
+/// hands the planner, never a second notion of "input"). LEAVES, with
+/// no outgoing edges at all, are the classes the planner can always
+/// plan without waiting: inputs with no genome row, and — the same
+/// thing one step further in — INPUT-TERMINAL classes, which
+/// `relax_to_fixpoint` plans from the boundary on its first pass
+/// whatever their genome row says. Neither can ever block, so neither
+/// can be part of a blocking cycle.
+///
+/// THE COMPONENT CRITERION. A choice cycle is possible only where the
+/// candidate graph has a cycle, so the re-description groups are
+/// exactly its NON-TRIVIAL strongly connected components (size >= 2,
+/// or a single class with a self-loop). A candidate's INTRA-COMPONENT
+/// SOURCES are its inputs inside its own component; a candidate with
+/// none PROGRESSES — every route it takes leaves the component, and
+/// the condensation of an SCC decomposition is a DAG, so progressing
+/// choices can never close a cycle no matter how they combine.
+///
+/// WHAT THIS SUBSUMES. The 2026-08-07 form grouped classes by SHARED
+/// LOGICAL VALUE, on the (then true) premise that the logical graph is
+/// a DAG so only layout siblings of one value could re-describe each
+/// other — the measured Copy⟷Copy welds. The cuBLASLt double-transpose
+/// collapse `(union ?w ?x)` broke that premise: two DIFFERENT logical
+/// values re-describe each other through `LogicalIndexMapApply`
+/// transposes, and both spellings looked "progressing" to the
+/// logical-value grouping. Components are the mechanism itself — no op
+/// name list, no logical-value heuristic — and same-logical sibling
+/// groups fall out of them automatically wherever the welds are real.
 pub struct SamplingSpace {
-    /// class → per-candidate sibling-source classes, parallel to the
-    /// class's producer-index entry. An empty inner vec marks a
-    /// progressing candidate.
-    pub sibling_sources: std::collections::BTreeMap<ClassId, Vec<Vec<ClassId>>>,
-    /// Sibling groups: index classes sharing one logical value (only
-    /// groups of two or more), members sorted, groups ordered by their
-    /// logical class — deterministic election order for the sampler.
-    pub groups: Vec<Vec<ClassId>>,
+    /// class → per-candidate input classes that hold genome rows,
+    /// parallel to the class's producer-index entry. These are the
+    /// candidate-graph edges out of each candidate.
+    pub candidate_inputs: std::collections::BTreeMap<ClassId, Vec<Vec<ClassId>>>,
+    /// class → per-candidate INTRA-COMPONENT source classes, parallel
+    /// to the class's producer-index entry. An empty inner vec marks a
+    /// PROGRESSING candidate. Always a subset of `candidate_inputs`;
+    /// identical to it only inside a component, empty everywhere else.
+    pub intra_sources: std::collections::BTreeMap<ClassId, Vec<Vec<ClassId>>>,
+    /// The non-trivial components: members sorted, components ordered —
+    /// a deterministic processing order for the sampler.
+    pub components: Vec<Vec<ClassId>>,
+    /// class → its index in [`SamplingSpace::components`], for the
+    /// classes that belong to a non-trivial one.
+    pub component_of: std::collections::BTreeMap<ClassId, usize>,
 }
 
-/// Compute the [`SamplingSpace`] for a producer index over its e-graph.
-#[allow(dead_code)] // selection-adapter API: test harness here; lib export in the luminal graft
-pub fn sampling_space(
-    egraph: &EGraph,
-    index: &std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>>,
-) -> SamplingSpace {
-    let class_nodes = class_nodes(egraph);
-    let logical_of = |class: &ClassId| -> Option<ClassId> {
-        class_nodes.get(class)?.iter().find_map(|node_id| {
-            let node = egraph.nodes.get(node_id)?;
-            if node.op != "LayoutTensorLit" {
-                return None;
+impl SamplingSpace {
+    /// The component decomposition of a candidate graph given directly
+    /// as class → per-candidate input classes (already restricted to
+    /// classes holding genome rows). Deterministic: nodes in sorted
+    /// class order, edges in candidate order, components sorted.
+    pub fn from_candidate_inputs(
+        candidate_inputs: std::collections::BTreeMap<ClassId, Vec<Vec<ClassId>>>,
+    ) -> Self {
+        let mut graph = DiGraph::<ClassId, ()>::new();
+        let mut node_of: std::collections::BTreeMap<ClassId, NodeIndex> =
+            std::collections::BTreeMap::new();
+        for class in candidate_inputs.keys() {
+            node_of.insert(class.clone(), graph.add_node(class.clone()));
+        }
+        for (class, per_candidate) in &candidate_inputs {
+            let from = node_of[class];
+            let mut added: std::collections::BTreeSet<ClassId> = std::collections::BTreeSet::new();
+            for inputs in per_candidate {
+                for input in inputs {
+                    let Some(&to) = node_of.get(input) else {
+                        continue; // boundary input: a leaf, never an edge
+                    };
+                    if added.insert(input.clone()) {
+                        graph.add_edge(from, to, ());
+                    }
+                }
             }
-            Some(egraph.nodes.get(node.children.first()?)?.eclass.clone())
-        })
-    };
-    let mut sibling_sources = std::collections::BTreeMap::new();
-    let mut groups_by_logical: std::collections::BTreeMap<ClassId, Vec<ClassId>> =
-        std::collections::BTreeMap::new();
-    for (class, entries) in index {
-        let logical = logical_of(class);
-        let per_candidate: Vec<Vec<ClassId>> = entries
-            .iter()
-            .map(|(_, choice)| {
-                let (Some(node), Some(logical)) = (egraph.nodes.get(&choice.enode), &logical)
-                else {
-                    return Vec::new();
-                };
-                node.children
-                    .iter()
-                    .filter_map(|child| {
-                        let input_class = egraph.nodes.get(child)?.eclass.clone();
-                        (index.contains_key(&input_class)
-                            && logical_of(&input_class).as_ref() == Some(logical))
-                        .then_some(input_class)
-                    })
-                    .collect()
+        }
+        let mut components: Vec<Vec<ClassId>> = petgraph::algo::tarjan_scc(&graph)
+            .into_iter()
+            .filter(|scc| scc.len() > 1 || graph.contains_edge(scc[0], scc[0]))
+            .map(|scc| {
+                let mut members: Vec<ClassId> =
+                    scc.iter().map(|index| graph[*index].clone()).collect();
+                members.sort();
+                members
             })
             .collect();
-        sibling_sources.insert(class.clone(), per_candidate);
-        if let Some(logical) = logical {
-            groups_by_logical
-                .entry(logical)
-                .or_default()
-                .push(class.clone());
+        components.sort();
+        let mut component_of: std::collections::BTreeMap<ClassId, usize> =
+            std::collections::BTreeMap::new();
+        for (component, members) in components.iter().enumerate() {
+            for member in members {
+                component_of.insert(member.clone(), component);
+            }
+        }
+        let intra_sources = candidate_inputs
+            .iter()
+            .map(|(class, per_candidate)| {
+                let component = component_of.get(class).copied();
+                let per_candidate = per_candidate
+                    .iter()
+                    .map(|inputs| match component {
+                        None => Vec::new(),
+                        Some(component) => inputs
+                            .iter()
+                            .filter(|input| component_of.get(*input) == Some(&component))
+                            .cloned()
+                            .collect(),
+                    })
+                    .collect();
+                (class.clone(), per_candidate)
+            })
+            .collect();
+        Self {
+            candidate_inputs,
+            intra_sources,
+            components,
+            component_of,
         }
     }
-    let groups = groups_by_logical
-        .into_values()
-        .filter(|members| members.len() >= 2)
-        .collect();
-    SamplingSpace {
-        sibling_sources,
-        groups,
+
+    /// The candidate position a genome selected for `class`, if the
+    /// genome names one of the class's index entries.
+    pub fn chosen_position(
+        &self,
+        index: &std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>>,
+        genome: &Genome,
+        class: &ClassId,
+    ) -> Option<usize> {
+        let choice = genome.choices.get(class)?;
+        index
+            .get(class)?
+            .iter()
+            .position(|(_, candidate)| candidate == choice)
     }
+
+    /// The genome's CHOSEN-EDGE graph: class → the genome-row input
+    /// classes of the one candidate the genome elected for it. This is
+    /// the graph the sampler keeps acyclic, and the graph the
+    /// extractor's blocking follows.
+    pub fn chosen_edges(
+        &self,
+        index: &std::collections::BTreeMap<ClassId, Vec<(String, ProducerChoice)>>,
+        genome: &Genome,
+    ) -> std::collections::BTreeMap<ClassId, Vec<ClassId>> {
+        self.candidate_inputs
+            .iter()
+            .map(|(class, per_candidate)| {
+                let edges = self
+                    .chosen_position(index, genome, class)
+                    .and_then(|position| per_candidate.get(position))
+                    .cloned()
+                    .unwrap_or_default();
+                (class.clone(), edges)
+            })
+            .collect()
+    }
+}
+
+/// Does a chosen-edge graph close a cycle? (Iterative three-colour DFS;
+/// the graphs are the sampler's own component-local edges.)
+pub fn edges_have_cycle(edges: &std::collections::BTreeMap<ClassId, Vec<ClassId>>) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Colour {
+        Open,
+        Done,
+    }
+    let mut colour: HashMap<&ClassId, Colour> = HashMap::new();
+    for root in edges.keys() {
+        if colour.contains_key(root) {
+            continue;
+        }
+        // (class, next child index) frames — no recursion, the graphs
+        // can be as deep as the program.
+        let mut stack: Vec<(&ClassId, usize)> = vec![(root, 0)];
+        colour.insert(root, Colour::Open);
+        while let Some((class, cursor)) = stack.pop() {
+            let children = edges.get(class).map_or(&[][..], Vec::as_slice);
+            if cursor >= children.len() {
+                colour.insert(class, Colour::Done);
+                continue;
+            }
+            stack.push((class, cursor + 1));
+            let child = &children[cursor];
+            match colour.get(child) {
+                Some(Colour::Open) => return true,
+                Some(Colour::Done) => {}
+                None => {
+                    colour.insert(child, Colour::Open);
+                    stack.push((child, 0));
+                }
+            }
+        }
+    }
+    false
 }
 
 /// A stable fingerprint of a plan's SHAPE: the chosen instances (enode +
@@ -1165,6 +1334,64 @@ impl<'a> Extractor<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Is this class planned straight from a boundary input? Such a
+    /// class is plannable unconditionally (see the leaf note in
+    /// `ExtractionSession::sampling_space`).
+    fn is_input_terminal(&self, class: &ClassId) -> bool {
+        self.input_terminals.contains_key(class)
+    }
+
+    /// The input classes the extractor would DEMAND for one genome
+    /// choice on `class`: the union of `OpSpec::inputs` over every
+    /// producer entry the choice resolves to — literally what
+    /// [`Extractor::producer_candidates_for_output`] turns into a
+    /// candidate's `children` (via `op_children`) and what
+    /// `relax_to_fixpoint` blocks on. The sampler's candidate graph is
+    /// built from THIS, so "input" means one thing in both places.
+    ///
+    /// A union rather than a per-spec list because a `ProducerChoice`
+    /// names (enode, output slot) only: when one op class carries
+    /// several distinct input lists at that slot, the planner enables
+    /// the class as soon as SOME of them plans, so taking the union is
+    /// the conservative reading — every edge the planner might follow
+    /// is present, and a union-acyclic genome is acyclic under each
+    /// spec individually.
+    fn choice_input_classes(&self, class: &ClassId, choice: &ProducerChoice) -> Vec<ClassId> {
+        let mut inputs: Vec<ClassId> = Vec::new();
+        let Some(producers) = self.producer_index.get(class) else {
+            return inputs;
+        };
+        let Some(node) = self.egraph.nodes.get(&choice.enode) else {
+            return inputs;
+        };
+        if node.subsumed || node.op == "[...]" || !self.matchers.contains_key(node.op.as_str()) {
+            return inputs;
+        }
+        for producer in producers {
+            if producer.output_index != choice.output_index {
+                continue;
+            }
+            if !self
+                .class_nodes
+                .get(&producer.op_class)
+                .is_some_and(|nodes| nodes.contains(&choice.enode))
+            {
+                continue;
+            }
+            let Some(spec) = self
+                .op_specs
+                .get(&producer.op_class)
+                .and_then(|specs| specs.get(producer.spec_index))
+            else {
+                continue;
+            };
+            inputs.extend(spec.inputs.iter().cloned());
+        }
+        inputs.sort();
+        inputs.dedup();
+        inputs
     }
 
     fn producer_candidates_for_output(&self, output_class: &ClassId) -> Vec<Candidate> {
