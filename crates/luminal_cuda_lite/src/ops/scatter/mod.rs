@@ -248,7 +248,7 @@ pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec
     // layout read, and it is unaffected by any of this.
     let mut reads = String::new();
     let mut any_chain = false;
-    for axis in 0..rank {
+    for (axis, stride) in strides.iter().enumerate() {
         // The coordinate value's own extents must be src's for the
         // prelude's `c*` to be its coordinates: refuse a mismatch,
         // never reinterpret (the elementwise contract). Asked of EVERY
@@ -271,10 +271,7 @@ pub(crate) fn codegen(op: &dyn BufferTensorIrOp, ctx: &CodegenCtx) -> Result<Vec
         any_chain |= !chain.is_empty();
         reads.push_str(&chain);
         reads.push_str(&format!("    coord = (long long){name}[{idx}];\n"));
-        reads.push_str(&format!(
-            "    flat += coord * {stride}LL;\n",
-            stride = strides[axis]
-        ));
+        reads.push_str(&format!("    flat += coord * {stride}LL;\n"));
     }
     let (src_chain, src_idx) = layout_read_index(
         "src",

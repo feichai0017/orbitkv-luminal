@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use luminal::buffer_tensor_ir::{AsAnyOp, OpSlotNames};
+use luminal::buffer_tensor_ir::OpSlotNames;
 use luminal::graph::Graph;
 use luminal::layout_ir::ExtractedNode;
 use test_runtime::cublaslt_marker::{CuEpilogue, CublasLt, CublasLtForm};
@@ -27,9 +27,7 @@ fn genome_flavored(
             .push(node.op.as_str());
     }
     let class_has = |class: &luminal::prelude::egraph_serialize::ClassId, op: &str| {
-        class_ops
-            .get(class)
-            .is_some_and(|ops| ops.iter().any(|o| *o == op))
+        class_ops.get(class).is_some_and(|ops| ops.contains(&op))
     };
     let child_class = |node: &luminal::prelude::egraph_serialize::Node, index: usize| {
         node.children
@@ -62,7 +60,7 @@ fn genome_flavored(
         |candidates: &[(String, luminal::extractor::ProducerChoice)], level: usize| -> Vec<usize> {
             let admitted = test_runtime::level_admits(level);
             let mut order: Vec<usize> = Vec::new();
-            let mut push_where =
+            let push_where =
                 |order: &mut Vec<usize>,
                  pred: &dyn Fn(&str, &luminal::extractor::ProducerChoice) -> bool| {
                     for (i, (name, choice)) in candidates.iter().enumerate() {
@@ -102,7 +100,7 @@ fn collect_ops(graph: &luminal::layout_ir::ExtractedGraph) -> Vec<(CublasLt, Vec
         .filter_map(|node| match node {
             ExtractedNode::LayoutOp(op) => {
                 let label = op.op.label().to_string();
-                let concrete = (&*op.op).as_any().downcast_ref::<CublasLt>().cloned();
+                let concrete = (*op.op).as_any().downcast_ref::<CublasLt>().cloned();
                 let inputs = op.inputs.iter().map(|i| i.value.to_string()).collect();
                 Some((concrete, inputs, label))
             }

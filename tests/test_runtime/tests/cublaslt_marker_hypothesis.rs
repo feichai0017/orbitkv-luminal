@@ -35,14 +35,13 @@ fn count_cublaslt(egraph: &luminal::prelude::egraph_serialize::EGraph) -> usize 
 }
 
 fn pinned_cublaslt(text: &str) -> Vec<test_runtime::cublaslt_marker::CublasLt> {
-    use luminal::buffer_tensor_ir::AsAnyOp;
     use luminal::layout_ir::ExtractedNode;
     let (graph, _) = test_runtime::extract_fixture_with_genome(text, PIN);
     graph
         .dag
         .node_weights()
         .filter_map(|node| match node {
-            ExtractedNode::LayoutOp(op) if op.op.label().starts_with("CublasLt") => (&*op.op)
+            ExtractedNode::LayoutOp(op) if op.op.label().starts_with("CublasLt") => (*op.op)
                 .as_any()
                 .downcast_ref::<test_runtime::cublaslt_marker::CublasLt>()
                 .cloned(),

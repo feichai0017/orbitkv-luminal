@@ -14,6 +14,9 @@
 
 use luminal::layout_ir::OpMatcher;
 
+type ProducerOrdering<'a> =
+    &'a dyn Fn(&[(String, luminal::extractor::ProducerChoice)], usize) -> Vec<usize>;
+
 /// Build a TOTAL genome over a fixture's produced classes: each class takes
 /// the first preference (an implementation constructor name) it can satisfy,
 /// falling back to its first candidate — the producer index is
@@ -79,7 +82,7 @@ pub fn level_admits(level: usize) -> impl Fn(&str) -> bool {
 pub fn genome_with_ordering(
     egraph: &luminal::prelude::egraph_serialize::EGraph,
     matchers: Vec<Box<dyn OpMatcher>>,
-    ordered: &dyn Fn(&[(String, luminal::extractor::ProducerChoice)], usize) -> Vec<usize>,
+    ordered: ProducerOrdering<'_>,
 ) -> luminal::extractor::Genome {
     use luminal::prelude::egraph_serialize::ClassId;
     use std::collections::{BTreeSet, HashMap};
@@ -250,7 +253,7 @@ pub fn genome_with_ordering(
         >,
         egraph: &luminal::prelude::egraph_serialize::EGraph,
         terminals: &BTreeSet<ClassId>,
-        ordered: &dyn Fn(&[(String, luminal::extractor::ProducerChoice)], usize) -> Vec<usize>,
+        ordered: ProducerOrdering<'_>,
         lit_input_lists: &dyn Fn(&ClassId) -> Vec<Vec<ClassId>>,
         path: &mut Vec<ClassId>,
         memo: &mut HashMap<(ClassId, usize), Outcome>,

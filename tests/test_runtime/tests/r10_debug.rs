@@ -1,5 +1,4 @@
 //! ROUND-10 scratch debug probe (not a gate).
-use luminal::buffer_tensor_ir::AsAnyOp;
 use luminal::graph::Graph;
 use luminal::layout_ir::ExtractedNode;
 use luminal::prelude::egraph_serialize::{ClassId, EGraph};
@@ -123,7 +122,7 @@ fn r10_debug_fixture1() {
         match node {
             ExtractedNode::LayoutOp(op) => {
                 println!("PLAN op: {}", op.op.label());
-                if let Some(c) = (&*op.op).as_any().downcast_ref::<CublasLt>() {
+                if let Some(c) = (*op.op).as_any().downcast_ref::<CublasLt>() {
                     if let Some(spec) = &c.spec {
                         println!(
                             "  spec m={} n={} k={} ta={} tb={} lda={} ldb={} ldd={} a_buf={:?} b_buf={:?} d_buf={:?}",
@@ -345,7 +344,7 @@ fn r10_debug_a4() {
                 .map(|o| format!("{} (logical {})", o.eclass, o.logical.eclass))
                 .collect();
             println!("PLAN {}: ins={ins:?} outs={outs:?}", op.op.label());
-            if let Some(c) = (&*op.op).as_any().downcast_ref::<CublasLt>() {
+            if let Some(c) = (*op.op).as_any().downcast_ref::<CublasLt>() {
                 if let Some(spec) = &c.spec {
                     println!(
                         "   spec m={} n={} k={} ta={} tb={} logical_a={} logical_b={} site_out={}",

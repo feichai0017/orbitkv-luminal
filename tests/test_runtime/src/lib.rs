@@ -153,6 +153,9 @@ pub fn extract_fixture(script_text: &str) -> ExtractedGraph {
 // board's original signatures by passing THIS runtime's `matchers()`.
 // ---------------------------------------------------------------------------
 
+type ProducerOrdering<'a> =
+    &'a dyn Fn(&[(String, luminal::extractor::ProducerChoice)], usize) -> Vec<usize>;
+
 /// See `luminal_cuda_lite::ops::cublaslt::election::genome_preferring` —
 /// this wrapper binds the board vocabulary.
 pub fn genome_preferring(
@@ -171,7 +174,7 @@ pub use luminal_cuda_lite::ops::cublaslt::election::level_admits;
 /// signature for the board's call sites.
 pub fn genome_with_ordering(
     egraph: &luminal::prelude::egraph_serialize::EGraph,
-    ordered: &dyn Fn(&[(String, luminal::extractor::ProducerChoice)], usize) -> Vec<usize>,
+    ordered: ProducerOrdering<'_>,
 ) -> luminal::extractor::Genome {
     luminal_cuda_lite::ops::cublaslt::election::genome_with_ordering(egraph, matchers(), ordered)
 }

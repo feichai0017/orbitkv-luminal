@@ -5,7 +5,6 @@
 
 use std::time::Instant;
 
-use luminal::buffer_tensor_ir::AsAnyOp;
 use luminal::graph::Graph;
 use luminal::layout_ir::ExtractedNode;
 use test_runtime::cublaslt_marker::{CuEpilogue, CublasLt};
@@ -52,7 +51,7 @@ fn probe(name: &str, geometries: &[(usize, usize, usize)], prev_nodes: Option<us
         .node_weights()
         .filter_map(|node| match node {
             ExtractedNode::LayoutOp(op) if op.op.label().starts_with("CublasLt") => {
-                (&*op.op).as_any().downcast_ref::<CublasLt>().cloned()
+                (*op.op).as_any().downcast_ref::<CublasLt>().cloned()
             }
             _ => None,
         })

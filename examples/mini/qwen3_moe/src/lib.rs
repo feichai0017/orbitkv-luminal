@@ -45,6 +45,10 @@ fn moe_lm_new(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the model-spec forward boundary keeps cache and decode inputs explicit"
+)]
 fn moe_lm_forward(
     embed: &Embedding,
     blocks: &[DecoderBlock],

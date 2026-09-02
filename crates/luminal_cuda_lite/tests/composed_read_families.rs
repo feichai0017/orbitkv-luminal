@@ -96,7 +96,7 @@ fn rendered(
                     &ctx.operand_dims[k],
                     kernels::Coords::FlatIndex { prefix: "c" },
                 )
-                .map_or(false, |(chain, idx)| chain.is_empty() && idx == "i")
+                .is_ok_and(|(chain, idx)| chain.is_empty() && idx == "i")
             })
             .collect();
         let sources: Vec<String> = (kernel.codegen)(op.as_ref(), &ctx)

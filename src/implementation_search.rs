@@ -179,6 +179,10 @@ impl<L: crate::bufferize::PlanLayout> PlanProfiler<L> for StaticProfiler {
 /// The runtime-owned search entry (ruling 2026-08-17): the caller
 /// supplies its OWN matcher set (None = the in-core reference
 /// registry, which Step B moves out) and its OWN profiler.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the public runtime boundary keeps each independently owned search input explicit"
+)]
 pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
     egraph: &egraph_serialize::EGraph,
     program: &LogicalProgram,
@@ -546,6 +550,10 @@ pub struct BucketPlan<L: crate::bufferize::PlanLayout> {
 /// Slice note (documented divergence from their symbolic LLIR): each
 /// winning plan is STATIC at its representative; executing at another pin
 /// re-renders — genome transfer across renders is future work.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bucket search composes independently owned graph, runtime, matcher, and profiling inputs"
+)]
 pub fn bucketed_search_implementations<L: crate::bufferize::PlanLayout>(
     graph: &crate::graph::Graph,
     dim_buckets: &BTreeMap<crate::shape::Symbol, Vec<crate::graph::DimBucket>>,

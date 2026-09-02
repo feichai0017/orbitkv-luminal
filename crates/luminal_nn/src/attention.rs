@@ -338,7 +338,7 @@ fn paged_attention_core(
             .lt(row_vals - (window as f32 - 1.0))
             .cast(DType::F32)
             * -1e9;
-        mask = mask + outside;
+        mask += outside;
     }
 
     // Broadcast (s, ctx) → (n_kv_heads, kv_groups, s, ctx) — ONE apply.
@@ -575,6 +575,11 @@ pub fn attention(
     head_dim: usize,
 ) -> GraphTensor {
     let scale = 1.0 / (head_dim as f32).sqrt();
+    assert_eq!(
+        q.dims()[1],
+        n_heads * head_dim,
+        "query width must equal n_heads * head_dim"
+    );
     let sq = q.dims()[0];
     let sk = k.dims()[0];
     // ONE apply per operand reshape (ruling 2026-08-26).

@@ -132,17 +132,18 @@ impl ReferenceRuntime {
             .logical
             .bound_parts(&crate::bindings::ReferenceBindings)
             .map_err(|reason| anyhow!("native load refused: {reason}"))?;
-        let mut runtime = Self::default();
-        runtime.native = Some(NativeSpec {
-            pre_schedule,
-            input_slots,
-            output_slots,
-            post_checks,
-            labeled_checks,
-            binding_seeds: String::new(),
-            ops: None,
-        });
-        Ok(runtime)
+        Ok(Self {
+            native: Some(NativeSpec {
+                pre_schedule,
+                input_slots,
+                output_slots,
+                post_checks,
+                labeled_checks,
+                binding_seeds: String::new(),
+                ops: None,
+            }),
+            ..Self::default()
+        })
     }
 
     /// BINDING: seed a dynamic dim's range (bounds-on-vars — never a pin).
@@ -1102,8 +1103,8 @@ mod tests {
             (cx, data, row, col, out)
         };
         let data_vals: Vec<f32> = (0..12).map(|v| v as f32 * 1.5 + 1.0).collect();
-        let row_ints = vec![0i32, 2, 1, 2, 0, 1];
-        let col_ints = vec![3i32, 0, 2, 3, 1, 0];
+        let row_ints = [0i32, 2, 1, 2, 0, 1];
+        let col_ints = [3i32, 0, 2, 3, 1, 0];
         let row_vals: Vec<i32> = row_ints.to_vec();
         let col_vals: Vec<i32> = col_ints.to_vec();
 
@@ -1145,8 +1146,8 @@ mod tests {
             (cx, dest, row, col, src, out)
         };
         let dest_vals: Vec<f32> = (0..12).map(|v| v as f32).collect();
-        let row_ints = vec![0i32, 1, 2, 1];
-        let col_ints = vec![1i32, 3, 0, 0];
+        let row_ints = [0i32, 1, 2, 1];
+        let col_ints = [1i32, 3, 0, 0];
         let row_vals: Vec<i32> = row_ints.to_vec();
         let col_vals: Vec<i32> = col_ints.to_vec();
         let src_vals = vec![100.0, 200.0, 300.0, 400.0];

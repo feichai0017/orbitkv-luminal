@@ -7,7 +7,7 @@
 
 use std::fs;
 
-use luminal::bufferize::{self, BufferId};
+use luminal::bufferize::BufferId;
 use luminal::layout_ir::ExtractedNode;
 
 /// The restored multi-output fixture script (deleted from

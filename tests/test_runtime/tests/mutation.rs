@@ -18,7 +18,6 @@
 //! Several are forked copies of scripts the reference corpus also
 //! carries — the two runtimes share no files.
 
-use luminal::bufferize;
 use luminal::prelude::petgraph;
 use luminal::test_support::bufferize_mock;
 

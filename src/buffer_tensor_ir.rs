@@ -62,17 +62,6 @@ impl<T: BufferTensorIrOp + Clone + 'static> CloneBufferTensorIrOp for T {
     }
 }
 
-/// What an op IS once every aliasing decision is behind it: its identity and
-/// its memory effects — the surface the BufferTensor layer, the lowering, and
-/// (eventually) the execution engine consume. Deliberately free of analysis
-/// concerns: `Bufferizable` (the aliasing contract) and `ToDps` are the
-/// ANALYSIS-time surfaces, and by this layer their questions are all answered.
-///
-/// Every value-level op is one automatically (`LayoutIrOp` has this as a
-/// supertrait); planner-synthesized ops like [`BufferCopy`] implement ONLY
-/// this trait — they have no logical semantics, no egglog constructor, and
-/// never meet the analyzer.
-
 /// Typed reference storage (rulings 2026-07-28, 2026-07-30, and the
 /// typed-buffers ruling 2026-08-11: NO value ever rides a buffer of
 /// another type — "no smuggling data in invalid types"). Floats live
@@ -413,6 +402,16 @@ impl<T: 'static> AsAnyOp for T {
     }
 }
 
+/// What an op IS once every aliasing decision is behind it: its identity and
+/// its memory effects — the surface the BufferTensor layer, the lowering, and
+/// (eventually) the execution engine consume. Deliberately free of analysis
+/// concerns: `Bufferizable` (the aliasing contract) and `ToDps` are the
+/// ANALYSIS-time surfaces, and by this layer their questions are all answered.
+///
+/// Every value-level op is one automatically (`LayoutIrOp` has this as a
+/// supertrait); planner-synthesized ops like [`BufferCopy`] implement ONLY
+/// this trait — they have no logical semantics, no egglog constructor, and
+/// never meet the analyzer.
 pub trait BufferTensorIrOp: OpSlotNames + CloneBufferTensorIrOp + AsAnyOp + Debug {
     /// The op's IR name (see the label policy in `luminal_reference::ops`).
     fn label(&self) -> &str;
@@ -1873,6 +1872,7 @@ pub(crate) fn install_anti_edges<L: PlanLayout>(bt: &mut BufferTensorIrGraph<L>)
 ///     and BEFORE B's free — otherwise some legal schedule uses storage
 ///     that does not exist yet, or has already been destroyed;
 ///   * a free has out-degree ZERO (nothing may ever depend on one).
+///
 /// A buffer without a record certifies as CallerFrees — the declared-absence
 /// semantics; real pipeline graphs always carry records (input validation
 /// requires both declarations).

@@ -1512,7 +1512,7 @@ fn validate_input_program(graph: &ExtractedGraph) -> Result<()> {
         // named the same layout twice), not region analysis.
         for (i, a) in demanded.iter().enumerate() {
             for b in &demanded[i + 1..] {
-                if input_layouts.get(a).is_some() && input_layouts.get(a) == input_layouts.get(b) {
+                if input_layouts.contains_key(a) && input_layouts.get(a) == input_layouts.get(b) {
                     anyhow::bail!(
                         "invalid input program: output buffer {} is demanded \
                          to hold two different values ({} and {}) under the \
@@ -1565,8 +1565,8 @@ pub(crate) fn extraction_layouts<L: PlanLayout>(
     layouts: &HashMap<ClassId, L>,
 ) -> Result<HashMap<ClassId, L>> {
     let mut value_layouts: HashMap<ClassId, L> = HashMap::new();
-    let mut record = |value: &crate::layout_ir::LayoutTensorInfo,
-                      table: &mut HashMap<ClassId, L>|
+    let record = |value: &crate::layout_ir::LayoutTensorInfo,
+                  table: &mut HashMap<ClassId, L>|
      -> Result<()> {
         if table.contains_key(&value.eclass) {
             return Ok(());
@@ -2782,7 +2782,6 @@ mod tests {
             pinned,
             read_only,
             output_values: vec![cid("r")],
-            ..Default::default()
         };
         let analysis = Analyzer::new(&ops, &facts).run().unwrap();
         assert_eq!(analysis.in_place.get(&(0, 1)), Some(&false));
@@ -2850,7 +2849,6 @@ mod tests {
             reads: vec![true, false],
             in_place_operand: Some(1),
             not_conflicting,
-            ..Default::default()
         };
         let ops = vec![AnalysisOp {
             position: 0,
@@ -3137,7 +3135,6 @@ mod tests {
             reads: vec![false],
             in_place_operand: Some(0),
             not_conflicting: true,
-            ..Default::default()
         };
         let reader = MockOp {
             reads: vec![true],

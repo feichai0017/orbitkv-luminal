@@ -14,7 +14,6 @@ impl MoE {
         let e_dim = *self.router.dims().last().unwrap();
         let (_, in_size, out_size) = self.expert_weights.dims3();
         let io = in_size * out_size;
-        let k_expr = IntExpr::from(self.k);
 
         // 1. Routing probabilities: [batch.., E]
         let routing_weights = activations.matmul(self.router).softmax(n - 1);
@@ -35,7 +34,7 @@ impl MoE {
             let mut stride = e_dim;
             let mut acc = IntExpr::from(0);
             for i in (0..n - 1).rev() {
-                acc = acc + c[i] * stride;
+                acc += c[i] * stride;
                 // Frontend simplification restored (revert ruling 2026-08-27).
                 stride = (stride * idx_dims[i]).simplify();
             }
@@ -320,7 +319,7 @@ mod topk_tests {
         for s_i in 0..S {
             let xr = &x_vals[s_i * H..(s_i + 1) * H];
             // Router logits (x @ router.t()) then softmax over E.
-            let mut logits = vec![0f32; E];
+            let mut logits = [0f32; E];
             for (e, logit) in logits.iter_mut().enumerate() {
                 *logit = (0..H).map(|j| xr[j] * router_vals[e * H + j]).sum();
             }
@@ -337,7 +336,7 @@ mod topk_tests {
                 let weight = probs[*expert] / picked_sum;
                 // Fused gate;up: (2I, H) rows.
                 let w = &gate_up_vals[expert * 2 * I * H..(expert + 1) * 2 * I * H];
-                let mut projected = vec![0f32; 2 * I];
+                let mut projected = [0f32; 2 * I];
                 for (r, slot) in projected.iter_mut().enumerate() {
                     *slot = (0..H).map(|j| xr[j] * w[r * H + j]).sum();
                 }
@@ -408,7 +407,7 @@ mod topk_tests {
         let mut expected = vec![0f32; S * H];
         for s_i in 0..S {
             let xr = &x_vals[s_i * H..(s_i + 1) * H];
-            let mut logits = vec![0f32; E];
+            let mut logits = [0f32; E];
             for (e, logit) in logits.iter_mut().enumerate() {
                 *logit = (0..H).map(|j| xr[j] * router_vals[e * H + j]).sum();
             }
@@ -423,7 +422,7 @@ mod topk_tests {
             for expert in &picked {
                 let weight = probs[*expert] / picked_sum;
                 let w = &gate_up_vals[expert * 2 * I * H..(expert + 1) * 2 * I * H];
-                let mut projected = vec![0f32; 2 * I];
+                let mut projected = [0f32; 2 * I];
                 for (r, slot) in projected.iter_mut().enumerate() {
                     *slot = (0..H).map(|j| xr[j] * w[r * H + j]).sum();
                 }

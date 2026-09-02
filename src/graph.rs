@@ -1045,10 +1045,10 @@ pub(crate) fn movement_entries(
             for (q, &p) in axes.iter().enumerate() {
                 replacement[p] = MapEntry::Coord {
                     from_end: prev_rank - 1 - q,
-                    extent: prev_dims[p].clone(),
+                    extent: prev_dims[p],
                 };
             }
-            let new_dims = axes.iter().map(|&p| prev_dims[p].clone()).collect();
+            let new_dims = axes.iter().map(|&p| prev_dims[p]).collect();
             (replacement, new_dims)
         }
         Movement::ExpandDim { axis, size } => {
@@ -1061,7 +1061,7 @@ pub(crate) fn movement_entries(
                     let q = if p < axis { p } else { p + 1 };
                     MapEntry::Coord {
                         from_end: new_rank - 1 - q,
-                        extent: prev_dims[p].clone(),
+                        extent: prev_dims[p],
                     }
                 })
                 .collect();
@@ -1084,7 +1084,7 @@ pub(crate) fn movement_entries(
                         let q = if p < axis { p } else { p - 1 };
                         MapEntry::Coord {
                             from_end: new_rank - 1 - q,
-                            extent: prev_dims[p].clone(),
+                            extent: prev_dims[p],
                         }
                     }
                 })
@@ -1120,7 +1120,7 @@ pub(crate) fn movement_entries(
                         let q = if p < axis { p } else { p + 1 };
                         MapEntry::Coord {
                             from_end: new_rank - 1 - q,
-                            extent: prev_dims[p].clone(),
+                            extent: prev_dims[p],
                         }
                     }
                 })
@@ -1134,7 +1134,7 @@ pub(crate) fn movement_entries(
             if axis1 >= axis2 || axis2 >= prev_rank {
                 return Err(format!("merge_dims ({axis1},{axis2}) vs rank {prev_rank}"));
             }
-            let inner = prev_dims[axis2].clone();
+            let inner = prev_dims[axis2];
             // Frontend simplification restored (revert ruling 2026-08-27).
             let merged = (prev_dims[axis1] * prev_dims[axis2]).simplify();
             let new_rank = prev_rank - 1;
@@ -1152,7 +1152,7 @@ pub(crate) fn movement_entries(
                         let q = if p < axis2 { p } else { p - 1 };
                         MapEntry::Coord {
                             from_end: new_rank - 1 - q,
-                            extent: prev_dims[p].clone(),
+                            extent: prev_dims[p],
                         }
                     }
                 })
@@ -1174,7 +1174,7 @@ pub(crate) fn movement_entries(
                     if repeats[p].to_usize() == Some(1) {
                         MapEntry::Coord {
                             from_end: prev_rank - 1 - p,
-                            extent: prev_dims[p].clone(),
+                            extent: prev_dims[p],
                         }
                     } else {
                         // Frontend simplification restored (revert
@@ -1185,7 +1185,7 @@ pub(crate) fn movement_entries(
                                 from_end: prev_rank - 1 - p,
                                 extent: tiled,
                             }),
-                            prev_dims[p].clone(),
+                            prev_dims[p],
                         )
                     }
                 })
@@ -1207,7 +1207,7 @@ pub(crate) fn movement_entries(
             let replacement = (0..prev_rank)
                 .map(|p| MapEntry::Coord {
                     from_end: prev_rank - 1 - p,
-                    extent: new_dims[p].clone(),
+                    extent: new_dims[p],
                 })
                 .collect();
             (replacement, new_dims)

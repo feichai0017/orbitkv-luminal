@@ -7,6 +7,8 @@
 
 use crate::layout_ir::ExtractionSite;
 
+type BinaryIotaBuilder = fn(Box<IotaExpr>, Box<IotaExpr>) -> IotaExpr;
+
 /// A numeric IntExpr tree for reference evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IotaExpr {
@@ -165,7 +167,7 @@ fn parse_int_expr_uncached(
     // a saturated class holds many equal spellings, and the first node of
     // a kind may have children outside the parsed subset while a sibling
     // spelling parses fine.
-    let binary_kinds: [(&str, fn(Box<IotaExpr>, Box<IotaExpr>) -> IotaExpr); 6] = [
+    let binary_kinds: [(&str, BinaryIotaBuilder); 6] = [
         ("IntAdd", |a, b| IotaExpr::Add(a, b)),
         ("IntMul", |a, b| IotaExpr::Mul(a, b)),
         ("IntTruncDiv", |a, b| IotaExpr::TruncDiv(a, b)),

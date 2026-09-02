@@ -132,7 +132,7 @@ fn audit(
                         &dims,
                         luminal_cuda_lite::kernels::Coords::FlatIndex { prefix: "c" },
                     )
-                    .map_or(false, |(chain, idx)| chain.is_empty() && idx == "i");
+                    .is_ok_and(|(chain, idx)| chain.is_empty() && idx == "i");
                     if !flat {
                         composed.push((label.to_string(), slot, info.layout.clone()));
                     }
@@ -159,7 +159,7 @@ fn audit(
                         &dims,
                         luminal_cuda_lite::kernels::Coords::FlatIndex { prefix: "c" },
                     )
-                    .map_or(false, |(chain, idx)| chain.is_empty() && idx == "i");
+                    .is_ok_and(|(chain, idx)| chain.is_empty() && idx == "i");
                     assert!(
                         flat,
                         "{label}: a compute RESULT is produced by the node, never read \

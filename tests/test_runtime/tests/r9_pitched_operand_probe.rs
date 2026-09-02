@@ -25,10 +25,9 @@
 //! (:4240-4250: "a transposed contiguous layout is a bijection it could
 //! not see"). So a view-born pitched layout has no injectivity fact, and
 //! the round-9 arms fail closed on it. `pitched_view_refuses_without_an
-//! _injectivity_fact` pins that; `pitched_view_reads_N_with_the_creator
+//! _injectivity_fact` pins that; `pitched_view_reads_n_with_the_creator
 //! _certificate` pins that the fact is the ONLY thing missing.
 
-use luminal::buffer_tensor_ir::AsAnyOp;
 use luminal::layout_ir::ExtractedNode;
 use luminal::prelude::egraph_serialize::EGraph;
 use test_runtime::cublaslt_marker::CublasLt;
@@ -167,7 +166,7 @@ fn pitched_view_refuses_without_an_injectivity_fact() {
 }
 
 #[test]
-fn pitched_view_reads_N_with_the_creator_certificate() {
+fn pitched_view_reads_n_with_the_creator_certificate() {
     let s = test_runtime::serialize_fixture(&pitched_view_fixture(true));
     let readings = a_readings_over_the_pitched_view(&s);
     println!("pitched view, certificate asserted: A readings over the view = {readings:?}");
@@ -201,7 +200,7 @@ fn pitched_view_reads_N_with_the_creator_certificate() {
         .dag
         .node_weights()
         .filter_map(|node| match node {
-            ExtractedNode::LayoutOp(op) if op.op.label().starts_with("CublasLt") => (&*op.op)
+            ExtractedNode::LayoutOp(op) if op.op.label().starts_with("CublasLt") => (*op.op)
                 .as_any()
                 .downcast_ref::<CublasLt>()
                 .and_then(|c| c.spec.clone()),
