@@ -165,14 +165,30 @@ impl CudaRuntime {
             .collect()
     }
 
-    /// Assemble, saturate, and search — with THIS backend's allow list.
-    /// On saturation failure the labeled post-checks are re-run in
-    /// isolation to name the door, mirroring the reference runtime.
-    pub fn search(
-        &mut self,
-        input_data: &FxHashMap<NodeIndex, TypedBuffer>,
-        options: &ImplementationSearchOptions,
-    ) -> Result<SearchOutcome<CudaLayout>> {
+    /// The SATURATED, SERIALIZED e-graph this runtime's search reads —
+    /// exactly the assembly [`CudaRuntime::search`] performs (this
+    /// backend's matcher vocabulary + the bound program + the schedule),
+    /// run to saturation and serialized, WITHOUT the genetic search. A
+    /// test seam: estate pins assert on the e-graph the search sees
+    /// (which constructors were minted, which spellings a layout class
+    /// holds) rather than on an election that depends on the budget.
+    pub fn saturated_egraph(&self) -> Result<luminal::prelude::egraph_serialize::EGraph> {
+        let (serialized, _program) = self.assemble_and_saturate()?;
+        Ok(serialized)
+    }
+
+    /// Assemble the program under this runtime's bindings and matcher
+    /// vocabulary, run it to saturation, and serialize. Shared by
+    /// [`CudaRuntime::search`] and [`CudaRuntime::saturated_egraph`] so
+    /// the two can never see different programs. On saturation failure
+    /// the labeled post-checks are re-run in isolation to name the door,
+    /// mirroring the reference runtime.
+    fn assemble_and_saturate(
+        &self,
+    ) -> Result<(
+        luminal::prelude::egraph_serialize::EGraph,
+        graph::LogicalProgram,
+    )> {
         let native = self
             .native
             .as_ref()
@@ -219,12 +235,28 @@ impl CudaRuntime {
             bail!("shape contracts failed:\n  - {}", doors.join("\n  - "));
         }
         let serialized = egraph.serialize(luminal::prelude::egglog::SerializeConfig::default());
+        Ok((serialized.egraph, program))
+    }
+
+    /// Assemble, saturate, and search — with THIS backend's allow list.
+    /// On saturation failure the labeled post-checks are re-run in
+    /// isolation to name the door, mirroring the reference runtime.
+    pub fn search(
+        &mut self,
+        input_data: &FxHashMap<NodeIndex, TypedBuffer>,
+        options: &ImplementationSearchOptions,
+    ) -> Result<SearchOutcome<CudaLayout>> {
+        let (serialized, program) = self.assemble_and_saturate()?;
+        let native = self
+            .native
+            .as_ref()
+            .ok_or_else(|| anyhow!("load before search"))?;
 
         // Own matchers, own allow list, and a profiler that never
         // touches another runtime: candidates rank by the heuristic
         // byte-move estimate (device profiling arrives with CL-3).
         let outcome = luminal::implementation_search::search_implementations_with_runtime(
-            &serialized.egraph,
+            &serialized,
             &program,
             input_data,
             options,

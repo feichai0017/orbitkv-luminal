@@ -158,31 +158,93 @@ fn c_fold_forms_read_c_from_operand_two_with_structural_beta_one() {
     assert_eq!(call.c, call.d, "C rides the D layout by rule guard");
 }
 
+fn bias_spec(form: CublasLtForm) -> LtMatmulSpec {
+    let mut spec = base_spec(4, 3, 5);
+    spec.form = form;
+    spec.has_c = form.has_c();
+    spec.has_bias = true;
+    if form.has_c() {
+        spec.c_tensor = Some(cid("c_lt"));
+    }
+    spec.bias_tensor = Some(cid("bias_lt"));
+    spec.epilogue = CuEpilogue::Bias;
+    spec
+}
+
+/// RULING 2026-09-01: the bias forms are no longer refused at plan time.
+/// The estate's bias decorators require a LeftMajor D (the premise
+/// `(= ?inner_L (LeftMajorContiguousElementLayoutLit ?ishape ?d_bits2))`
+/// in `egg/cublaslt_marker_decorate.egg`), so a planned bias form arrives
+/// with a left-major election that `bind_destination` resolves to
+/// CUBLASLT_ORDER_COL — the order the A100 library accepts for
+/// BIAS/RELU_BIAS. `plan_call` therefore SUCCEEDS on a bias spec, and the
+/// bias/order check is the TRIPWIRE at the end of `bind_destination`,
+/// where the D order is known.
 #[test]
-fn bias_epilogue_forms_refuse_at_plan_time() {
-    // THE MEASURED A100 FINDING (2026-08-28 probe): the library
-    // refuses BIAS/RELU_BIAS whenever D is CUBLASLT_ORDER_ROW, and
-    // the marker's sibling-frame per-D-row bias cannot be expressed
-    // through a COL re-description of the executor's row-major dest —
-    // the bridge refuses the bias forms LOUDLY before any descriptor
-    // is built.
+fn bias_epilogue_forms_plan_and_bind_under_a_col_d() {
     for form in [CublasLtForm::Bias, CublasLtForm::AccumulateBias] {
+        let call = plan_call_from_spec(&bias_spec(form))
+            .expect("bias forms plan: the unconditional refusal is gone");
+        assert_eq!(
+            call.bias_operand,
+            Some(if form.has_c() { 3 } else { 2 }),
+            "contract order [a, b, c?, bias]"
+        );
+        assert_eq!(call.beta_is_one, form.has_c());
+        // The plan's election for the sibling destination is LeftMajor
+        // over the call frame [m, n] = [4, 3] -> COL, ld = m.
+        let mut bound = call.clone();
+        bind_destination(&mut bound, &left_major(&[4, 3]), "pin")
+            .expect("a LeftMajor destination binds a bias form");
+        assert_eq!(bound.d, LtDesc::col(4, 3, 4), "{form:?}: COL D, ld = m");
+        assert_eq!(bound.c, bound.d, "{form:?}: C rides D's frame");
+        // The bound frame fits the destination buffer exactly (COL reach =
+        // ld*(cols-1) + rows = 4*2 + 4 = 12) and the bias buffer holds m.
+        let mut elems = vec![20usize, 15];
+        if form.has_c() {
+            elems.push(12);
+        }
+        elems.push(4);
+        bound
+            .validate_against(&elems, 12)
+            .expect("the bound bias call passes the pre-dispatch gate");
+    }
+}
+
+/// THE TRIPWIRE: a bias form whose destination election is RIGHT-major
+/// (ROW D) is unreachable from the estate — the decorators require
+/// LeftMajor — and `bind_destination` refuses it loudly, naming the
+/// measured library finding, BEFORE any descriptor is built.
+#[test]
+fn bias_epilogue_forms_with_a_row_d_trip_the_unreachable_fence() {
+    for form in [CublasLtForm::Bias, CublasLtForm::AccumulateBias] {
+        let mut call = plan_call_from_spec(&bias_spec(form)).expect("plan");
+        let err = bind_destination(&mut call, &right_major(&[4, 3]), "pin")
+            .expect_err("a ROW-order D under a bias form must be refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unreachable"), "{form:?}: {msg}");
+        assert!(
+            msg.contains("bias decorators require a LeftMajor D"),
+            "{form:?}: the refusal must name the estate premise: {msg}"
+        );
+        assert!(
+            msg.contains("Row-order D descriptor"),
+            "{form:?}: the refusal must print the order it saw: {msg}"
+        );
+        assert!(msg.contains("refused BEFORE dispatch"), "{form:?}: {msg}");
+    }
+    // The default forms are untouched by the tripwire: a ROW D binds.
+    for form in [CublasLtForm::Base, CublasLtForm::Accumulate] {
         let mut spec = base_spec(4, 3, 5);
         spec.form = form;
         spec.has_c = form.has_c();
-        spec.has_bias = true;
         if form.has_c() {
             spec.c_tensor = Some(cid("c_lt"));
         }
-        spec.bias_tensor = Some(cid("bias_lt"));
-        spec.epilogue = CuEpilogue::Bias;
-        let err = plan_call_from_spec(&spec).expect_err("bias form must refuse at plan time");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("NOT dispatchable under"), "{msg}");
-        assert!(
-            msg.contains("ROW"),
-            "the refusal must name the convention: {msg}"
-        );
+        let mut call = plan_call_from_spec(&spec).expect("plan");
+        bind_destination(&mut call, &right_major(&[4, 3]), "pin")
+            .expect("default-epilogue forms dispatch under either order");
+        assert_eq!(call.d, LtDesc::row(4, 3, 3));
     }
 }
 
@@ -221,15 +283,19 @@ fn row_bridge_flips_the_spec_col_readings() {
 
 #[test]
 fn beta_is_structural_per_form_and_nothing_else() {
-    // The bias forms refuse at plan time (see
-    // `bias_epilogue_forms_refuse_at_plan_time`); the structural-beta
-    // pin runs over the dispatchable forms.
-    for form in [CublasLtForm::Base, CublasLtForm::Accumulate] {
+    // All four forms plan (ruling 2026-09-01: the bias forms dispatch
+    // under a COL D — see `bias_epilogue_forms_plan_and_bind_under_a_col_d`).
+    for form in CublasLtForm::ALL {
         let mut spec = base_spec(4, 3, 5);
         spec.form = form;
         spec.has_c = form.has_c();
+        spec.has_bias = form.has_bias();
         if form.has_c() {
             spec.c_tensor = Some(cid("c_lt"));
+        }
+        if form.has_bias() {
+            spec.bias_tensor = Some(cid("bias_lt"));
+            spec.epilogue = CuEpilogue::Bias;
         }
         let call = plan_call_from_spec(&spec).expect("plan");
         assert_eq!(

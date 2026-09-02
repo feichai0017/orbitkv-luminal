@@ -193,22 +193,14 @@ pub fn dispatch(
     dest: &mut CudaSlice<u8>,
     stream: &Arc<CudaStream>,
 ) -> Result<()> {
-    // BIAS-EPILOGUE DEFENSE IN DEPTH: `plan_call_from_spec` refuses
-    // the bias forms (the library rejects BIAS/RELU_BIAS on a
-    // ROW-order D — the measured A100 finding), so a bias-bearing
-    // LtCall can only arrive hand-built. Refuse it here too, BEFORE
-    // any library call, with the same finding.
-    if call.bias_operand.is_some() {
-        return Err(anyhow!(
-            "cuBLASLt {:?}: bias-epilogue dispatch refused — the library does \
-             not support BIAS/RELU_BIAS with a ROW-order D (measured \
-             CUBLAS_STATUS_NOT_SUPPORTED on the A100), and no COL-order D \
-             dispatch of the marker's per-row bias has been measured on \
-             hardware; refused BEFORE dispatch for every destination order \
-             until one is",
-            call.form
-        ));
-    }
+    // BIAS/ORDER TRIPWIRE, DEFENSE IN DEPTH (ruling 2026-09-01): a
+    // planned bias form arrives with a COL D — the estate's bias
+    // decorators require a LeftMajor D and `exec::bind_destination`
+    // already ran this check. A hand-built bias call with a ROW D is
+    // the one way to reach this line with the wrong order; refuse it
+    // BEFORE any library call with the measured finding (the library
+    // rejects BIAS/RELU_BIAS on a ROW-order D).
+    super::exec::assert_bias_destination_order(call, "dispatch")?;
     // Pre-dispatch bounds gate (contract 4) — LOUD, before any library
     // call, byte counts converted to f32 element counts.
     let elems: Vec<usize> = operands.iter().map(|s| s.len() / 4).collect();

@@ -4,10 +4,13 @@
 //!
 //! Coverage:
 //!  * the four contract forms on real device buffers (direct
-//!    `device_call::dispatch` over hand-built `LtCall`s, ROW
-//!    convention): DEFAULT-epilogue forms execute green; BIAS-epilogue
-//!    forms pin the loud refusal (the measured library restriction —
-//!    no BIAS/RELU_BIAS on a ROW-order D);
+//!    `device_call::dispatch` over hand-built `LtCall`s): the
+//!    DEFAULT-epilogue forms under a ROW D and — RULING 2026-09-01,
+//!    NEEDS A100 RUN — the BIAS-epilogue forms under a COL D, all
+//!    compared tolerance-based against the host walk; a bias form with
+//!    a ROW D pins the tripwire (the measured library restriction — no
+//!    BIAS/RELU_BIAS on a ROW-order D — now unreachable from the estate,
+//!    whose bias decorators require a LeftMajor D);
 //!  * the TF32 strictness detector assertion (contract 5);
 //!  * a deliberate ld-bounds violation refused loudly BEFORE dispatch
 //!    (contract 4 — including the rows==1 case the library's own check
@@ -38,7 +41,7 @@ fn walked_dense(rt: &CudaRuntime, out: NodeIndex) -> Vec<f32> {
         .expect("the returned layout reads dense over its backing buffer")
 }
 use luminal_cuda_lite::ops::cublaslt::device_call;
-use luminal_cuda_lite::ops::cublaslt::exec::{CSource, LtCall, LtDesc};
+use luminal_cuda_lite::ops::cublaslt::exec::{CSource, LtCall, LtDesc, LtOrder};
 use luminal_cuda_lite::ops::cublaslt::CublasLtForm;
 use luminal_cuda_lite::CudaRuntime;
 use std::sync::Arc;
@@ -73,10 +76,26 @@ fn weights(n: usize, seed: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Host reference for one call: ROW-order walk (the bridge's ROW
-/// convention — every descriptor is CUBLASLT_ORDER_ROW, ld = row
-/// pitch) of D = act(op(A)op(B) + beta*C + bias), alpha = 1 (the
-/// fixed literal).
+/// The seed at which the 12x16/mut-4 search elected `CublasLtBias` on
+/// the CPU pin (`tests/cublaslt_bias_premise.rs`,
+/// `search_elects_the_bias_form_and_binds_a_col_d`).
+const BIAS_ELECTING_SEED: u64 = 0;
+
+/// Element index of `(r, c)` under a descriptor's own order: ROW puts it
+/// at `r*ld + c`, COL at `c*ld + r`.
+fn at(desc: &LtDesc, r: usize, c: usize) -> usize {
+    match desc.order {
+        LtOrder::Row => r * desc.ld as usize + c,
+        LtOrder::Col => c * desc.ld as usize + r,
+    }
+}
+
+/// Host reference for one call: A and B walked in ROW order (the bridge's
+/// operand convention), C and D through THEIR descriptors' declared order
+/// (ROW for the default forms; COL for the bias forms, ruling 2026-09-01)
+/// — D = act(op(A)op(B) + beta*C + bias), alpha = 1 (the fixed literal),
+/// bias[row] added along D's rows (the API's only bias axis, independent
+/// of storage order).
 fn host_reference(
     call: &LtCall,
     a: &[f32],
@@ -104,7 +123,7 @@ fn host_reference(
                 acc += (a_v as f64) * (b_v as f64);
             }
             if let Some(c) = c {
-                acc += c[row * call.c.ld as usize + col] as f64;
+                acc += c[at(&call.c, row, col)] as f64;
             }
             if let Some(bias) = bias {
                 acc += bias[row] as f64;
@@ -113,7 +132,7 @@ fn host_reference(
             if call.relu {
                 v = v.max(0.0);
             }
-            d[row * call.d.ld as usize + col] = v;
+            d[at(&call.d, row, col)] = v;
         }
     }
     d
@@ -135,10 +154,17 @@ fn from_device(stream: &Arc<cudarc::driver::CudaStream>, slice: &CudaSlice<u8>) 
 }
 
 /// Build the canonical contiguous call for one form (m=3, n=4, k=5) —
-/// the bridge's ROW convention: dense row-major operands, ld = the
-/// row pitch (= cols).
+/// dense row-major operands (ld = the row pitch = cols); C and D in the
+/// order the plan would elect for the form: ROW (ld = n) for the default
+/// forms, COL (ld = m) for the bias forms — the estate's bias decorators
+/// require a LeftMajor D, which `bind_destination` resolves to COL.
 fn call_for(form: CublasLtForm) -> LtCall {
     let (m, n, k) = (3i64, 4i64, 5i64);
+    let cd = if form.has_bias() {
+        LtDesc::col(m, n, m)
+    } else {
+        LtDesc::row(m, n, n)
+    };
     LtCall {
         form,
         m,
@@ -148,8 +174,8 @@ fn call_for(form: CublasLtForm) -> LtCall {
         trans_b: false,
         a: LtDesc::row(m, k, k),
         b: LtDesc::row(k, n, n),
-        c: LtDesc::row(m, n, n),
-        d: LtDesc::row(m, n, n),
+        c: cd,
+        d: cd,
         c_source: if form.has_c() {
             CSource::Operand(2)
         } else {
@@ -171,17 +197,20 @@ fn tf32_strictness_detector_is_green() {
     );
 }
 
-/// The four contract forms, each under the bridge's ROW convention:
-/// the DEFAULT-epilogue forms (Base, Accumulate) execute green on real
-/// buffers, compared tolerance-based against the host walk (see
-/// `assert_close`'s reduction-order contract); the BIAS-epilogue forms
-/// (Bias, AccumulateBias) are refused LOUDLY before dispatch — the
-/// MEASURED A100 finding (2026-08-28 probe): the library returns
-/// CUBLAS_STATUS_NOT_SUPPORTED for BIAS/RELU_BIAS whenever D is
-/// CUBLASLT_ORDER_ROW (any A/B order), and the API's per-D-row bias
-/// cannot express the marker's sibling-frame bias through a COL
-/// re-description of the row-major destination. No bytes may move on a
-/// refused form.
+/// The four contract forms execute green on real buffers, compared
+/// tolerance-based against the host walk (see `assert_close`'s
+/// reduction-order contract): the DEFAULT-epilogue forms (Base,
+/// Accumulate) under a ROW D, the BIAS-epilogue forms (Bias,
+/// AccumulateBias) under a COL D.
+///
+/// RULING 2026-09-01 — NEEDS A100 RUN. The bias forms used to pin a
+/// refusal here (the 2026-08-28 finding: CUBLAS_STATUS_NOT_SUPPORTED for
+/// BIAS/RELU_BIAS whenever D is CUBLASLT_ORDER_ROW). The estate now
+/// requires a LeftMajor D on the bias decorators, so a planned bias form
+/// always dispatches with `CUBLASLT_ORDER_COL` — the order the probe
+/// measured as SUPPORTED. This test's bias rows are the first device
+/// measurement of that dispatch; the ROW-D refusal moved to
+/// `bias_form_with_a_row_d_is_refused_before_dispatch`.
 #[test]
 fn all_four_contract_forms_execute_green() {
     let ctx = CudaContext::new(0).expect("CUDA device 0");
@@ -207,23 +236,16 @@ fn all_four_contract_forms_execute_green() {
         }
         let mut dest = stream.alloc_zeros::<u8>(m * n * 4).expect("dest alloc");
 
-        if form.has_bias() {
-            let err = device_call::dispatch(&call, &operands, &mut dest, &stream)
-                .expect_err("bias-epilogue forms must be refused under the ROW convention");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("refused BEFORE dispatch"), "{form:?}: {msg}");
-            assert!(
-                msg.contains("ROW-order D"),
-                "{form:?} refusal must name the finding: {msg}"
-            );
-            stream.synchronize().expect("sync");
-            assert!(
-                from_device(&stream, &dest).iter().all(|&v| v == 0.0),
-                "{form:?}: no bytes may move on a refused dispatch"
-            );
-            continue;
-        }
-
+        // Bias forms: COL D (ld = m), the order the library supports for
+        // BIAS/RELU_BIAS; the epilogue adds bias[row] along D's rows.
+        assert_eq!(
+            call.d.order,
+            if form.has_bias() {
+                LtOrder::Col
+            } else {
+                LtOrder::Row
+            }
+        );
         device_call::dispatch(&call, &operands, &mut dest, &stream)
             .unwrap_or_else(|e| panic!("{form:?} dispatch: {e:#}"));
         stream.synchronize().expect("sync");
@@ -272,6 +294,124 @@ fn ld_bounds_violation_refuses_before_dispatch() {
         from_device(&stream, &dest).iter().all(|&v| v == 0.0),
         "no bytes may move on a refused dispatch"
     );
+}
+
+/// THE TRIPWIRE ON DEVICE (ruling 2026-09-01): a bias form whose D is
+/// ROW-order is unreachable from the estate (the bias decorators require
+/// a LeftMajor D). A hand-built one is refused BEFORE any library call —
+/// the library would return CUBLAS_STATUS_NOT_SUPPORTED (measured
+/// 2026-08-28) — and no bytes move.
+#[test]
+fn bias_form_with_a_row_d_is_refused_before_dispatch() {
+    let ctx = CudaContext::new(0).expect("CUDA device 0");
+    let stream = ctx.default_stream();
+    for form in [CublasLtForm::Bias, CublasLtForm::AccumulateBias] {
+        let mut call = call_for(form);
+        let (m, n, k) = (call.m as usize, call.n as usize, call.k as usize);
+        call.c = LtDesc::row(call.m, call.n, call.n);
+        call.d = call.c;
+        let a = weights(m * k, 1);
+        let b = weights(k * n, 2);
+        let dev_a = to_device(&stream, &a);
+        let dev_b = to_device(&stream, &b);
+        let mut operands: Vec<&CudaSlice<u8>> = vec![&dev_a, &dev_b];
+        let dev_c = form.has_c().then(|| to_device(&stream, &weights(m * n, 3)));
+        let dev_bias = to_device(&stream, &weights(m, 4));
+        if let Some(dc) = dev_c.as_ref() {
+            operands.push(dc);
+        }
+        operands.push(&dev_bias);
+        let mut dest = stream.alloc_zeros::<u8>(m * n * 4).expect("dest alloc");
+        let err = device_call::dispatch(&call, &operands, &mut dest, &stream)
+            .expect_err("a ROW-order D under a bias form must trip the fence");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unreachable"), "{form:?}: {msg}");
+        assert!(
+            msg.contains("bias decorators require a LeftMajor D"),
+            "{form:?}: {msg}"
+        );
+        assert!(msg.contains("refused BEFORE dispatch"), "{form:?}: {msg}");
+        stream.synchronize().expect("sync");
+        assert!(
+            from_device(&stream, &dest).iter().all(|&v| v == 0.0),
+            "{form:?}: no bytes may move on a refused dispatch"
+        );
+    }
+}
+
+/// THE BIAS FORM END TO END (ruling 2026-09-01 — NEEDS A100 RUN): the
+/// marker-elected plan for `x[4,8] @ w[8,3] + b[3]` (spelled as
+/// `luminal_nn::Linear` with bias spells it) executes through the
+/// host-call arm with the BIAS epilogue under the sibling's COL D, against
+/// the decomposed route, tolerance-based. The seed is the one the CPU pin
+/// (`tests/cublaslt_bias_premise.rs`) measured electing `CublasLtBias`.
+#[test]
+fn marker_elected_bias_plan_matches_decomposed_route_tolerance_based() {
+    use luminal::prelude::Ns;
+    let build = || {
+        let mut cx = luminal::graph::Graph::new();
+        let fc = luminal_nn::Linear::new(8, 3, true, &Ns::root().child("fc"), &mut cx);
+        let x = cx.tensor((4usize, 8usize));
+        let out = fc.forward(x).output();
+        let bias = fc.bias.expect("bias");
+        (cx, x.id, fc.weight.id, bias.id, out.id)
+    };
+    let data_for =
+        |x: NodeIndex, w: NodeIndex, b: NodeIndex| -> FxHashMap<NodeIndex, TypedBuffer> {
+            [
+                (x, TypedBuffer::from(weights(32, 1))),
+                (w, TypedBuffer::from(weights(24, 2))),
+                (b, TypedBuffer::from(weights(3, 3))),
+            ]
+            .into_iter()
+            .collect()
+        };
+    let options = luminal::implementation_search::ImplementationSearchOptions {
+        generations: 12,
+        generation_size: 16,
+        mutations: 4,
+        trials: 1,
+        seed: BIAS_ELECTING_SEED,
+    };
+
+    let (cx, x, w, b, out) = build();
+    let mut fused = CudaRuntime::load_with_cublaslt(&cx).expect("load fused");
+    fused
+        .search(&data_for(x, w, b), &options)
+        .expect("fused search");
+    let elected_bias = fused
+        .plan()
+        .expect("plan")
+        .dag
+        .node_weights()
+        .any(|n| matches!(n, BufferNode::Compute { op, .. } if op.label() == "CublasLtBias"));
+    assert!(
+        elected_bias,
+        "the fused route must elect CublasLtBias for this comparison (seed {BIAS_ELECTING_SEED} measured electing on the CPU pin; re-sweep tests/cublaslt_bias_premise.rs if this moves)"
+    );
+    fused.set_data(x, weights(32, 1));
+    fused.set_data(w, weights(24, 2));
+    fused.set_data(b, weights(3, 3));
+    fused
+        .execute()
+        .expect("fused execute (bias epilogue under COL D)");
+    let got = walked_dense(&fused, out);
+
+    let (cx, x, w, b, out) = build();
+    let mut plain = CudaRuntime::load(&cx).expect("load plain");
+    plain
+        .search(
+            &data_for(x, w, b),
+            &luminal::test_support::harness_search_options(),
+        )
+        .expect("plain search");
+    plain.set_data(x, weights(32, 1));
+    plain.set_data(w, weights(24, 2));
+    plain.set_data(b, weights(3, 3));
+    plain.execute().expect("plain execute");
+    let want = walked_dense(&plain, out);
+
+    assert_close(&want, &got, "marker(bias) vs decomposed 4x8x3 + b[3]");
 }
 
 /// Item 4 END TO END: the marker-elected plan (searched with the

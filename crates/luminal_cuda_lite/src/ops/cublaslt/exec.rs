@@ -67,7 +67,25 @@
 //! defaults) is REJECTED: cuBLASLt's bias epilogue adds bias[i] to
 //! row i of the API's D, and the marker's bias contract is per-row of
 //! the call's D (length m) — a role swap would silently turn it into
-//! a per-column bias. ROW order keeps bias semantics intact.
+//! a per-column bias.
+//!
+//! THE BIAS FORMS DISPATCH ONLY UNDER A COL-ORDER D (ruling 2026-09-01,
+//! Austin: "adding the layout requirement to the rule is the correct
+//! solution"). MEASURED on the A100 (2026-08-28): the library returns
+//! CUBLAS_STATUS_NOT_SUPPORTED for CUBLASLT_EPILOGUE_BIAS / RELU_BIAS
+//! whenever D is CUBLASLT_ORDER_ROW (any A/B order). The fix is in the
+//! ESTATE, not here: the two bias decorators
+//! (`egg/cublaslt_marker_decorate.egg`) now carry the premise
+//! `(= ?inner_L (LeftMajorContiguousElementLayoutLit ?ishape ?d_bits2))`
+//! — the bias form is minted only when the claimed D is provably
+//! left-major contiguous over the sibling frame `[n, m]`, which is
+//! byte-identical to the recorder's row-major `[m, n]`, puts the
+//! per-feature vector on D's rows (the API's only bias axis), and is
+//! exactly what [`bind_destination`] resolves to `LtDesc::col`. The
+//! executor therefore no longer refuses the bias forms; it carries a
+//! TRIPWIRE instead ([`assert_bias_destination_order`]): a bias-bearing
+//! call whose D is not COL is unreachable from the estate, and reaching
+//! it is a bug to bail on, never a case to handle.
 //!
 //! THE DESTINATION FRAME IS THE PLAN'S, NOT A CONSTANT (regression fix,
 //! 2026-08-31 — see [`bind_destination`]). The paragraph above says
@@ -343,6 +361,42 @@ pub fn bind_destination(
     };
     call.d = desc;
     call.c = desc;
+    // The bias/order tripwire runs HERE — after the D order is known,
+    // never before (the spec-only default is ROW and would fire falsely).
+    assert_bias_destination_order(call, who)
+}
+
+/// THE BIAS/ORDER TRIPWIRE (ruling 2026-09-01). The estate's two bias
+/// decorators (`egg/cublaslt_marker_decorate.egg`) mint a bias form ONLY
+/// when the claimed D carries the `LeftMajorContiguousElementLayoutLit`
+/// spelling over the sibling frame, and [`bind_destination`] maps a
+/// LeftMajor election to `CUBLASLT_ORDER_COL`. A bias-bearing call whose
+/// D descriptor is not COL is therefore UNREACHABLE from a planned
+/// dispatch — it can only mean the estate premise and this bridge have
+/// drifted apart (or a hand-built call). Bail, never dispatch: the
+/// library refuses BIAS/RELU_BIAS on a ROW-order D
+/// (CUBLAS_STATUS_NOT_SUPPORTED, measured on the A100 2026-08-28), and
+/// this check names the finding BEFORE any descriptor is built.
+///
+/// Classification (see the CHECK TAXONOMY on [`bind_destination`]): a
+/// COHERENCE FENCE between the estate's premise vocabulary (the LeftMajor
+/// literal) and the call frame the executor builds (the D order) — not an
+/// e-graph re-check, and not disposable.
+pub fn assert_bias_destination_order(call: &LtCall, who: &str) -> Result<()> {
+    if call.bias_operand.is_some() && call.d.order != LtOrder::Col {
+        bail!(
+            "cuBLASLt {who}: unreachable: the bias decorators require a LeftMajor D; \
+             a bias form ({}) reached the executor with a {:?}-order D descriptor \
+             ({}x{} ld {}). The library refuses BIAS/RELU_BIAS on a ROW-order D \
+             (CUBLAS_STATUS_NOT_SUPPORTED, measured on the A100 2026-08-28) — \
+             refused BEFORE dispatch, no bytes move",
+            call.form.constructor_name(),
+            call.d.order,
+            call.d.rows,
+            call.d.cols,
+            call.d.ld
+        );
+    }
     Ok(())
 }
 
@@ -362,30 +416,14 @@ pub fn plan_call(op: &CublasLt) -> Result<LtCall> {
 
 /// [`plan_call`] over the spec alone (test seam).
 pub fn plan_call_from_spec(spec: &LtMatmulSpec) -> Result<LtCall> {
-    // BIAS-EPILOGUE REFUSAL (measured on the A100, 2026-08-28 probe —
-    // see the ROW CONVENTION module doc): cublasLtMatmulAlgoGetHeuristic
-    // returns CUBLAS_STATUS_NOT_SUPPORTED for CUBLASLT_EPILOGUE_BIAS /
-    // RELU_BIAS whenever D is CUBLASLT_ORDER_ROW (any A/B order;
-    // DEFAULT and RELU are supported under every order combination).
-    // The bias vector's length is pinned to D's ROW count by the API,
-    // and the marker's bias contract is per-row of the SIBLING call's
-    // D (length m = the recorder's feature dim) — re-expressing D as
-    // COL over the executor's row-major dest transposes the frame and
-    // would need a per-COLUMN bias, which the API does not have. Under
-    // the frozen estate + the executor's dense row-major destination
-    // there is NO correct dispatch for the bias forms: refuse loudly,
-    // never land wrong bytes.
-    if spec.form.has_bias() {
-        bail!(
-            "cuBLASLt {}: the bias-epilogue contracts are NOT dispatchable under \
-             the ROW convention — the A100 library refuses BIAS/RELU_BIAS with a \
-             ROW-order D (measured CUBLAS_STATUS_NOT_SUPPORTED), and the API's \
-             per-D-row bias cannot express the marker's per-row-of-the-sibling-D \
-             vector through a COL re-description of the row-major destination; \
-             refusing before any descriptor is built",
-            spec.form.constructor_name()
-        );
-    }
+    // NO BIAS REFUSAL HERE (ruling 2026-09-01). The unconditional
+    // bias-form refusal that stood at the top of this function is gone:
+    // the estate's bias decorators now require a LeftMajor D, so a bias
+    // form arrives with a COL destination election and dispatches. The
+    // D order is NOT known at this point (the spec-only default below is
+    // ROW), so the bias/order coherence check cannot live here — it runs
+    // in [`bind_destination`] once the plan's election has been read
+    // (see [`assert_bias_destination_order`]).
     let m = literal(&spec.m, "m")?;
     let n = literal(&spec.n, "n")?;
     let k = literal(&spec.k, "k")?;

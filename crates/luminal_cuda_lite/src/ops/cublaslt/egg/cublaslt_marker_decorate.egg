@@ -171,6 +171,15 @@
     (= ?d_layout (BitOffsetExpressionLayoutLit ?d_expr ?d_shape2 ?d_bits2))
     (= ?composed_d (int-subst-of ?d_expr ?tmap))
     (= ?inner_L (BitOffsetExpressionLayoutLit ?composed_d ?ishape ?d_bits2))
+    ; THE LAYOUT REQUIREMENT (Austin, 2026-09-01): the bias form is minted
+    ; ONLY when the claimed D is provably LEFT-major contiguous over the
+    ; sibling frame [n, m] -- the storage order the library accepts for
+    ; BIAS/RELU_BIAS (ROW-order D is NOT_SUPPORTED, measured 2026-08-28)
+    ; and the one that puts the per-feature vector on D's rows. Two
+    ; (= ?inner_L ...) premises on one variable = the class holds BOTH
+    ; spellings; downward discovery (preamble 3a/3c + native chain
+    ; composition) supplies the literal, this rule never mints it.
+    (= ?inner_L (LeftMajorContiguousElementLayoutLit ?ishape ?d_bits2))
     (= ?d_shape (ShapeLit (IntExprCons ?m (IntExprCons ?n (IntExprNil)))))
     (= ?out2 (LogicalAdd ?y_outer ?bias_bcast))
     (= ?bias_bcast (LogicalIndexMapApply ?bias_logical ?bias_map ?d_shape))
@@ -224,6 +233,15 @@
     (= ?d_layout (BitOffsetExpressionLayoutLit ?d_expr ?d_shape2 ?d_bits2))
     (= ?composed_d (int-subst-of ?d_expr ?tmap))
     (= ?inner_L (BitOffsetExpressionLayoutLit ?composed_d ?ishape ?d_bits2))
+    ; THE LAYOUT REQUIREMENT (Austin, 2026-09-01): the bias form is minted
+    ; ONLY when the claimed D is provably LEFT-major contiguous over the
+    ; sibling frame [n, m] -- the storage order the library accepts for
+    ; BIAS/RELU_BIAS (ROW-order D is NOT_SUPPORTED, measured 2026-08-28)
+    ; and the one that puts the per-feature vector on D's rows. Two
+    ; (= ?inner_L ...) premises on one variable = the class holds BOTH
+    ; spellings; downward discovery (preamble 3a/3c + native chain
+    ; composition) supplies the literal, this rule never mints it.
+    (= ?inner_L (LeftMajorContiguousElementLayoutLit ?ishape ?d_bits2))
     (= ?d_shape (ShapeLit (IntExprCons ?m (IntExprCons ?n (IntExprNil)))))
     (= ?out2 (LogicalAdd ?y_outer ?bias_bcast))
     (= ?bias_bcast (LogicalIndexMapApply ?bias_logical ?bias_map ?d_shape))
