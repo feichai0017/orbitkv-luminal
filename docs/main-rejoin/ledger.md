@@ -28,6 +28,9 @@ Dispositions:
 | `aa5664bb` | #385 | luminal_python: honor the in-place mutation contract (write-back outputs) | FILE-LEVEL | PR #448 (branch `16fbb5bd`) | — |
 | `be3e2fe5` | #387 | translator: robustness fixes — dtype promotion, rank-extending expand, norm opmath | RE-EXPRESSED (movement / unary) | PR #448 (branch `5817a012`) | — |
 | `7423ca37` | #391 | compile search progress UI | RE-EXPRESSED (`search_log` + Start/Faster/Slower) | branch `merge/main-391-search-ui` (this commit) | see **#391 progress UI** below |
+| `7d2817fa` | — | luminal_python: search_iterations pass through more places | FILE-LEVEL | branch `7b25c63d` (`merge/main-7d2817fa-search-iterations`) | parked crate: re-point `search_iterations` at `ImplementationSearchOptions` when luminal_python is re-attached to the recorder |
+| `bea18ecf` | #389 | Sdpa gqa fixes | FILE-LEVEL | branch `201aa15b` (`merge/main-389-sdpa-gqa`) | parked crate + non-gating `ci/`: the loosened gemma / gemma4_moe TPOT numbers are main's HLIR cuda_lite numbers and must be re-baselined against CL A100 draws before they gate anything here |
+| `499d0779` | #386 | Search: early-stop candidate profiling against the best-so-far metric | MIXED — FILE-LEVEL (park + metal) / INTENT-ONLY (core) | this commit, on `merge/main-386-early-stop` | see **#386 early-stop profiling** below |
 
 ## #391 progress UI — re-expressed in `src/implementation_search.rs`
 
@@ -112,3 +115,97 @@ drives the reporter over an in-memory writer and pins `Start` exactly once (with
 the baseline metric), one `Faster` carrying the new best, the `x1 → x2` climb,
 the reset back to `x1` after an improvement, and the five `\r\x1b[2K` in-place
 rewrites. It strips ANSI so it passes whether or not `colored` colorizes.
+
+## #386 early-stop profiling — what landed, and what is owed
+
+Main's commit is one idea spread over six files: an opt-in
+`CompileOptions::early_stop_factor(f64)` threads `Option<(best_metric, factor)>`
+through `Runtime::profile` / `Runtime::profile_with_bucket_context`; each device
+runtime, after every *timed* trial, compares the candidate's running MEAN trial
+time against `best * factor` (the shared predicate `luminal::op::
+early_stop_exceeded`) and breaks out, returning the partial mean. Selection is
+explicitly unchanged: the truncated metric is still ranked, so early stop only
+shortens the timing of candidates already out of contention. The initial genome
+passes `None` because it *is* the baseline, and CUDA's warmup bail is left
+untouched so a slow-warmup / fast-steady candidate is not disqualified.
+
+**Landed FILE-LEVEL (parked, does not build):**
+
+- `crates/luminal_cuda_lite_hlir/src/runtime.rs` — main's
+  `crates/luminal_cuda_lite/` hunks with the path rewritten, per the ruling that
+  the hlir park TRACKS main so the target CL must reach keeps moving. Applied
+  cleanly against the park's existing branch drift (`IntExpr`, `alias_state` →
+  `alloc_state_buffer` + `bind_*_buffer`, no `mask_events`); only hunk offsets
+  moved.
+- `crates/luminal_metal/src/runtime.rs` — file-level, per the ruling that metal
+  becomes a runtime like the others and is ported later.
+
+Both now reference `luminal::op::early_stop_exceeded`, which does not exist on
+this branch (`src/op.rs` is deleted). Neither crate is a workspace member, so
+nothing fails to build; the dangling reference is the standing cost of parking
+these files at main's spelling, and it resolves when each crate is ported.
+
+**Not landed (no counterpart on this branch):**
+
+- `src/op.rs` (+41: the `Runtime::profile` / `profile_with_bucket_context`
+  signature change, the `early_stop_exceeded` predicate, and its
+  `#[cfg(test)] mod early_stop_tests`) and `src/hlir.rs` (+1: the
+  `ReferenceRuntime` impl) — both files are deleted on this branch.
+- `examples/llama/src/main.rs` (opts in at `.early_stop_factor(2.0)`) — this
+  branch has no `examples/llama`; the zoo is `examples/llama3`,
+  `examples/paged_llama3`, … and none of them use `CompileOptions`.
+- `src/graph.rs` (+109: the `CompileOptions::early_stop_factor` builder, passing
+  `None` for the initial genome and `Some((best, factor))` thereafter, and the
+  regression test `search_passes_best_so_far_to_profile_early_stop`) — main's
+  `src/graph.rs` is the HLIR `CompileOptions` / `Graph::search` file; this
+  branch's `src/graph.rs` is the LogicalGraph recorder, with no
+  `CompileOptions`, no search loop, no `trials` and no `timeout`.
+
+**Why the re-expression was NOT done here.** The brief allows re-expressing the
+idea against `src/implementation_search.rs` only if it is small and mechanical.
+It is not — it needs two decisions that are not the implementer's to make:
+
+1. **Which metric.** Main's guarantee ("remaining trials cannot change the
+   outcome") is an argument about a running *mean*, which only rises as trials
+   accumulate. This branch's `ReferenceProfiler` (`crates/luminal_reference/src/
+   search.rs`) ranks by the running *minimum* — `best_nanos.min(...)` over
+   `trials` timed executes after one warmup — and a running minimum can still
+   fall on a later trial. Early-stopping on a minimum is therefore a heuristic
+   truncation of a metric bounded only from below: it can promote a candidate
+   whose truncated min is worse than its true min. Adopting a mean instead
+   changes what `best_nanos` means everywhere that reads it
+   (`SearchOutcome::best_nanos`, search logs, anything baselined on it).
+2. **Where the cutoff hooks in.** The trial loop lives inside the profiler, not
+   inside the selection loop, so the cutoff has to cross `PlanProfiler::profile`
+   — the deliberately thin runtime-owned-execution seam (ruling 2026-08-17,
+   "every runtime owns its execution", including how its candidates are timed).
+   That is either a fifth positional argument on a public trait method that
+   already has four, or an options/context struct — a seam decision, not a
+   mechanical edit.
+
+**The requirement, for whenever it is taken up.** (a) `early_stop_factor:
+Option<f64>` on `ImplementationSearchOptions`, default `None` (off), with main's
+`>= 1.0` assertion; behaviour identical to today when unset. (b) The selection
+loop in `src/implementation_search.rs` passes `None` while `best.is_none()` and
+`Some((best_nanos, factor))` afterwards — the loop already holds exactly that
+`best: Option<(nanos, genome, plan)>`. (c) `ReferenceProfiler::profile` checks
+after each timed execute and returns the partial metric; `StaticProfiler`
+ignores it (it never runs trials). (d) The predicate re-expresses as a free
+function over `u128` nanos rather than main's `Duration`, and main's
+`test_early_stop_exceeded` moves essentially verbatim once retyped. (e) Main's
+`search_passes_best_so_far_to_profile_early_stop` regression test cannot move —
+it is built on `Runtime` / `LLIRGraph` / `compile_with_rng` / `CompileOptions` —
+but its intent re-expresses as a recording `PlanProfiler` that asserts `None`
+for the first candidate and `Some((best, factor))` for every later one under a
+fixed seed.
+
+**And the precondition that decides whether it is worth anything.** The only
+profiler on this branch that actually executes candidates is the host
+`ReferenceProfiler`, at `trials: 3` — a maximum saving of two executes per
+losing candidate — and the search already suppresses duplicate work with the
+plan-fingerprint cache. CL does not time candidates at all: `crates/
+luminal_cuda_lite/src/runtime.rs` searches with `StaticProfiler`, ranking by the
+heuristic bytes-moved cost with no execution. So the CUDA half of main's commit
+— the half where this feature pays what the PR claims — has no landing target
+until CL grows a real device `PlanProfiler`. That is the follow-on this row is
+waiting on, and it is a much larger question than the cutoff itself.
