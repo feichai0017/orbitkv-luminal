@@ -119,13 +119,13 @@ pub fn genome_with_ordering(
     // (extractor.rs collect_input_terminals): a BufferTensorLit whose
     // BufferTensor class is an explicit input (BufferInputLit list) when
     // explicit inputs exist, else any BufferTensorLit not reachable from
-    // the BufferOutputLit list. These classes take the extractor's Input
-    // plan; CRUCIALLY (round 11), the genome must carry NO row for them:
-    // under genome authority a producer row OVERRIDES the Input plan
-    // (observed: the transpose-view re-descriptions give input layout
-    // tensors their first producers, and total-genome rows then
-    // instantiated view 2-cycles over bound inputs — the bufferize
-    // "extracted graph has a cycle" failure).
+    // the BufferOutputLit list. These classes are leaves: they
+    // take the extractor's Input plan, and the producer index carries no
+    // rows for them at all (Extractor::new drops every input-terminal
+    // key), so no genome row over one is even constructible here. This
+    // helper's terminal set therefore exists for ONE purpose: the demand
+    // walk's leaf check, which stops a candidate's subtree at a bound
+    // input instead of declaring it unreachable.
     let buffer_list_classes = |root_op: &str| -> BTreeSet<ClassId> {
         let mut out: BTreeSet<ClassId> = BTreeSet::new();
         for node in egraph.nodes.values() {
@@ -340,11 +340,6 @@ pub fn genome_with_ordering(
     let mut memo: HashMap<(ClassId, usize), Outcome> = HashMap::new();
     let mut genome = luminal::extractor::Genome::default();
     for (class, candidates) in &index {
-        // Input terminals take the extractor's Input plan; a genome row
-        // would OVERRIDE it with a producer (genome authority) — omit.
-        if terminals.contains(class) {
-            continue;
-        }
         // Escalate strictness only when nothing viable exists below.
         let mut pick: Option<luminal::extractor::ProducerChoice> = None;
         for level in 0..3usize {

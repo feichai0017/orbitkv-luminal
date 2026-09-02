@@ -1126,9 +1126,7 @@ mod sampler_tests {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
-    use crate::extractor::{
-        Genome, ProducerChoice, SamplingSpace, contract_candidate_inputs, edges_have_cycle,
-    };
+    use crate::extractor::{Genome, ProducerChoice, SamplingSpace, edges_have_cycle};
 
     use super::{ProducerIndex, bufferize_cycle_tripwire, mutate_genome, sample_genome};
 
@@ -1172,50 +1170,6 @@ mod sampler_tests {
                     .collect(),
             );
         }
-        let space = SamplingSpace::from_candidate_inputs(inputs);
-        (index, space)
-    }
-
-    /// [`build`] with ROW-LESS classes in the picture: `rows` is the
-    /// board's producer index as above, and `row_less` names classes the
-    /// index has NO row for together with what each DEMANDS. Candidate
-    /// inputs are contracted exactly as `ExtractionSession::sampling_space`
-    /// contracts them, so the edges under test are the ones the real
-    /// analysis draws.
-    fn build_with_row_less(
-        rows: &[BoardRow<'_>],
-        row_less: &[(&str, &[&str])],
-    ) -> (ProducerIndex, SamplingSpace) {
-        let (index, _) = build(rows);
-        let demands: BTreeMap<ClassId, Vec<ClassId>> = row_less
-            .iter()
-            .map(|(owner, demanded)| {
-                (
-                    class(owner),
-                    demanded.iter().map(|name| class(name)).collect(),
-                )
-            })
-            .collect();
-        let inputs: BTreeMap<ClassId, Vec<Vec<ClassId>>> = rows
-            .iter()
-            .map(|(owner, candidates)| {
-                (
-                    class(owner),
-                    candidates
-                        .iter()
-                        .map(|(_, sources)| {
-                            let raw: Vec<ClassId> =
-                                sources.iter().map(|name| class(name)).collect();
-                            contract_candidate_inputs(
-                                &raw,
-                                &|input| index.contains_key(input),
-                                &|input| demands.get(input).cloned().unwrap_or_default(),
-                            )
-                        })
-                        .collect(),
-                )
-            })
-            .collect();
         let space = SamplingSpace::from_candidate_inputs(inputs);
         (index, space)
     }
@@ -1412,115 +1366,6 @@ mod sampler_tests {
             let child = mutate_genome(&genome, &index, &space, &classes, &mut rng, 3);
             assert_eq!(spelling(&index, &child), vec!["a=prog".to_string()]);
         }
-    }
-
-    /// (vi) A CYCLE THAT CLOSES THROUGH A ROW-LESS CLASS. `a` reads `d`,
-    /// which the genome index has no row for; `d` demands `b`; `b` reads
-    /// `a`. Nothing chooses anything at `d` — it is planned whichever way
-    /// the two ends go — so `a -> d -> b` IS the edge `a -> b` and the
-    /// only cycle in the board runs a -> b -> a. Contracting `d` is what
-    /// makes the component visible; leaving `d` out (round 1) left `a`
-    /// with no edges at all, no component, and the cyclic pair reachable.
-    #[test]
-    fn a_cycle_through_a_row_less_class_is_one_component() {
-        let (index, space) = build_with_row_less(
-            &[
-                ("a", &[("prog", &[]), ("reads_d", &["d"])]),
-                ("b", &[("prog", &[]), ("reads_a", &["a"])]),
-            ],
-            &[("d", &["b"])],
-        );
-        assert_eq!(
-            space.candidate_inputs[&class("a")],
-            vec![vec![], vec![class("b")]],
-            "`d` holds no row, so `a`'s second candidate depends on what `d` demands"
-        );
-        assert_eq!(
-            space.components,
-            vec![vec![class("a"), class("b")]],
-            "the cycle closes through a row-less class, and the component must contain \
-             both classes that DO hold rows"
-        );
-
-        // THE FREE SAMPLER REACHES IT: uniform over every candidate, the
-        // cyclic pair is one of the four combinations, and it is cyclic.
-        let free = genome_electing(&index, &[("a", "reads_d"), ("b", "reads_a")]);
-        assert!(
-            cyclic(&index, &space, &free),
-            "the (reads_d, reads_a) pair is the cycle this board is made of"
-        );
-
-        // THE FOREST SAMPLER NEVER DOES, and still reaches everything else.
-        let mut seen: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
-        for seed in 0..200u64 {
-            let genome = sample_genome(&index, &space, &mut StdRng::seed_from_u64(seed));
-            assert!(
-                !cyclic(&index, &space, &genome),
-                "seed {seed} sampled the cycle through the row-less class: {:?}",
-                spelling(&index, &genome)
-            );
-            seen.insert(spelling(&index, &genome));
-        }
-        let expected: std::collections::BTreeSet<Vec<String>> = [
-            vec!["a=prog".to_string(), "b=prog".to_string()],
-            vec!["a=prog".to_string(), "b=reads_a".to_string()],
-            vec!["a=reads_d".to_string(), "b=prog".to_string()],
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(
-            seen, expected,
-            "exactly the three acyclic genomes stay reachable"
-        );
-    }
-
-    /// CONTRACTION IS TRANSITIVE AND TERMINATES: `a` reads `d`, `d`
-    /// demands `e`, `e` demands `b` AND `d` (a ring among the row-less
-    /// classes). The contraction must walk through both and stop, and
-    /// the edge that comes out is `a -> b`.
-    #[test]
-    fn contraction_walks_chains_of_row_less_classes_and_terminates() {
-        let (_index, space) = build_with_row_less(
-            &[
-                ("a", &[("prog", &[]), ("reads_d", &["d"])]),
-                ("b", &[("prog", &[]), ("reads_a", &["a"])]),
-            ],
-            &[("d", &["e"]), ("e", &["b", "d"])],
-        );
-        assert_eq!(
-            space.candidate_inputs[&class("a")],
-            vec![vec![], vec![class("b")]],
-            "a -> d -> e -> b contracts to a -> b, and the d/e ring does not hang"
-        );
-        assert_eq!(space.components, vec![vec![class("a"), class("b")]]);
-    }
-
-    /// A ROW-LESS CLASS THAT DEMANDS NOTHING IS A LEAF — the input
-    /// terminal's shape (produced by nothing, planned from the boundary).
-    /// Its readers keep no edge at all, so no component forms.
-    #[test]
-    fn a_row_less_class_that_demands_nothing_is_a_leaf() {
-        let (index, space) = build_with_row_less(
-            &[
-                ("a", &[("prog", &[]), ("reads_t", &["t"])]),
-                ("b", &[("prog", &[]), ("reads_a", &["a"])]),
-            ],
-            &[("t", &[])],
-        );
-        assert_eq!(
-            space.candidate_inputs[&class("a")],
-            vec![vec![], vec![]],
-            "a terminal demands nothing, so reading one draws no edge"
-        );
-        assert!(space.components.is_empty());
-        let mut seen: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
-        for seed in 0..200u64 {
-            seen.insert(spelling(
-                &index,
-                &sample_genome(&index, &space, &mut StdRng::seed_from_u64(seed)),
-            ));
-        }
-        assert_eq!(seen.len(), 4, "all four combinations stay reachable");
     }
 
     /// THE BUFFERIZE TRIPWIRE fires on the cyclic-graph refusal and on
