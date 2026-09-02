@@ -24,12 +24,14 @@ pub trait LogicalRender {
     fn child_expr(&mut self, node: &Node, index: usize) -> String;
     /// Depth-bounded structural rendering of the child at `index`,
     /// preferring `prefer`-named enodes when the class offers a choice.
+    /// `prefer` is `&'static str`: it names a constructor, and the
+    /// renderer keys its memo on it.
     fn child_short(
         &mut self,
         node: &Node,
         index: usize,
         depth: usize,
-        prefer: Option<&str>,
+        prefer: Option<&'static str>,
     ) -> Option<String>;
     /// Readable shape of the child at `index`.
     fn child_shape(&mut self, node: &Node, index: usize) -> Option<String>;

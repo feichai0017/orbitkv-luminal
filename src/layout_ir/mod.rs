@@ -15,10 +15,135 @@
 // bufferization layer and are not yet read by the visualization.
 #![allow(dead_code)]
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
+use std::fmt;
+use std::ops::Deref;
+use std::rc::Rc;
 
 use egraph_serialize::{ClassId, NodeId};
 use petgraph::graph::{DiGraph, NodeIndex};
+
+// =============================================================================
+// Deferred display text
+// =============================================================================
+
+/// A value that is either already in hand or produced ON FIRST READ and
+/// then kept forever.
+///
+/// WHY (ruling 2026-09-01, "make label, tooltip, and details lazy,
+/// leaving only the numeric readers on the hot path"): the extractor
+/// builds one info struct per value and per op output slot, on every
+/// genome of a search. Their DISPLAY text — tooltips, the logical and
+/// layout labels — costs full-depth e-graph rendering, and only the
+/// visualizer and the diagnostics ever read it. Deferring it takes that
+/// work off the search's hot path without changing a character of the
+/// result: `get()` runs the very same builder the eager code ran, so the
+/// string is identical whenever anybody asks for it.
+///
+/// NOT a cache and not a skip — a `Deferred` value is computed exactly
+/// once and never recomputed or approximated.
+///
+/// `Rc`, not `Arc`: an [`ExtractedGraph`] is single-threaded everywhere
+/// it travels (the Python holder is `#[pyclass(unsendable)]`), and the
+/// deferred builder holds extractor state that is itself `Rc`-shared.
+/// Sharing the `Rc` across clones is deliberate: an info cloned into
+/// several DAG slots (the DPS rewrite, multi-output ops) renders at most
+/// once for all of them.
+pub struct Lazy<T>(Rc<LazyInner<T>>);
+
+enum LazyInner<T> {
+    Eager(T),
+    Deferred {
+        cell: OnceCell<T>,
+        build: Box<dyn Fn() -> T>,
+    },
+}
+
+impl<T> Lazy<T> {
+    /// A value already computed (synthesized nodes, test fixtures).
+    pub fn eager(value: T) -> Self {
+        Lazy(Rc::new(LazyInner::Eager(value)))
+    }
+
+    /// A value built on first read. `build` must be a pure function of
+    /// what it captures: it may run at any later time, and its result is
+    /// what every reader sees.
+    pub fn deferred(build: impl Fn() -> T + 'static) -> Self {
+        Lazy(Rc::new(LazyInner::Deferred {
+            cell: OnceCell::new(),
+            build: Box::new(build),
+        }))
+    }
+
+    /// The value, building it if this is the first read.
+    pub fn get(&self) -> &T {
+        match &*self.0 {
+            LazyInner::Eager(value) => value,
+            LazyInner::Deferred { cell, build } => cell.get_or_init(build),
+        }
+    }
+
+    /// Whether the value is already in hand — for tests and diagnostics
+    /// that want to observe the deferral without triggering it.
+    pub fn is_rendered(&self) -> bool {
+        match &*self.0 {
+            LazyInner::Eager(_) => true,
+            LazyInner::Deferred { cell, .. } => cell.get().is_some(),
+        }
+    }
+}
+
+/// Sharing, not deep-copying: clones observe one another's rendering.
+impl<T> Clone for Lazy<T> {
+    fn clone(&self) -> Self {
+        Lazy(Rc::clone(&self.0))
+    }
+}
+
+impl<T> Deref for Lazy<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.get()
+    }
+}
+
+impl<T: fmt::Display> fmt::Display for Lazy<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.get(), f)
+    }
+}
+
+/// DOES NOT force the value: `{:?}` on a half-built graph is a debugging
+/// aid, and making it render every deferred tooltip would defeat the
+/// deferral exactly where it matters most.
+impl<T: fmt::Debug> fmt::Debug for Lazy<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &*self.0 {
+            LazyInner::Eager(value) => fmt::Debug::fmt(value, f),
+            LazyInner::Deferred { cell, .. } => match cell.get() {
+                Some(value) => fmt::Debug::fmt(value, f),
+                None => f.write_str("<unrendered>"),
+            },
+        }
+    }
+}
+
+impl<T: Default> Default for Lazy<T> {
+    fn default() -> Self {
+        Lazy::eager(T::default())
+    }
+}
+
+impl<T> From<T> for Lazy<T> {
+    fn from(value: T) -> Self {
+        Lazy::eager(value)
+    }
+}
+
+/// The deferred-text alias every info struct uses.
+pub type LazyText = Lazy<String>;
 
 // =============================================================================
 // The op interface
@@ -500,8 +625,11 @@ pub struct ExtractedEdge {
 #[derive(Debug, Clone)]
 pub struct LayoutTensorInfo {
     pub eclass: ClassId,
+    /// EAGER: semantic, not decoration — bufferization names allocations
+    /// after it and the plan summary goldens pin those names.
     pub label: String,
-    pub tooltip: String,
+    /// Deferred: visualizer/diagnostic text only (see [`Lazy`]).
+    pub tooltip: LazyText,
     pub shape: Option<String>,
     pub dtype: Option<String>,
     /// The machine-readable plan dtype, from the logical side's
@@ -524,8 +652,10 @@ pub struct LayoutTensorInfo {
 #[derive(Debug, Clone)]
 pub struct LogicalInfo {
     pub eclass: ClassId,
-    pub label: String,
-    pub tooltip: String,
+    /// Deferred: visualizer text only (see [`Lazy`]).
+    pub label: LazyText,
+    /// Deferred: visualizer text only (see [`Lazy`]).
+    pub tooltip: LazyText,
     /// The logical CONSTRUCTOR producing this tensor (e.g. `LogicalSqrt`),
     /// when it has operands — rendered as the logical op node between this
     /// tensor and its children. `None` for leaves (literals).
@@ -537,8 +667,10 @@ pub struct LogicalInfo {
 #[derive(Debug, Clone)]
 pub struct LayoutInfo {
     pub eclass: ClassId,
-    pub label: String,
-    pub tooltip: String,
+    /// Deferred: visualizer text only (see [`Lazy`]).
+    pub label: LazyText,
+    /// Deferred: visualizer text only (see [`Lazy`]).
+    pub tooltip: LazyText,
 }
 
 /// CONTENTS permission: may the program overwrite this buffer's bytes?
@@ -593,10 +725,12 @@ pub enum FreedBy {
 pub struct BufferInfo {
     pub tensor_eclass: ClassId,
     pub tensor_label: String,
-    pub tensor_tooltip: String,
+    /// Deferred: visualizer text only (see [`Lazy`]).
+    pub tensor_tooltip: LazyText,
     pub id_eclass: ClassId,
     pub id_label: String,
-    pub id_tooltip: String,
+    /// Deferred: visualizer text only (see [`Lazy`]).
+    pub id_tooltip: LazyText,
     /// The declared contents permission — `None` when the program omits the
     /// declaration, which input-program validation rejects for EVERY buffer.
     pub access: Option<Access>,
@@ -663,7 +797,9 @@ pub struct OpNode {
     pub provenance: Provenance,
     pub inputs: Vec<OpInput>,
     pub outputs: Vec<LayoutTensorInfo>,
-    pub tooltip: String,
+    /// Deferred: visualizer text only (see [`Lazy`]). The heaviest of
+    /// them — it renders the op's whole operand/result table.
+    pub tooltip: LazyText,
     pub heuristic_cost: u64,
 }
 
@@ -1037,7 +1173,7 @@ impl DotEmitter {
         // Bare label, like the BufferId notes: the note shape already says
         // "metadata", so spelling the kind would break the no-prefix rule.
         let layout_id = self.raw_node(
-            value.layout.label.clone(),
+            value.layout.label.to_string(),
             VisualKind::Layout,
             &value.layout.tooltip,
         );
@@ -1052,7 +1188,7 @@ impl DotEmitter {
             return *id;
         }
         let id = self.raw_node(
-            logical.label.clone(),
+            logical.label.to_string(),
             VisualKind::LogicalTensor,
             &logical.tooltip,
         );
