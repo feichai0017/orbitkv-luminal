@@ -384,16 +384,68 @@ impl SearchTimings {
 /// reference host executor (the historical behavior) and a static
 /// ranker that never executes.
 pub trait PlanProfiler<L: crate::bufferize::PlanLayout> {
-    /// Best-of-`trials` cost for the plan with buffer-keyed inputs;
-    /// smaller wins. `heuristic_cost` is the extracted graph's summed
+    /// The plan's cost over `trials` with buffer-keyed inputs; smaller
+    /// wins. `heuristic_cost` is the extracted graph's summed
     /// bytes-moved estimate, for profilers that rank without running.
+    ///
+    /// `best_so_far` is the INCUMBENT's metric in nanos — `None` while
+    /// the search holds no candidate yet, since the first candidate IS
+    /// the baseline. It is the early-stop cutoff (#386, ruling 3 of
+    /// 2026-09-02: the cutoff crosses this seam as a fifth POSITIONAL
+    /// argument, not a struct). A profiler may use it to stop trialing
+    /// a candidate that has already lost; whatever it then returns is
+    /// still ranked normally, so early stop never changes which
+    /// candidates are eligible — only how much time is spent timing
+    /// ones already out of contention. Ignoring it is always correct.
     fn profile(
         &mut self,
         plan: &crate::bufferize::BufferIrGraph<L>,
         input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
         trials: usize,
         heuristic_cost: u64,
+        best_so_far: Option<u128>,
     ) -> Result<u128>;
+}
+
+/// Main's `early_stop_exceeded` (its `src/op.rs`), retyped from
+/// `Duration` to this branch's u128 nanos: true once a candidate's mean
+/// trial cost exceeds `best * factor`, i.e. the candidate has already
+/// lost by at least that margin and further trials can only refine a
+/// metric that is out of contention.
+///
+/// The in-core caller ([`crate::implementation_search`]'s reference
+/// profiler, in `luminal_reference`) applies it at `factor = 1.0` to a
+/// LOWER BOUND on the candidate's final mean, which makes the stop
+/// exact rather than heuristic: a candidate whose best conceivable
+/// final mean already exceeds the incumbent cannot win. The factor
+/// survives because it is main's semantics and main's tuning knob
+/// (`CompileOptions::early_stop_factor`), and a device profiler
+/// mirroring this design will want it.
+pub fn early_stop_exceeded(mean_nanos: u128, best_nanos: u128, factor: f64) -> bool {
+    mean_nanos as f64 > best_nanos as f64 * factor
+}
+
+#[cfg(test)]
+mod early_stop_tests {
+    use super::early_stop_exceeded;
+
+    /// Main's `test_early_stop_exceeded` (`src/op.rs`), retyped from
+    /// `Duration` to nanos.
+    #[test]
+    fn early_stop_exceeded_keeps_mains_margin_semantics() {
+        const MS: u128 = 1_000_000;
+        let best = 5 * MS;
+        // 2x cutoff: 10ms mean is at the boundary, not over it.
+        assert!(!early_stop_exceeded(10 * MS, best, 2.0));
+        assert!(early_stop_exceeded(11 * MS, best, 2.0));
+        // A candidate faster than best never stops early.
+        assert!(!early_stop_exceeded(4 * MS, best, 2.0));
+        // Factor 1.0 stops anything slower than best.
+        assert!(early_stop_exceeded(6 * MS, best, 1.0));
+        // ...and NOT a tie: the incumbent keeps its seat, but a tied
+        // candidate is still worth finishing (it is not yet losing).
+        assert!(!early_stop_exceeded(5 * MS, best, 1.0));
+    }
 }
 
 /// Rank by the heuristic byte-move estimate without executing —
@@ -409,6 +461,11 @@ impl<L: crate::bufferize::PlanLayout> PlanProfiler<L> for StaticProfiler {
         _input_data: &FxHashMap<i64, crate::buffer_tensor_ir::TypedBuffer>,
         _trials: usize,
         heuristic_cost: u64,
+        // Ruling 4 (2026-09-02): CL must eventually profile ON DEVICE,
+        // mirroring the reference profiler's design; until it does, the
+        // static ranker runs no trials, so there is nothing to cut
+        // short and the cutoff is accepted and ignored.
+        _best_so_far: Option<u128>,
     ) -> Result<u128> {
         Ok(u128::from(heuristic_cost).saturating_add(1))
     }
@@ -924,8 +981,17 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
                         })
                         .sum();
                     let profile_start = Instant::now();
-                    let profiled =
-                        profiler.profile(&plan, input_data, options.trials, heuristic_total);
+                    // The incumbent's metric is the early-stop cutoff
+                    // (#386). `None` on the first candidate: it IS the
+                    // baseline, so there is nothing to have lost to.
+                    let best_so_far = best.as_ref().map(|(best_nanos, _, _)| *best_nanos);
+                    let profiled = profiler.profile(
+                        &plan,
+                        input_data,
+                        options.trials,
+                        heuristic_total,
+                        best_so_far,
+                    );
                     timings.profile_nanos += profile_start.elapsed().as_nanos();
                     let nanos = match profiled {
                         Ok(nanos) => nanos,
@@ -1251,6 +1317,110 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Main's `search_passes_best_so_far_to_profile_early_stop`
+    /// (`src/graph.rs`, #386), re-expressed against this branch's seam:
+    /// the selection loop passes `None` for the FIRST profiled
+    /// candidate — it is the baseline — and the incumbent's metric for
+    /// every later one. Main's version asserts `Some((best, factor))`;
+    /// here the cutoff is the bare incumbent (ruling 3, 2026-09-02).
+    #[test]
+    fn search_passes_the_incumbent_metric_to_every_later_profile_call() {
+        #[derive(Default)]
+        struct RecordingProfiler {
+            seen: Vec<Option<u128>>,
+        }
+
+        impl luminal::implementation_search::PlanProfiler<luminal_reference::RefLayout>
+            for RecordingProfiler
+        {
+            fn profile(
+                &mut self,
+                _plan: &luminal::bufferize::BufferIrGraph<luminal_reference::RefLayout>,
+                _input_data: &FxHashMap<i64, luminal::buffer_tensor_ir::TypedBuffer>,
+                _trials: usize,
+                _heuristic_cost: u64,
+                best_so_far: Option<u128>,
+            ) -> anyhow::Result<u128> {
+                self.seen.push(best_so_far);
+                // Strictly increasing metrics (main's trick): the first
+                // candidate scores 0 and stays the incumbent, so every
+                // later call must see exactly that.
+                Ok(self.seen.len() as u128 - 1)
+            }
+        }
+
+        let mut cx = Graph::new();
+        let x = cx.tensor(4);
+        let y = cx.tensor(4);
+        let _sum = (x + y).output();
+        let _product = (x * y).output();
+        let program = cx
+            .logical
+            .bound_program(&luminal_reference::ReferenceBindings)
+            .expect("native program");
+        let text = format!(
+            "{}\n\n{}",
+            luminal_reference::assembled_program(),
+            program.text
+        );
+        let mut egraph = luminal::egglog_snippet::new_egraph();
+        egraph
+            .parse_and_run_program(None, &text)
+            .expect("program runs");
+        let serialized = egraph.serialize(SerializeConfig::default()).egraph;
+
+        let mut inputs = FxHashMap::default();
+        inputs.insert(x.id, vec![1.0f32, 2.0, 3.0, 4.0].into());
+        inputs.insert(y.id, vec![10.0f32, 20.0, 30.0, 40.0].into());
+
+        let options = ImplementationSearchOptions {
+            generations: 3,
+            generation_size: 4,
+            mutations: 2,
+            trials: 1,
+            seed: 0,
+            search_log: false,
+        };
+        let mut profiler = RecordingProfiler::default();
+        let outcome = luminal::implementation_search::search_implementations_with_runtime(
+            &serialized,
+            &program,
+            &inputs,
+            &options,
+            Some(luminal_reference::reference_allow_list()),
+            luminal_reference::ops::built_in_matchers(),
+            &luminal_reference::ReferenceLayoutDecoder,
+            &mut profiler,
+        )
+        .expect("search finds an executable plan");
+
+        assert!(
+            profiler.seen.len() > 1,
+            "the search must profile more than the baseline candidate: {:?}",
+            profiler.seen
+        );
+        assert_eq!(
+            profiler.seen.len(),
+            outcome.plans_profiled,
+            "one profile call per profiled plan (the rest are cache hits)"
+        );
+        assert_eq!(
+            profiler.seen[0], None,
+            "no incumbent exists before the first candidate is profiled"
+        );
+        for (index, seen) in profiler.seen.iter().enumerate().skip(1) {
+            assert_eq!(
+                *seen,
+                Some(0),
+                "candidate {index} must receive the incumbent's metric"
+            );
+        }
+        assert_eq!(
+            outcome.best_nanos, 0,
+            "the first candidate's metric is the running best"
+        );
     }
 
     /// BUCKETED: two buckets over 'a', each validated bucket-wide

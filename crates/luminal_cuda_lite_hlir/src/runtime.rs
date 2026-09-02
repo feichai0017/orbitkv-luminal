@@ -38,6 +38,23 @@ use std::{
 use tracing::{Level, span, trace};
 use uuid::Uuid;
 
+/// LOCAL STUB: `luminal::op` does not exist on this branch (`src/op.rs`
+/// is deleted); the parks track main's spelling, so main's shared
+/// predicate is copied here verbatim from its `src/op.rs` at 499d0779
+/// instead of depending on a core symbol this branch does not have.
+///
+/// Shared early-stop predicate for duration-metric runtimes: true once a
+/// candidate's running mean trial time exceeds `best * factor`, i.e. the
+/// candidate has already lost by at least the configured margin and further
+/// trials can only refine a metric that is out of contention.
+pub fn early_stop_exceeded(
+    mean: std::time::Duration,
+    best: std::time::Duration,
+    factor: f64,
+) -> bool {
+    mean.as_secs_f64() > best.as_secs_f64() * factor
+}
+
 const ARENA_ALIGNMENT: usize = 256;
 const MIN_ARENA_ALLOCATION_BYTES: usize = 16 * 1024 * 1024;
 
@@ -3139,7 +3156,7 @@ impl CudaRuntime {
             // slow warmup must not disqualify a fast steady-state candidate.
             if early_stop.is_some_and(|(best, factor)| {
                 let mean = durations.iter().sum::<Duration>() / durations.len() as u32;
-                luminal::op::early_stop_exceeded(mean, best, factor)
+                early_stop_exceeded(mean, best, factor)
             }) {
                 break;
             }
