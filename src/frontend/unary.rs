@@ -528,7 +528,7 @@ pub(super) mod tests {
             .map(|e| e.to_usize().unwrap())
             .collect_vec();
         let mut cx = Graph::new();
-        let a = cx.tensor(shape.clone());
+        let a = cx.tensor(shape.clone(), DType::F32);
         let b = func(a).output();
 
         let v = random_vec(shape.iter().copied().product());
@@ -694,7 +694,7 @@ pub(super) mod tests {
     #[test]
     fn test_topk_indexes() {
         let mut cx = Graph::new();
-        let x = cx.tensor((2, 4));
+        let x = cx.tensor((2, 4), DType::F32);
         let out = x.topk_indexes(2, 1).cast(DType::F32).output();
 
         // row 0: [0.1, 3.0, 2.0, -1.0] → top-2 desc = idx 1, 2

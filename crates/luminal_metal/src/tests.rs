@@ -141,15 +141,15 @@ struct MiniTransformerLayer {
 impl MiniTransformerLayer {
     fn init(cx: &mut Graph) -> Self {
         Self {
-            attn_norm_w: cx.tensor(TRANSFORMER_HIDDEN),
-            wq: cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN)),
-            wk: cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN)),
-            wv: cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN)),
-            wo: cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN)),
-            mlp_norm_w: cx.tensor(TRANSFORMER_HIDDEN),
-            w_gate: cx.tensor((TRANSFORMER_INTERMEDIATE, TRANSFORMER_HIDDEN)),
-            w_up: cx.tensor((TRANSFORMER_INTERMEDIATE, TRANSFORMER_HIDDEN)),
-            w_down: cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_INTERMEDIATE)),
+            attn_norm_w: cx.tensor(TRANSFORMER_HIDDEN, DType::F32),
+            wq: cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F32),
+            wk: cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F32),
+            wv: cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F32),
+            wo: cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F32),
+            mlp_norm_w: cx.tensor(TRANSFORMER_HIDDEN, DType::F32),
+            w_gate: cx.tensor((TRANSFORMER_INTERMEDIATE, TRANSFORMER_HIDDEN), DType::F32),
+            w_up: cx.tensor((TRANSFORMER_INTERMEDIATE, TRANSFORMER_HIDDEN), DType::F32),
+            w_down: cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_INTERMEDIATE), DType::F32),
         }
     }
 
@@ -298,7 +298,7 @@ fn dynamic_const_codegen_uses_dyn_buffer() {
 fn dynamic_dim_sum_reduce_runs() {
     let mut cx = Graph::default();
     cx.set_dim('a', 3);
-    let input = cx.tensor(('a', 2));
+    let input = cx.tensor(('a', 2), DType::F32);
     let output = input.sum(0).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -316,7 +316,7 @@ fn dynamic_dim_sum_reduce_runs() {
 #[test]
 fn metal_bucketed_dynamic_dim_dispatches_correct_graph() {
     let mut cx = Graph::default();
-    let input = cx.tensor(('s', 4));
+    let input = cx.tensor(('s', 4), DType::F32);
     let output = (input + input).output();
 
     cx.set_dim('s', 1);
@@ -347,7 +347,7 @@ fn metal_bucketed_dynamic_dim_dispatches_correct_graph() {
 #[test]
 fn metal_int_arithmetic_preserves_large_values() {
     let mut cx = Graph::default();
-    let token = cx.tensor_dtyped(1, DType::Int);
+    let token = cx.tensor(1, DType::Int);
     let large_index = (token * 1024) + 123;
     let mod_output = (large_index % 65_537).output();
 
@@ -370,7 +370,7 @@ proptest! {
         prop_assume!(values.len() >= len);
 
         let mut cx = Graph::default();
-        let input = cx.tensor(len);
+        let input = cx.tensor(len, DType::F32);
         let output = (input + input).output();
 
         cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -392,7 +392,7 @@ proptest! {
         prop_assume!(values.len() >= len);
 
         let mut cx = Graph::default();
-        let input = cx.tensor(len);
+        let input = cx.tensor(len, DType::F32);
         let output = (input * input).output();
 
         cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -414,7 +414,7 @@ proptest! {
         prop_assume!(values.len() >= len);
 
         let mut cx = Graph::default();
-        let input = cx.tensor(len);
+        let input = cx.tensor(len, DType::F32);
         let output = input.exp2().output();
 
         cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -435,8 +435,8 @@ proptest! {
 #[test]
 fn metal_simple_add() {
     let mut cx = Graph::default();
-    let a = cx.tensor(4);
-    let b = cx.tensor(4);
+    let a = cx.tensor(4, DType::F32);
+    let b = cx.tensor(4, DType::F32);
     let output = (a + b).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -455,8 +455,8 @@ fn metal_simple_add() {
 #[test]
 fn metal_simple_mul() {
     let mut cx = Graph::default();
-    let a = cx.tensor(4);
-    let b = cx.tensor(4);
+    let a = cx.tensor(4, DType::F32);
+    let b = cx.tensor(4, DType::F32);
     let output = (a * b).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -475,7 +475,7 @@ fn metal_simple_mul() {
 #[test]
 fn metal_simple_exp2() {
     let mut cx = Graph::default();
-    let input = cx.tensor(4);
+    let input = cx.tensor(4, DType::F32);
     let output = input.exp2().output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -492,7 +492,7 @@ fn metal_simple_exp2() {
 #[test]
 fn metal_simple_log2() {
     let mut cx = Graph::default();
-    let input = cx.tensor(4);
+    let input = cx.tensor(4, DType::F32);
     let output = input.log2().output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -509,7 +509,7 @@ fn metal_simple_log2() {
 #[test]
 fn metal_simple_sin() {
     let mut cx = Graph::default();
-    let input = cx.tensor(4);
+    let input = cx.tensor(4, DType::F32);
     let output = input.sin().output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -534,7 +534,7 @@ fn metal_simple_sin() {
 #[test]
 fn metal_simple_sqrt() {
     let mut cx = Graph::default();
-    let input = cx.tensor(4);
+    let input = cx.tensor(4, DType::F32);
     let output = input.sqrt().output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -551,7 +551,7 @@ fn metal_simple_sqrt() {
 #[test]
 fn metal_simple_recip() {
     let mut cx = Graph::default();
-    let input = cx.tensor(4);
+    let input = cx.tensor(4, DType::F32);
     let output = input.reciprocal().output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -568,8 +568,8 @@ fn metal_simple_recip() {
 #[test]
 fn metal_simple_mod() {
     let mut cx = Graph::default();
-    let a = cx.tensor(4);
-    let b = cx.tensor(4);
+    let a = cx.tensor(4, DType::F32);
+    let b = cx.tensor(4, DType::F32);
     let output = (a % b).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -587,8 +587,8 @@ fn metal_simple_mod() {
 #[test]
 fn metal_simple_less_than() {
     let mut cx = Graph::default();
-    let a = cx.tensor(4);
-    let b = cx.tensor(4);
+    let a = cx.tensor(4, DType::F32);
+    let b = cx.tensor(4, DType::F32);
     let output = a.lt(b).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -607,7 +607,7 @@ fn metal_simple_less_than() {
 #[test]
 fn metal_simple_sum_reduce() {
     let mut cx = Graph::default();
-    let input = cx.tensor((2, 4));
+    let input = cx.tensor((2, 4), DType::F32);
     // sum over axis 1
     let output = input.sum(1).output();
 
@@ -626,7 +626,7 @@ fn metal_simple_sum_reduce() {
 #[test]
 fn metal_simple_max_reduce() {
     let mut cx = Graph::default();
-    let input = cx.tensor((2, 4));
+    let input = cx.tensor((2, 4), DType::F32);
     // max over axis 1
     let output = input.max(1).output();
 
@@ -645,7 +645,7 @@ fn metal_simple_max_reduce() {
 #[test]
 fn metal_f16_cast_roundtrip() {
     let mut cx = Graph::default();
-    let input = cx.tensor(4);
+    let input = cx.tensor(4, DType::F32);
     let output = input.cast(DType::F16).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -662,8 +662,8 @@ fn metal_f16_cast_roundtrip() {
 #[test]
 fn metal_f16_intermediate_add_roundtrip() {
     let mut cx = Graph::default();
-    let a = cx.tensor(4);
-    let b = cx.tensor(4);
+    let a = cx.tensor(4, DType::F32);
+    let b = cx.tensor(4, DType::F32);
     let output = (a.cast(DType::F16) + b.cast(DType::F16))
         .cast(DType::F32)
         .output();
@@ -683,8 +683,8 @@ fn metal_f16_intermediate_add_roundtrip() {
 #[test]
 fn metal_specialized_matmul() {
     let mut cx = Graph::default();
-    let a = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN));
-    let b = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN));
+    let a = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN), DType::F32);
+    let b = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F32);
     let output = a.matmul(b).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -723,8 +723,8 @@ fn metal_regular_tiled_matmul_path() {
     let m = 64;
     let k = 64;
     let n = 64;
-    let a = cx.tensor((m, k));
-    let b = cx.tensor((k, n));
+    let a = cx.tensor((m, k), DType::F32);
+    let b = cx.tensor((k, n), DType::F32);
     let output = a.matmul(b).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -758,8 +758,8 @@ fn metal_mps_matmul_transposed_rhs_weight_layout() {
     let m = 7;
     let k = 11;
     let n = 13;
-    let a = cx.tensor((m, k));
-    let weight = cx.tensor((n, k));
+    let a = cx.tensor((m, k), DType::F32);
+    let weight = cx.tensor((n, k), DType::F32);
     let output = a.matmul(weight.t()).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -793,8 +793,8 @@ fn metal_mps_matmul_transposed_lhs_layout() {
     let m = 5;
     let k = 9;
     let n = 6;
-    let lhs_storage = cx.tensor((k, m));
-    let rhs = cx.tensor((k, n));
+    let lhs_storage = cx.tensor((k, m), DType::F32);
+    let rhs = cx.tensor((k, n), DType::F32);
     let output = lhs_storage.t().matmul(rhs).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -832,8 +832,8 @@ fn metal_mps_batched_matmul_row_row_layout() {
     let m = 4;
     let k = 5;
     let n = 6;
-    let a = cx.tensor((batch, m, k));
-    let b = cx.tensor((batch, k, n));
+    let a = cx.tensor((batch, m, k), DType::F32);
+    let b = cx.tensor((batch, k, n), DType::F32);
     let output = a.matmul(b).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -875,8 +875,8 @@ fn metal_generic_matmul_covers_noncontiguous_merged_head_projection() {
     let head_dim = 5;
     let hidden = heads * head_dim;
     let out_dim = 7;
-    let attn = cx.tensor((heads, seq, head_dim));
-    let weight = cx.tensor((out_dim, hidden));
+    let attn = cx.tensor((heads, seq, head_dim), DType::F32);
+    let weight = cx.tensor((out_dim, hidden), DType::F32);
     let merged = attn.transpose(0, 1).merge_dims(1, 2);
     let output = merged.matmul(weight.t()).output();
 
@@ -935,8 +935,8 @@ fn metal_mps_batched_matmul_transposed_rhs_layout() {
     let m = 3;
     let k = 7;
     let n = 5;
-    let a = cx.tensor((batch, m, k));
-    let weight = cx.tensor((batch, n, k));
+    let a = cx.tensor((batch, m, k), DType::F32);
+    let weight = cx.tensor((batch, n, k), DType::F32);
     let output = a.matmul(weight.permute((0, 2, 1))).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -976,8 +976,8 @@ fn metal_mps_matmul_f16_transposed_rhs_weight_layout() {
     let m = 6;
     let k = 10;
     let n = 7;
-    let a = cx.tensor_dtyped((m, k), DType::F16);
-    let weight = cx.tensor_dtyped((n, k), DType::F16);
+    let a = cx.tensor((m, k), DType::F16);
+    let weight = cx.tensor((n, k), DType::F16);
     let output = a.matmul(weight.t()).cast(DType::F32).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -1008,8 +1008,8 @@ fn metal_mps_matmul_f16_transposed_rhs_weight_layout() {
 #[test]
 fn metal_rms_norm() {
     let mut cx = Graph::default();
-    let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN));
-    let weight = cx.tensor(TRANSFORMER_HIDDEN);
+    let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN), DType::F32);
+    let weight = cx.tensor(TRANSFORMER_HIDDEN, DType::F32);
     let output = rms_norm(input, weight, 1e-5).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -1039,11 +1039,11 @@ fn metal_rms_norm() {
 #[test]
 fn metal_self_attention() {
     let mut cx = Graph::default();
-    let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN));
-    let wq = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN));
-    let wk = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN));
-    let wv = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN));
-    let wo = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN));
+    let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN), DType::F32);
+    let wq = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F32);
+    let wk = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F32);
+    let wv = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F32);
+    let wo = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F32);
     let output = self_attention(input, wq, wk, wv, wo).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -1087,15 +1087,15 @@ fn metal_self_attention() {
 fn metal_self_attention_f16_weights() {
     let mut cx = Graph::default();
     let input = cx
-        .tensor_dtyped((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN), DType::F16);
+        .tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN), DType::F16);
     let wq = cx
-        .tensor_dtyped((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F16);
+        .tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F16);
     let wk = cx
-        .tensor_dtyped((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F16);
+        .tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F16);
     let wv = cx
-        .tensor_dtyped((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F16);
+        .tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F16);
     let wo = cx
-        .tensor_dtyped((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F16);
+        .tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), DType::F16);
     let output = self_attention(input, wq, wk, wv, wo)
         .cast(DType::F32)
         .output();
@@ -1140,10 +1140,10 @@ fn metal_self_attention_f16_weights() {
 #[test]
 fn metal_swiglu_mlp() {
     let mut cx = Graph::default();
-    let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN));
-    let w_gate = cx.tensor((TRANSFORMER_INTERMEDIATE, TRANSFORMER_HIDDEN));
-    let w_up = cx.tensor((TRANSFORMER_INTERMEDIATE, TRANSFORMER_HIDDEN));
-    let w_down = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_INTERMEDIATE));
+    let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN), DType::F32);
+    let w_gate = cx.tensor((TRANSFORMER_INTERMEDIATE, TRANSFORMER_HIDDEN), DType::F32);
+    let w_up = cx.tensor((TRANSFORMER_INTERMEDIATE, TRANSFORMER_HIDDEN), DType::F32);
+    let w_down = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_INTERMEDIATE), DType::F32);
     let output = swiglu_mlp(input, w_gate, w_up, w_down).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -1194,7 +1194,7 @@ fn metal_swiglu_mlp() {
 #[test]
 fn metal_mini_transformer_layer() {
     let mut cx = Graph::default();
-    let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN));
+    let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN), DType::F32);
     let layer = MiniTransformerLayer::init(&mut cx);
     let output = layer.forward(input).output();
 
@@ -1240,7 +1240,7 @@ fn metal_mini_transformer_layer() {
 #[test]
 fn metal_mini_transformer_layer_f16_intermediate() {
     let mut cx = Graph::default();
-    let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN));
+    let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN), DType::F32);
     let layer = MiniTransformerLayer::init(&mut cx);
 
     let normed = rms_norm(input, layer.attn_norm_w, 1e-5).cast(DType::F16);
@@ -1306,9 +1306,9 @@ fn metal_mini_transformer_layer_f16_intermediate() {
 #[test]
 fn test_scatter_basic() {
     let mut cx = Graph::default();
-    let src = cx.tensor(3);
-    let indexes = cx.tensor_dtyped(3, DType::Int);
-    let dest = cx.tensor(5);
+    let src = cx.tensor(3, DType::F32);
+    let indexes = cx.tensor(3, DType::Int);
+    let dest = cx.tensor(5, DType::F32);
     let result = src.scatter(indexes, dest).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -1327,9 +1327,9 @@ fn test_scatter_basic() {
 #[test]
 fn test_scatter_buffer_roundtrip() {
     let mut cx = Graph::default();
-    let src = cx.tensor(1);
-    let indexes = cx.tensor_dtyped(1, DType::Int);
-    let cache = cx.tensor(4).persist();
+    let src = cx.tensor(1, DType::F32);
+    let indexes = cx.tensor(1, DType::Int);
+    let cache = cx.tensor(4, DType::F32).persist();
     let cache_out = src.scatter(indexes, cache);
     let read = cache_out.output();
 
@@ -1359,8 +1359,8 @@ fn test_scatter_buffer_roundtrip() {
 #[test]
 fn test_load_safetensors_f32_survives_search_and_overrides_input_data() {
     let mut cx = Graph::default();
-    let weights = cx.named_tensor("weights", 3);
-    let bias = cx.named_tensor("bias", 3);
+    let weights = cx.named_tensor("weights", 3, DType::F32);
+    let bias = cx.named_tensor("bias", 3, DType::F32);
     let out = (weights + bias).output();
 
     let weight_values = [1.25f32, -2.5, 4.0];
@@ -1383,11 +1383,11 @@ fn test_load_safetensors_f32_survives_search_and_overrides_input_data() {
 #[test]
 fn test_load_safetensors_converts_supported_float_dtypes() {
     let mut cx = Graph::default();
-    let f16_to_f32 = cx.named_tensor("f16_to_f32", 2);
-    let bf16_to_f32 = cx.named_tensor("bf16_to_f32", 2);
-    let f16_to_f16 = cx.named_tensor_dtyped("f16_to_f16", 2, DType::F16);
-    let f32_to_f16 = cx.named_tensor_dtyped("f32_to_f16", 2, DType::F16);
-    let bf16_to_f16 = cx.named_tensor_dtyped("bf16_to_f16", 2, DType::F16);
+    let f16_to_f32 = cx.named_tensor("f16_to_f32", 2, DType::F32);
+    let bf16_to_f32 = cx.named_tensor("bf16_to_f32", 2, DType::F32);
+    let f16_to_f16 = cx.named_tensor("f16_to_f16", 2, DType::F16);
+    let f32_to_f16 = cx.named_tensor("f32_to_f16", 2, DType::F16);
+    let bf16_to_f16 = cx.named_tensor("bf16_to_f16", 2, DType::F16);
 
     let f16_to_f32_out = (f16_to_f32 + 0.0).output();
     let bf16_to_f32_out = (bf16_to_f32 + 0.0).output();
@@ -1452,9 +1452,9 @@ fn test_load_safetensors_converts_supported_float_dtypes() {
 #[test]
 fn test_gather_noncontiguous_data_uses_data_shape() {
     let mut cx = Graph::default();
-    let input = cx.tensor((4, 3));
+    let input = cx.tensor((4, 3), DType::F32);
     let data = input.transpose(0, 1);
-    let indexes = cx.tensor_dtyped((2, 2), DType::Int);
+    let indexes = cx.tensor((2, 2), DType::Int);
     let out = data.gather(indexes).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -1474,9 +1474,9 @@ fn test_gather_noncontiguous_data_uses_data_shape() {
 #[test]
 fn test_scatter_into_nonzero_dest() {
     let mut cx = Graph::default();
-    let src = cx.tensor(1);
-    let indexes = cx.tensor_dtyped(1, DType::Int);
-    let dest = cx.tensor(5);
+    let src = cx.tensor(1, DType::F32);
+    let indexes = cx.tensor(1, DType::Int);
+    let dest = cx.tensor(5, DType::F32);
     let result = src.scatter(indexes, dest).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -1501,9 +1501,9 @@ fn test_scatter_into_nonzero_dest() {
 #[test]
 fn test_scatter_no_copy_remove_buffer_aliases_dest() {
     let mut cx = Graph::default();
-    let src = cx.tensor(2);
-    let indexes = cx.tensor_dtyped(2, DType::Int);
-    let dest = cx.tensor(5);
+    let src = cx.tensor(2, DType::F32);
+    let indexes = cx.tensor(2, DType::Int);
+    let dest = cx.tensor(5, DType::F32);
     let result = src.scatter(indexes, dest).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -1530,9 +1530,9 @@ fn test_scatter_no_copy_remove_buffer_aliases_dest() {
 #[test]
 fn test_scatter_no_copy_handles_2d_destination() {
     let mut cx = Graph::default();
-    let src = cx.tensor(2);
-    let indexes = cx.tensor_dtyped(2, DType::Int);
-    let dest = cx.tensor((2, 3));
+    let src = cx.tensor(2, DType::F32);
+    let indexes = cx.tensor(2, DType::Int);
+    let dest = cx.tensor((2, 3), DType::F32);
     let result = src.scatter(indexes, dest).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -1556,9 +1556,9 @@ fn test_scatter_no_copy_handles_2d_destination() {
 #[test]
 fn test_scatter_no_copy_not_selected_when_dest_has_another_consumer() {
     let mut cx = Graph::default();
-    let src = cx.tensor(1);
-    let indexes = cx.tensor_dtyped(1, DType::Int);
-    let dest = cx.tensor(4);
+    let src = cx.tensor(1, DType::F32);
+    let indexes = cx.tensor(1, DType::Int);
+    let dest = cx.tensor(4, DType::F32);
     let scatter = src.scatter(indexes, dest).output();
     let dest_plus_one = (dest + 1.0).output();
 
@@ -1584,9 +1584,9 @@ fn test_scatter_no_copy_not_selected_when_dest_has_another_consumer() {
 #[test]
 fn test_scatter_all_positions() {
     let mut cx = Graph::default();
-    let src = cx.tensor(4);
-    let indexes = cx.tensor_dtyped(4, DType::Int);
-    let dest = cx.tensor(4);
+    let src = cx.tensor(4, DType::F32);
+    let indexes = cx.tensor(4, DType::Int);
+    let dest = cx.tensor(4, DType::F32);
     let result = src.scatter(indexes, dest).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
@@ -1605,8 +1605,8 @@ fn test_scatter_all_positions() {
 #[test]
 fn test_gather_preserves_data_dtype() {
     let mut cx = Graph::default();
-    let data = cx.tensor(2);
-    let indexes = cx.tensor_dtyped(1, DType::Int);
+    let data = cx.tensor(2, DType::F32);
+    let indexes = cx.tensor(1, DType::Int);
     let out = data.gather(indexes).output();
 
     cx.build_search_space::<MetalRuntime>(CompileOptions::default());
