@@ -93,7 +93,7 @@ fn report(name: &str, text: &str) {
         "[{name}] no free for the escaping buffer:\n{summary}"
     );
     // OPTION B: the layout is TOTAL on bindings; what is pinned is that
-    // the binding carries the SLOT VALUE's own rendered layout, not the
+    // the binding carries the SLOT VALUE's own decoded layout, not the
     // backing buffer's resident layout.
     assert_eq!(
         Some(&slot.layout),

@@ -14,7 +14,7 @@ use luminal::implementation_search::{
     search_implementations_with_runtime, ImplementationSearchOptions, PlanProfiler, SearchOutcome,
 };
 
-use crate::layouts::{RefLayout, ReferenceLayoutRenderer};
+use crate::layouts::{RefLayout, ReferenceLayoutDecoder};
 use crate::runtime::{reference_allow_list, ReferenceRuntime};
 
 /// The historical profiler: execute on the reference host runtime.
@@ -63,7 +63,7 @@ pub fn search_implementations_with_ops(
         options,
         allow,
         crate::ops::built_in_matchers(),
-        &ReferenceLayoutRenderer,
+        &ReferenceLayoutDecoder,
         &mut ReferenceProfiler,
     )
 }

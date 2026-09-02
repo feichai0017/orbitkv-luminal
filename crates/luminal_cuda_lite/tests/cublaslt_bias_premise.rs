@@ -149,10 +149,10 @@ fn linear_with_bias_mints_the_bias_form_on_a_left_major_d() {
     }
     for class in &d_classes {
         let ops = class_ops(&egraph, class);
-        let mirror = luminal::layouts::render_layout_for(&egraph, class, "bias-premise pin")
-            .expect("the D layout class renders");
+        let mirror = luminal::layouts::decode_layout_for(&egraph, class, "bias-premise pin")
+            .expect("the D layout class decodes");
         println!("BIAS-PREMISE CublasLtBias D layout class {class:?}: ops={ops:?}");
-        println!("BIAS-PREMISE   rendered (most-structured spelling): {mirror:?}");
+        println!("BIAS-PREMISE   decoded (most-structured spelling): {mirror:?}");
         assert!(
             ops.contains("LeftMajorContiguousElementLayoutLit"),
             "the bias form's D class must hold the LeftMajor spelling: {ops:?}"
@@ -172,7 +172,7 @@ fn linear_with_bias_mints_the_bias_form_on_a_left_major_d() {
         );
         assert!(
             matches!(mirror, luminal::layouts::MirrorLayout::LeftMajor(_)),
-            "the renderer's most-structured spelling is LeftMajor (RightMajor is absent, \
+            "the decoder's most-structured spelling is LeftMajor (RightMajor is absent, \
              as it must be: a [3,4] left-major over the bytes of a [4,3] right-major): {mirror:?}"
         );
     }

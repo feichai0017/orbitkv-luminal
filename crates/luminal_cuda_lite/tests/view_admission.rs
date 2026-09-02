@@ -24,7 +24,7 @@
 //!    by EVALUATING that layout to a flat parent element index and
 //!    comparing against the hand-computed map. (The hop chain is retired:
 //!    corrected contract, 2026-08-31. The e-graph composes views at view
-//!    creation; the rendered `L` IS the read path, and how it is spelled
+//!    creation; the decoded `L` IS the read path, and how it is spelled
 //!    is the e-graph's business.)
 
 use luminal::buffer_tensor_ir::TypedBuffer;

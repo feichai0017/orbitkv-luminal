@@ -546,33 +546,33 @@ pub trait OpMatcher: std::fmt::Debug {
     fn extract(&self, site: &ExtractionSite<'_>) -> Box<dyn LayoutIrOp>;
 }
 
-/// The runtime's LAYOUT RENDERER — the layout-side mirror of the
+/// The runtime's LAYOUT DECODER — the layout-side mirror of the
 /// [`OpMatcher`] registration seam (resident-geometry cleanup, ruling
 /// 2026-08-31). Where matchers turn elected op enodes into instances, the
-/// renderer turns each elected value's LAYOUT e-class into the runtime's
+/// decoder turns each elected value's LAYOUT e-class into the runtime's
 /// own opaque layout value `L` — the type the bufferizer transports on
 /// [`crate::bufferize::Buffer`] without ever interpreting it. Core CALLS
 /// this hook (once per distinct layout class, see
-/// [`crate::extractor::rendered_layout_table`]) and never parses a layout
+/// [`crate::extractor::decoded_layout_table`]) and never parses a layout
 /// spelling itself.
 ///
-/// RENDERING RULE for implementors: any spelling present in the class is
+/// DECODING RULE for implementors: any spelling present in the class is
 /// correct — all spellings of a layout class denote one function — and
 /// the most-structured spelling present (RightMajor > LeftMajor >
-/// Strided > ElementOffset > BitOffset) is preferred as a rendering
+/// Strided > ElementOffset > BitOffset) is preferred as a decoding
 /// preference only. No normalization, no analysis, and failure is LOUD:
 /// an error refuses the plan; there is no silent default layout.
-/// PER-VALUE RENDERING (Option B rework, 2026-08-31): the hook receives
+/// PER-VALUE DECODING (Option B rework, 2026-08-31): the hook receives
 /// the elected VALUE's [`LayoutTensorInfo`] — its layout class plus the
 /// extraction-side facts the runtime already owns (notably `dtype_enum`,
 /// the `dtype-of` row) — so a runtime may fold whatever it wants of its
 /// OWN knowledge into `L` (e.g. a typed layout). Core still never reads
-/// any of it back. CACHE CONTRACT: the rendering must be a pure function
+/// any of it back. CACHE CONTRACT: decoding must be a pure function
 /// of `(value.layout.eclass, value.dtype_enum)` — core caches on exactly
 /// that key across genomes.
-pub trait LayoutRenderer<L> {
-    /// Render one elected value's layout into `L`.
-    fn render_layout(
+pub trait LayoutDecoder<L> {
+    /// Decode one elected value's layout into `L`.
+    fn decode(
         &self,
         egraph: &egraph_serialize::EGraph,
         value: &LayoutTensorInfo,

@@ -8,7 +8,7 @@
 //! this a core vocabulary: the bufferizer stays generic over an opaque
 //! layout type it only clones and transports, and nothing in the planner
 //! imports this module. It exists so runtimes can pull the five mirror
-//! structs, the [`SpanExpr`] trait, and [`render_layout`] from one place
+//! structs, the [`SpanExpr`] trait, and [`decode_layout`] from one place
 //! instead of each respelling them; a backend that wants a different
 //! layout vocabulary brings its own type and ignores this module
 //! entirely — nothing here is a closed set the planner depends on.
@@ -18,18 +18,18 @@
 //!    vocabulary the constructor fields are spelled in;
 //!  * the five mirror structs, field-for-field with the preamble's
 //!    constructors (`RightMajorContiguousElementLayoutLit(Shape, BitWidth)`
-//!    and friends), plus the [`MirrorLayout`] sum for renderers;
+//!    and friends), plus the [`MirrorLayout`] sum for decoders;
 //!  * [`SpanExpr`] — the span-as-EXPRESSION trait, implemented ONLY where
 //!    a span is honest (the packed element ladder: right-major,
 //!    left-major, strided). The offset-expression forms deliberately do
 //!    NOT implement it: an offset function alone does not disclose its
 //!    reach, and nothing here guesses. NOTHING consumes `span()` yet.
-//!  * [`render_layout`] — the spelling renderer: walk one layout e-class
+//!  * [`decode_layout`] — the spelling decoder: walk one layout e-class
 //!    of a serialized e-graph into a [`MirrorLayout`]. Any spelling
 //!    present in a class is correct (all spellings of a layout class
 //!    denote one function); the walk PREFERS the most-structured spelling
 //!    present (RightMajor > LeftMajor > Strided > ElementOffset >
-//!    BitOffset) as a rendering preference only. No normalization, no
+//!    BitOffset) as a decoding preference only. No normalization, no
 //!    analysis — a class none of whose spellings parse is a loud error,
 //!    never a guess.
 
@@ -42,7 +42,7 @@ use std::collections::HashMap;
 // =============================================================================
 
 /// An integer expression TERM — the symbolic vocabulary layout fields are
-/// rendered into. A direct transliteration of the preamble's `IntExpr`
+/// decoded into. A direct transliteration of the preamble's `IntExpr`
 /// subset that appears inside layouts; construction only, no evaluation
 /// and no rewriting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub enum IntExprTerm {
     Var(String),
     /// `(CoordVar shape axis)` — a coordinate over the owning layout's
     /// domain, axis 0-based FROM THE END (the preamble's de Bruijn
-    /// convention). The owner shape is checked at render time (a foreign
+    /// convention). The owner shape is checked at decode time (a foreign
     /// shape's coordinate never silently parses); the term keeps the
     /// axis alone.
     Coord {
@@ -165,13 +165,13 @@ pub struct BitOffsetExpressionLayout {
     pub width: BitWidthTerm,
 }
 
-/// The convenience sum renderers produce — one value for "some spelling
-/// of this layout class". RENDERER CONVENIENCE ONLY: the bufferizer is
-/// generic and never sees this type; a backend may render into its own
+/// The convenience sum decoders produce — one value for "some spelling
+/// of this layout class". DECODER CONVENIENCE ONLY: the bufferizer is
+/// generic and never sees this type; a backend may decode into its own
 /// type instead. NOT a closed vocabulary — and FLAGGED for review
 /// (Austin): a sum over the five constructors may already be too
 /// enum-ish for a vocabulary that is deliberately open; kept for now as
-/// the shared renderers' return type.
+/// the shared decoders' return type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirrorLayout {
     RightMajor(RightMajorContiguousElementLayout),
@@ -332,19 +332,19 @@ impl MirrorLayout {
 }
 
 // =============================================================================
-// The spelling renderer
+// The spelling decoder
 // =============================================================================
 
-/// Render one layout e-class of a serialized e-graph into a
+/// Decode one layout e-class of a serialized e-graph into a
 /// [`MirrorLayout`]. Builds a class index for the walk (one pass over the
-/// e-graph), so callers rendering many classes should memoize per class
-/// (all spellings of a class denote one function, so a class renders the
+/// e-graph), so callers decoding many classes should memoize per class
+/// (all spellings of a class denote one function, so a class decodes the
 /// same every time). Errors are LOUD and name the class — never a guess.
-pub fn render_layout(egraph: &EGraph, class: &ClassId) -> Result<MirrorLayout> {
-    Reader::new(egraph).render_layout(class)
+pub fn decode_layout(egraph: &EGraph, class: &ClassId) -> Result<MirrorLayout> {
+    Reader::new(egraph).decode_layout(class)
 }
 
-/// The renderer's walk state: the e-graph plus its by-class node index.
+/// The decoder's walk state: the e-graph plus its by-class node index.
 struct Reader<'a> {
     egraph: &'a EGraph,
     class_nodes: HashMap<&'a ClassId, Vec<&'a NodeId>>,
@@ -424,8 +424,8 @@ impl<'a> Reader<'a> {
             })
     }
 
-    fn render_layout(&self, class: &ClassId) -> Result<MirrorLayout> {
-        // The rendering PREFERENCE (most-structured spelling first); any
+    fn decode_layout(&self, class: &ClassId) -> Result<MirrorLayout> {
+        // The decoding PREFERENCE (most-structured spelling first); any
         // spelling present is correct, so the first that parses wins and
         // later constructors are backtracking fallbacks only.
         let mut present = Vec::new();
@@ -433,9 +433,9 @@ impl<'a> Reader<'a> {
             present.push("RightMajorContiguousElementLayoutLit");
             let (Some(shape), Some(width)) = (
                 self.class_of_child(node, 0)
-                    .and_then(|c| self.render_shape(&c)),
+                    .and_then(|c| self.decode_shape(&c)),
                 self.class_of_child(node, 1)
-                    .and_then(|c| self.render_bit_width(&c)),
+                    .and_then(|c| self.decode_bit_width(&c)),
             ) else {
                 continue;
             };
@@ -447,9 +447,9 @@ impl<'a> Reader<'a> {
             present.push("LeftMajorContiguousElementLayoutLit");
             let (Some(shape), Some(width)) = (
                 self.class_of_child(node, 0)
-                    .and_then(|c| self.render_shape(&c)),
+                    .and_then(|c| self.decode_shape(&c)),
                 self.class_of_child(node, 1)
-                    .and_then(|c| self.render_bit_width(&c)),
+                    .and_then(|c| self.decode_bit_width(&c)),
             ) else {
                 continue;
             };
@@ -468,12 +468,12 @@ impl<'a> Reader<'a> {
                 continue;
             };
             let (Some(shape), Some(width)) = (
-                self.render_shape(&shape_class),
-                self.render_bit_width(&width_class),
+                self.decode_shape(&shape_class),
+                self.decode_bit_width(&width_class),
             ) else {
                 continue;
             };
-            let Some(chain) = self.render_affine_chain(&chain_class, &shape_class) else {
+            let Some(chain) = self.decode_affine_chain(&chain_class, &shape_class) else {
                 continue;
             };
             return Ok(MirrorLayout::Strided(StridedElementLayout {
@@ -496,8 +496,8 @@ impl<'a> Reader<'a> {
                     continue;
                 };
                 let (Some(shape), Some(width)) = (
-                    self.render_shape(&shape_class),
-                    self.render_bit_width(&width_class),
+                    self.decode_shape(&shape_class),
+                    self.decode_bit_width(&width_class),
                 ) else {
                     continue;
                 };
@@ -525,7 +525,7 @@ impl<'a> Reader<'a> {
         if present.is_empty() {
             bail!(
                 "layout class {class} has no Layout constructor spelling — \
-                 nothing to render (fail-closed, never a guess)"
+                 nothing to decode (fail-closed, never a guess)"
             );
         }
         bail!(
@@ -535,7 +535,7 @@ impl<'a> Reader<'a> {
         )
     }
 
-    fn render_bit_width(&self, class: &ClassId) -> Option<BitWidthTerm> {
+    fn decode_bit_width(&self, class: &ClassId) -> Option<BitWidthTerm> {
         for node in self.nodes_in_class_value(class, "BitWidthLit") {
             let Some(bits_class) = self.class_of_child(node, 0) else {
                 continue;
@@ -547,14 +547,14 @@ impl<'a> Reader<'a> {
         None
     }
 
-    fn render_shape(&self, class: &ClassId) -> Option<ShapeTerm> {
+    fn decode_shape(&self, class: &ClassId) -> Option<ShapeTerm> {
         for node in self.nodes_in_class_value(class, "ShapeLit") {
             let Some(head) = self.class_of_child(node, 0) else {
                 continue;
             };
             let mut memo = HashMap::new();
             if let Some(extents) =
-                self.render_expr_list(&head, "IntExprCons", "IntExprNil", 64, None, &mut memo)
+                self.decode_expr_list(&head, "IntExprCons", "IntExprNil", 64, None, &mut memo)
             {
                 return Some(ShapeTerm(extents));
             }
@@ -565,13 +565,13 @@ impl<'a> Reader<'a> {
     /// The strided chain: one summand per axis from-end. Coordinates are
     /// guarded to the layout's OWN shape (a foreign shape's coordinate is
     /// not this domain's and fails that spelling — the owner-shape guard).
-    fn render_affine_chain(
+    fn decode_affine_chain(
         &self,
         class: &ClassId,
         owner_shape: &ClassId,
     ) -> Option<Vec<IntExprTerm>> {
         let mut memo = HashMap::new();
-        self.render_expr_list(
+        self.decode_expr_list(
             class,
             "IntAffineExprCons",
             "IntAffineExprNil",
@@ -584,7 +584,7 @@ impl<'a> Reader<'a> {
     /// Cons-spine walk, existential at every level (the backtracking
     /// doctrine): a saturated list class holds several cons spellings and
     /// the first may dead-end while a sibling parses fine.
-    fn render_expr_list(
+    fn decode_expr_list(
         &self,
         class: &ClassId,
         cons_op: &str,
@@ -610,7 +610,7 @@ impl<'a> Reader<'a> {
                 continue;
             };
             if let Some(mut rest) =
-                self.render_expr_list(&tail, cons_op, nil_op, depth - 1, owner_shape, memo)
+                self.decode_expr_list(&tail, cons_op, nil_op, depth - 1, owner_shape, memo)
             {
                 rest.insert(0, expr);
                 return Some(rest);
@@ -768,10 +768,10 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Convenience for renderers that must be total: [`render_layout`] with
+/// Convenience for decoders that must be total: [`decode_layout`] with
 /// the error contextualized by who was asking.
-pub fn render_layout_for(egraph: &EGraph, class: &ClassId, who: &str) -> Result<MirrorLayout> {
-    render_layout(egraph, class).map_err(|err| anyhow!("{who}: {err}"))
+pub fn decode_layout_for(egraph: &EGraph, class: &ClassId, who: &str) -> Result<MirrorLayout> {
+    decode_layout(egraph, class).map_err(|err| anyhow!("{who}: {err}"))
 }
 
 #[cfg(test)]

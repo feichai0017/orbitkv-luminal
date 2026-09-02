@@ -5,7 +5,7 @@
 //! The reason is stated on `SlotDescriptor`: recording per-slot view-fold
 //! chains was the PLANNER composing layout knowledge, and the e-graph
 //! already mints every view value's composed layout at view creation. The
-//! runtime's rendered `L` for that value IS the read path.
+//! runtime's decoded `L` for that value IS the read path.
 //!
 //! So the plan-level fact worth pinning changed shape. It is no longer
 //! "the fold's map survived onto the descriptor"; it is:
@@ -20,8 +20,8 @@
 //!
 //! ASSERTION DISCIPLINE. These plans are built with `MockLayout`, which
 //! transports the layout e-class IDENTITY and nothing evaluable — the
-//! test runtime has no layout renderer of its own. Element-level
-//! evaluation of REAL rendered layouts is pinned where real layouts
+//! test runtime has no layout decoder of its own. Element-level
+//! evaluation of REAL decoded layouts is pinned where real layouts
 //! exist: `luminal_cuda_lite/tests/view_admission.rs` (searched plans,
 //! flat-index evaluation against hand-computed maps) and
 //! `test_runtime::test_equality` (readback through a returned
@@ -35,7 +35,7 @@ use std::collections::HashMap;
 type FoldedSlot = (String, usize, MockLayout);
 
 /// Bufferize a frontend program with views preferred; return the plan,
-/// the rendered (mock) layout table, and every operand slot READING
+/// the decoded (mock) layout table, and every operand slot READING
 /// THROUGH A FOLD.
 ///
 /// THE DISCRIMINATOR IS THE LAYOUT, not the assignment. The plan does not
@@ -139,7 +139,7 @@ fn transpose_view_consumer_carries_the_views_own_layout() {
     );
     assert!(
         table.values().any(|l| l == layout),
-        "…and it is a rendered table row, transported verbatim"
+        "…and it is a decoded table row, transported verbatim"
     );
 }
 
@@ -170,7 +170,7 @@ fn sliced_transpose_chain_arrives_as_one_layout() {
     println!("folded read on {label} operand {slot} — one layout, no chain");
     assert!(
         table.values().any(|l| l == layout),
-        "the carried layout is a rendered table row, transported verbatim"
+        "the carried layout is a decoded table row, transported verbatim"
     );
 }
 
@@ -213,7 +213,7 @@ fn r10_chained_matmuls_read_through_folded_layouts() {
     for (label, slot, layout) in &found {
         assert!(
             table.values().any(|l| l == layout),
-            "{label} operand {slot}: the carried layout must be a rendered row, \
+            "{label} operand {slot}: the carried layout must be a decoded row, \
              transported verbatim — never synthesized by the planner"
         );
     }
