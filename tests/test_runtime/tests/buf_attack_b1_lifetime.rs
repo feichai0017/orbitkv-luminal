@@ -24,8 +24,8 @@ use petgraph::algo::has_path_connecting;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 
-fn computes<'a>(
-    plan: &'a luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
+fn computes(
+    plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
     label: &str,
 ) -> Vec<(NodeIndex, Vec<BufferId>, Vec<BufferId>)> {
     plan.dag

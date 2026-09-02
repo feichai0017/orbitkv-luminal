@@ -478,7 +478,7 @@ pub struct ExtractedGraph {
 pub enum ExtractedNode {
     /// A program input boundary: a LayoutTensor backed by a pre-assigned buffer.
     /// Not a `LayoutOp` — it is a (caller-owned) storage specification.
-    BufferInput(InputNode),
+    BufferInput(Box<InputNode>),
     /// A dataflow op producing one or more LayoutTensor outputs.
     LayoutOp(OpNode),
     /// A program output boundary: final LayoutTensors that must be written into

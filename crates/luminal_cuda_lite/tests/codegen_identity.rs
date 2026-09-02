@@ -34,7 +34,7 @@ use std::collections::HashMap;
 /// read.
 fn reads_flat(layout: &luminal_cuda_lite::layouts::CudaLayout, dims: &[usize]) -> bool {
     kernels::layout_read_index("probe", layout, dims, Coords::FlatIndex { prefix: "c" })
-        .map_or(false, |(chain, idx)| chain.is_empty() && idx == "i")
+        .is_ok_and(|(chain, idx)| chain.is_empty() && idx == "i")
 }
 
 /// The PRE-Phase-3 construction, restated for the corrected contract:
@@ -261,7 +261,6 @@ mod strided {
     use luminal::buffer_tensor_ir::BufferTensorIrOp;
     use luminal::bufferize::{BufferId, SlotDescriptor};
     use luminal::dtype::PlanDtype;
-    use luminal::index_expr::IotaExpr;
     use luminal_cuda_lite::{kernels, ops};
 
     use luminal::layouts::{
@@ -338,12 +337,6 @@ mod strided {
         let mut s = slot(dims);
         s.layout.dtype = Some(dtype);
         s
-    }
-
-    /// A layout whose read does NOT reduce to the identity, for the
-    /// write-side pins: stride 2 over the slot's own dims.
-    fn unsimplifiable(dims: &[i64]) -> CudaLayout {
-        strided_layout(dims, vec![mul(coord(0), lit(2))])
     }
 
     /// Generate the single kernel source for `op` with the given
@@ -930,8 +923,12 @@ fn descriptor_ctx_bails_loudly_on_unusable_layouts() {
         },
         ..filled.clone()
     };
-    let err = kernels::CodegenCtx::from_descriptors("ProbeOp", &[symbolic], &[filled.clone()])
-        .expect_err("symbolic layout extents must refuse");
+    let err = kernels::CodegenCtx::from_descriptors(
+        "ProbeOp",
+        &[symbolic],
+        std::slice::from_ref(&filled),
+    )
+    .expect_err("symbolic layout extents must refuse");
     assert!(
         err.to_string().contains("symbolic layout extents"),
         "got: {err}"
@@ -943,14 +940,19 @@ fn descriptor_ctx_bails_loudly_on_unusable_layouts() {
         },
         ..filled.clone()
     };
-    let err = kernels::CodegenCtx::from_descriptors("ProbeOp", &[filled.clone()], &[untyped])
-        .expect_err("a missing dtype fact must refuse");
+    let err =
+        kernels::CodegenCtx::from_descriptors("ProbeOp", std::slice::from_ref(&filled), &[untyped])
+            .expect_err("a missing dtype fact must refuse");
     assert!(
         err.to_string().contains("carries no dtype fact"),
         "got: {err}"
     );
-    let ok = kernels::CodegenCtx::from_descriptors("ProbeOp", &[filled.clone()], &[filled])
-        .expect("filled descriptors build");
+    let ok = kernels::CodegenCtx::from_descriptors(
+        "ProbeOp",
+        std::slice::from_ref(&filled),
+        std::slice::from_ref(&filled),
+    )
+    .expect("filled descriptors build");
     assert_eq!(ok.operand_dims, vec![vec![2, 3]]);
     assert!(
         reads_flat(ok.operand_layout(0), &ok.operand_dims[0]),

@@ -2,11 +2,13 @@
 //! the B x left-major arm, relu on a symbolic-k op, and the static-pitch
 //! OUTPUT layout (creator-rewrite certified).
 
-use luminal::buffer_tensor_ir::AsAnyOp;
-use luminal::bufferize::{self, BufferId};
+use luminal::bufferize::BufferId;
 use luminal::graph::Graph;
 use luminal::layout_ir::{Bufferizable, ExtractedNode, Sharing};
 use test_runtime::cublaslt_marker::{CuDim, CuEpilogue, CublasLt, CublasLtDps, CublasLtForm};
+
+type GraphBuilder = Box<dyn Fn(&mut Graph)>;
+type FormProgram = (&'static str, CublasLtForm, GraphBuilder);
 
 const SCHEDULE: &str = "(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))";
 
@@ -38,7 +40,7 @@ fn cublaslt_in_plan(graph: &luminal::layout_ir::ExtractedGraph) -> Vec<(CublasLt
         .node_weights()
         .filter_map(|node| match node {
             ExtractedNode::LayoutOp(op) if op.op.label().starts_with("CublasLt") => {
-                let concrete = (&*op.op).as_any().downcast_ref::<CublasLt>().cloned()?;
+                let concrete = (*op.op).as_any().downcast_ref::<CublasLt>().cloned()?;
                 let inputs = op.inputs.iter().map(|i| i.value.to_string()).collect();
                 Some((concrete, inputs))
             }
@@ -80,7 +82,7 @@ fn t4_dps_alias_tables() {
 // ===========================================================================
 #[test]
 fn t6a_bufferize_all_four_forms() {
-    let programs: [(&str, CublasLtForm, Box<dyn Fn(&mut Graph)>); 4] = [
+    let programs: [FormProgram; 4] = [
         (
             "base",
             CublasLtForm::Base,
@@ -168,7 +170,6 @@ fn t6a_bufferize_all_four_forms() {
             form.lit_arity() + 1,
             "{name}: DPS operands = contract arity + dest"
         );
-        use luminal::buffer_tensor_ir::OpSlotNames;
         assert_eq!(
             dps_op.op.operand_name(form.lit_arity()),
             "dest",

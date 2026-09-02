@@ -34,8 +34,8 @@ use luminal::test_support::{EmptyOp, MockOp, MockView, TestGraph};
 use petgraph::algo::has_path_connecting;
 use petgraph::graph::NodeIndex;
 
-fn computes<'a>(
-    plan: &'a luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
+fn computes(
+    plan: &luminal::bufferize::BufferIrGraph<luminal::test_support::MockLayout>,
     label: &str,
 ) -> Vec<(NodeIndex, Vec<BufferId>, Vec<BufferId>)> {
     plan.dag
@@ -402,10 +402,12 @@ impl DimsGraph {
     fn input(&mut self, name: &str, buffer: &str, dims: &[i64]) -> LayoutTensorInfo {
         let value = self.value(name, "rm", dims);
         let buffer = self.buffer(buffer);
-        let node = self.dag.add_node(ExtractedNode::BufferInput(InputNode {
-            value: value.clone(),
-            buffer,
-        }));
+        let node = self
+            .dag
+            .add_node(ExtractedNode::BufferInput(Box::new(InputNode {
+                value: value.clone(),
+                buffer,
+            })));
         self.producers.insert(value.eclass.clone(), node);
         value
     }

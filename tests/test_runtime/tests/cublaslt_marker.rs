@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use luminal::buffer_tensor_ir::{AsAnyOp, OpSlotNames};
+use luminal::buffer_tensor_ir::OpSlotNames;
 use luminal::graph::Graph;
 use luminal::layout_ir::ExtractedNode;
 use test_runtime::cublaslt_marker::{CuEpilogue, CublasLt};
@@ -36,7 +36,7 @@ fn pinned_cublaslt_ops(text: &str) -> Vec<(CublasLt, Vec<String>)> {
         .node_weights()
         .filter_map(|node| match node {
             ExtractedNode::LayoutOp(op) if op.op.label().starts_with("CublasLt") => {
-                let concrete = (&*op.op)
+                let concrete = (*op.op)
                     .as_any()
                     .downcast_ref::<CublasLt>()
                     .expect("CublasLt instance downcasts")

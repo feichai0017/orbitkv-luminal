@@ -106,7 +106,7 @@ fn a_view_reader_extends_parent_lifetime_single_free() {
             .iter()
             .find(|(_, _, w)| matches!(w[0], BufferId::Boundary(_)))
             .expect("consumer into bound output (seeded)");
-        (w.clone(), c.clone())
+        (*w, *c)
     };
     let parent = writer.2[0].clone();
     assert_eq!(

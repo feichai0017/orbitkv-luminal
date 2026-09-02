@@ -39,8 +39,8 @@ pub fn ref_paged_step(
     q: &[f32],
     k_new: &[f32],
     v_new: &[f32],
-    k_cache: &mut Vec<f32>,
-    v_cache: &mut Vec<f32>,
+    k_cache: &mut [f32],
+    v_cache: &mut [f32],
     gather: &[usize],
     scatter_slot: usize,
     n_heads: usize,
@@ -116,8 +116,8 @@ pub fn ref_block_step(
     wv: &[f32],
     wo: &[f32],
     ff: &dyn Fn(&[f32]) -> Vec<f32>,
-    k_cache: &mut Vec<f32>,
-    v_cache: &mut Vec<f32>,
+    k_cache: &mut [f32],
+    v_cache: &mut [f32],
     gather: &[usize],
     scatter_slot: usize,
     n_heads: usize,
@@ -146,7 +146,6 @@ pub fn ref_block_step(
 
 /// GQA paged-attention reference, one new token: query head h reads
 /// KV head h / (n_heads / n_kv_heads).
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub fn ref_paged_step_gqa(
     q: &[f32],
@@ -215,7 +214,7 @@ pub fn ref_silu(x: &[f32]) -> Vec<f32> {
 pub fn ref_gelu_tanh(x: &[f32]) -> Vec<f32> {
     x.iter()
         .map(|v| {
-            let scaled = 1.5957691216 * v * (1.0 + 0.044715 * v * v);
+            let scaled = 1.595_769_2 * v * (1.0 + 0.044715 * v * v);
             v / (1.0 + (-scaled).exp())
         })
         .collect()

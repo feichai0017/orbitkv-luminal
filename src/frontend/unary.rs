@@ -72,7 +72,7 @@ impl GraphTensor {
                 self.dims(),
                 self.dtype,
             )
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 
@@ -87,7 +87,7 @@ impl GraphTensor {
                 self.dims(),
                 self.dtype,
             )
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 
@@ -112,7 +112,7 @@ impl GraphTensor {
                 self.dims(),
                 self.dtype,
             )
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 
@@ -127,7 +127,7 @@ impl GraphTensor {
                 self.dims(),
                 self.dtype,
             )
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 
@@ -152,7 +152,7 @@ impl GraphTensor {
                 self.dims(),
                 self.dtype,
             )
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(new_id, self.dims(), self.graph_ref, self.dtype)
     }
 

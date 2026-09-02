@@ -32,6 +32,10 @@ use test_runtime::cublaslt_marker::{
     parse_spec, CuDim, CuEpilogue, CublasLt, CublasLtForm, LtMatmulSpec,
 };
 
+type GraphBuilder = Box<dyn Fn(&mut Graph)>;
+type FormProgram = (&'static str, CublasLtForm, GraphBuilder);
+type EpilogueProgram = (&'static str, CublasLtForm, CuEpilogue, GraphBuilder);
+
 const SCHEDULE: &str = "(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))";
 
 const PIN: &[&str] = &[
@@ -90,7 +94,7 @@ fn elected_ops(graph: &ExtractedGraph) -> Vec<Elected> {
         .node_weights()
         .filter_map(|node| match node {
             ExtractedNode::LayoutOp(op) if op.op.label().starts_with("CublasLt") => {
-                let concrete = (&*op.op).as_any().downcast_ref::<CublasLt>().cloned()?;
+                let concrete = (*op.op).as_any().downcast_ref::<CublasLt>().cloned()?;
                 let inputs = op
                     .inputs
                     .iter()
@@ -150,11 +154,8 @@ fn genome_flavored(
             .or_default()
             .push(node.op.as_str());
     }
-    let class_has = |class: &ClassId, op: &str| {
-        class_ops
-            .get(class)
-            .is_some_and(|ops| ops.iter().any(|o| *o == op))
-    };
+    let class_has =
+        |class: &ClassId, op: &str| class_ops.get(class).is_some_and(|ops| ops.contains(&op));
     let child_class = |node: &luminal::prelude::egraph_serialize::Node, index: usize| {
         node.children
             .get(index)
@@ -183,7 +184,7 @@ fn genome_flavored(
         |candidates: &[(String, luminal::extractor::ProducerChoice)], level: usize| -> Vec<usize> {
             let admitted = test_runtime::level_admits(level);
             let mut order: Vec<usize> = Vec::new();
-            let mut push_where =
+            let push_where =
                 |order: &mut Vec<usize>,
                  pred: &dyn Fn(&str, &luminal::extractor::ProducerChoice) -> bool| {
                     for (i, (name, choice)) in candidates.iter().enumerate() {
@@ -2246,7 +2247,7 @@ fn attack_e2_respelled_relu_stays_decomposed() {
 /// AccumulateBias with relu — but NEVER Accumulate + relu.
 #[test]
 fn attack_e3_four_inlined_relu_copies_agree() {
-    let programs: [(&str, CublasLtForm, CuEpilogue, Box<dyn Fn(&mut Graph)>); 4] = [
+    let programs: [EpilogueProgram; 4] = [
         (
             "base",
             CublasLtForm::Base,
@@ -3388,7 +3389,7 @@ fn attack_f1_dual_readings_are_legal_multiplicity() {
     );
     assert_eq!(a, 8, "two frames per site's a operand");
     assert_eq!(ops, 20, "the frame cross products across the four sites");
-    let classes = assert_one_lit_per_op_class(&s, "f1");
+    assert_one_lit_per_op_class(&s, "f1");
 
     let specs = specs_of_every_enode(&s, CublasLtForm::Base);
     assert_eq!(specs.len(), ops, "all candidates parse");
@@ -3662,7 +3663,7 @@ fn attack_h1_one_lit_per_op_class() {
 /// tensor the spec names for that role — the actual mis-assignment guard.
 #[test]
 fn attack_u1_lit_slot_contents_pinned() {
-    let cases: [(&str, CublasLtForm, Box<dyn Fn(&mut Graph)>); 4] = [
+    let cases: [FormProgram; 4] = [
         (
             "base",
             CublasLtForm::Base,

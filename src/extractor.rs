@@ -11,6 +11,9 @@ use crate::layout_ir::{
 };
 use crate::logical_op::{LogicalRender, logical_op_for};
 
+type Bounds = (Option<i128>, Option<i128>);
+type BoundsIndex = HashMap<ClassId, Bounds>;
+
 #[derive(Debug)]
 struct Extractor<'a> {
     egraph: &'a EGraph,
@@ -48,7 +51,7 @@ struct Extractor<'a> {
     /// serialized `lower-bound-of` / `upper-bound-of` rows: IntExpr class →
     /// (lower, upper). `tensor_bytes_cache` memoizes the per-LayoutTensor
     /// byte size derived from its layout's shape and bit width.
-    bounds_index: std::cell::RefCell<Option<HashMap<ClassId, (Option<i128>, Option<i128>)>>>,
+    bounds_index: std::cell::RefCell<Option<BoundsIndex>>,
     tensor_bytes_cache: std::cell::RefCell<HashMap<ClassId, u64>>,
     /// GENOME-INDEPENDENT dtype index (typed-buffers landing A,
     /// 2026-08-11): serialized `dtype-of` rows, scanned once —
@@ -945,7 +948,7 @@ impl<'a> Extractor<'a> {
     /// recursive walk. The DFS's cycle guard made `None` contextual:
     /// not caching it re-explored whole subtrees exponentially on
     /// cycle-rich e-graphs (the 2-layer decoder hang — 15k nodes,
-    /// >150s), and caching it produced wrong refusals. Relaxation has
+    /// more than 150s), and caching it produced wrong refusals. Relaxation has
     /// neither problem: a class's plan materializes the pass after all
     /// of some candidate's children have plans, costs only improve
     /// monotonically, and cycles simply never enable — no guard, no
@@ -1222,16 +1225,16 @@ impl<'a> Extractor<'a> {
         };
 
         let children = self.op_children(&spec.inputs, op.as_ref());
-        Some(Candidate::layout_ir(
-            producer.op_class.clone(),
-            node_id,
-            producer.output_index,
-            spec.inputs.clone(),
-            spec.outputs.clone(),
-            op,
+        Some(Candidate {
+            source_eclass: Some(producer.op_class.clone()),
+            source_enode: Some(node_id.clone()),
+            selected_output_index: Some(producer.output_index),
+            input_list: spec.inputs.clone(),
+            output_list: spec.outputs.clone(),
+            kind: PlanKind::LayoutIr(op),
             children,
             metadata,
-        ))
+        })
     }
 
     fn op_children(&self, inputs: &[ClassId], op: &dyn LayoutIrOp) -> Vec<PlanChild> {
@@ -1684,28 +1687,6 @@ impl Candidate {
             kind,
             children,
             metadata: Vec::new(),
-        }
-    }
-
-    fn layout_ir(
-        source_eclass: ClassId,
-        source_enode: &NodeId,
-        selected_output_index: usize,
-        input_list: Vec<ClassId>,
-        output_list: Vec<ClassId>,
-        op: Box<dyn LayoutIrOp>,
-        children: Vec<PlanChild>,
-        metadata: Vec<PlanMeta>,
-    ) -> Self {
-        Self {
-            source_eclass: Some(source_eclass),
-            source_enode: Some(source_enode.clone()),
-            selected_output_index: Some(selected_output_index),
-            input_list,
-            output_list,
-            kind: PlanKind::LayoutIr(op),
-            children,
-            metadata,
         }
     }
 }
@@ -2976,7 +2957,10 @@ impl<'e, 'a> IrBuilder<'e, 'a> {
                 );
                 let index = self
                     .dag
-                    .add_node(ExtractedNode::BufferInput(InputNode { value, buffer }));
+                    .add_node(ExtractedNode::BufferInput(Box::new(InputNode {
+                        value,
+                        buffer,
+                    })));
                 self.value_producer.insert(class.clone(), index);
                 Ok(index)
             }
@@ -3624,7 +3608,7 @@ pub enum ChainStride {
 /// closed, never guess.
 pub fn chain_strides(egraph: &EGraph, layout: &ClassId) -> Option<Vec<Option<ChainStride>>> {
     let mut class_nodes: HashMap<ClassId, Vec<NodeId>> = HashMap::new();
-    for (node_id, node) in &egraph.nodes {
+    for node_id in egraph.nodes.keys() {
         class_nodes
             .entry(egraph.nid_to_cid(node_id).clone())
             .or_default()

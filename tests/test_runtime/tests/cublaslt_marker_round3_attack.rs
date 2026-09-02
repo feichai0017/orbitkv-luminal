@@ -639,15 +639,13 @@ fn check_reading_set_coherence(s: &EGraph) -> (Vec<String>, usize) {
                     }
                 })
                 .unwrap_or("<missing>");
-            if ctor == "LayoutTensorOpCublasLt" && epilogue == "Default" {
-                if d_logical != site_out {
-                    violations.push(format!(
-                        "{tag}: D-LEAK — undecorated base op claims logical {:?}, \
+            if ctor == "LayoutTensorOpCublasLt" && epilogue == "Default" && d_logical != site_out {
+                violations.push(format!(
+                    "{tag}: D-LEAK — undecorated base op claims logical {:?}, \
                          site out is {:?}",
-                        d_logical.as_ref().map(short),
-                        site_out.as_ref().map(short)
-                    ));
-                }
+                    d_logical.as_ref().map(short),
+                    site_out.as_ref().map(short)
+                ));
             }
             if epilogue == "<none>" || epilogue == "<missing>" {
                 violations.push(format!("{tag}: epilogue slot carries no value"));
@@ -712,7 +710,7 @@ fn genome_flavored(s: &EGraph, preferences: &[&str]) -> luminal::extractor::Geno
         |candidates: &[(String, luminal::extractor::ProducerChoice)], level: usize| -> Vec<usize> {
             let admitted = test_runtime::level_admits(level);
             let mut order: Vec<usize> = Vec::new();
-            let mut push_where = |order: &mut Vec<usize>, pred: &dyn Fn(&str) -> bool| {
+            let push_where = |order: &mut Vec<usize>, pred: &dyn Fn(&str) -> bool| {
                 for (i, (name, _)) in candidates.iter().enumerate() {
                     if admitted(name) && pred(name) && !order.contains(&i) {
                         order.push(i);
@@ -749,7 +747,7 @@ fn genome_electing(s: &EGraph, enode: &NodeId) -> (luminal::extractor::Genome, b
         |candidates: &[(String, luminal::extractor::ProducerChoice)], level: usize| -> Vec<usize> {
             let admitted = test_runtime::level_admits(level);
             let mut order: Vec<usize> = Vec::new();
-            let mut push_where = |order: &mut Vec<usize>, pred: &dyn Fn(&str) -> bool| {
+            let push_where = |order: &mut Vec<usize>, pred: &dyn Fn(&str) -> bool| {
                 for (i, (name, _)) in candidates.iter().enumerate() {
                     if admitted(name) && pred(name) && !order.contains(&i) {
                         order.push(i);
@@ -782,7 +780,7 @@ fn cublaslt_in_plan(graph: &luminal::layout_ir::ExtractedGraph) -> Vec<(CublasLt
         .node_weights()
         .filter_map(|node| match node {
             ExtractedNode::LayoutOp(op) if op.op.label().starts_with("CublasLt") => {
-                let concrete = (&*op.op).as_any().downcast_ref::<CublasLt>().cloned()?;
+                let concrete = (*op.op).as_any().downcast_ref::<CublasLt>().cloned()?;
                 let inputs = op.inputs.iter().map(|i| i.value.to_string()).collect();
                 Some((concrete, inputs))
             }
@@ -797,28 +795,6 @@ fn pinned_cublaslt(text: &str) -> Vec<CublasLt> {
         .into_iter()
         .map(|(op, _)| op)
         .collect()
-}
-
-/// The B readings (our `a` operand) over one logical tensor, as
-/// (form, operation, ld) — the shape the round-3 attacks compare.
-fn b_reading_forms(s: &EGraph, logical: &ClassId) -> Vec<(String, String, Dim)> {
-    let mut out: Vec<(String, String, Dim)> = all_readings(s)
-        .into_iter()
-        .filter(|r| r.role == "B" && &r.logical == logical)
-        .map(|r| {
-            (
-                r.operation
-                    .trim_start_matches("CublasLtOperation")
-                    .to_string(),
-                r.operation
-                    .trim_start_matches("CublasLtOperation")
-                    .to_string(),
-                r.ld,
-            )
-        })
-        .collect();
-    out.sort();
-    out
 }
 
 fn spec_of(op: &CublasLt) -> &LtMatmulSpec {

@@ -56,7 +56,6 @@ pub struct MiniDit {
     pub single_knorm: GraphTensor,
     ln: LayerNorm, // no-affine LayerNorm, shared (stateless)
     d: usize,
-    n_heads: usize,
     head_dim: usize,
     mlp: usize,
     t_half: usize,
@@ -117,7 +116,6 @@ impl MiniDit {
             single_knorm: cx.named_tensor("SglKNorm", head_dim),
             ln: LayerNorm::new(d, false, false, true, 1e-6, &Ns::root().child("ln"), cx),
             d,
-            n_heads,
             head_dim,
             mlp,
             t_half,
@@ -254,18 +252,18 @@ impl MiniDit {
         )); // (s, d)
         let attn_txt = attn.slice_along(0..s_txt, 0);
         let attn_img = attn.slice_along(s_txt.., 0);
-        img = img + gate(self.img_out.forward(attn_img), gate0);
-        txt = txt + gate(self.txt_out.forward(attn_txt), c_gate0);
+        img += gate(self.img_out.forward(attn_img), gate0);
+        txt += gate(self.txt_out.forward(attn_txt), c_gate0);
         let ff = swiglu(
             self.ff_in
                 .forward(ada(self.ln.forward(img), scale1, shift1)),
         );
-        img = img + gate(self.ff_out.forward(ff), gate1);
+        img += gate(self.ff_out.forward(ff), gate1);
         let c_ff = swiglu(
             self.ctx_ff_in
                 .forward(ada(self.ln.forward(txt), c_scale1, c_shift1)),
         );
-        txt = txt + gate(self.ctx_ff_out.forward(c_ff), c_gate1);
+        txt += gate(self.ctx_ff_out.forward(c_ff), c_gate1);
 
         // ---- single-stream block over [txt ‖ img] ----
         // The joint sequence assembles by SCATTER writes into a zero
@@ -293,11 +291,10 @@ impl MiniDit {
         let mlp_out = swiglu(proj.slice_along(3 * d..3 * d + 2 * mlp, 1)); // (s, mlp)
                                                                            // Fused out-projection over [attn ‖ mlp], spelled as the
                                                                            // row-split sum (see the single_out_* field note).
-        hidden = hidden
-            + gate(
-                self.single_out_attn.forward(attn) + self.single_out_mlp.forward(mlp_out),
-                s_gate,
-            );
+        hidden += gate(
+            self.single_out_attn.forward(attn) + self.single_out_mlp.forward(mlp_out),
+            s_gate,
+        );
 
         // ---- AdaLayerNormContinuous head: (scale, shift) — REVERSED ----
         let img_final = hidden.slice_along(s_txt.., 0); // (s_img, d)
@@ -325,10 +322,10 @@ pub fn mini_dit_rope_tables(s_txt: usize, h: usize, w: usize) -> (Vec<f32>, Vec<
     }
     let (mut cos, mut sin) = (Vec::new(), Vec::new());
     for id in ids {
-        for axis in 0..4 {
+        for value in id {
             for _ in 0..2 {
-                cos.push(id[axis].cos());
-                sin.push(id[axis].sin());
+                cos.push(value.cos());
+                sin.push(value.sin());
             }
         }
     }

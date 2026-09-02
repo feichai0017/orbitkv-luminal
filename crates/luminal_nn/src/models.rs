@@ -42,6 +42,10 @@ impl Mlp {
 }
 
 /// The FFN flavor a decoder block carries.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the public model API keeps both feed-forward variants directly constructible"
+)]
 pub enum FeedForward {
     /// up → relu → down.
     Dense { up: Linear, down: Linear },
@@ -1049,7 +1053,8 @@ mod tests {
             weights(D * D, 4),
             weights(D * D, 5),
         );
-        let ff: Box<dyn Fn(&[f32]) -> Vec<f32>> = match &fx.block.ff {
+        type ScalarFfn = dyn Fn(&[f32]) -> Vec<f32>;
+        let ff: Box<ScalarFfn> = match &fx.block.ff {
             FeedForward::Dense { .. } => {
                 let (up, down) = (weights(D * FF_HIDDEN, 9), weights(FF_HIDDEN * D, 10));
                 Box::new(move |x: &[f32]| {

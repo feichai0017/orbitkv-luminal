@@ -392,6 +392,12 @@ pub struct TestGraph {
     next: u32,
 }
 
+impl Default for TestGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestGraph {
     pub fn new() -> Self {
         TestGraph {
@@ -476,7 +482,10 @@ impl TestGraph {
         let buffer = self.buffer_info(buffer, access, freed_by);
         let node = self
             .dag
-            .add_node(ExtractedNode::BufferInput(InputNode { value, buffer }));
+            .add_node(ExtractedNode::BufferInput(Box::new(InputNode {
+                value,
+                buffer,
+            })));
         self.producers.insert(eclass.clone(), node);
         eclass
     }
@@ -2592,7 +2601,7 @@ mod stage4b_probes {
             let start = std::time::Instant::now();
             let mut egraph = luminal::egglog_snippet::new_egraph();
             egraph
-                .parse_and_run_program(None, &preamble)
+                .parse_and_run_program(None, preamble)
                 .expect("preamble loads");
             eprintln!(
                 "[prof] ===== preamble only (parse+declare, no body/schedule): {:.2}s, {} lines =====",
@@ -2878,7 +2887,7 @@ mod subst_guard_study {
         ];
         let base = luminal_reference::assembled_program();
         for var_name in ["landed", "legacy"] {
-            let varied = variant(&base, var_name);
+            let varied = variant(base, var_name);
             for (scen_name, tail) in scenarios() {
                 let verdict = run_verdict(&format!("{varied}\n{tail}"));
                 let want = expected
@@ -3904,7 +3913,7 @@ mod escape_execution_tests {
     //! discipline as `harness_tests`: every luminal type comes from the
     //! `luminal::` build luminal_reference links.
     use egraph_serialize::ClassId;
-    use luminal::buffer_tensor_ir::TypedBuffer;
+
     use luminal::bufferize::{
         Buffer, BufferEdge, BufferId, BufferIrGraph, BufferNode, EdgeKind, InputBinding,
         OutputBinding, Owner,

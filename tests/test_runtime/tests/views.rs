@@ -13,11 +13,8 @@
 //! pointed at this crate's own `fixtures/` — including its forked copy of
 //! `basic_program.egg`. Nothing here reaches into the core script tree.
 
-use luminal::bufferize;
 use luminal::layout_ir::Access;
 use luminal::test_support::{bufferize_mock, MockOp, TestGraph};
-
-use test_runtime::IndexMapApplyView;
 
 /// THE REAL VIEW OP, plan level (Step 3): `IndexMapApplyView` feeding a
 /// compute op contributes ZERO plan nodes — the result binds its parent's

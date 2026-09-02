@@ -7,6 +7,7 @@
 //!      consumed mid-graph, not directly bound.
 //!   2. matmul -> matmul -> output (the chained case): the interior view
 //!      feeds the second call's operand.
+//!
 //! Observational: prints the DPS ops and the buffer plan; asserts only
 //! that bufferize succeeds and counts BufferCopy occurrences honestly.
 use luminal::graph::Graph;

@@ -12,6 +12,10 @@ use luminal_nn::{Embedding, GatedFfn, LayerNorm, LlamaBlock};
 /// family keeps its own NAMED front door (ruling 2026-08-10: minis are
 /// named for the model they represent, not parameterized as llama) so
 /// family-specific constructs accrete in one visible place.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the model-spec builder keeps each architecture hyperparameter explicit"
+)]
 fn gqa_lm_new(
     vocab: usize,
     d: usize,
@@ -42,6 +46,10 @@ fn gqa_lm_new(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the model-spec forward boundary keeps cache and decode inputs explicit"
+)]
 fn gqa_lm_forward(
     embed: &Embedding,
     blocks: &[LlamaBlock],

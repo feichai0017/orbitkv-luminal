@@ -8,7 +8,6 @@
 //! the all-ones corner) — must not panic; readings stay bounded and
 //! every elected spec is sound.
 
-use luminal::buffer_tensor_ir::AsAnyOp;
 use luminal::layout_ir::ExtractedNode;
 use test_runtime::cublaslt_marker::CublasLt;
 
@@ -87,7 +86,7 @@ fn cublaslt_ops(graph: &luminal::layout_ir::ExtractedGraph) -> Vec<CublasLt> {
         .node_weights()
         .filter_map(|node| match node {
             ExtractedNode::LayoutOp(op) if op.op.label().starts_with("CublasLt") => {
-                (&*op.op).as_any().downcast_ref::<CublasLt>().cloned()
+                (*op.op).as_any().downcast_ref::<CublasLt>().cloned()
             }
             _ => None,
         })
@@ -236,7 +235,7 @@ fn fixture7_extent1_weld_single_canonical_reading() {
     // term; what matters is boundedness and that every elected spec is
     // sound (checked below).
     assert!(
-        sites >= 2 && sites <= 4,
+        (2..=4).contains(&sites),
         "bounded sites despite the coordinate weld: {sites}"
     );
     assert!(a_readings >= 1, "the welded bytes are read at least once");

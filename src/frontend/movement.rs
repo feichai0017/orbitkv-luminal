@@ -685,7 +685,7 @@ impl GraphTensor {
             .graph()
             .logical
             .record_gather(&data_operand, &coord_operands, out_dims.clone(), self.dtype)
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(id, out_dims, self.graph_ref, self.dtype)
     }
 
@@ -726,7 +726,7 @@ impl GraphTensor {
                 dims.clone(),
                 self.dtype,
             )
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(id, dims, self.graph_ref, self.dtype)
     }
 
@@ -971,7 +971,7 @@ impl GraphTensor {
                 .graph()
                 .logical
                 .view_op(&operand, &entries, new_dims.clone(), self.dtype)
-                .unwrap_or_else(|| crate::graph::unrecorded_value());
+                .unwrap_or_else(crate::graph::unrecorded_value);
             GraphTensor::from_id(id, new_dims, self.graph_ref, self.dtype)
         } else {
             // No start slices so no iota needed, just reduce the shape down
@@ -1063,7 +1063,7 @@ impl GraphTensor {
                 .graph()
                 .logical
                 .view_op(&operand, &entries, out_dims.clone(), self.dtype)
-                .unwrap_or_else(|| crate::graph::unrecorded_value());
+                .unwrap_or_else(crate::graph::unrecorded_value);
         }
         let clamped =
             GraphTensor::from_id(clamped_id, out_dims.clone(), self.graph_ref, self.dtype);
@@ -1072,7 +1072,7 @@ impl GraphTensor {
             .graph()
             .logical
             .record_mask_iota(&befores, &afters, &dims)
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         let mask =
             GraphTensor::from_id(mask_id, out_dims, self.graph_ref, DType::Int).cast(self.dtype);
 

@@ -7,7 +7,7 @@ impl Graph {
         let id = self
             .logical
             .record_iota(&expr, &[])
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(id, (), self, DType::Int)
     }
 
@@ -16,7 +16,7 @@ impl Graph {
         let id = self
             .logical
             .op(LogicalOp::Constant(i as f64), &[], Vec::new(), DType::F32)
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(id, (), self, DType::F32)
     }
 
@@ -46,7 +46,7 @@ impl Graph {
         let id = self
             .logical
             .record_iota(&expr, &sh)
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(id, sh, self, DType::Int)
     }
 
@@ -140,7 +140,7 @@ impl GraphTensor {
             .graph()
             .logical
             .op(LogicalOp::Cast(dtype), &[operand], out_dims, dtype)
-            .unwrap_or_else(|| crate::graph::unrecorded_value());
+            .unwrap_or_else(crate::graph::unrecorded_value);
         GraphTensor::from_id(id, self.dims(), self.graph_ref, dtype)
     }
 }
