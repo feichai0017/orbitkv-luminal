@@ -8,6 +8,11 @@
 //! must-share ties, may-share permits, accumulators), which by design have no
 //! egglog surface.
 
+/// ID-FREE e-class location: describe the class, then query the e-nodes
+/// inside it (ruling 2026-09-02). Nothing a test asserts may depend on a
+/// serialized `ClassId` — see the module docs for the contract.
+pub mod locate;
+
 pub mod test_ops {
     //! TEST FIXTURE (seed of the future TestRuntime, ruling 2026-08-13):
     //! the reference runtime implements ONLY non-mutating spellings of the

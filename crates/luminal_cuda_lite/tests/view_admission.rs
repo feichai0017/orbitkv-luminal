@@ -67,6 +67,30 @@ fn plan_for(
 /// slot" being an operand whose carried layout does NOT reduce to the
 /// identity read over its own domain.
 type FoldedSlot = (String, usize, luminal_cuda_lite::CudaLayout);
+/// THE FOLDED SLOT OF ONE OP, located BY LABEL rather than by position.
+///
+/// `composed[0]` (the shape these three fixtures used to index with)
+/// depended on plan node order and operand-slot order: two facts the
+/// planner never promised, and a second folded slot appearing anywhere
+/// ahead of the intended one would have silently retargeted the
+/// assertions. Naming the op and requiring the slot to be UNIQUE says what
+/// the fixture actually means, and prints every folded slot when it is not.
+/// (Ruling 2026-09-02: a test locates what it asserts on by description.)
+fn only_folded<'a>(composed: &'a [FoldedSlot], label: &str) -> &'a FoldedSlot {
+    let matching: Vec<&FoldedSlot> = composed.iter().filter(|(l, ..)| l == label).collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one folded slot on {label}, found {}: {:?}",
+        matching.len(),
+        composed
+            .iter()
+            .map(|(l, slot, layout)| format!("{l}[{slot}] {:?}", layout.mirror.literal_extents()))
+            .collect::<Vec<_>>()
+    );
+    matching[0]
+}
+
 fn audit(
     plan: &BufferIrGraph<luminal_cuda_lite::CudaLayout>,
 ) -> (usize, usize, usize, Vec<FoldedSlot>) {
@@ -265,8 +289,7 @@ fn transpose_consumer_folds_and_carries_the_swap_map() {
         "no operand carries a folded layout:\n{}",
         plan.summary()
     );
-    let (label, slot, layout) = &composed[0];
-    assert_eq!(label, "MulFunctionalGeneric");
+    let (_, slot, layout) = only_folded(&composed, "MulFunctionalGeneric");
     // The layout's DOMAIN is the view's shape (3,2) — the value's own
     // extents, which is exactly why no `dims` field is needed.
     assert_eq!(layout.mirror.literal_extents(), Some(vec![3, 2]));
@@ -308,7 +331,7 @@ fn slice_consumer_folds_and_carries_the_offset_map() {
         "no operand carries a folded layout:\n{}",
         plan.summary()
     );
-    let (_, _, layout) = &composed[0];
+    let (_, _, layout) = only_folded(&composed, "MulFunctionalGeneric");
     assert_eq!(layout.mirror.literal_extents(), Some(vec![2, 6]));
     for i in 0..2usize {
         for j in 0..6usize {
@@ -349,7 +372,7 @@ fn broadcast_consumer_folds_and_carries_the_stride0_map() {
         "no operand carries a folded layout:\n{}",
         plan.summary()
     );
-    let (_, _, layout) = &composed[0];
+    let (_, _, layout) = only_folded(&composed, "MulFunctionalGeneric");
     assert_eq!(layout.mirror.literal_extents(), Some(vec![2, 3]));
     for i in 0..2usize {
         for j in 0..3usize {

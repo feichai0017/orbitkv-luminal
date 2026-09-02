@@ -8,8 +8,12 @@
 //! the all-ones corner) — must not panic; readings stay bounded and
 //! every elected spec is sound.
 
+use std::collections::BTreeSet;
+
 use luminal::layout_ir::ExtractedNode;
-use test_runtime::cublaslt_marker::CublasLt;
+use luminal::prelude::egraph_serialize::{ClassId, Node};
+use luminal::test_support::locate::Locator;
+use test_runtime::cublaslt_marker::{CublasLt, LtMatmulSpec};
 
 const SCHEDULE: &str = "(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))";
 
@@ -146,7 +150,184 @@ fn fixture4_sliced_source_refused() {
 // Fixture 7 — degenerate extents must not panic; readings stay bounded.
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// The m=1 sweep's per-e-node oracle: what does THIS cuBLASLt e-node's own
+// descriptor term say the call frame is? Reads the e-graph only, through
+// `luminal::test_support::locate` — no class id is spelled anywhere.
+// ---------------------------------------------------------------------------
+
+/// The reading one cuBLASLt op e-node commits to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Reading {
+    trans_a: bool,
+    trans_b: bool,
+    lda: i64,
+    ldb: i64,
+    ldd: i64,
+    /// Descriptor A's / B's layout tensor — opaque in-process handles used
+    /// to find this e-node's kernel in the elected plan, never asserted on.
+    a_lt: ClassId,
+    b_lt: ClassId,
+}
+
+/// The storage extents of a logical tensor, off its `shape-of` row.
+fn storage_dims(loc: &Locator<'_>, logical: &ClassId) -> Vec<i64> {
+    let shape = loc
+        .find_one_class(|c| {
+            c.nodes_with_op("shape-of")
+                .iter()
+                .any(|n| loc.try_child(n, 0).as_ref() == Some(logical))
+        })
+        .clone();
+    let lit = loc
+        .node_in(&shape, "ShapeLit")
+        .expect("a shape class holds a ShapeLit");
+    loc.walk_cons(&loc.child(lit, 0), "IntExprCons", "IntExprNil")
+        .iter()
+        .map(|dim| {
+            loc.int_literal(dim)
+                .expect("this fixture's extents are all literal")
+        })
+        .collect()
+}
+
+/// The operand descriptor at `slot` of a cuBLASLt op e-node, and whether
+/// its operation constructor is the TRANSPOSED one.
+fn descriptor<'e>(
+    loc: &Locator<'e>,
+    op: &Node,
+    slot: usize,
+    constructor: &str,
+) -> (&'e Node, bool) {
+    let class = loc.child(op, slot);
+    let desc = loc
+        .node_in(&class, constructor)
+        .unwrap_or_else(|| panic!("slot {slot} holds a {constructor}"));
+    let operation = loc.child(desc, 2);
+    let view = loc.view(&operation);
+    assert!(
+        view.has_op("CublasLtOperationN") || view.has_op("CublasLtOperationT"),
+        "a descriptor's operation slot holds one of the two operation constructors, got {}",
+        view.signature()
+    );
+    (desc, view.has_op("CublasLtOperationT"))
+}
+
+/// THIS e-node's own reading, derived from its own site triple and its own
+/// descriptors: the operation constructors fix trans_a/trans_b, and the
+/// COL-view row counts fix the lds.
+///
+/// The general oracle (`per_enode_election_sweep`'s `reading_ld` on the
+/// round-3 board) additionally lets a PADDED layout override the row count
+/// with its own pitch. That override cannot fire here, and the assertion
+/// below is the reason: every operand of this fixture is described by a
+/// CONTIGUOUS element layout, whose pitch is by construction one of its own
+/// extents. If an estate change ever makes an operand strided, this fails
+/// on the precondition rather than on a confusing ld mismatch.
+fn read_enode(loc: &Locator<'_>, op: &Node) -> Reading {
+    let site_class = loc.child(op, 0);
+    let site = loc
+        .node_in(&site_class, "CublasLtLogicalMatmulSite")
+        .expect("slot 0 holds the site");
+    let a_storage = storage_dims(loc, &loc.child(site, 0));
+    let d_storage = storage_dims(loc, &loc.child(site, 2));
+    assert_eq!(a_storage.len(), 2, "2-D fixture");
+    assert_eq!(d_storage.len(), 2, "2-D fixture");
+    // Unswapped frame (round 10): the call's m/n are the SITE's own out
+    // extents, and k is the a-storage extent that is not m.
+    let (lm, ln) = (d_storage[0], d_storage[1]);
+    let lk = if a_storage[0] == lm {
+        a_storage[1]
+    } else {
+        a_storage[0]
+    };
+
+    let (a_desc, trans_a) = descriptor(loc, op, 1, "CublasLtOperandADescriptor");
+    let (b_desc, trans_b) = descriptor(loc, op, 2, "CublasLtOperandBDescriptor");
+    let a_lt = loc.child(a_desc, 1);
+    let b_lt = loc.child(b_desc, 1);
+    for (role, lt) in [("A", &a_lt), ("B", &b_lt)] {
+        let layout = loc.child(
+            loc.node_in(lt, "LayoutTensorLit")
+                .expect("a descriptor names a layout tensor"),
+            1,
+        );
+        let view = loc.view(&layout);
+        assert!(
+            view.has_op("RightMajorContiguousElementLayoutLit")
+                || view.has_op("LeftMajorContiguousElementLayoutLit"),
+            "operand {role} is not described by a contiguous element layout, so the padded-pitch \
+             override of the general ld oracle may apply and this sweep's rows rule is no longer \
+             sufficient: {}",
+            view.signature()
+        );
+    }
+
+    Reading {
+        trans_a,
+        trans_b,
+        lda: if trans_a { lk } else { lm },
+        ldb: if trans_b { ln } else { lk },
+        ldd: lm,
+        a_lt,
+        b_lt,
+    }
+}
+
+/// The cuBLASLt COL-order leading-dimension clamps on literals: lda >=
+/// rows(A), ldb >= rows(B), ldd >= m, ldc == ldd. Every elected frame must
+/// pass them, whichever one the sweep forced.
+fn assert_call_sound(tag: &str, spec: &LtMatmulSpec) {
+    let (m, n, k) = spec.mnk_lits();
+    let rows_a = if spec.trans_a { k } else { m };
+    let rows_b = if spec.trans_b { n } else { k };
+    for (name, ld, rows) in [
+        ("lda", spec.lda.literal(), rows_a),
+        ("ldb", spec.ldb.literal(), rows_b),
+        ("ldd", spec.ldd.literal(), m),
+    ] {
+        let ld = ld.unwrap_or_else(|| panic!("{tag}: {name} is symbolic on a literal fixture"));
+        assert!(
+            ld >= rows,
+            "{tag}: cuBLASLt COL clamp violated — {name}={ld} < rows={rows}"
+        );
+    }
+    assert_eq!(
+        spec.ldc.literal(),
+        spec.ldd.literal(),
+        "{tag}: C rides the D layout, so ldc must equal ldd"
+    );
+}
+
 /// m=1 (live-recorder geometry x[1,4] @ w[4,3]).
+///
+/// ORIGINAL INTENT (round 1, re-pinned round 10). The degenerate matmul
+/// must not panic: saturation stays bounded (the original site plus the
+/// transpose-sandwich sibling), and the elected call frame is sound. Round
+/// 10 additionally pinned the SPEC FIELDS to one frame — `!trans_a`,
+/// `trans_b`, `lda=1, ldb=3, ldd=1` — on the reasoning that "at m=1 the
+/// original site presents a legal unswapped call directly ... and WINS THE
+/// ELECTION over the sibling".
+///
+/// WHY THOSE FIELD PINS WERE RETIRED (ruling 2026-09-02, Austin: tests must
+/// never pin a cost/label TIE by accident). The boundary output class
+/// carries FOUR cuBLASLt readings of the same bytes — {A op N, A op T} x
+/// {B op N, B op T} — same constructor, same cost, same label. Which one an
+/// untouched election returns is decided by e-node ORDER inside the
+/// producer index (`(name, enode.to_string(), output_index)`), which is
+/// creation-order and guaranteed by nothing. All four are sound spellings
+/// of the same GEMV, so "the original site wins" was never a compiler
+/// promise to assert.
+///
+/// WHAT IS ASSERTED NOW — the per-e-node pattern, as
+/// `per_enode_election_sweep` does it. The site is located BY DESCRIPTION
+/// (the site whose two logical operands are the boundary inputs), its
+/// cuBLASLt candidates are listed BY SIGNATURE, and each candidate in turn
+/// is FORCED into the genome; the parsed spec must then be THAT
+/// candidate's own descriptors' reading — its own operation constructors,
+/// its own COL row counts — and must pass the COL clamps. The round-10
+/// numbers survive as the reading of the (A op N, B op T) candidate, now
+/// checked alongside the other three rather than in place of them.
 #[test]
 fn fixture7_m1_degenerate_no_panic() {
     use luminal::graph::Graph;
@@ -177,26 +358,151 @@ fn fixture7_m1_degenerate_no_panic() {
         "the degenerate matmul carries original + sibling sites"
     );
 
-    let (graph, _) = test_runtime::extract_fixture_with_genome(&text, PIN);
-    let ops = cublaslt_ops(&graph);
-    assert_eq!(ops.len(), 1);
-    let spec = ops[0].spec.as_ref().expect("spec parses");
-    println!(
-        "  m={} n={} k={} trans_a={} trans_b={} lda={} ldb={} ldd={}",
-        spec.m, spec.n, spec.k, spec.trans_a, spec.trans_b, spec.lda, spec.ldb, spec.ldd
+    let loc = Locator::new(&serialized);
+
+    // DESCRIBE THE SITE, don't name it: the ORIGINAL site is the one whose
+    // two logical operands are the boundary inputs themselves (the
+    // sibling's operands are index-map applies of them).
+    let boundary_logicals: BTreeSet<ClassId> = loc
+        .inputs()
+        .iter()
+        .map(|buffer_tensor| {
+            let lit = loc
+                .node_in(buffer_tensor, "BufferTensorLit")
+                .expect("a boundary slot is a BufferTensorLit");
+            let layout_tensor = loc.child(lit, 0);
+            let lt = loc
+                .node_in(&layout_tensor, "LayoutTensorLit")
+                .expect("a buffer tensor names a layout tensor");
+            loc.child(lt, 0)
+        })
+        .collect();
+    assert_eq!(boundary_logicals.len(), 2, "x and w cross the boundary");
+    let original_site = loc.find_one_class(|class| {
+        class.node("CublasLtLogicalMatmulSite").is_some_and(|site| {
+            boundary_logicals.contains(&loc.child(site, 0))
+                && boundary_logicals.contains(&loc.child(site, 1))
+        })
+    });
+
+    // The class the election actually decides: the boundary output's own
+    // layout tensor.
+    let out_buffer_tensor = loc
+        .outputs()
+        .first()
+        .cloned()
+        .expect("one bound output slot");
+    let out_layout_tensor = loc.child(
+        loc.node_in(&out_buffer_tensor, "BufferTensorLit")
+            .expect("the output slot is a BufferTensorLit"),
+        0,
     );
-    // ROUND-10 RE-PIN (was (3,1,4), the round-9 swapped frame): at m=1 a
-    // right-major [1,n] out IS column-major 1 x n (ld=1), so the ORIGINAL
-    // site presents a legal unswapped call directly, claims the boundary
-    // tensor itself (no view hop), and wins the election over the sibling.
-    // Both frames are sound spellings of the same GEMV; the elected one is
-    // the direct (1, n, k) call.
-    assert_eq!(spec.mnk_lits(), (1, 3, 4));
-    assert!(!spec.trans_a, "direct call: A = x[1,4] COL 1x4 ld 1, op N");
-    assert!(spec.trans_b, "direct call: B = w[4,3] COL 3x4 ld 3, op T");
-    assert_eq!(spec.lda, 1);
-    assert_eq!(spec.ldb, 3);
-    assert_eq!(spec.ldd, 1);
+    println!(
+        "  output slot {:?} -> layout tensor {}",
+        loc.output_stems(),
+        loc.class_digest(&out_layout_tensor)
+    );
+
+    let index = loc.producer_index(test_runtime::matchers());
+    let base = test_runtime::genome_preferring(&serialized, PIN);
+    let candidates: Vec<_> = loc
+        .candidates(&index, &out_layout_tensor)
+        .into_iter()
+        .filter(|candidate| {
+            candidate.constructor.starts_with("LayoutTensorOpCublasLt")
+                && loc.child(&serialized.nodes[&candidate.enode], 0) == original_site
+        })
+        .collect();
+    println!(
+        "  {} cuBLASLt candidate(s) on the boundary class",
+        candidates.len()
+    );
+    assert!(
+        candidates.len() >= 2,
+        "the degenerate frame is read several ways; a single candidate would mean the \
+         multiplicity this sweep exists for has gone"
+    );
+
+    let mut swept = 0usize;
+    for candidate in &candidates {
+        let want = read_enode(&loc, &serialized.nodes[&candidate.enode]);
+        let genome =
+            loc.elect_by_signature(&index, &base, &out_layout_tensor, &candidate.signature);
+        let graph = luminal::extractor::extract_layout_ir_with_genome_and_matchers(
+            &serialized,
+            &genome,
+            test_runtime::matchers(),
+        )
+        .expect("forced extraction runs")
+        .expect("forced extraction reaches the boundary");
+        let ops = cublaslt_ops(&graph);
+        assert_eq!(ops.len(), 1, "one kernel per forced election");
+        let spec = ops[0].spec.as_ref().expect("spec parses");
+        println!(
+            "  elected {} => m={} n={} k={} trans_a={} trans_b={} lda={} ldb={} ldd={}",
+            candidate.describe_short(),
+            spec.m,
+            spec.n,
+            spec.k,
+            spec.trans_a,
+            spec.trans_b,
+            spec.lda,
+            spec.ldb,
+            spec.ldd
+        );
+
+        // The frame's SHAPE is the same GEMV whichever reading is elected.
+        assert_eq!(spec.mnk_lits(), (1, 3, 4));
+        // ...and every field is THIS e-node's own reading, never a sibling's.
+        assert_eq!(
+            (
+                spec.desc_a_layout_tensor.clone(),
+                spec.desc_b_layout_tensor.clone()
+            ),
+            (want.a_lt.clone(), want.b_lt.clone()),
+            "the elected kernel must be the FORCED e-node's, not a sibling reading"
+        );
+        assert_eq!(
+            spec.trans_a, want.trans_a,
+            "trans_a is THIS e-node's reading"
+        );
+        assert_eq!(
+            spec.trans_b, want.trans_b,
+            "trans_b is THIS e-node's reading"
+        );
+        assert_eq!(
+            spec.lda.literal(),
+            Some(want.lda),
+            "lda is THIS e-node's reading"
+        );
+        assert_eq!(
+            spec.ldb.literal(),
+            Some(want.ldb),
+            "ldb is THIS e-node's reading"
+        );
+        assert_eq!(
+            spec.ldd.literal(),
+            Some(want.ldd),
+            "ldd is THIS e-node's reading"
+        );
+        assert_call_sound("fixture7 m=1", spec);
+        swept += 1;
+    }
+    assert_eq!(
+        swept,
+        candidates.len(),
+        "every cuBLASLt candidate of the boundary class was forced and checked"
+    );
+
+    // The round-10 numbers, no longer as "the winner" but as one member of
+    // the swept set: the direct call A = x[1,4] COL 1x4 ld 1 op N,
+    // B = w[4,3] COL 3x4 ld 3 op T.
+    let direct = candidates
+        .iter()
+        .map(|candidate| read_enode(&loc, &serialized.nodes[&candidate.enode]))
+        .find(|reading| !reading.trans_a && reading.trans_b)
+        .expect("the direct (op N, op T) frame is still one of the readings");
+    assert_eq!((direct.lda, direct.ldb, direct.ldd), (1, 3, 1));
 }
 
 /// The extent-1 pointing-weld geometry: m=1, k=1, n=3 (A [1,1], B [1,3]).
