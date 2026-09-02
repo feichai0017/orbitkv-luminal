@@ -8,6 +8,9 @@
 //! must-share ties, may-share permits, accumulators), which by design have no
 //! egglog surface.
 
+pub mod digest;
+pub mod relabel;
+
 pub mod test_ops {
     //! TEST FIXTURE (seed of the future TestRuntime, ruling 2026-08-13):
     //! the reference runtime implements ONLY non-mutating spellings of the
