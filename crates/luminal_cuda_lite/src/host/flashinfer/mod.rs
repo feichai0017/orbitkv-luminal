@@ -1571,4 +1571,24 @@ mod resource_tests {
         assert!(spec.cache_key.is_none());
         assert_eq!(spec.prepared_device_bytes().unwrap(), 2 * 32 * 128 * 2);
     }
+
+    #[test]
+    fn external_page_plan_accepts_non_power_of_two_gqa_geometry() {
+        let attention =
+            FlashInferAttention::paged(14, 2, 64, 16, 1.into(), 1.into(), DType::Bf16, 0.0, None);
+        let inputs = (0..7).map(NodeIndex::new).collect_vec();
+        let page_bytes = 16 * 2 * 64 * 2;
+        let lengths = FxHashMap::from_iter([
+            (inputs[1], 4 * page_bytes),
+            (inputs[2], 4 * page_bytes),
+            (inputs[4], 2 * std::mem::size_of::<i32>()),
+            (inputs[5], 2 * std::mem::size_of::<i32>()),
+            (inputs[6], std::mem::size_of::<i32>()),
+        ]);
+
+        let spec = attention
+            .device_resource_spec(&inputs, &lengths, &FxHashMap::default(), false)
+            .unwrap();
+        assert_eq!(spec.spec.num_qo_heads / spec.spec.num_kv_heads, 7);
+    }
 }
