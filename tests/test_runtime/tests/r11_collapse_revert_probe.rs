@@ -45,7 +45,7 @@ fn bounded_program(iters: usize, with_collapse: bool) -> String {
     // Replace the recorder's saturating schedule with a bounded run of
     // the MAIN ruleset only (the divergence lives entirely in the main
     // ruleset: sandwich + collapse are unscheduled rules).
-    let sat = "(run-schedule (saturate (saturate (run)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))";
+    let sat = test_runtime::TestRuntimeBindings::SCHEDULE.trim_end();
     assert!(
         program.contains(sat),
         "recorder schedule line not found — probe surgery is stale"

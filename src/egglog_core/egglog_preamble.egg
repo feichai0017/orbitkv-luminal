@@ -455,6 +455,166 @@
 ; their list rows.
 (ruleset materializing-copy-mint)
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; CLEANUP — the input-producer stratum (Austin's ruling 2026-09-02:
+; "add an e-graph CLEANUP stratum that removes producer spellings from
+; classes that hold an input").
+;
+; THE LEAF ARGUMENT. A boundary input is a LEAF: it exists at launch,
+; before a single op runs. Nothing in the program produces it, so no
+; producer of an input's class is ever NEEDED, and none can ever be
+; cheaper than reading the leaf. Any op whose OUTPUT list holds that
+; leaf is therefore junk for selection — sound as an equality,
+; unselectable as a plan.
+;
+; WHY THE JUNK EXISTS. Sound unions put it there. The cuBLASLt marker's
+; double-transpose collapse unions apply(apply(x, t), t) INTO x's
+; logical class; forward-layout rules then match a view op whose output
+; lands in x's LAYOUT-TENSOR class while reading the transpose view of
+; x — whose own class reads back. The extractor seeds an input terminal
+; at heuristic_cost 0 and a view producer also costs 0, so the tie broke
+; on plan_label ("IndexMapApplyViewGeneric" < "Input:..."), the
+; BufferInput vanished, and the extracted graph was CYCLIC — caught only
+; at bufferize (ruling's measurement: 50/50 weld genomes cyclic, ~15% of
+; genomes on the 2D marker graph, 9/32 in a real search). Re-measured at
+; the landing over seeds 0..20 at the harness budget on the 2D marker
+; matmul — 160 sampled genomes: BEFORE, 20 recorded bufferize refusals
+; across the 16 searches that finished plus 10 more named by the 4 that
+; exhausted the budget, every one of them "extracted graph has a cycle";
+; AFTER, zero bufferize refusals, zero cycle mentions, and all 20
+; searches produce a plan.
+;
+; WHAT DIES AND WHAT SURVIVES. The premise is the BOUND LEAF: the layout
+; tensor a BufferInputLit's BufferTensorLit names, over a
+; LogicalTensorInputLit. That is exactly the class the extractor seeds as
+; an Input plan, so the invariant this stratum installs is "a class the
+; plan reads as a launch-time leaf offers no producer".
+;
+; The premise is deliberately NOT "any layout tensor over an input's
+; logical value". A DIFFERENT layout over the same input value (a
+; left-major spelling of x) is a different arrangement of bytes: it is
+; not the leaf, it genuinely needs producing, and it is a legitimate
+; route — the marker's transposed B operand reaches its call that way.
+; Widening the premise to the logical member was tried at the landing and
+; REFUTED: it strips Copy/Materialize/View from that class and
+; `cublaslt_marker_round3_attack`'s `ru3_m1_corner_multiplicity` and
+; `ru4_weld_harvesting_is_cross_tensor` lose their plan outright. Killing
+; the producer that steals the LEAF's own class is all the cycle needs:
+; the weld is `leaf <- view(U)` welded to `U <- view(leaf)`, and only the
+; first arm is junk.
+;
+; Everything else survives untouched: a copy or a view that READS the
+; input and writes another class keeps every row it had, and a
+; pass-through output or a donated in-place write is not a producer of
+; the input's value either.
+;
+; POSITION. This stratum runs AFTER layout-tensor-op-metadata (the list
+; rows must already be set — a subsumed Lit is unmatchable, so cleanup
+; would starve the metadata rule if it ran first) and BEFORE
+; fixpoint-invariants. Minting and checking stay SEPARATE strata: this
+; ruleset is neither, and merging it into either would put a retraction
+; inside a phase whose contract is that it only adds.
+;
+; SATURATING. `(saturate (run cleanup))` — both list walks are recursive
+; (down the binding's BufferTensorList to find the leaves, then down each
+; op's LayoutTensorList to find one), so a single pass reaches only depth
+; 1. Saturation terminates trivially: the relations are monotone over a
+; finite list universe and the subsume retires the very node its own rule
+; matches.
+;
+; SUBSUME IS HYGIENE, NOT THE MECHANISM. Subsuming the generic
+; LayoutTensorOpLit spelling does NOT remove the runtime constructor
+; spellings unioned into the same class (each op's match_functional.egg
+; unions e.g. LayoutTensorOpAddFunctionalGeneric into it), and a core
+; rule cannot name every runtime constructor. The extractor therefore
+; reads the `input-producer` FACT — enode-anchored, class-invariant,
+; never a spelling.
+(ruleset cleanup)
+
+; An op whose output list holds a boundary input's LEAF layout tensor.
+(relation input-producer (LayoutTensorOp))
+; The recursive helper: this list holds at least one such layout tensor.
+(relation list-holds-input-layout-tensor (LayoutTensorList))
+; The boundary input binding's buffer-tensor list, walked to its leaves.
+(relation input-buffer-tensor-list (BufferTensorList))
+; A LAUNCH-TIME LEAF: the layout tensor an input binding names.
+(relation input-leaf-layout-tensor (LayoutTensor))
+
+; The input binding names a buffer-tensor list...
+(rule
+  (
+    (= ?binding (BufferInputLit ?list))
+  )
+  (
+    (input-buffer-tensor-list ?list)
+  )
+  :ruleset cleanup
+)
+; ...walk its spine...
+(rule
+  (
+    (input-buffer-tensor-list ?list)
+    (= ?list (BufferTensorCons ?head ?rest))
+  )
+  (
+    (input-buffer-tensor-list ?rest)
+  )
+  :ruleset cleanup
+)
+; ...and every layout tensor it binds a buffer to is a leaf. The
+; LogicalTensorInputLit conjunct is the belt: a binding may only name a
+; boundary value, and the fact refuses to be minted if that ever slips.
+(rule
+  (
+    (input-buffer-tensor-list ?list)
+    (= ?list (BufferTensorCons ?head ?rest))
+    (= ?head (BufferTensorLit ?layout_tensor ?buffer_id))
+    (= ?layout_tensor (LayoutTensorLit ?logical ?layout))
+    (= ?logical (LogicalTensorInputLit ?id ?shape ?dtype))
+  )
+  (
+    (input-leaf-layout-tensor ?layout_tensor)
+  )
+  :ruleset cleanup
+)
+
+; Base: the head is a leaf.
+(rule
+  (
+    (= ?list (LayoutTensorCons ?head ?rest))
+    (input-leaf-layout-tensor ?head)
+  )
+  (
+    (list-holds-input-layout-tensor ?list)
+  )
+  :ruleset cleanup
+)
+
+; Step: the tail holds one, so the cons does.
+(rule
+  (
+    (= ?list (LayoutTensorCons ?head ?rest))
+    (list-holds-input-layout-tensor ?rest)
+  )
+  (
+    (list-holds-input-layout-tensor ?list)
+  )
+  :ruleset cleanup
+)
+
+; The stratum's one conclusion: mark the op, retire the generic spelling.
+(rule
+  (
+    (= ?op (LayoutTensorOpLit ?ins ?outs))
+    (list-holds-input-layout-tensor ?outs)
+  )
+  (
+    (input-producer ?op)
+    (subsume (LayoutTensorOpLit ?ins ?outs))
+  )
+  :ruleset cleanup
+)
+
 (function expr-list-length-of (IntExprList) i64 :no-merge) ; I think these can be no merge
 (function expr-list-nth-from-end (IntExprList i64) IntExpr :no-merge) ; I think these can be no merge
 (relation expr-list-scale-demand (IntExpr IntExprList))
