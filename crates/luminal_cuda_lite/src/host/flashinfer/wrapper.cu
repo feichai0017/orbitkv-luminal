@@ -210,10 +210,9 @@ static int batch_decode_plan_t(
             stream, work_estimation_func);
     };
 
-    // FlashInfer specializes work estimation by GQA group size. Decoder
-    // checkpoints commonly use non-power-of-two ratios, so dispatch the
-    // complete practical range instead of silently restricting model
-    // geometry to {1, 2, 4, 8}.
+    // FlashInfer specializes work estimation by GQA group size. Cover the
+    // ratios used by dense decoder families, including non-power-of-two
+    // geometry, without instantiating every integer and inflating cold JIT.
     switch (group_size) {
         case 1:  status = do_plan.template operator()<1>();  break;
         case 2:  status = do_plan.template operator()<2>();  break;
@@ -223,13 +222,6 @@ static int batch_decode_plan_t(
         case 6:  status = do_plan.template operator()<6>();  break;
         case 7:  status = do_plan.template operator()<7>();  break;
         case 8:  status = do_plan.template operator()<8>();  break;
-        case 9:  status = do_plan.template operator()<9>();  break;
-        case 10: status = do_plan.template operator()<10>(); break;
-        case 11: status = do_plan.template operator()<11>(); break;
-        case 12: status = do_plan.template operator()<12>(); break;
-        case 13: status = do_plan.template operator()<13>(); break;
-        case 14: status = do_plan.template operator()<14>(); break;
-        case 15: status = do_plan.template operator()<15>(); break;
         case 16: status = do_plan.template operator()<16>(); break;
         default: return -1;
     }
