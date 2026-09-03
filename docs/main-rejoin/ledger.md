@@ -292,7 +292,10 @@ reference banked at main's spelling, the same standing cost as
 `early_stop_exceeded` in the #386 parks.
 
 **UNCARRIED.** `src/dyn_backend.rs` (+56) and `src/hlir.rs` (+240/-53) are
-deleted on this branch and were dropped from the pick. Of their content:
+deleted on this branch and were dropped from the pick. `src/frontend/other.rs`
+(+11) is live here but was not carried either: its whole hunk is the
+`Graph::constant_float64` door, which is the `ConstantF64` question settled
+below (SUPERSEDED). Of their content:
 
 - The **`bytes_to_reference_data` empty-Vec dtype fix** is DROPPED, not owed:
   it repairs `ReferenceData::from_raw_parts` reinterpreting an empty byte
@@ -340,7 +343,16 @@ dispatch. The pieces:
   an arbitrary hole.
 - Storage and readback: the `PlanDtype::F64` arm in
   `ReferenceRuntime::materialize` (staged F64 accepted, zeros otherwise) and
-  `ReferenceRuntime::get_f64`. The reference BINDING needed no change — it
+  `ReferenceRuntime::get_f64`.
+- **Arm inventory, so "executable" is read at its true width.** F64 executes
+  through the unary family above, through `move_gathered` in
+  `crates/luminal_reference/src/kernels/mod.rs` (gather, index-map
+  materialize, dense layout copy), and through staging and readback. It has
+  NO arm in `add`, `mul`, `less_than`, `reduce_sum`, `reduce_max`, `scatter`
+  or `iota`; each refuses an F64 operand loudly by name at its catch-all.
+  Main had those arms pre-split, via `ReferenceData::F64` in `src/hlir.rs`.
+  **Owed** together with the cast policy in the next paragraph: an F64
+  program today is unary-and-movement only. The reference BINDING needed no change — it
   emits `(bits-of (F64))` through the generic `{dtype:?}` arm, and the
   preamble already sets that row to 64.
 - `crates/luminal_cuda_lite/src/device.rs` gains an F64 arm in
@@ -432,8 +444,9 @@ three `PlanDtype` materialize arms and `get_i8` / `get_u8` / `get_i16`.
 > escaped error that the bounds lattice can and does prove away. The
 > argument against is that it is two overflow semantics in one runtime,
 > distinguishable only by width. If ruled the other way, the change is
-> local: swap `Ok(a.wrapping_add(b))` for a `checked_add` in the six narrow
-> arms and add `(I8)/(U8)/(I16)` proof gates beside the `(Int)` ones.
+> local: swap the `wrapping_*` calls for `checked_*` at the fifteen narrow
+> call sites (`add`, `mul`, `reduce_sum`, `trunc_div`, `trunc_rem`, three
+> widths each) and add `(I8)/(U8)/(I16)` proof gates beside the `(Int)` ones.
 
 **Main's `as` casts: carried for integers, NOT for floats.** A cast touching
 a narrow int routes through one `narrow_cast` helper in
@@ -674,7 +687,10 @@ of this shape).
 
 **What is true NOW, having applied #394 (P3) and #396 (P4) to the park.** The
 park has inherited main's race exactly. Verified after this batch's earlier
-commits, all in `crates/luminal_cuda_lite_hlir/`:
+commits, all in `crates/luminal_cuda_lite_hlir/`. Line numbers are as of
+`e259d33d` (this row's commit); after #401 (P6) the four `src/runtime.rs`
+rows below line 81 sit at 3079, 3080, 3099 and 5353, the `to_host.rs` rows
+do not move:
 
 | file | line | current | #400 would make it |
 | --- | --- | --- | --- |
