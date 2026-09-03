@@ -17,6 +17,7 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow, ensure};
+use colored::Colorize;
 use egraph_serialize::ClassId;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -37,6 +38,11 @@ pub struct ImplementationSearchOptions {
     pub mutations: usize,
     pub trials: usize,
     pub seed: u64,
+    /// Print live search progress to stderr (`Start` / `Faster` /
+    /// `Slower x{n}`). ON by default, matching main's
+    /// `CompileOptions::search_log`; overridden by `SEARCH_LOG=0`/`1`
+    /// or `LUMINAL_LOG=1`.
+    pub search_log: bool,
 }
 
 impl Default for ImplementationSearchOptions {
@@ -47,7 +53,229 @@ impl Default for ImplementationSearchOptions {
             mutations: 2,
             trials: 3,
             seed: 0,
+            search_log: true,
         }
+    }
+}
+
+impl ImplementationSearchOptions {
+    /// Enable or disable live search progress logging — main's
+    /// `CompileOptions::search_log(enabled)` builder, re-expressed.
+    pub fn search_log(mut self, enabled: bool) -> Self {
+        self.search_log = enabled;
+        self
+    }
+
+    fn search_log_enabled(&self) -> bool {
+        log_channel_enabled(self.search_log, "SEARCH_LOG")
+    }
+}
+
+fn parse_log_flag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Main's `log_channel_enabled` (its `src/egglog_utils/mod.rs`), which
+/// this branch has no counterpart for: `LUMINAL_LOG=1` forces every
+/// channel on, an explicit channel variable overrides the programmatic
+/// setting, and otherwise the option stands.
+pub fn log_channel_enabled(option_enabled: bool, channel_env: &str) -> bool {
+    if std::env::var("LUMINAL_LOG").is_ok_and(|value| parse_log_flag(&value)) {
+        return true;
+    }
+    if let Ok(value) = std::env::var(channel_env) {
+        return parse_log_flag(&value);
+    }
+    option_enabled
+}
+
+/// A profiled candidate's cost, as the progress lines spell it.
+fn display_nanos(nanos: u128) -> String {
+    format!("{:.3} ms", nanos as f64 / 1e6)
+}
+
+/// The production sink for [`SearchProgress`].
+///
+/// Writing to `std::io::stderr()` directly bypasses libtest's output
+/// capture, so every test that leaves `search_log` on would leak
+/// progress lines (including unterminated transient `Slower` rows)
+/// into the harness output. Routing the same bytes through the
+/// `eprint!` macro goes through the capture-aware path instead, so the
+/// suites stay silent unless run with `--nocapture` while real runs
+/// still print to stderr.
+pub(crate) struct CaptureAwareStderr;
+
+impl std::io::Write for CaptureAwareStderr {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        eprint!("{}", String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // `eprint!` already writes through on each call; nothing buffered here.
+        Ok(())
+    }
+}
+
+/// Live search progress, re-expressing main's #391 three-state report
+/// (`Start` once, a permanent `Faster` per improvement, one transient
+/// `Slower x{n}`) for this branch's selection loop.
+///
+/// THE ONE DIVERGENCE from main: main draws progress bars under the
+/// report and walks the cursor up over them (`\x1b[1A` per bar row)
+/// before printing. This branch's search draws no bars, so all of that
+/// cursor arithmetic is dropped; the transient `Slower` line is instead
+/// written WITHOUT a newline and every subsequent line starts by
+/// clearing it in place (`\r\x1b[2K`). A `Faster` line therefore
+/// replaces the pending `Slower` line rather than being appended below
+/// it, and ends with a newline, so improvements accumulate as
+/// scrollback exactly as on main.
+pub(crate) struct SearchProgress<W: std::io::Write> {
+    out: W,
+    /// The baseline has been announced.
+    started: bool,
+    /// Consecutive non-improving candidates since the last improvement.
+    slower_since_faster: usize,
+    /// A transient `Slower` line is currently on screen, unterminated.
+    slower_line_visible: bool,
+}
+
+impl<W: std::io::Write> SearchProgress<W> {
+    pub(crate) fn new(out: W) -> Self {
+        Self {
+            out,
+            started: false,
+            slower_since_faster: 0,
+            slower_line_visible: false,
+        }
+    }
+
+    /// The BASELINE: the first profiled plan, announced once. (Main
+    /// renamed this label from `Search` to `Start` in the same commit:
+    /// the first line reports the baseline, not a search result.)
+    pub(crate) fn start(&mut self, nanos: u128) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        let _ = writeln!(
+            self.out,
+            "   {:>6} {}",
+            "Start".cyan().bold(),
+            display_nanos(nanos)
+        );
+        let _ = self.out.flush();
+    }
+
+    /// One profiled candidate after the baseline: a permanent `Faster`
+    /// line carrying the new best, or the transient `Slower x{n}`
+    /// counter (reset to zero by every improvement).
+    pub(crate) fn report(&mut self, improved: bool, nanos: u128) {
+        let _ = write!(self.out, "\r\x1b[2K");
+        if improved {
+            self.slower_since_faster = 0;
+            self.slower_line_visible = false;
+            let _ = writeln!(
+                self.out,
+                "   {:>6} {}",
+                "Faster".green().bold(),
+                display_nanos(nanos)
+            );
+        } else {
+            self.slower_since_faster += 1;
+            self.slower_line_visible = true;
+            let _ = write!(
+                self.out,
+                "   {:>6} x{}",
+                "Slower".yellow().bold(),
+                self.slower_since_faster
+            );
+        }
+        let _ = self.out.flush();
+    }
+
+    /// End of search: clear a pending transient `Slower` line so it
+    /// does not survive as a half-written row.
+    pub(crate) fn finish(&mut self) {
+        if self.slower_line_visible {
+            let _ = write!(self.out, "\r\x1b[2K");
+            self.slower_line_visible = false;
+        }
+        let _ = self.out.flush();
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::SearchProgress;
+
+    /// Read the WORDS whatever `colored` decided about this terminal:
+    /// drop every escape sequence, keep the carriage returns (they are
+    /// the transient-line mechanism the test is pinning).
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) && c != '[' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn progress_prints_start_once_faster_per_improvement_and_a_resetting_slower_counter() {
+        let mut sink: Vec<u8> = Vec::new();
+        {
+            let mut progress = SearchProgress::new(&mut sink);
+            progress.start(4_000_000);
+            // The baseline is announced exactly once, even if the loop
+            // were to ask twice.
+            progress.start(9_000_000);
+            progress.report(false, 9_000_000);
+            progress.report(false, 8_000_000);
+            progress.report(true, 3_000_000);
+            progress.report(false, 5_000_000);
+            progress.finish();
+        }
+        let raw = String::from_utf8(sink).expect("utf8");
+        let text = strip_ansi(&raw);
+
+        assert_eq!(text.matches("Start").count(), 1, "Start once: {text:?}");
+        assert!(text.contains("Start 4.000 ms"), "baseline nanos: {text:?}");
+
+        assert_eq!(
+            text.matches("Faster").count(),
+            1,
+            "one improvement: {text:?}"
+        );
+        assert!(
+            text.contains("Faster 3.000 ms"),
+            "the new best rides the Faster line: {text:?}"
+        );
+
+        // The counter climbs while nothing improves and RESETS on the
+        // improvement, so the last candidate is x1 again, not x3.
+        assert!(text.contains("Slower x1"), "{text:?}");
+        assert!(text.contains("Slower x2"), "{text:?}");
+        assert!(!text.contains("Slower x3"), "counter must reset: {text:?}");
+        assert_eq!(text.matches("Slower x1").count(), 2, "{text:?}");
+
+        // Every report (and the finish) rewrites the transient line in
+        // place: no bar-relative cursor math, just \r + erase-line.
+        assert_eq!(raw.matches("\r\x1b[2K").count(), 5, "{raw:?}");
+        // Faster/Start lines are permanent (newline-terminated); the
+        // pending Slower line is not, and finish() clears it.
+        assert!(raw.ends_with("\r\x1b[2K"), "{raw:?}");
     }
 }
 
@@ -568,6 +796,12 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
     let mut refusals: Vec<String> = Vec::new();
     let mut breakdown = RefusalBreakdown::default();
     let mut best: Option<(u128, Genome, BufferIrGraph<L>)> = None;
+    // Live progress (#391), on stderr (via the capture-aware adapter, so
+    // test output stays clean) and never on a caller's stdout.
+    // `None` = the option (or `SEARCH_LOG`) says quiet.
+    let mut progress = options
+        .search_log_enabled()
+        .then(|| SearchProgress::new(CaptureAwareStderr));
 
     for generation in 0..options.generations {
         let mut candidates: Vec<Genome> = Vec::with_capacity(options.generation_size);
@@ -705,10 +939,20 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
                     };
                     cache.insert(fingerprint, nanos);
                     plans_profiled += 1;
-                    if best
+                    let improved = best
                         .as_ref()
-                        .is_none_or(|(best_nanos, _, _)| nanos < *best_nanos)
-                    {
+                        .is_none_or(|(best_nanos, _, _)| nanos < *best_nanos);
+                    if let Some(progress) = progress.as_mut() {
+                        // The FIRST profiled plan IS the baseline, so it
+                        // reports as `Start`, never as an improvement on
+                        // itself; everything after it is Faster/Slower.
+                        if plans_profiled == 1 {
+                            progress.start(nanos);
+                        } else {
+                            progress.report(improved, nanos);
+                        }
+                    }
+                    if improved {
                         best = Some((nanos, genome.clone(), plan));
                     }
                     continue;
@@ -744,6 +988,9 @@ pub fn search_implementations_with_runtime<L: crate::bufferize::PlanLayout>(
         }
     }
 
+    if let Some(progress) = progress.as_mut() {
+        progress.finish();
+    }
     let (best_nanos, best_genome, best_plan) = best.ok_or_else(|| {
         anyhow!("no candidate genome produced an executable plan; refusals: {refusals:#?}")
     })?;

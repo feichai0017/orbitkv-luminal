@@ -45,6 +45,7 @@ fn view_search_options() -> ImplementationSearchOptions {
         mutations: 4,
         trials: 1,
         seed: 0,
+        search_log: false,
     }
 }
 

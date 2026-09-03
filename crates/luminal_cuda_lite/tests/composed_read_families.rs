@@ -40,6 +40,7 @@ fn view_search_options(seed: u64) -> ImplementationSearchOptions {
         mutations: 4,
         trials: 1,
         seed,
+        search_log: false,
     }
 }
 

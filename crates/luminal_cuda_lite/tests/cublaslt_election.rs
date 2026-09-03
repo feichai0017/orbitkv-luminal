@@ -194,6 +194,7 @@ fn canonical_2d_matmul_elects_the_marker() {
         mutations: 4,
         trials: 1,
         seed: 0,
+        search_log: false,
     };
     let row = search_and_count_opts("matmul_2d(4x8 . 8x3)", &cx, &pairs, &options);
     let Row::Searched { elected, computes } = row else {
