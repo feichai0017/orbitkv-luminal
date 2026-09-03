@@ -74,6 +74,18 @@ pub struct PagedAttentionSpec {
     pub window_left: Option<usize>,
 }
 
+/// Runtime tensors for an externally managed paged-attention state.
+#[derive(Clone, Copy, Debug)]
+pub struct PagedAttentionPlan {
+    pub query: GraphTensor,
+    pub key_cache: GraphTensor,
+    pub value_cache: GraphTensor,
+    pub page_indices: GraphTensor,
+    pub query_indptr: GraphTensor,
+    pub page_indptr: GraphTensor,
+    pub last_page_len: GraphTensor,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FlashInferDecodeSpec {
     total_q_tokens: usize,
@@ -385,6 +397,13 @@ impl Default for FlashInferAttention {
 }
 
 impl FlashInferAttention {
+    fn group_size(num_qo_heads: usize, num_kv_heads: usize) -> anyhow::Result<usize> {
+        num_qo_heads
+            .checked_div(num_kv_heads)
+            .filter(|group| *group > 0 && num_qo_heads.is_multiple_of(num_kv_heads))
+            .ok_or_else(|| anyhow::anyhow!("FlashInfer query/KV head geometry is invalid"))
+    }
+
     /// Constructs a paged-attention execution node whose page geometry is
     /// supplied by an external state compiler.
     ///
@@ -455,15 +474,18 @@ impl luminal::op::CustomOp for FlashInferAttention {
 /// page indices, query indptr, KV-page indptr, and last-page token counts.
 /// The returned tensor is laid out as `(heads, query_tokens, head_dim)`.
 pub fn paged_attention_with_plan(
-    q: GraphTensor,
-    k_cache: GraphTensor,
-    v_cache: GraphTensor,
-    page_indices: GraphTensor,
-    qo_indptr: GraphTensor,
-    kv_indptr: GraphTensor,
-    last_page_len: GraphTensor,
+    plan: PagedAttentionPlan,
     spec: PagedAttentionSpec,
 ) -> GraphTensor {
+    let PagedAttentionPlan {
+        query: q,
+        key_cache: k_cache,
+        value_cache: v_cache,
+        page_indices,
+        query_indptr: qo_indptr,
+        page_indptr: kv_indptr,
+        last_page_len,
+    } = plan;
     let inputs = [
         q,
         k_cache,
@@ -614,7 +636,9 @@ impl EgglogOp for FlashInferAttention {
         // first execute. Pays the ~30s cold-cache nvcc cost during compile
         // rather than during the GA profiling loop, where it would dominate
         // the candidate's measured runtime and make the GA reject FlashInfer.
-        let _ = jit::ensure_compiled(head_dim, window_left >= 0);
+        let group_size = Self::group_size(num_qo_heads, num_kv_heads)
+            .expect("FlashInferAttention extracted with invalid query/KV head geometry");
+        let _ = jit::ensure_compiled(head_dim, window_left >= 0, group_size);
 
         let flat_idx_node = input_enodes[3];
         let gather_idx = find_indptrs::try_find_compact_gather_idx(egraph, flat_idx_node)
@@ -870,7 +894,8 @@ impl FlashInferAttention {
         mut resolved: FlashInferResolvedDecode,
         enable_cuda_graph: bool,
     ) -> anyhow::Result<PreparedFlashInferDecode> {
-        let lib = jit::ensure_compiled(self.head_dim, self.window_left >= 0);
+        let group_size = Self::group_size(self.num_qo_heads, self.num_kv_heads)?;
+        let lib = jit::ensure_compiled(self.head_dim, self.window_left >= 0, group_size);
         let cu_stream = stream.cu_stream() as *mut std::ffi::c_void;
         let spec = &mut resolved.spec;
         let is_prefill = spec.is_prefill();

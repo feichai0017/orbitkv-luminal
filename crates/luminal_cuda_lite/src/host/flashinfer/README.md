@@ -60,14 +60,14 @@ The runtime FlashInfer inputs are only `Q`, `K_cache`, `V_cache`, and compact `g
 
 ### 3. JIT Compilation
 
-FlashInfer requires `HEAD_DIM` as a compile-time template parameter. Rather than baking it at `cargo build` time, `jit.rs` JIT-compiles `wrapper.cu` with the model's actual HEAD_DIM:
+FlashInfer requires `HEAD_DIM` and the query-to-KV head ratio as compile-time template parameters. Rather than baking them at `cargo build` time, `jit.rs` JIT-compiles `wrapper.cu` with the graph's actual geometry:
 
-1. First call to `ensure_compiled(head_dim)` runs `nvcc` with `-DLUMINAL_HEAD_DIM=<N>`
-2. The compiled `.so` is cached at `~/.cache/luminal/flashinfer/libflashinfer_hd<N>_<arch>.so`
+1. First call to `ensure_compiled(head_dim, use_swa, group_size)` runs `nvcc` with `-DLUMINAL_HEAD_DIM=<N>` and `-DLUMINAL_GQA_GROUP_SIZE=<N>`
+2. The compiled `.so` cache key includes head dimension, sliding-window mode, grouped-query ratio, CUDA architecture, and wrapper source hash
 3. Subsequent calls load the cached library via `dlopen`
-4. Function pointers (plan, run, transpose, etc.) are resolved and stored in a `static OnceLock`
+4. Function pointers (plan, run, transpose, etc.) are retained in a process-wide map keyed by the same geometry
 
-Supported HEAD_DIM values: 64, 128, 256.
+Supported HEAD_DIM values: 64, 128, 256, and 512. Grouped-query ratios may be any positive integer accepted by the underlying kernel templates.
 
 ### 4. Runtime Execution
 

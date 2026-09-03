@@ -15,6 +15,9 @@
 #ifndef LUMINAL_HEAD_DIM
 #error "LUMINAL_HEAD_DIM must be defined (e.g. -DLUMINAL_HEAD_DIM=128)"
 #endif
+#ifndef LUMINAL_GQA_GROUP_SIZE
+#error "LUMINAL_GQA_GROUP_SIZE must be defined"
+#endif
 
 // Include utils.cuh first to get the original DISPATCH_HEAD_DIM, then override it
 // to only instantiate our specific HEAD_DIM. This avoids a compile error in
@@ -51,6 +54,7 @@ using namespace flashinfer;
 using IdType = int32_t;
 
 constexpr uint32_t HEAD_DIM = LUMINAL_HEAD_DIM;
+constexpr uint32_t GQA_GROUP_SIZE = LUMINAL_GQA_GROUP_SIZE;
 constexpr PosEncodingMode POS_ENCODING_MODE = PosEncodingMode::kNone;
 
 // Sliding-window attention is a kernel-variant template flag; the actual
@@ -210,21 +214,8 @@ static int batch_decode_plan_t(
             stream, work_estimation_func);
     };
 
-    // FlashInfer specializes work estimation by GQA group size. Cover the
-    // ratios used by dense decoder families, including non-power-of-two
-    // geometry, without instantiating every integer and inflating cold JIT.
-    switch (group_size) {
-        case 1:  status = do_plan.template operator()<1>();  break;
-        case 2:  status = do_plan.template operator()<2>();  break;
-        case 3:  status = do_plan.template operator()<3>();  break;
-        case 4:  status = do_plan.template operator()<4>();  break;
-        case 5:  status = do_plan.template operator()<5>();  break;
-        case 6:  status = do_plan.template operator()<6>();  break;
-        case 7:  status = do_plan.template operator()<7>();  break;
-        case 8:  status = do_plan.template operator()<8>();  break;
-        case 16: status = do_plan.template operator()<16>(); break;
-        default: return -1;
-    }
+    if (group_size != GQA_GROUP_SIZE) return -1;
+    status = do_plan.template operator()<GQA_GROUP_SIZE>();
 
     if (status != cudaSuccess) return (int)status;
 

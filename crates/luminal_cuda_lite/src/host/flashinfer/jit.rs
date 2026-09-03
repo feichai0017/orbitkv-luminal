@@ -199,19 +199,25 @@ pub struct FlashInferLib {
 unsafe impl Send for FlashInferLib {}
 unsafe impl Sync for FlashInferLib {}
 
-/// One compiled wrapper per (HEAD_DIM, use_sliding_window) pair — gemma
-/// needs head dims 256 (sliding) and 512 (full) in one process. Libraries
-/// are leaked: each .so stays mapped for the process lifetime anyway.
-static FLASHINFER_LIBS: OnceLock<
-    std::sync::Mutex<std::collections::HashMap<(usize, bool), &'static FlashInferLib>>,
-> = OnceLock::new();
+type FlashInferJitKey = (usize, bool, usize);
+type FlashInferRegistry =
+    std::sync::Mutex<std::collections::HashMap<FlashInferJitKey, &'static FlashInferLib>>;
+
+/// One compiled wrapper per head-dimension, sliding-window, and grouped-query
+/// geometry. Libraries are leaked because each `.so` remains mapped for the
+/// process lifetime anyway.
+static FLASHINFER_LIBS: OnceLock<FlashInferRegistry> = OnceLock::new();
 
 /// Ensure the FlashInfer library is compiled and loaded for the given
 /// HEAD_DIM and sliding-window variant. Thread-safe.
-pub fn ensure_compiled(head_dim: usize, use_swa: bool) -> &'static FlashInferLib {
+pub fn ensure_compiled(
+    head_dim: usize,
+    use_swa: bool,
+    group_size: usize,
+) -> &'static FlashInferLib {
     let libs = FLASHINFER_LIBS.get_or_init(Default::default);
     let mut libs = libs.lock().unwrap();
-    if let Some(lib) = libs.get(&(head_dim, use_swa)) {
+    if let Some(lib) = libs.get(&(head_dim, use_swa, group_size)) {
         return lib;
     }
     assert!(
@@ -219,12 +225,16 @@ pub fn ensure_compiled(head_dim: usize, use_swa: bool) -> &'static FlashInferLib
         "FlashInfer: unsupported HEAD_DIM={} (must be 64, 128, 256, or 512; 512 is 16-bit only)",
         head_dim
     );
-    let so_path = compile_or_cache(head_dim, use_swa);
+    assert!(
+        group_size > 0,
+        "FlashInfer: GQA group size must be positive"
+    );
+    let so_path = compile_or_cache(head_dim, use_swa, group_size);
     let lib: &'static FlashInferLib = Box::leak(Box::new(unsafe {
         FlashInferLib::load(&so_path)
             .unwrap_or_else(|e| panic!("Failed to load FlashInfer library: {e}"))
     }));
-    libs.insert((head_dim, use_swa), lib);
+    libs.insert((head_dim, use_swa, group_size), lib);
     lib
 }
 
@@ -310,6 +320,7 @@ pub fn compile_flashinfer_source(
         source.cutlass_tools_include,
         source.extra_flags,
         source.progress_note,
+        None,
     )
 }
 
@@ -327,11 +338,16 @@ fn compile_or_cache_common(
     cutlass_tools_include: bool,
     extra_flags: &[&str],
     progress_note: &str,
+    group_size: Option<usize>,
 ) -> PathBuf {
     let cache_dir = cache_directory();
     let so_name = format!(
-        "{so_stem}_hd{}_swa{}_{}_w{:016x}.so",
-        head_dim, use_swa as u8, arch, wrapper_hash
+        "{so_stem}_hd{}_swa{}_gqa{}_{}_w{:016x}.so",
+        head_dim,
+        use_swa as u8,
+        group_size.map_or_else(|| "any".to_owned(), |value| value.to_string()),
+        arch,
+        wrapper_hash
     );
     let so_path = cache_dir.join(&so_name);
 
@@ -370,6 +386,9 @@ fn compile_or_cache_common(
         "-I".to_string(),
         cutlass_include.to_str().unwrap().to_string(),
     ];
+    if let Some(group_size) = group_size {
+        args.push(format!("-DLUMINAL_GQA_GROUP_SIZE={group_size}"));
+    }
     if cutlass_tools_include {
         // cutlass_utils.cuh also pulls in cutlass/util/* from the tools tree.
         let tools = cutlass_include.parent().unwrap().join("tools/util/include");
@@ -411,7 +430,7 @@ fn compile_or_cache_common(
 }
 
 /// Compile wrapper.cu for the given HEAD_DIM/variant, or return cached .so path.
-fn compile_or_cache(head_dim: usize, use_swa: bool) -> PathBuf {
+fn compile_or_cache(head_dim: usize, use_swa: bool, group_size: usize) -> PathBuf {
     let cache_dir = cache_directory();
     std::fs::create_dir_all(&cache_dir).expect("Failed to create FlashInfer cache directory");
     // Extract bundled wrapper sources to the cache so nvcc can compile them.
@@ -428,6 +447,7 @@ fn compile_or_cache(head_dim: usize, use_swa: bool) -> PathBuf {
         /*cutlass_tools_include=*/ false,
         &["-rdc=true"],
         "",
+        Some(group_size),
     )
 }
 

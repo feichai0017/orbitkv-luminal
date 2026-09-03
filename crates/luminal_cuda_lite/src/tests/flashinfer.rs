@@ -1730,9 +1730,15 @@ fn flashinfer_f32_prefill_still_rejected() {
 #[ignore = "one-time JIT compile check for the gemma variants (~2 min each cold)"]
 fn jit_compiles_gemma_variants() {
     // sliding layers: head_dim 256 with the sliding-window kernel variant
-    let _ = crate::host::flashinfer::jit::ensure_compiled(256, true);
+    let _ = crate::host::flashinfer::jit::ensure_compiled(256, true, 2);
     // full layers: head_dim 512 (16-bit only; f32 instantiation is gated out)
-    let _ = crate::host::flashinfer::jit::ensure_compiled(512, false);
+    let _ = crate::host::flashinfer::jit::ensure_compiled(512, false, 2);
+}
+
+#[test]
+#[ignore = "one-time JIT compile check for a non-power-of-two GQA ratio"]
+fn jit_compiles_non_power_of_two_gqa_geometry() {
+    let _ = crate::host::flashinfer::jit::ensure_compiled(64, false, 7);
 }
 
 /// Gemma-4 paged attention spelling at mini dims (scale-free scores; sliding
