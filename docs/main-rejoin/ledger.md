@@ -31,6 +31,7 @@ Dispositions:
 | `7d2817fa` | — | luminal_python: search_iterations pass through more places | FILE-LEVEL | branch `merge/main-7d2817fa-search-iterations` | parked crate: re-point `search_iterations` at `ImplementationSearchOptions` when luminal_python is re-attached to the recorder |
 | `bea18ecf` | #389 | Sdpa gqa fixes | FILE-LEVEL | branch `merge/main-389-sdpa-gqa` | parked crate + non-gating `ci/`: RULED 2026-09-02 (ruling 1) — `ci/example_output.py` SYNCS main's numbers for now, by decision; the loosened gemma / gemma4_moe TPOT figures are main's HLIR cuda_lite draws and still have to be re-baselined against CL A100 draws before they gate anything here |
 | `499d0779` | #386 | Search: early-stop candidate profiling against the best-so-far metric | MIXED — RE-EXPRESSED (core: running mean + fifth positional cutoff + predicate) / FILE-LEVEL (parks, with a stubbed predicate) | branch `merge/main-386-early-stop` (two commits) | REQUIREMENT FOR CL (ruling 4): a device `PlanProfiler` that times candidates on device, mirroring `ReferenceProfiler`'s design, and then honours the cutoff — until then `StaticProfiler` accepts and ignores it; see **#386 early-stop profiling** below |
+| `6a5313f2` | #398 | Support for PyTorch OpInfo tests | MIXED — FILE-LEVEL (python + workflow) / RE-EXPRESSED (F64 becomes a real executable dtype) | branch `merge/main-398-opinfo` (two commits) | see **#398 OpInfo + F64** below |
 
 ## #391 progress UI — re-expressed in `src/implementation_search.rs`
 
@@ -242,3 +243,66 @@ profiler's design** — warmup, timed trials, a mean metric, and the same
 lower-bound cutoff — at which point `StaticProfiler`'s ignored argument becomes
 a real one. That is a larger question than the cutoff itself, and it is not in
 this batch.
+
+## #398 OpInfo + F64 — what landed, and what is owed
+
+RULED 2026-09-02 (ruling 1): *"this is good and should get its content
+merged"*. Split in two commits, because the commit is two things.
+
+**FILE-LEVEL (commit 1).** All 13 `crates/luminal_python/**` files plus
+`.github/workflows/test-python-native.yml` (the OpInfo shard job, committed
+commented-out) take main's diff. The crate is not a workspace member here, so
+none of it builds or runs; it is banked so the OpInfo harness — main's only
+broad conformance oracle, 373 lines of `tests/test_opinfo.py` — is not lost,
+and so the two genuine lowering fixes riding along are recorded as text:
+
+- **`translate_arange` trusts export's output metadata** instead of
+  recomputing `(end-start)/step`. The old code collected every *decodable*
+  positional argument with a `filter_map`, which silently dropped float and
+  bool values and shifted the survivors into the wrong start/end/step slots;
+  the rewrite resolves `start`/`step` by PT2 schema NAME and takes the length
+  from `output_meta_shape`, which is already correct for fractional and
+  negative steps (`arange(-1, 2, 2)`) and for empty ranges.
+- **`acos` / `acosh` lowerings** (Chebyshev-style polynomial + the
+  `1 - x` square-root fold, and `log(x + sqrt(x^2 - 1))`) in
+  `translator/unary.rs`.
+
+Both are REQUIREMENTS on the M4 re-attachment: when the translator is
+re-expressed against the recorder frontend they must not be silently
+re-broken.
+
+Four files conflicted and were resolved keeping this branch's spellings, never
+main's (the standing rule): `compiled_graph.rs` takes main's new
+`copy_host_bytes` helper but keeps the `IntExpr` doc comment;
+`translator/attention.rs` takes main's f64 default SDPA scale with the
+branch's `legacy_tracker_ref()` indentation; `translator/binary.rs` takes
+main's `scalar_constant` + alpha plumbing with `expand_rhs(a.dims())` for
+main's `expand_rhs(a.shape)`; `translator/tensor.rs` takes main's schema-name
+arange with `Expr(IntExpr)` for `Expr(Expression)` and `indices.dims()` for
+`indices.shape`. `main`'s new `Translator::scalar_constant` calls
+`Graph::constant_float64`, which this branch does not have — a DANGLING
+reference banked at main's spelling, the same standing cost as
+`early_stop_exceeded` in the #386 parks.
+
+**UNCARRIED.** `src/dyn_backend.rs` (+56) and `src/hlir.rs` (+240/-53) are
+deleted on this branch and were dropped from the pick. Of their content:
+
+- The **`bytes_to_reference_data` empty-Vec dtype fix** is DROPPED, not owed:
+  it repairs `ReferenceData::from_raw_parts` reinterpreting an empty byte
+  slice as F32 regardless of the declared dtype. `TypedBuffer` holds typed
+  `Vec`s and never reinterprets bytes, so the hazard cannot recur here.
+- **`ConstantF64`** is SUPERSEDED and deliberately NOT ported. Main's own
+  commit calls it temporary — *"should be removed ASAP once the SSA changeset
+  lands, by having Constant be typed"* — and typed constants ARE this
+  branch's design: `LogicalOp::Constant(f64)` already carries an f64 payload
+  and `LogicalGraph::op` already takes an explicit `DType`. What blocks
+  `Graph::constant_float64` today is one line of egglog, not an op:
+  `src/logical_op/constant/dtype.egg` sets `(dtype-of (LogicalConstant ?v))`
+  to `(F32)` UNCONDITIONALLY, so a constant cannot be minted at any other
+  dtype. **Owed:** give `LogicalConstant` a dtype — either a second
+  constructor child or a `dtype-of` seed written by the recorder — and then
+  `constant_float64` is a three-line frontend method. Until then a parked
+  `scalar_constant` call to it stays dangling.
+- The **`f64_fn` arms** ARE re-expressed, in the next commit on this
+  branch — F64 becomes a real executable dtype (ruling 1 answered intent-row
+  question 2 in the affirmative).
