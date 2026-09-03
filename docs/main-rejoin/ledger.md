@@ -38,6 +38,7 @@ Dispositions:
 | `2fbf5b6a` | #400 | cuda_lite: retype dim maps | DROPPED | — | ruling 5 of 2026-09-02: *"okay, we can drop"*. But the mismatch it repairs is now VERIFIABLY PRESENT in the park — see **#400 dropped** below, which names all 8 sites |
 | `1d07093c` | #401 | Reuse persistent CUDA intermediate arena | FILE-LEVEL (park) + INTENT-ONLY (core) | branch `merge/main-401-arena-park` | REQUIREMENT FOR THE CL EXECUTOR: honour the plan's `BufferAlloc`/`BufferFree` against one runtime-owned high-water slab; park-don't-free, keep-the-largest, re-attach-only-if-wanted — see **#401 persistent arena** below |
 | `7e7deb2a` | #404 | Spec | FILE-LEVEL (`spec.md`) | branch `merge/main-404-spec` | ruling 7 of 2026-09-02: *"this is just a snapshot, we'll update it later"* — the text describes main's architecture (translator-fed HLIR, loop-rolling, genetic LLIR extraction), NOT this branch's; see **#404 spec.md** below for the line-by-line divergence |
+| `d6d26cbe` | #402 | translate_module: hand back the translated graph without the pytorch wrappings | FILE-LEVEL (4 seam files) + SUPERSEDED (the `scatter_nd` fix) | branch `merge/main-402-translate-seam` | the seam's REQUIREMENT for the python re-attachment: a host must be able to take the translated graph WITHOUT inheriting luminal's dim buckets or search budget — see **#402 translate_module** below |
 
 ## #391 progress UI — re-expressed in `src/implementation_search.rs`
 
@@ -784,3 +785,59 @@ Profiling -> unrolled LLIR -> Runtime`. On this branch:
 `extractor` + `implementation_search` / `bufferize` / CL flow. Adapting this
 text line by line would be worse than starting from the pipeline as it is;
 what should survive the rewrite is the contracts section, not the diagram.
+
+## #402 translate_module — the seam banked, the scatter fix superseded
+
+RULED 2026-09-02 (ruling 8): *"I like your merge plan"* — the four
+translate-seam files file-level, the `scatter_nd` half dropped as superseded.
+
+**FILE-LEVEL.** `crates/luminal_python/rust/{Cargo.toml, src/lib.rs,
+src/pt2_compiled_model.rs}` and `crates/luminal_python/src/luminal/pt2.py`,
+applied cleanly (empty diff-of-diffs against `d6d26cbe` for those paths). The
+commit adds a "translate and stop" entry point: `translate_module` traces and
+exports a Dynamo `GraphModule`, translates the `.pt2` into a
+`GraphTranslation` + `WeightData`, and hands that back in an unsendable
+`TranslatedModule` pyclass INSTEAD of compiling a backend and returning a
+callable. The packaging change is what makes that usable: the crate builds as
+`rlib` alongside `cdylib` (lib renamed `luminal` -> `luminal_python`) and the
+PT2 modules become `pub`, so a Rust host can LINK the translator rather than
+drive it through the interpreter. Note the `#[pymodule]` is still `fn
+luminal`, so the name Python imports is unchanged — the rename is safe exactly
+as long as that stays true.
+
+**The REQUIREMENT this banks**, for the python re-attachment: *an embedding
+host must be able to take the translated graph without inheriting luminal's
+dim buckets or its search budget.* `process_pt2` chooses both; a host that
+wants to pick its own has nowhere to intervene. On this branch the natural
+expression is handing back the recorded `Graph` (plus its `InputSpec` /
+`output_named` bindings) BEFORE `implementation_search` runs — at which point
+`GraphTranslation` itself has to be redefined in recorder terms, since it
+currently carries HLIR `NodeIndex`es.
+
+**SUPERSEDED — the `pt2_scatter_nd` fix, deliberately not ported.** Main's
+bug: the per-trailing-dim `arange` scaffolding gave the tensor expanded
+(0-stride) dims and then OVERWROTE its `ShapeTracker` with a contiguous
+`[trailing_numel]` view, which is unsound for a virtual dim — at data rank >= 3
+the scatter wrote one element per row. Main replaces it with
+`flat_base.expand_dim(1, trailing_numel) + arange(trailing_numel).expand_dim(0,
+batch_numel)`, which is correct because the trailing offsets happen to be
+row-major over the trailing block.
+
+This branch fixed the same defect independently and by a STRONGER mechanism,
+in its own frontend: `src/frontend/movement.rs:563` `GraphTensor::scatter_nd`
+computes the trailing offset as a real coordinate function —
+`graph().iota(trailing_shape, |c| sum c[ti] * trailing_strides[ti])` over the
+ACTUAL trailing strides, then `expand_rhs` / `expand_lhs` broadcasts (comments
+cite ruling 2026-08-26, "ONE iota + two broadcast applies replace the per-dim
+arange/expand scaffolding"). It does not rely on the trailing block being
+row-major, it uses the strides. And main's buggy CONSTRUCT is not expressible
+here at all: `legacy_tracker_mut` has no definition left anywhere in branch
+`src/`, so there is no ShapeTracker to overwrite.
+
+Porting the hunk into the parked file would create a second, divergent
+spelling of a bug this branch already fixed, which a future reader could
+mistake for the contract. Dropped.
+
+Two bullets in main's own commit message — `DynBackend::move_buffer` and
+`CudaRuntime::write_external` — describe code that is absent from main
+entirely. Do not go looking for them.
