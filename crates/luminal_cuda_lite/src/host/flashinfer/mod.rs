@@ -33,9 +33,10 @@ use crate::{
 /// (one q token per sequence) works in every dtype; prefill (multiple q tokens
 /// per sequence) requires tensor cores and is therefore 16-bit only.
 ///
-/// Runtime graph inputs: Q, K_pool, V_pool, compact gather_idx, and optionally
-/// qo_indptr + kv_indptr for standalone multi-sequence execution. The additive
-/// causal mask is only an egglog proof anchor and is not a runtime dependency.
+/// Runtime graph inputs: Q, K_pool, V_pool, compact page indices, and optionally
+/// qo_indptr + kv_indptr + kv_last_page_len for externally planned paged
+/// execution. The additive causal mask is only an egglog proof anchor and is
+/// not a runtime dependency.
 #[derive(Debug)]
 pub struct FlashInferAttention {
     pub num_qo_heads: usize,
@@ -54,6 +55,23 @@ pub struct FlashInferAttention {
     pub window_left: i64,
 
     pub plan_info: Mutex<Vec<i64>>,
+}
+
+/// Compile-time geometry for an externally managed paged-attention state.
+///
+/// The state manager owns page allocation and lifetime. Luminal owns only the
+/// executable graph node and consumes the supplied page-table tensors.
+#[derive(Clone, Copy, Debug)]
+pub struct PagedAttentionSpec {
+    pub num_qo_heads: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    pub page_size: usize,
+    pub query_tokens: Expression,
+    pub context_pages: Expression,
+    pub dtype: DType,
+    pub sm_scale: f64,
+    pub window_left: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +113,7 @@ pub(crate) struct FlashInferDecodePointers {
     output: u64,
     pub(crate) explicit_qo_indptr: Option<u64>,
     pub(crate) explicit_kv_indptr: Option<u64>,
+    pub(crate) explicit_last_page_len: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +150,7 @@ pub(crate) struct FlashInferDeviceResourceSpec {
     spec: FlashInferDecodeSpec,
     explicit_qo_indptr: bool,
     explicit_kv_indptr: bool,
+    explicit_last_page_len: bool,
     enable_cuda_graph: bool,
 }
 
@@ -140,6 +160,7 @@ impl FlashInferDeviceResourceSpec {
             &self.spec,
             self.explicit_qo_indptr,
             self.explicit_kv_indptr,
+            self.explicit_last_page_len,
             self.enable_cuda_graph,
         )
     }
@@ -149,6 +170,7 @@ fn prepared_device_bytes(
     spec: &FlashInferDecodeSpec,
     explicit_qo_indptr: bool,
     explicit_kv_indptr: bool,
+    explicit_last_page_len: bool,
     enable_cuda_graph: bool,
 ) -> Result<usize, ResourceViolation> {
     let is_prefill = spec.is_prefill();
@@ -165,22 +187,26 @@ fn prepared_device_bytes(
     if is_prefill && !explicit_qo_indptr {
         allocations.push(2usize * std::mem::size_of::<i32>());
     }
-    allocations.push(
-        spec.c
-            .max(1)
-            .checked_mul(std::mem::size_of::<i32>())
-            .ok_or(ResourceViolation::ArithmeticOverflow {
-                resource: "FlashInfer indices",
-            })?,
-    );
-    allocations.push(
-        spec.batch_size
-            .max(1)
-            .checked_mul(std::mem::size_of::<i32>())
-            .ok_or(ResourceViolation::ArithmeticOverflow {
-                resource: "FlashInfer last-page lengths",
-            })?,
-    );
+    if !explicit_last_page_len {
+        allocations.push(
+            spec.c
+                .max(1)
+                .checked_mul(std::mem::size_of::<i32>())
+                .ok_or(ResourceViolation::ArithmeticOverflow {
+                    resource: "FlashInfer indices",
+                })?,
+        );
+    }
+    if !explicit_last_page_len {
+        allocations.push(
+            spec.batch_size
+                .max(1)
+                .checked_mul(std::mem::size_of::<i32>())
+                .ok_or(ResourceViolation::ArithmeticOverflow {
+                    resource: "FlashInfer last-page lengths",
+                })?,
+        );
+    }
     allocations.push(
         spec.total_q_tokens
             .checked_mul(spec.num_qo_heads)
@@ -268,9 +294,9 @@ pub(crate) struct PreparedFlashInferDecode {
     owned_qo_indptr_ptr: Option<u64>,
     current_c: Option<Mutex<CudaSlice<i32>>>,
     current_c_ptr: Option<u64>,
-    _indices: CudaSlice<i32>,
+    _indices: Option<CudaSlice<i32>>,
     indices_ptr: u64,
-    _last_page_len: CudaSlice<i32>,
+    _last_page_len: Option<CudaSlice<i32>>,
     last_page_len_ptr: u64,
     _temp_output: CudaSlice<u8>,
     temp_output_ptr: u64,
@@ -356,6 +382,136 @@ impl Default for FlashInferAttention {
             plan_info: Mutex::new(Vec::new()),
         }
     }
+}
+
+impl FlashInferAttention {
+    /// Constructs a paged-attention execution node whose page geometry is
+    /// supplied by an external state compiler.
+    ///
+    /// This is the native integration boundary used by OrbitKV: Luminal owns
+    /// graph and kernel execution, while the caller owns page placement and
+    /// lifecycle. Explicit CSR metadata must be supplied when the operation is
+    /// inserted into a graph with [`Graph::custom_op`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn paged(
+        num_qo_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        page_size: usize,
+        batch_dim: Expression,
+        context_pages: Expression,
+        dtype: DType,
+        sm_scale: f64,
+        window_left: Option<usize>,
+    ) -> Self {
+        assert!(num_qo_heads > 0, "query-head count must be positive");
+        assert!(num_kv_heads > 0, "KV-head count must be positive");
+        assert!(
+            num_qo_heads.is_multiple_of(num_kv_heads),
+            "GQA head ratio must be integral"
+        );
+        assert!(
+            matches!(head_dim, 64 | 128 | 256 | 512),
+            "unsupported FlashInfer head dimension"
+        );
+        assert!(page_size > 0, "page size must be positive");
+        Self {
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            page_size,
+            batch_dim,
+            context_dim: context_pages,
+            dtype,
+            sm_scale,
+            window_left: window_left.map_or(-1, |value| {
+                i64::try_from(value).expect("sliding window does not fit i64")
+            }),
+            plan_info: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl luminal::op::CustomOp for FlashInferAttention {
+    fn to_llir_op(&self) -> LLIROp {
+        LLIROp::new::<dyn HostOp>(Box::new(Self {
+            num_qo_heads: self.num_qo_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            page_size: self.page_size,
+            batch_dim: self.batch_dim,
+            context_dim: self.context_dim,
+            dtype: self.dtype,
+            sm_scale: self.sm_scale,
+            window_left: self.window_left,
+            plan_info: Mutex::new(Vec::new()),
+        }) as Box<dyn HostOp>)
+    }
+}
+
+/// Inserts paged attention backed by a page table owned outside Luminal.
+///
+/// Inputs are ordered exactly as FlashInfer's paged API: Q, K pool, V pool,
+/// page indices, query indptr, KV-page indptr, and last-page token counts.
+/// The returned tensor is laid out as `(heads, query_tokens, head_dim)`.
+pub fn paged_attention_with_plan(
+    q: GraphTensor,
+    k_cache: GraphTensor,
+    v_cache: GraphTensor,
+    page_indices: GraphTensor,
+    qo_indptr: GraphTensor,
+    kv_indptr: GraphTensor,
+    last_page_len: GraphTensor,
+    spec: PagedAttentionSpec,
+) -> GraphTensor {
+    let inputs = [
+        q,
+        k_cache,
+        v_cache,
+        page_indices,
+        qo_indptr,
+        kv_indptr,
+        last_page_len,
+    ];
+    assert!(
+        inputs.iter().all(|input| input.graph_ref == q.graph_ref),
+        "paged-attention inputs must belong to one graph"
+    );
+    assert_eq!(
+        q.dtype, spec.dtype,
+        "Q dtype differs from the compiled plan"
+    );
+    assert_eq!(
+        k_cache.dtype, spec.dtype,
+        "K-cache dtype differs from the compiled plan"
+    );
+    assert_eq!(
+        v_cache.dtype, spec.dtype,
+        "V-cache dtype differs from the compiled plan"
+    );
+    for metadata in [page_indices, qo_indptr, kv_indptr, last_page_len] {
+        assert_eq!(
+            metadata.dtype,
+            DType::Int,
+            "paged-attention metadata must be Int"
+        );
+    }
+    q.graph().custom_op(
+        FlashInferAttention::paged(
+            spec.num_qo_heads,
+            spec.num_kv_heads,
+            spec.head_dim,
+            spec.page_size,
+            spec.query_tokens,
+            spec.context_pages,
+            spec.dtype,
+            spec.sm_scale,
+            spec.window_left,
+        ),
+        inputs.to_vec(),
+        (spec.num_qo_heads, spec.query_tokens, spec.head_dim),
+        spec.dtype,
+    )
 }
 
 impl EgglogOp for FlashInferAttention {
@@ -480,8 +636,8 @@ impl EgglogOp for FlashInferAttention {
 }
 
 impl FlashInferAttention {
-    pub(crate) fn graph_inputs(&self) -> usize {
-        4
+    pub(crate) fn accepts_graph_inputs(&self, count: usize) -> bool {
+        count == 4 || count == 6 && self.page_size == 1 || count == 7
     }
 
     /// Resolve only dimensions and allocation sizes. No pointer is fabricated
@@ -506,7 +662,7 @@ impl FlashInferAttention {
             .ok_or(ResourceViolation::UnresolvedExpression {
                 resource: "FlashInfer context length",
             })?;
-        if inputs.len() != 4 && inputs.len() != 6 {
+        if !self.accepts_graph_inputs(inputs.len()) {
             return Err(ResourceViolation::HostResourcePlanning {
                 name: "FlashInferAttention input arity",
             });
@@ -521,12 +677,12 @@ impl FlashInferAttention {
                 resource: "FlashInfer KV width",
             },
         )?;
-        let kv_bytes =
-            kv_dim
-                .checked_mul(dtype.size_of())
-                .ok_or(ResourceViolation::ArithmeticOverflow {
-                    resource: "FlashInfer KV row bytes",
-                })?;
+        let kv_page_bytes = kv_dim
+            .checked_mul(dtype.size_of())
+            .and_then(|bytes| bytes.checked_mul(self.page_size))
+            .ok_or(ResourceViolation::ArithmeticOverflow {
+                resource: "FlashInfer KV page bytes",
+            })?;
         let k_bytes = buffer_lengths.get(&inputs[1]).copied().ok_or(
             ResourceViolation::HostResourcePlanning {
                 name: "FlashInfer K-cache length",
@@ -538,11 +694,12 @@ impl FlashInferAttention {
             },
         )?;
         let max_kv_pages = k_bytes
-            .checked_div(kv_bytes)
-            .zip(v_bytes.checked_div(kv_bytes))
+            .checked_div(kv_page_bytes)
+            .zip(v_bytes.checked_div(kv_page_bytes))
             .map(|(k_pages, v_pages)| k_pages.min(v_pages).max(c))
             .unwrap_or(c);
-        let explicit_indptr = inputs.len() == 6;
+        let explicit_indptr = inputs.len() >= 6;
+        let explicit_last_page_len = inputs.len() == 7;
         let batch_size = if explicit_indptr {
             // A CSR index pointer has one entry per sequence plus a terminator,
             // so the row count is the buffer's own length. Asking dyn_map for it
@@ -585,6 +742,7 @@ impl FlashInferAttention {
             spec,
             explicit_qo_indptr: explicit_indptr,
             explicit_kv_indptr: explicit_indptr,
+            explicit_last_page_len,
             enable_cuda_graph,
         })
     }
@@ -604,9 +762,9 @@ impl FlashInferAttention {
             .context_dim
             .exec(dyn_map)
             .ok_or_else(|| anyhow::anyhow!("FlashInferAttention context_dim is unresolved"))?;
-        if inputs.len() != 4 && inputs.len() != 6 {
+        if !self.accepts_graph_inputs(inputs.len()) {
             anyhow::bail!(
-                "FlashInferAttention expects 4 inputs (derived causal decode) or 6 inputs (explicit indptrs), got {}",
+                "FlashInferAttention expects 4 inputs (derived causal decode), 6 inputs (explicit indptrs), or 7 inputs (external page plan), got {}",
                 inputs.len()
             );
         }
@@ -630,11 +788,11 @@ impl FlashInferAttention {
             )
         })?;
         let kv_dim = self.num_kv_heads * self.head_dim;
-        let kv_bytes = kv_dim * dtype.size_of();
+        let kv_page_bytes = kv_dim * dtype.size_of() * self.page_size;
         let max_kv_pages = k_buf
             .len()
-            .checked_div(kv_bytes)
-            .zip(v_buf.len().checked_div(kv_bytes))
+            .checked_div(kv_page_bytes)
+            .zip(v_buf.len().checked_div(kv_page_bytes))
             .map(|(k_pages, v_pages)| k_pages.min(v_pages).max(c))
             .unwrap_or(c);
         let (kv_indptr_host, batch_size, explicit_qo_indptr, explicit_kv_indptr) =
@@ -699,6 +857,9 @@ impl FlashInferAttention {
                 output: out_buf.ptr(),
                 explicit_qo_indptr,
                 explicit_kv_indptr,
+                explicit_last_page_len: (inputs.len() == 7)
+                    .then(|| get_buf("kv_last_page_len", inputs[6]).map(DeviceBuffer::ptr))
+                    .transpose()?,
             },
         })
     }
@@ -796,20 +957,31 @@ impl FlashInferAttention {
         let total_pages = spec.kv_indptr_host.last().copied().unwrap_or_default();
         if total_pages < 0 || total_pages as usize > spec.c {
             anyhow::bail!(
-                "FlashInfer describes {total_pages} KV pages, but compact gather_idx has only {}",
+                "FlashInfer describes {total_pages} KV pages, but compact page indices contain only {}",
                 spec.c
             );
         }
 
-        let indices = unsafe { stream.alloc::<i32>(spec.c.max(1))? };
-        let indices_ptr = indices.device_ptr(stream).0;
-        let last_page_len_host = vec![1i32; spec.batch_size];
-        let last_page_len = if last_page_len_host.is_empty() {
-            unsafe { stream.alloc::<i32>(1)? }
+        let (indices, indices_ptr) = if resolved.ptrs.explicit_last_page_len.is_some() {
+            (None, resolved.ptrs.gather_idx)
         } else {
-            stream.clone_htod(&last_page_len_host)?
+            let buffer = unsafe { stream.alloc::<i32>(spec.c.max(1))? };
+            let ptr = buffer.device_ptr(stream).0;
+            (Some(buffer), ptr)
         };
-        let last_page_len_ptr = last_page_len.device_ptr(stream).0;
+        let (last_page_len, last_page_len_ptr) =
+            if let Some(ptr) = resolved.ptrs.explicit_last_page_len {
+                (None, ptr)
+            } else {
+                let values = vec![self.page_size as i32; spec.batch_size];
+                let buffer = if values.is_empty() {
+                    unsafe { stream.alloc::<i32>(1)? }
+                } else {
+                    stream.clone_htod(&values)?
+                };
+                let ptr = buffer.device_ptr(stream).0;
+                (Some(buffer), ptr)
+            };
         let temp_output_bytes =
             (spec.total_q_tokens * spec.num_qo_heads * spec.head_dim * spec.dtype.size_of()).max(1);
         let temp_output = unsafe { stream.alloc::<u8>(temp_output_bytes)? };
@@ -954,7 +1126,7 @@ impl PreparedFlashInferDecode {
                     cu_stream,
                 );
             }
-        } else if self.spec.c > 0 {
+        } else if self.spec.c > 0 && self._indices.is_some() {
             unsafe {
                 (self.lib.extract_slot_indices)(
                     ptrs.gather_idx as *const i32,
@@ -1120,6 +1292,17 @@ impl HostOp for FlashInferAttention {
 
     fn output_bytes(&self) -> Expression {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
+    }
+
+    fn output_dtype(&self) -> DType {
+        self.dtype
+    }
+
+    fn cuda_graph_capture_arity(&self) -> Option<usize> {
+        // The direct OrbitKV path supplies explicit qo_indptr, kv_indptr, and
+        // last-page lengths. The structural rewrite keeps the legacy
+        // four-input form and is handled by the specialized capture path.
+        Some(7)
     }
 
     fn device_memory_plan(
@@ -1350,5 +1533,42 @@ mod resource_tests {
         // No owned indptrs: indices (400), two last-page lengths (8),
         // and temporary output (1024).
         assert_eq!(spec.prepared_device_bytes().unwrap(), 1_432);
+    }
+
+    #[test]
+    fn external_page_plan_supports_block_pages_without_private_metadata() {
+        let attention = FlashInferAttention::paged(
+            32,
+            8,
+            128,
+            16,
+            2.into(),
+            3.into(),
+            DType::Bf16,
+            0.0,
+            Some(4095),
+        );
+        let inputs = (0..7).map(NodeIndex::new).collect_vec();
+        let kv_page_bytes = 16 * 8 * 128 * 2;
+        let lengths = FxHashMap::from_iter([
+            (inputs[1], 64 * kv_page_bytes),
+            (inputs[2], 64 * kv_page_bytes),
+            (inputs[4], 3 * std::mem::size_of::<i32>()),
+            (inputs[5], 3 * std::mem::size_of::<i32>()),
+            (inputs[6], 2 * std::mem::size_of::<i32>()),
+        ]);
+
+        let spec = attention
+            .device_resource_spec(&inputs, &lengths, &FxHashMap::default(), true)
+            .unwrap();
+
+        assert_eq!(spec.spec.page_size, 16);
+        assert_eq!(spec.spec.batch_size, 2);
+        assert_eq!(spec.spec.max_kv_pages, 64);
+        assert!(spec.explicit_qo_indptr);
+        assert!(spec.explicit_kv_indptr);
+        assert!(spec.explicit_last_page_len);
+        assert!(spec.cache_key.is_none());
+        assert_eq!(spec.prepared_device_bytes().unwrap(), 2 * 32 * 128 * 2);
     }
 }

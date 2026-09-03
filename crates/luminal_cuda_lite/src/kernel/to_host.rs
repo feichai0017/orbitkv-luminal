@@ -4183,7 +4183,7 @@ pub(crate) fn prepare_kernel_to_host_plan_with_topo_and_source_cache(
                         .is_some_and(|flashinfer| {
                             let incoming =
                                 llir_graph.edges_directed(node, Direction::Incoming).count();
-                            incoming == flashinfer.graph_inputs() || incoming == 6
+                            flashinfer.accepts_graph_inputs(incoming)
                         })
                     || (host.cuda_graph_capture_arity().is_some()
                         && capture_state_resource_by_node
@@ -4571,7 +4571,7 @@ pub(crate) fn kernel_to_host_with_prepared(
                     .map(|e| e.source())
                     .map(|input| resolve_transparent_input(llir_graph, input))
                     .collect_vec();
-                if inputs.len() != flashinfer.graph_inputs() && inputs.len() != 6 {
+                if !flashinfer.accepts_graph_inputs(inputs.len()) {
                     continue;
                 }
                 all_buffer_nodes.insert(*node);
