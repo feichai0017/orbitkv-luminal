@@ -392,3 +392,267 @@ fn sampled_genomes_never_hand_bufferize_a_cyclic_graph() {
         "no refusal may name `extracted graph has a cycle`"
     );
 }
+
+// ---------------------------------------------------------------------------
+// (c) NAMES SURVIVE THE STRIPPING (Austin's ruling 2026-09-02: "make it
+//     not remove a named tensor, so that if the input was named that tool
+//     would still work").
+// ---------------------------------------------------------------------------
+
+/// The authored names on the NAMED marker fixture. Both inputs and the
+/// output carry one, so the pin covers both name-bearing spellings:
+/// `LogicalTensorInputLit`'s own `LogicalId` (an input's name lives IN
+/// its declaration) and the `LogicalTensorNamed` annotation a
+/// `.output_named()` unions in.
+const NAMED_INPUTS: [&str; 2] = ["blocks.0.attn.q_proj.weight", "hidden_states"];
+const NAMED_OUTPUT: &str = "logits";
+
+/// [`marker_matmul`]'s shapes, authored with NAMES — the same cuBLASLt
+/// transpose collapse, so the same input producers are minted.
+fn named_marker_matmul() -> Graph {
+    let mut cx = Graph::new();
+    let a = cx.named_tensor(NAMED_INPUTS[0], (4usize, 8usize));
+    let b = cx.named_tensor(NAMED_INPUTS[1], (8usize, 3usize));
+    let _out = a.matmul(b).output_named(NAMED_OUTPUT);
+    cx
+}
+
+/// Saturate a program with an ARBITRARY schedule — the seam this pin
+/// needs to measure a WITHOUT-CLEANUP baseline. It mirrors
+/// `CudaRuntime::assemble_and_saturate` over the same public parts
+/// (`bound_parts` + the cuBLASLt matcher vocabulary), so the ONLY
+/// difference from [`CudaRuntime::saturated_egraph`] is the schedule.
+fn saturate_with_schedule(cx: &Graph, schedule: &str) -> EGraph {
+    let (pre_schedule, _inputs, _outputs, post_checks, _labeled) = cx
+        .logical
+        .bound_parts(&luminal_cuda_lite::CudaBindings)
+        .expect("bound parts");
+    let full = format!(
+        "{}\n\n{pre_schedule}{schedule}{post_checks}",
+        luminal::egglog_snippet::assembled_program_for(
+            &luminal_cuda_lite::ops::cuda_matchers_with_cublaslt()
+        )
+    );
+    let mut egraph = luminal::egglog_snippet::new_egraph();
+    egraph
+        .parse_and_run_program(None, &full)
+        .expect("saturation");
+    egraph
+        .serialize(luminal::prelude::egglog::SerializeConfig::default())
+        .egraph
+}
+
+/// The name a `LogicalId` class carries, read the way the renderer reads
+/// it (`ClassRenderer::logical_name_from_logical`): the `LogicalIdLit`
+/// node's String child, unquoted. Also reports whether that spelling is
+/// subsumed.
+fn logical_id_name(egraph: &EGraph, id_class: &ClassId) -> Option<(String, bool)> {
+    let lit = egraph
+        .nodes
+        .values()
+        .find(|n| n.eclass == *id_class && n.op == "LogicalIdLit")?;
+    let text = lit.children.first().map(|c| egraph.nodes[c].op.clone())?;
+    Some((text.trim_matches('"').to_string(), lit.subsumed))
+}
+
+/// Every name-bearing spelling: (name, carrier op, carrier class,
+/// subsumed anywhere on the name's route — carrier or `LogicalIdLit`).
+fn name_bearing_spellings(egraph: &EGraph) -> Vec<(String, String, ClassId, bool)> {
+    egraph
+        .nodes
+        .values()
+        .filter(|n| n.op == "LogicalTensorInputLit" || n.op == "LogicalTensorNamed")
+        .filter_map(|n| {
+            let id_class = child_class(egraph, n, 0)?;
+            let (name, id_subsumed) = logical_id_name(egraph, &id_class)?;
+            Some((
+                name,
+                n.op.clone(),
+                n.eclass.clone(),
+                n.subsumed || id_subsumed,
+            ))
+        })
+        .collect()
+}
+
+/// The ops of every subsumed node — the measurement (d) compares across
+/// the with/without-cleanup schedules. Node and class ids shift when a
+/// ruleset mints relations, so OPS are the stable currency.
+fn subsumed_ops(egraph: &EGraph) -> BTreeMap<String, usize> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for node in egraph.nodes.values().filter(|n| n.subsumed) {
+        *counts.entry(node.op.clone()).or_default() += 1;
+    }
+    counts
+}
+
+/// A NAMED INPUT KEEPS ITS NAME (ruling 2026-09-02).
+///
+/// The cleanup stratum's job is to STRIP a boundary input's producer
+/// spellings: it subsumes the generic `LayoutTensorOpLit` on every op
+/// whose output list holds the input's leaf layout tensor. Names travel
+/// on a DIFFERENT route — `LogicalTensorInputLit`'s own `LogicalId` for
+/// an input, the `LogicalTensorNamed` annotation for a designated
+/// output, plus the serialized `class_data.extra["let"]` the recorder
+/// stamps on each SSA value — and every naming tool reads that route:
+///
+///  * LET-NAME LOOKUP (`ClassRenderer::class_let_name`, and the
+///    `by_let` idiom the estate tests use to address a class without
+///    ids) resolves a class to its authored `v{k}` binder.
+///  * THE RENDER PATH (`ClassRenderer::logical_name_from_logical` /
+///    `logical_name_from_layout_tensor`) resolves a layout tensor back
+///    to the AUTHORED tensor name — which is how a plan, a refusal
+///    message, or the visualizer says "blocks.0.attn.q_proj.weight"
+///    instead of an opaque class id.
+///
+/// A cleanup rule that widened from "the op that produces the leaf" to
+/// "anything in the leaf's neighbourhood" would silently retire the very
+/// node those tools read, and the failure would be INVISIBLE at the
+/// plan level: the search would still elect, and only the names would
+/// turn into class ids. This pin therefore asserts the two routes stay
+/// LIVE while the stripping happens, and — against the WITHOUT-CLEANUP
+/// baseline (the same program on the same schedule minus
+/// `(saturate (run cleanup))`) — that the ONLY spelling the stratum
+/// newly subsumes anywhere in the e-graph is `LayoutTensorOpLit`.
+#[test]
+fn named_input_keeps_its_name_bearing_spellings() {
+    let cx = named_marker_matmul();
+    let rt = CudaRuntime::load_with_cublaslt(&cx).expect("load");
+    let egraph = rt.saturated_egraph().expect("saturation");
+
+    // ---- (a) the name-bearing spellings are present and LIVE. ----
+    let spellings = name_bearing_spellings(&egraph);
+    let mut by_name: BTreeMap<String, (String, ClassId, bool)> = BTreeMap::new();
+    for (name, op, class, subsumed) in spellings {
+        by_name.insert(name, (op, class, subsumed));
+    }
+    println!("NAMED spellings: {by_name:?}");
+    for name in NAMED_INPUTS {
+        let (op, _, subsumed) = by_name.get(name).unwrap_or_else(|| {
+            panic!("named input {name:?} lost its name-bearing spelling: {by_name:?}")
+        });
+        assert_eq!(
+            op, "LogicalTensorInputLit",
+            "an input's name lives IN its declaration"
+        );
+        assert!(
+            !subsumed,
+            "the cleanup stratum must not subsume the name route of input {name:?}"
+        );
+    }
+    let (out_op, _, out_subsumed) = by_name
+        .get(NAMED_OUTPUT)
+        .unwrap_or_else(|| panic!("named output {NAMED_OUTPUT:?} lost its annotation"));
+    assert_eq!(out_op, "LogicalTensorNamed");
+    assert!(
+        !out_subsumed,
+        "the cleanup stratum must not subsume the output's name annotation"
+    );
+
+    // ---- (b) the recorder's let-names are intact. ----
+    // A named input is still an SSA value with a binder, and `by_let`
+    // (the estate tests' id-free addressing) must still find it.
+    let let_names: BTreeMap<String, ClassId> = egraph
+        .class_data
+        .iter()
+        .filter_map(|(class, data)| Some((data.extra.get("let")?.clone(), class.clone())))
+        .collect();
+    for name in NAMED_INPUTS {
+        let (_, class, _) = &by_name[name];
+        let binder = egraph
+            .class_data
+            .get(class)
+            .and_then(|data| data.extra.get("let"))
+            .unwrap_or_else(|| {
+                panic!("named input {name:?} class {class:?} lost its let-name; binders: {let_names:?}")
+            });
+        assert!(
+            let_names.get(binder) == Some(class),
+            "let-name {binder:?} must resolve back to input {name:?}'s class"
+        );
+        println!("NAMED input {name:?} -> let {binder:?} -> {class:?}");
+    }
+
+    // ---- (c) the cleanup DID run on this graph. ----
+    // Without this the rest is vacuous: nothing was stripped, so of
+    // course nothing was over-stripped.
+    let marked = input_producer_ops(&egraph);
+    let leaves = input_leaf_layout_tensors(&egraph);
+    assert_eq!(leaves.len(), 2, "the named pin binds two boundary inputs");
+    let mut expected: BTreeSet<ClassId> = BTreeSet::new();
+    for (op_class, outputs) in op_lit_outputs(&egraph) {
+        if outputs.iter().any(|out| leaves.contains(out)) {
+            expected.insert(op_class);
+        }
+    }
+    assert!(
+        !expected.is_empty(),
+        "the NAMED marker graph must mint input producers too — naming must \
+         not change which welds appear, or this pin measures nothing"
+    );
+    assert_eq!(
+        expected, marked,
+        "the `input-producer` relation must mark EXACTLY the ops whose output \
+         list holds a bound input leaf, names or no names"
+    );
+
+    // ---- (d) the stratum subsumes NOTHING but LayoutTensorOpLit. ----
+    // Direct check first: no name-bearing or boundary spelling anywhere
+    // in the e-graph is retired.
+    const MUST_STAY_LIVE: [&str; 4] = [
+        "LayoutTensorLit",
+        "LogicalTensorInputLit",
+        "LogicalTensorNamed",
+        "LogicalIdLit",
+    ];
+    let with_cleanup = subsumed_ops(&egraph);
+    for op in MUST_STAY_LIVE {
+        assert!(
+            !with_cleanup.contains_key(op),
+            "cleanup subsumed a {op} node ({} of them) — a naming tool reads \
+             that spelling; full subsumed census: {with_cleanup:?}",
+            with_cleanup[op]
+        );
+    }
+
+    // ...and the BASELINE delta: run the identical program on the
+    // identical schedule minus the cleanup stratum, and diff.
+    let without =
+        luminal_cuda_lite::CudaBindings::SCHEDULE.replace("(saturate (run cleanup)) ", "");
+    assert_ne!(
+        without,
+        luminal_cuda_lite::CudaBindings::SCHEDULE,
+        "the baseline must actually drop the cleanup stratum — if the schedule \
+         was reworded this pin silently stops measuring anything"
+    );
+    let baseline = saturate_with_schedule(&cx, &without);
+    assert!(
+        input_producer_ops(&baseline).is_empty(),
+        "the baseline must NOT run the cleanup stratum"
+    );
+    let without_cleanup = subsumed_ops(&baseline);
+    println!("SUBSUMED with cleanup:    {with_cleanup:?}");
+    println!("SUBSUMED without cleanup: {without_cleanup:?}");
+
+    let newly_subsumed: BTreeSet<&String> = with_cleanup
+        .keys()
+        .filter(|op| !without_cleanup.contains_key(*op))
+        .collect();
+    assert_eq!(
+        newly_subsumed,
+        ["LayoutTensorOpLit".to_string()].iter().collect(),
+        "the cleanup stratum may retire the generic LayoutTensorOpLit spelling \
+         and NOTHING else; with={with_cleanup:?} without={without_cleanup:?}"
+    );
+    for (op, before) in &without_cleanup {
+        let after = with_cleanup.get(op).copied().unwrap_or(0);
+        assert!(
+            after >= *before,
+            "cleanup must only ADD subsumptions, but {op} went {before} -> {after}"
+        );
+    }
+    assert!(
+        with_cleanup["LayoutTensorOpLit"] > 0,
+        "the stratum must actually retire generic op spellings on this graph"
+    );
+}
