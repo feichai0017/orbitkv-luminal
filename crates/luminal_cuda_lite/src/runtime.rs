@@ -46,6 +46,9 @@ use std::{
 use tracing::{Level, span, trace};
 use uuid::Uuid;
 
+mod device_copy;
+pub use device_copy::{DeviceCopyError, DeviceCopyPlan, DeviceCopyRange};
+
 const ARENA_ALIGNMENT: usize = 256;
 const MIN_ARENA_ALLOCATION_BYTES: usize = 16 * 1024 * 1024;
 const MIN_SEARCH_DEVICE_HEADROOM_BYTES: usize = 512 * 1024 * 1024;
@@ -1533,31 +1536,46 @@ impl<O: IntoEgglogOp> CudaRuntimeImpl<O> {
 
     /// Resolve the device-side buffer for an output tensor without copying to host.
     /// Used by copy_output_to_device_ptr for DtoD transfers.
-    fn resolve_output_buffer(&self, id: impl ToId) -> DeviceBuffer {
-        let data_id = self.resolve_data_node(id);
+    fn try_resolve_output_buffer(&self, id: impl ToId) -> Result<DeviceBuffer, DeviceCopyError> {
+        let id = id.to_id();
+        let producer = self
+            .active()
+            .output_producers
+            .get(&id)
+            .copied()
+            .ok_or(DeviceCopyError::UnknownTensor)?;
+        let data_id = self.follow_aliases(producer);
         let bucket = self.active();
         if let Some(ext) = self.external_output_buffers.get(&data_id) {
-            return DeviceBuffer::new(ext.device_ptr(&self.cuda_stream).0, ext.len());
+            return Ok(DeviceBuffer::new(
+                ext.device_ptr(&self.cuda_stream).0,
+                ext.len(),
+            ));
         }
         if let Some(hlir_node) = bucket.llir_to_hlir.get(&data_id) {
             match self
                 .hlir_buffers
                 .get(hlir_node)
-                .expect("Cannot find input tensor in runtime!")
+                .ok_or(DeviceCopyError::MissingBuffer)?
             {
                 CudaInput::Buffer { buf, len } => {
-                    DeviceBuffer::new(buf.device_ptr(&self.cuda_stream).0, *len)
+                    Ok(DeviceBuffer::new(buf.device_ptr(&self.cuda_stream).0, *len))
                 }
                 CudaInput::Ptr(_) => self
                     .external_buffers
                     .get(hlir_node)
                     .map(|ext| DeviceBuffer::new(ext.device_ptr(&self.cuda_stream).0, ext.len()))
-                    .expect("Cannot read raw pointer input — no external_buffers entry for node"),
+                    .ok_or(DeviceCopyError::MissingExternalBuffer),
             }
         } else {
             Self::bucket_buffer(bucket, &self.cuda_stream, &data_id)
-                .expect("Cannot find tensor in runtime!")
+                .ok_or(DeviceCopyError::MissingBuffer)
         }
+    }
+
+    fn resolve_output_buffer(&self, id: impl ToId) -> DeviceBuffer {
+        self.try_resolve_output_buffer(id)
+            .expect("cannot resolve output tensor in runtime")
     }
 
     /// Copy output tensor data to an external CUDA device pointer (DtoD).
