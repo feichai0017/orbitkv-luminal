@@ -18,6 +18,23 @@ use objc::runtime::Object;
 use safetensors::{Dtype, SafeTensors};
 use std::{cell::RefCell, fs::File, time::Duration};
 
+/// LOCAL STUB: `luminal::op` does not exist on this branch (`src/op.rs`
+/// is deleted); the parks track main's spelling, so main's shared
+/// predicate is copied here verbatim from its `src/op.rs` at 499d0779
+/// instead of depending on a core symbol this branch does not have.
+///
+/// Shared early-stop predicate for duration-metric runtimes: true once a
+/// candidate's running mean trial time exceeds `best * factor`, i.e. the
+/// candidate has already lost by at least the configured margin and further
+/// trials can only refine a metric that is out of contention.
+pub fn early_stop_exceeded(
+    mean: std::time::Duration,
+    best: std::time::Duration,
+    factor: f64,
+) -> bool {
+    mean.as_secs_f64() > best.as_secs_f64() * factor
+}
+
 #[derive(Clone)]
 struct MetalExecutionStep {
     node: NodeIndex,
@@ -383,6 +400,7 @@ impl Runtime for MetalRuntime {
         dyn_map: &FxHashMap<char, usize>,
         trials: usize,
         timeout: Option<std::time::Duration>,
+        early_stop: Option<(Self::ProfileMetric, f64)>,
     ) -> (Self::ProfileMetric, String) {
         self.load_llir(llir_graph);
         self.allocate_intermediate_buffers(dyn_map);
@@ -397,6 +415,14 @@ impl Runtime for MetalRuntime {
             duration += start.elapsed();
             completed_trials += 1;
             if timeout.is_some_and(|timeout| profile_start.elapsed() >= timeout) {
+                break;
+            }
+            // A candidate whose running mean has already lost by the
+            // early-stop margin keeps its partial mean; further trials
+            // can only refine a metric that is out of contention.
+            if early_stop.is_some_and(|(best, factor)| {
+                early_stop_exceeded(duration / completed_trials as u32, best, factor)
+            }) {
                 break;
             }
         }

@@ -27,7 +27,10 @@ Dispositions:
 | `cd0aa58f` | #384 | translate_sdpa: close the SDPA surface — precision, masks, GQA, dynamic shapes | FILE-LEVEL | PR #445 (branch `e2f5cd0a`) | — |
 | `aa5664bb` | #385 | luminal_python: honor the in-place mutation contract (write-back outputs) | FILE-LEVEL | PR #448 (branch `16fbb5bd`) | — |
 | `be3e2fe5` | #387 | translator: robustness fixes — dtype promotion, rank-extending expand, norm opmath | RE-EXPRESSED (movement / unary) | PR #448 (branch `5817a012`) | — |
-| `7423ca37` | #391 | compile search progress UI | RE-EXPRESSED (`search_log` + Start/Faster/Slower) | branch `merge/main-391-search-ui` (this commit) | see **#391 progress UI** below |
+| `7423ca37` | #391 | compile search progress UI | RE-EXPRESSED (`search_log` + Start/Faster/Slower) | branch `merge/main-391-search-ui` (2nd commit) | see **#391 progress UI** below |
+| `7d2817fa` | — | luminal_python: search_iterations pass through more places | FILE-LEVEL | branch `merge/main-7d2817fa-search-iterations` | parked crate: re-point `search_iterations` at `ImplementationSearchOptions` when luminal_python is re-attached to the recorder |
+| `bea18ecf` | #389 | Sdpa gqa fixes | FILE-LEVEL | branch `merge/main-389-sdpa-gqa` | parked crate + non-gating `ci/`: RULED 2026-09-02 (ruling 1) — `ci/example_output.py` SYNCS main's numbers for now, by decision; the loosened gemma / gemma4_moe TPOT figures are main's HLIR cuda_lite draws and still have to be re-baselined against CL A100 draws before they gate anything here |
+| `499d0779` | #386 | Search: early-stop candidate profiling against the best-so-far metric | MIXED — RE-EXPRESSED (core: running mean + fifth positional cutoff + predicate) / FILE-LEVEL (parks, with a stubbed predicate) | branch `merge/main-386-early-stop` (two commits) | REQUIREMENT FOR CL (ruling 4): a device `PlanProfiler` that times candidates on device, mirroring `ReferenceProfiler`'s design, and then honours the cutoff — until then `StaticProfiler` accepts and ignores it; see **#386 early-stop profiling** below |
 
 ## #391 progress UI — re-expressed in `src/implementation_search.rs`
 
@@ -112,3 +115,130 @@ drives the reporter over an in-memory writer and pins `Start` exactly once (with
 the baseline metric), one `Faster` carrying the new best, the `x1 → x2` climb,
 the reset back to `x1` after an improvement, and the five `\r\x1b[2K` in-place
 rewrites. It strips ANSI so it passes whether or not `colored` colorizes.
+
+## #386 early-stop profiling — what landed, and what is owed
+
+Main's commit is one idea spread over six files: an opt-in
+`CompileOptions::early_stop_factor(f64)` threads `Option<(best_metric, factor)>`
+through `Runtime::profile` / `Runtime::profile_with_bucket_context`; each device
+runtime, after every *timed* trial, compares the candidate's running MEAN trial
+time against `best * factor` (the shared predicate `luminal::op::
+early_stop_exceeded`) and breaks out, returning the partial mean. Selection is
+explicitly unchanged: the truncated metric is still ranked, so early stop only
+shortens the timing of candidates already out of contention. The initial genome
+passes `None` because it *is* the baseline, and CUDA's warmup bail is left
+untouched so a slow-warmup / fast-steady candidate is not disqualified.
+
+**Landed FILE-LEVEL (parked, does not build):**
+
+- `crates/luminal_cuda_lite_hlir/src/runtime.rs` — main's
+  `crates/luminal_cuda_lite/` hunks with the path rewritten, per the ruling that
+  the hlir park TRACKS main so the target CL must reach keeps moving. Applied
+  cleanly against the park's existing branch drift (`IntExpr`, `alias_state` →
+  `alloc_state_buffer` + `bind_*_buffer`, no `mask_events`); only hunk offsets
+  moved.
+- `crates/luminal_metal/src/runtime.rs` — file-level, per the ruling that metal
+  becomes a runtime like the others and is ported later.
+
+Both called `luminal::op::early_stop_exceeded`, which does not exist on this
+branch (`src/op.rs` is deleted). Per ruling 6 (2026-09-02) that dangling
+reference is gone: each park now carries a LOCAL `early_stop_exceeded` copied
+verbatim from main's `src/op.rs` at 499d0779 (`crates/luminal_metal/src/
+runtime.rs`, `crates/luminal_cuda_lite_hlir/src/runtime.rs`, each marked "local
+stub: `luminal::op` does not exist on this branch; parks track main's
+spelling"), and the call sites point at it. The parks keep main's spelling
+without depending on a core symbol this branch does not have; the stub is
+deleted when each crate is ported.
+
+**Not landed (no counterpart on this branch):**
+
+- `src/op.rs` (+41: the `Runtime::profile` / `profile_with_bucket_context`
+  signature change, the `early_stop_exceeded` predicate, and its
+  `#[cfg(test)] mod early_stop_tests`) and `src/hlir.rs` (+1: the
+  `ReferenceRuntime` impl) — both files are deleted on this branch. The
+  predicate and its test DID land, re-expressed, in
+  `src/implementation_search.rs` (below); the `Runtime` trait they sat on
+  did not, because it does not exist.
+- `examples/llama/src/main.rs` (opts in at `.early_stop_factor(2.0)`) — this
+  branch has no `examples/llama`; the zoo is `examples/llama3`,
+  `examples/paged_llama3`, … and none of them use `CompileOptions`.
+- `src/graph.rs` (+109: the `CompileOptions::early_stop_factor` builder, passing
+  `None` for the initial genome and `Some((best, factor))` thereafter, and the
+  regression test `search_passes_best_so_far_to_profile_early_stop`) — main's
+  `src/graph.rs` is the HLIR `CompileOptions` / `Graph::search` file; this
+  branch's `src/graph.rs` is the LogicalGraph recorder, with no
+  `CompileOptions`, no search loop, no `trials` and no `timeout`.
+
+**What was ruled, and what landed (2026-09-02).** The two decisions this row
+was waiting on were taken, and the core re-expression landed in
+`src/implementation_search.rs`:
+
+1. **Which metric — ruling 2: the RUNNING MEAN.** `ReferenceProfiler`
+   (`crates/luminal_reference/src/search.rs`) used to rank by the best-of-trials
+   MINIMUM, which can still fall on a later trial, so truncating it is a
+   heuristic that can flatter a candidate. It now sums the timed trials and
+   returns `sum / trials` — a mean, which only rises as trials accumulate. Every
+   reader of `best_nanos` is therefore reading a mean now; the re-baselining is
+   recorded below.
+2. **Where the cutoff hooks in — ruling 3: a FIFTH POSITIONAL ARGUMENT.**
+   `PlanProfiler::profile` gains `best_so_far: Option<u128>` after
+   `heuristic_cost` — not an options struct, for now. The selection loop passes
+   `None` for the first profiled candidate (it IS the baseline) and
+   `Some(best_nanos)` — the incumbent — for every later one.
+
+**The core code, as landed.**
+
+- `luminal::implementation_search::early_stop_exceeded(mean_nanos, best_nanos,
+  factor)` — main's `src/op.rs` predicate retyped from `Duration` to u128 nanos,
+  same comparison (`mean > best * factor`). The factor survives because it is
+  main's semantics and main's device-tuning knob. There is NO
+  `early_stop_factor` option on `ImplementationSearchOptions`: the cutoff is the
+  bare incumbent (ruling 3), and the one in-core caller needs no margin.
+- `ReferenceProfiler::profile` applies the predicate at `factor = 1.0` to a
+  LOWER BOUND on
+  the candidate's final mean — the trials run so far divided by the TOTAL trial
+  count, i.e. assuming every remaining trial costs zero. Once even that bound
+  exceeds the incumbent, no continuation of this candidate can win, so the stop
+  is EXACT rather than heuristic: it never changes which candidate is selected,
+  only how long the losers are timed. The partial mean (`sum / completed`) is
+  returned and ranked normally, and is `>=` the bound, so it is still a loss.
+- `StaticProfiler` accepts and ignores the argument (ruling 4): it runs no
+  trials, so it has nothing to cut short. Note it lives in core
+  (`src/implementation_search.rs`), not in `crates/luminal_cuda_lite/src/
+  runtime.rs` — CL only *elects* it, at its one `search` call site.
+
+**Tests.** `implementation_search::early_stop_tests::
+early_stop_exceeded_keeps_mains_margin_semantics` is main's
+`test_early_stop_exceeded` retyped (10 ms at a 2x cutoff is the boundary and
+does NOT stop, 11 ms does, a faster-than-best candidate never stops, factor 1.0
+stops anything slower than best), plus a tie case for the 1.0 factor the in-core
+caller uses. `implementation_search::tests::
+search_passes_the_incumbent_metric_to_every_later_profile_call` is main's
+`search_passes_best_so_far_to_profile_early_stop` re-expressed: a recording
+`PlanProfiler` over a real two-output search (fixed seed) that returns strictly
+increasing metrics, asserting `None` for the first profile call and `Some(0)` —
+the incumbent — for every later one.
+
+**Re-baselining (mean vs min).** Nothing in the tree asserts an exact or
+relative profiler figure, so no expectation changed:
+`SearchOutcome::best_nanos` has exactly one reader outside the search loop,
+`crates/luminal_nn/src/models.rs` (a `#[cfg(test)]` ladder that PRINTS
+`outcome.best_nanos as f64 / 1e6` in its report row), and the loop's own
+comparisons (`nanos < *best_nanos`) are metric-agnostic. What changed is the
+MEANING: a plan's recorded cost is now its mean trial time, which for a noisy
+host is larger and less spiky than the old minimum, and the search now prefers
+consistently-fast plans over occasionally-fast ones.
+
+**And the precondition that decides whether it is worth anything (ruling 4:
+QUEUED, out of scope here).** The only profiler on this branch that actually
+executes candidates is the host `ReferenceProfiler`, at `trials: 3` — a maximum
+saving of two executes per losing candidate — and the search already suppresses
+duplicate work with the plan-fingerprint cache. CL does not time candidates at
+all: `crates/luminal_cuda_lite/src/runtime.rs` searches with `StaticProfiler`,
+ranking by the heuristic bytes-moved cost with no execution. The requirement
+carried forward, and the half of main's commit where this feature pays what the
+PR claims: **CL must eventually profile on device, mirroring the reference
+profiler's design** — warmup, timed trials, a mean metric, and the same
+lower-bound cutoff — at which point `StaticProfiler`'s ignored argument becomes
+a real one. That is a larger question than the cutoff itself, and it is not in
+this batch.
