@@ -32,6 +32,7 @@ Dispositions:
 | `bea18ecf` | #389 | Sdpa gqa fixes | FILE-LEVEL | branch `merge/main-389-sdpa-gqa` | parked crate + non-gating `ci/`: RULED 2026-09-02 (ruling 1) — `ci/example_output.py` SYNCS main's numbers for now, by decision; the loosened gemma / gemma4_moe TPOT figures are main's HLIR cuda_lite draws and still have to be re-baselined against CL A100 draws before they gate anything here |
 | `499d0779` | #386 | Search: early-stop candidate profiling against the best-so-far metric | MIXED — RE-EXPRESSED (core: running mean + fifth positional cutoff + predicate) / FILE-LEVEL (parks, with a stubbed predicate) | branch `merge/main-386-early-stop` (two commits) | REQUIREMENT FOR CL (ruling 4): a device `PlanProfiler` that times candidates on device, mirroring `ReferenceProfiler`'s design, and then honours the cutoff — until then `StaticProfiler` accepts and ignores it; see **#386 early-stop profiling** below |
 | `6a5313f2` | #398 | Support for PyTorch OpInfo tests | MIXED — FILE-LEVEL (python + workflow) / RE-EXPRESSED (`TypedBuffer::F64` + typed unary kernels) / DROPPED (`ConstantF64`, the empty-Vec fix) | branch `merge/main-398-opinfo` (two commits) | OpInfo harness, the arange-metadata and acos/acosh lowerings = M4 translator requirements; typed `LogicalConstant`; F32<->F64 cast policy; F64 on CL — see **#398 OpInfo + F64** below |
+| `db3c80fd` | #399 | Add native narrow integer HLIR dtypes | MIXED — FILE-LEVEL (python) / RE-EXPRESSED (I8/U8/I16 TypedBuffer + kernels, int-safe `abs`) | branch `merge/main-399-narrow-ints` (two commits) | **CARVE-OUT to confirm at review**: I8/U8/I16 wrap, I32/I64 stay checked — see **#399 narrow ints** below |
 
 ## #391 progress UI — re-expressed in `src/implementation_search.rs`
 
@@ -373,3 +374,27 @@ Main's other two Rust tests do not move: `f64_constant_to_egglog_round_trips_exa
 tests `ConstantF64`, which is superseded, and
 `empty_bytes_preserve_reference_dtype` tests a `from_raw_parts` hazard that
 does not exist here.
+
+## #399 narrow ints — what landed, and the carve-out that needs confirming
+
+RULED 2026-09-02 (ruling 2): *"this is good and should get its content
+merged"*, with the narrow-int semantics flagged for Austin to object to at
+review. Two commits.
+
+**FILE-LEVEL (commit 1).** The seven `crates/luminal_python/**` files carry
+main's diff byte for byte (no conflicts, no re-spelling — the diff-of-diffs
+against `db3c80fd` is empty). `torch_dtype.rs` and `typed_data.rs` are the
+boundary dtype tables — the record of which torch dtype maps to which luminal
+one — and are worth having even inert. The crate is not a workspace member
+and `typed_data.rs` still names `luminal::hlir::ReferenceData`, so none of it
+builds; it is banked, not revived.
+
+**UNCARRIED.** `src/hlir.rs` (+350) and `src/dyn_backend.rs` (+87) are deleted
+here. Their content is re-expressed (below) except for the `DynBackend`
+`get_output_i8/u8/i16` trait defaults, which have no counterpart at all: this
+branch's outputs come back through `ReferenceRuntime`'s typed getters, so
+main's three trait methods become three `get_*` methods on the runtime and the
+`DynBackend`/pyo3/python reader-table plumbing around them is dropped with the
+trait. Main's two test hunks (`src/hlir.rs` `mod tests`, `src/dyn_backend.rs`)
+name deleted types and could not move as written; they are re-expressed as
+reference-runtime tests instead.
