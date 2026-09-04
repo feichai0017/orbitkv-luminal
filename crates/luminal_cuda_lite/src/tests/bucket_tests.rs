@@ -87,7 +87,6 @@ fn captured_execution_reads_updated_stable_inputs() {
 
     let mut runtime = CudaRuntime::initialize(stream);
     runtime.set_data_with_capacity(input, vec![1.0f32; 4], 4 * size_of::<f32>());
-    let allocation = runtime.input_allocation(input).unwrap();
     let mut rng = SmallRng::seed_from_u64(42);
     runtime = cx.search_with_rng(
         runtime,
@@ -103,10 +102,12 @@ fn captured_execution_reads_updated_stable_inputs() {
         1e-5,
         1e-5,
     );
+    runtime.set_data_with_capacity(input, vec![1.0f32, 2.0, 3.0, 4.0], 4 * size_of::<f32>());
+    let capture_allocation = runtime.input_allocation(input).unwrap();
     let captured = runtime.capture_execution(&cx.dyn_map).unwrap();
 
     runtime.set_data(input, vec![5.0f32, 6.0, 7.0, 8.0]);
-    assert_eq!(runtime.input_allocation(input), Some(allocation));
+    assert_eq!(runtime.input_allocation(input), Some(capture_allocation));
     runtime.prepare_captured_execution(&cx.dyn_map);
     captured.launch().unwrap();
     assert_close(

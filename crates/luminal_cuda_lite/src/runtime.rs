@@ -621,10 +621,29 @@ impl<O: IntoEgglogOp> CudaRuntimeImpl<O> {
     ) -> Result<CapturedCudaExecution, cudarc::driver::DriverError> {
         self.cuda_stream.synchronize()?;
         let stream = Arc::clone(&self.cuda_stream);
-        CudaGraphHandle::begin_standalone_capture(&stream)?;
         let previous_external = self.external_cuda_graph;
         let previous_synchronize = self.synchronize_stream;
+
+        // The ordinary warmup uses Luminal's materialized child graphs. Prime
+        // the direct-launch path separately before capture so the CUDA driver
+        // never performs first-use module or library initialization inside a
+        // stream capture. External mode retains runtime-owned inputs.
         self.external_cuda_graph = true;
+        self.synchronize_stream = true;
+        let priming = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            <Self as Runtime>::execute(self, dyn_map);
+        }));
+        if let Err(payload) = priming {
+            self.external_cuda_graph = previous_external;
+            self.synchronize_stream = previous_synchronize;
+            std::panic::resume_unwind(payload);
+        }
+
+        if let Err(error) = CudaGraphHandle::begin_standalone_capture(&stream) {
+            self.external_cuda_graph = previous_external;
+            self.synchronize_stream = previous_synchronize;
+            return Err(error);
+        }
         self.synchronize_stream = false;
         let execution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             <Self as Runtime>::execute(self, dyn_map);
@@ -5485,7 +5504,7 @@ impl<O: IntoEgglogOp> Runtime for CudaRuntimeImpl<O> {
         // their metadata here would force every repeated invocation to
         // reinstall lifted weights. A later changed set_device_ptr call safely
         // replaces the retained non-owning view.
-        if self.profiling {
+        if self.profiling || self.external_cuda_graph {
             return;
         }
         let timer = std::time::Instant::now();
