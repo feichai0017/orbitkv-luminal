@@ -57,6 +57,7 @@ fn test_bucket_dispatch_simple() {
     cx.set_dim('s', 1);
     let input_data = vec![1.0f32, 2.0, 3.0, 4.0];
     rt.set_data(a, input_data.clone());
+    let stable_input = rt.input_allocation(a).unwrap();
     rt.execute(&cx.dyn_map);
     assert_eq!(rt.active_bucket_index(), 0);
     let result = rt.get_f32(b);
@@ -67,6 +68,7 @@ fn test_bucket_dispatch_simple() {
     cx.set_dim('s', 3);
     let input_data: Vec<f32> = (0..12).map(|i| i as f32).collect();
     rt.set_data(a, input_data.clone());
+    assert_eq!(rt.input_allocation(a), Some(stable_input));
     rt.execute(&cx.dyn_map);
     assert_eq!(rt.active_bucket_index(), 1);
     let result = rt.get_f32(b);

@@ -613,6 +613,19 @@ impl<O: IntoEgglogOp> CudaRuntimeImpl<O> {
         &self.hlir_buffers
     }
 
+    /// Returns the installed device address and allocation capacity for one
+    /// graph input. Logical payload length changes do not affect this value.
+    pub fn input_allocation(&self, id: impl ToId) -> Option<(u64, usize)> {
+        let id = id.to_id();
+        match self.hlir_buffers.get(&id)? {
+            CudaInput::Buffer { buf, .. } => Some((buf.device_ptr(&self.cuda_stream).0, buf.len())),
+            CudaInput::Ptr(pointer) => self
+                .external_buffers
+                .get(&id)
+                .map(|buffer| (*pointer, buffer.len())),
+        }
+    }
+
     /// Whether the currently installed executable reads an HLIR input in any
     /// retained bucket.
     ///
