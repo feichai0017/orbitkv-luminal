@@ -653,6 +653,9 @@ fn test_scatter_dual_cache_accumulates_without_roundtrip() {
         "Expected the forced no-copy dual-cache plan, got: {:?}",
         scatter_names
     );
+    assert!(rt.output_aliases_input_in_all_buckets(k_cache_out, k_cache));
+    assert!(rt.output_aliases_input_in_all_buckets(v_cache_out, v_cache));
+    assert!(!rt.output_aliases_input_in_all_buckets(k_cache_out, v_cache));
 
     rt.execute(&cx.dyn_map);
     assert_eq!(rt.get_f32(attn_out), vec![6.0, 0.0, 0.0, 0.0, 0.0]);

@@ -1439,6 +1439,28 @@ impl<O: IntoEgglogOp> CudaRuntimeImpl<O> {
         self.external_output_buffers.contains_key(&data_node)
     }
 
+    /// Whether an output resolves to the same HLIR input in every retained
+    /// dynamic-shape bucket.
+    ///
+    /// Persistent-state users call this after search to fail closed when any
+    /// selected bucket materializes a new buffer instead of mutating the
+    /// registered state arena in place.
+    pub fn output_aliases_input_in_all_buckets(&self, output: impl ToId, input: impl ToId) -> bool {
+        let output = output.to_id();
+        let input = input.to_id();
+        !self.compiled_buckets.is_empty()
+            && self.compiled_buckets.iter().all(|bucket| {
+                let Some(&producer) = bucket.output_producers.get(&output) else {
+                    return false;
+                };
+                let mut data_node = producer;
+                while let Some(&alias) = bucket.output_alias_map.get(&data_node) {
+                    data_node = alias;
+                }
+                bucket.llir_to_hlir.get(&data_node) == Some(&input)
+            })
+    }
+
     /// Find the LLIR producing node for an output tensor.
     fn find_producer_node(&self, id: impl ToId) -> NodeIndex {
         let id = id.to_id();
