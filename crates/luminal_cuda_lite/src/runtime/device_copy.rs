@@ -161,7 +161,11 @@ fn validate_device_copy_ranges(
 
 #[cfg(test)]
 mod tests {
+    use cudarc::driver::CudaContext;
+    use luminal::{dtype::DType, op::Runtime, prelude::Graph};
+
     use super::*;
+    use crate::runtime::CudaRuntime;
 
     #[test]
     fn accepts_disjoint_source_and_destination_ranges() {
@@ -209,5 +213,43 @@ mod tests {
             ),
             Err(DeviceCopyError::RangeOutOfBounds)
         );
+    }
+
+    #[test]
+    fn copies_ranges_within_a_persistent_graph_input() {
+        let Ok(context) = CudaContext::new(0) else {
+            return;
+        };
+        let stream = context.default_stream();
+        let mut graph = Graph::default();
+        let input = graph
+            .named_tensor("state", 8)
+            .as_dtype(DType::Int)
+            .persist();
+        let output = input.output();
+        let mut runtime = CudaRuntime::initialize(stream);
+        runtime.set_data(input, (0_i32..8).collect::<Vec<_>>());
+        let mut runtime = graph.compile(
+            runtime,
+            luminal::prelude::CompileOptions::default().search_graph_limit(1),
+        );
+        runtime.set_data(input, (0_i32..8).collect::<Vec<_>>());
+        runtime.execute(&graph.dyn_map);
+
+        runtime
+            .copy_input_ranges(&[DeviceInputCopyPlan {
+                tensor: input.id,
+                ranges: vec![DeviceCopyRange {
+                    source_offset: 0,
+                    destination_offset: 4 * std::mem::size_of::<i32>(),
+                    bytes: 2 * std::mem::size_of::<i32>(),
+                }]
+                .into_boxed_slice(),
+            }])
+            .unwrap()
+            .synchronize()
+            .unwrap();
+
+        assert_eq!(runtime.get_i32(output), vec![0, 1, 2, 3, 0, 1, 6, 7]);
     }
 }
