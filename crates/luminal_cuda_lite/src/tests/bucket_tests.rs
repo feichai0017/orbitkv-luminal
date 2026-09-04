@@ -43,7 +43,7 @@ fn test_bucket_dispatch_simple() {
 
     // Set dummy input for search
     cx.set_dim('s', 1);
-    rt.set_data(a, vec![1.0f32; 4]);
+    rt.set_data_with_capacity(a, vec![1.0f32; 4], 4 * 4 * size_of::<f32>());
 
     let mut rng = SmallRng::seed_from_u64(42);
     rt = cx.search_with_rng(
