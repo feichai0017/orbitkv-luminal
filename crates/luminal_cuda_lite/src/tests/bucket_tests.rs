@@ -51,12 +51,14 @@ fn test_bucket_dispatch_simple() {
         CompileOptions::default().search_graph_limit(5),
         &mut rng,
     );
+    assert_eq!(rt.compiled_bucket_count(), 2);
 
     // Test bucket 1: s=1
     cx.set_dim('s', 1);
     let input_data = vec![1.0f32, 2.0, 3.0, 4.0];
     rt.set_data(a, input_data.clone());
     rt.execute(&cx.dyn_map);
+    assert_eq!(rt.active_bucket_index(), 0);
     let result = rt.get_f32(b);
     let expected: Vec<f32> = input_data.iter().map(|x| x * 2.0).collect();
     assert_close(&result[..4], &expected, 1e-5, 1e-5);
@@ -66,6 +68,7 @@ fn test_bucket_dispatch_simple() {
     let input_data: Vec<f32> = (0..12).map(|i| i as f32).collect();
     rt.set_data(a, input_data.clone());
     rt.execute(&cx.dyn_map);
+    assert_eq!(rt.active_bucket_index(), 1);
     let result = rt.get_f32(b);
     let expected: Vec<f32> = input_data.iter().map(|x| x * 2.0).collect();
     assert_close(&result[..12], &expected, 1e-5, 1e-5);

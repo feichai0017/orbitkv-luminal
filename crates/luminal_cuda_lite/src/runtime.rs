@@ -992,6 +992,16 @@ impl<O: IntoEgglogOp> CudaRuntimeImpl<O> {
         &self.active().kernel_names
     }
 
+    /// Number of dynamic-shape bucket executables retained by this runtime.
+    pub fn compiled_bucket_count(&self) -> usize {
+        self.compiled_buckets.len()
+    }
+
+    /// Index of the bucket selected by the most recent execution.
+    pub fn active_bucket_index(&self) -> usize {
+        self.active_bucket
+    }
+
     /// Host operations in the active executable graph, for diagnostics.
     pub fn host_ops(&self) -> Vec<&dyn HostOp> {
         self.active()
