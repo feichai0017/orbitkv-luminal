@@ -1615,6 +1615,86 @@ fn flashinfer_bf16_decode_bs1_ctx4() {
 }
 
 #[test]
+fn flashinfer_bf16_decode_non_power_of_two_gqa_block_page() {
+    if !crate::tests::utilities::gpu_supports_flashinfer() {
+        return;
+    }
+    let Some(stream) = get_cuda_stream() else {
+        return;
+    };
+    const QUERY_HEADS: usize = 14;
+    const KV_HEADS: usize = 2;
+    const PAGE_SIZE: usize = 16;
+    const PAGES: usize = 2;
+    let q = vec![0.0; QUERY_HEADS * HEAD_DIM];
+    let k = vec![0.0; PAGES * PAGE_SIZE * KV_HEADS * HEAD_DIM];
+    let mut v = vec![0.0; k.len()];
+    for token in 0..5 {
+        let begin = token * KV_HEADS * HEAD_DIM;
+        v[begin..begin + KV_HEADS * HEAD_DIM].fill((token + 1) as f32);
+    }
+    let q_buf = copy_to_dev(&stream, &f32s_to_bf16_bytes(&q));
+    let k_buf = copy_to_dev(&stream, &f32s_to_bf16_bytes(&k));
+    let v_buf = copy_to_dev(&stream, &f32s_to_bf16_bytes(&v));
+    let page_indices = copy_to_dev(&stream, &[0_i32]);
+    let query_indptr = copy_to_dev(&stream, &[0_i32, 1]);
+    let page_indptr = copy_to_dev(&stream, &[0_i32, 1]);
+    let last_page_len = copy_to_dev(&stream, &[5_i32]);
+    let output = alloc_dev(&stream, QUERY_HEADS * HEAD_DIM * 2);
+    let nodes = (0..8).map(NodeIndex::new).collect::<Vec<_>>();
+    let mut buffers = FxHashMap::default();
+    for (node, buffer) in [
+        (nodes[0], &q_buf),
+        (nodes[1], &k_buf),
+        (nodes[2], &v_buf),
+        (nodes[3], &page_indices),
+        (nodes[4], &query_indptr),
+        (nodes[5], &page_indptr),
+        (nodes[6], &last_page_len),
+        (nodes[7], &output),
+    ] {
+        buffers.insert(
+            node,
+            DeviceBuffer::new(buffer.device_ptr(&stream).0, buffer.len()),
+        );
+    }
+    let attention = FlashInferAttention::paged(
+        QUERY_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        PAGE_SIZE,
+        1.into(),
+        1.into(),
+        DType::Bf16,
+        0.0,
+        None,
+    );
+    let mut dyn_map = FxHashMap::default();
+    dyn_map.insert(Symbol::from('s'), 1);
+    dyn_map.insert(Symbol::from('b'), 1);
+    dyn_map.insert(Symbol::from('c'), 1);
+    attention
+        .execute(&stream, nodes[7], &nodes[..7], &buffers, &dyn_map)
+        .expect("non-power-of-two GQA decode");
+    stream.synchronize().unwrap();
+    let mut output_bytes = vec![0_u8; QUERY_HEADS * HEAD_DIM * 2];
+    unsafe {
+        cudarc::driver::result::memcpy_dtoh_async(
+            &mut output_bytes,
+            output.device_ptr(&stream).0,
+            stream.cu_stream(),
+        )
+        .unwrap();
+    }
+    stream.synchronize().unwrap();
+    assert!(
+        bf16_bytes_to_f32s(&output_bytes)
+            .iter()
+            .all(|value| (*value - 3.0).abs() <= 0.05)
+    );
+}
+
+#[test]
 fn flashinfer_bf16_decode_bs2_supersequence() {
     if !crate::tests::utilities::gpu_supports_flashinfer() {
         return;

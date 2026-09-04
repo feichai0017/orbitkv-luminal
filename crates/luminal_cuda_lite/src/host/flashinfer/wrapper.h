@@ -10,6 +10,9 @@ extern "C" {
 // dtype codes shared with the Rust side: 0 = f32, 1 = f16, 2 = bf16.
 // Q / K / V / output buffers must all use the same dtype.
 
+// Thread-local diagnostic from the most recent guarded C entry point.
+const char* flashinfer_last_error_message();
+
 // Plan phase: CPU-side scheduling. Must call before each new batch config.
 // Returns 0 on success, non-zero on failure.
 int flashinfer_batch_decode_plan(
@@ -51,7 +54,7 @@ void flashinfer_extract_slot_indices(
 // Update graph-stable decode metadata from the current decode length.
 // Used by CUDA-graph decode plans that are built for a fixed capacity but run
 // with a changing current context length.
-void flashinfer_prepare_decode_metadata(
+int flashinfer_prepare_decode_metadata(
     void* int_workspace,
     int64_t* plan_info_vec, int plan_info_len,
     const int32_t* current_c,

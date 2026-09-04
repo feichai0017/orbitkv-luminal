@@ -1064,9 +1064,14 @@ impl FlashInferAttention {
             }
         };
         if plan_ret != 0 {
-            return Err(anyhow::anyhow!(
-                "FlashInfer {} plan failed with error code {plan_ret}",
-                if is_prefill { "prefill" } else { "decode" }
+            return Err(flashinfer_native_error(
+                lib,
+                if is_prefill {
+                    "prefill plan"
+                } else {
+                    "decode plan"
+                },
+                plan_ret,
             ));
         }
 
@@ -1093,6 +1098,15 @@ impl FlashInferAttention {
             temp_output_ptr,
         })
     }
+}
+
+fn flashinfer_native_error(lib: &jit::FlashInferLib, operation: &str, code: i32) -> anyhow::Error {
+    lib.error_message().map_or_else(
+        || anyhow::anyhow!("FlashInfer {operation} failed with error code {code}"),
+        |message| {
+            anyhow::anyhow!("FlashInfer {operation} failed with error code {code}: {message}")
+        },
+    )
 }
 
 impl PreparedFlashInferDecode {
@@ -1137,7 +1151,7 @@ impl PreparedFlashInferDecode {
         if !include_metadata {
             // A preceding dependency has already populated the metadata.
         } else if let Some(current_c_ptr) = self.current_c_ptr {
-            unsafe {
+            let metadata_ret = unsafe {
                 (self.lib.prepare_decode_metadata)(
                     self.int_workspace_ptr as *mut std::ffi::c_void,
                     plan_info.as_mut_ptr(),
@@ -1149,7 +1163,14 @@ impl PreparedFlashInferDecode {
                     self.spec.c as i32,
                     self.spec.kv_dim as i32,
                     cu_stream,
-                );
+                )
+            };
+            if metadata_ret != 0 {
+                return Err(flashinfer_native_error(
+                    self.lib,
+                    "decode metadata preparation",
+                    metadata_ret,
+                ));
             }
         } else if self.spec.c > 0 && self._indices.is_some() {
             unsafe {
@@ -1235,13 +1256,14 @@ impl PreparedFlashInferDecode {
         };
 
         if run_ret != 0 {
-            return Err(anyhow::anyhow!(
-                "FlashInfer {} run failed with error code {run_ret}",
+            return Err(flashinfer_native_error(
+                self.lib,
                 if self.spec.is_prefill() {
-                    "prefill"
+                    "prefill run"
                 } else {
-                    "decode"
-                }
+                    "decode run"
+                },
+                run_ret,
             ));
         }
 

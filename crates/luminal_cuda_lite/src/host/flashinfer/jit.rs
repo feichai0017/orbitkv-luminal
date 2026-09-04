@@ -13,7 +13,7 @@
 //! the first call the `OnceLock` makes subsequent lookups free.
 
 use std::{
-    ffi::c_void,
+    ffi::{CStr, c_char, c_void},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
@@ -116,7 +116,9 @@ pub type PrepareDecodeMetadataFn = unsafe extern "C" fn(
     capacity_c: i32,
     kv_dim: i32,
     stream: *mut c_void,
-);
+) -> i32;
+
+pub type LastErrorFn = unsafe extern "C" fn() -> *const c_char;
 
 pub type TransposeOutputFn = unsafe extern "C" fn(
     src: *const c_void,
@@ -192,6 +194,7 @@ pub struct FlashInferLib {
     pub transpose_output: TransposeOutputFn,
     pub prefill_plan: PrefillPlanFn,
     pub prefill_run: PrefillRunFn,
+    last_error: LastErrorFn,
 }
 
 // SAFETY: The library handle and function pointers are valid for the lifetime
@@ -258,6 +261,8 @@ impl FlashInferLib {
             unsafe { *lib.get::<PrefillPlanFn>(b"flashinfer_batch_prefill_plan\0")? };
         let prefill_run: PrefillRunFn =
             unsafe { *lib.get::<PrefillRunFn>(b"flashinfer_batch_prefill_run\0")? };
+        let last_error: LastErrorFn =
+            unsafe { *lib.get::<LastErrorFn>(b"flashinfer_last_error_message\0")? };
         Ok(Self {
             _lib: lib,
             plan,
@@ -267,7 +272,19 @@ impl FlashInferLib {
             transpose_output,
             prefill_plan,
             prefill_run,
+            last_error,
         })
+    }
+
+    pub fn error_message(&self) -> Option<String> {
+        let pointer = unsafe { (self.last_error)() };
+        if pointer.is_null() {
+            return None;
+        }
+        let message = unsafe { CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned();
+        (!message.is_empty()).then_some(message)
     }
 }
 

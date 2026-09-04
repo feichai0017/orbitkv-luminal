@@ -31,6 +31,22 @@
     __VA_ARGS__                                      \
   }
 
+// Decode's implementation dispatches the grouped-query ratio a second time.
+// Keep that dispatch aligned with the JIT key so plan and run instantiate the
+// same arbitrary positive ratio without compiling a fixed family of variants.
+#undef DISPATCH_GQA_GROUP_SIZE
+#define DISPATCH_GQA_GROUP_SIZE(group_size, GROUP_SIZE, ...)                \
+  {                                                                         \
+    if ((group_size) != LUMINAL_GQA_GROUP_SIZE) {                           \
+      std::ostringstream err_msg;                                           \
+      err_msg << "JIT group_size mismatch: " << (group_size) << " != "    \
+              << LUMINAL_GQA_GROUP_SIZE;                                    \
+      FLASHINFER_ERROR(err_msg.str());                                      \
+    }                                                                       \
+    constexpr size_t GROUP_SIZE = LUMINAL_GQA_GROUP_SIZE;                  \
+    __VA_ARGS__                                                             \
+  }
+
 #include <flashinfer/attention/scheduler.cuh>
 #include <flashinfer/attention/decode.cuh>
 #include <flashinfer/attention/default_decode_params.cuh>
@@ -45,6 +61,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <vector>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -69,6 +86,29 @@ constexpr bool USE_SWA = LUMINAL_USE_SWA != 0;
 constexpr int LUMINAL_DTYPE_F32 = 0;
 constexpr int LUMINAL_DTYPE_F16 = 1;
 constexpr int LUMINAL_DTYPE_BF16 = 2;
+constexpr int LUMINAL_EXCEPTION_ERROR = -1000;
+
+thread_local char luminal_last_error[1024] = {};
+
+static void luminal_set_last_error(const char* message) noexcept {
+    const char* source = message ? message : "unknown C++ exception";
+    std::strncpy(luminal_last_error, source, sizeof(luminal_last_error) - 1);
+    luminal_last_error[sizeof(luminal_last_error) - 1] = '\0';
+}
+
+template <typename F>
+static int luminal_ffi_guard(F&& operation) noexcept {
+    luminal_last_error[0] = '\0';
+    try {
+        return operation();
+    } catch (const std::exception& error) {
+        luminal_set_last_error(error.what());
+        return LUMINAL_EXCEPTION_ERROR;
+    } catch (...) {
+        luminal_set_last_error(nullptr);
+        return LUMINAL_EXCEPTION_ERROR;
+    }
+}
 
 // Attention variants
 using Variant = DefaultAttention</*use_custom_mask=*/false,
@@ -418,6 +458,10 @@ static int batch_prefill_run_t(
 
 extern "C" {
 
+const char* flashinfer_last_error_message() {
+    return luminal_last_error;
+}
+
 int flashinfer_batch_decode_plan(
     void* float_workspace, size_t float_ws_size,
     void* int_workspace, size_t int_ws_size,
@@ -431,7 +475,8 @@ int flashinfer_batch_decode_plan(
 {
     (void)head_dim; // fixed at compile time
 
-    switch (dtype) {
+    return luminal_ffi_guard([&]() -> int {
+      switch (dtype) {
         case LUMINAL_DTYPE_F32:
 #if LUMINAL_HEAD_DIM <= 256
             return batch_decode_plan_t<float>(
@@ -456,7 +501,8 @@ int flashinfer_batch_decode_plan(
                 plan_info_out, plan_info_len_out);
         default:
             return -1;
-    }
+      }
+    });
 }
 
 int flashinfer_batch_decode_run(
@@ -479,7 +525,8 @@ int flashinfer_batch_decode_run(
     (void)float_ws_size;
     (void)head_dim; // fixed at compile time
 
-    switch (dtype) {
+    return luminal_ffi_guard([&]() -> int {
+      switch (dtype) {
         case LUMINAL_DTYPE_F32:
 #if LUMINAL_HEAD_DIM <= 256
             return batch_decode_run_t<float>(
@@ -505,10 +552,11 @@ int flashinfer_batch_decode_run(
                 window_left, stream);
         default:
             return -1;
-    }
+      }
+    });
 }
 
-void flashinfer_prepare_decode_metadata(
+int flashinfer_prepare_decode_metadata(
     void* int_workspace,
     int64_t* plan_info_vec, int plan_info_len,
     const int32_t* current_c,
@@ -519,8 +567,9 @@ void flashinfer_prepare_decode_metadata(
     int kv_dim,
     cudaStream_t stream)
 {
-    DecodePlanInfo plan_info;
-    plan_info.FromVector(std::vector<int64_t>(plan_info_vec, plan_info_vec + plan_info_len));
+    return luminal_ffi_guard([&]() -> int {
+      DecodePlanInfo plan_info;
+      plan_info.FromVector(std::vector<int64_t>(plan_info_vec, plan_info_vec + plan_info_len));
 
     bool* block_valid_mask = nullptr;
     if (plan_info.split_kv && plan_info.enable_cuda_graph) {
@@ -536,12 +585,14 @@ void flashinfer_prepare_decode_metadata(
 
     int padded_batch_size = (int)plan_info.padded_batch_size;
     int n = max(capacity_c, padded_batch_size);
-    if (n <= 0) return;
+    if (n <= 0) return 0;
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
     prepare_decode_metadata_kernel<<<blocks, threads, 0, stream>>>(
         current_c, slot_idx, kv_indices, kv_indptr, o_indptr, block_valid_mask,
         kv_tile_indices, kv_chunk_size_ptr, capacity_c, kv_dim, padded_batch_size);
+    return (int)cudaPeekAtLastError();
+    });
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -562,12 +613,13 @@ int flashinfer_batch_prefill_plan(
 {
     (void)head_dim; // fixed at compile time
 
-    if (dtype != LUMINAL_DTYPE_F16 && dtype != LUMINAL_DTYPE_BF16) {
-        return -1; // f32 prefill is physically unsupported (tensor cores are 16-bit)
-    }
+    return luminal_ffi_guard([&]() -> int {
+      if (dtype != LUMINAL_DTYPE_F16 && dtype != LUMINAL_DTYPE_BF16) {
+          return -1; // f32 prefill is physically unsupported (tensor cores are 16-bit)
+      }
 
-    PrefillPlanInfo plan_info;
-    cudaError_t status = PrefillPlan<IdType>(
+      PrefillPlanInfo plan_info;
+      cudaError_t status = PrefillPlan<IdType>(
         float_workspace, float_ws_size,
         int_workspace, page_locked_int_workspace, int_ws_size,
         plan_info, qo_indptr_h, kv_indptr_h,
@@ -580,12 +632,13 @@ int flashinfer_batch_prefill_plan(
         /*num_colocated_ctas=*/0,
         stream);
 
-    if (status != cudaSuccess) return (int)status;
+      if (status != cudaSuccess) return (int)status;
 
-    auto vec = plan_info.ToVector();
-    *plan_info_len_out = (int)vec.size();
-    std::memcpy(plan_info_out, vec.data(), vec.size() * sizeof(int64_t));
-    return 0;
+      auto vec = plan_info.ToVector();
+      *plan_info_len_out = (int)vec.size();
+      std::memcpy(plan_info_out, vec.data(), vec.size() * sizeof(int64_t));
+      return 0;
+    });
 }
 
 int flashinfer_batch_prefill_run(
@@ -610,7 +663,8 @@ int flashinfer_batch_prefill_run(
     (void)head_dim; // fixed at compile time
     (void)total_num_rows;
 
-    switch (dtype) {
+    return luminal_ffi_guard([&]() -> int {
+      switch (dtype) {
         case LUMINAL_DTYPE_F16:
             return batch_prefill_run_t<half>(
                 float_workspace, int_workspace, plan_info_vec, plan_info_len,
@@ -627,7 +681,8 @@ int flashinfer_batch_prefill_run(
                 page_size, sm_scale, window_left, stream);
         default:
             return -1; // f32 prefill is physically unsupported
-    }
+      }
+    });
 }
 
 } // extern "C"
