@@ -77,10 +77,9 @@ fn test_bucket_dispatch_simple() {
 }
 
 #[test]
+#[ignore = "requires a CUDA device"]
 fn captured_execution_reads_updated_stable_inputs() {
-    let Some(default_stream) = get_cuda_stream() else {
-        return;
-    };
+    let default_stream = get_cuda_stream().expect("CUDA device is required");
     let stream = default_stream.context().new_stream().unwrap();
     let (mut cx, input, output) = build_dynamic_add_graph();
     cx.set_dim('s', 1);
