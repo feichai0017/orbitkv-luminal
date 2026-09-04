@@ -47,7 +47,7 @@ use tracing::{Level, span, trace};
 use uuid::Uuid;
 
 mod device_copy;
-pub use device_copy::{DeviceCopyError, DeviceCopyPlan, DeviceCopyRange, DeviceInputCopyPlan};
+pub use device_copy::{DeviceCopyError, DeviceCopyRange, DeviceInputCopyPlan};
 
 const ARENA_ALIGNMENT: usize = 256;
 const MIN_ARENA_ALLOCATION_BYTES: usize = 16 * 1024 * 1024;
