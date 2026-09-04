@@ -77,6 +77,48 @@ fn test_bucket_dispatch_simple() {
 }
 
 #[test]
+fn captured_execution_reads_updated_stable_inputs() {
+    let Some(default_stream) = get_cuda_stream() else {
+        return;
+    };
+    let stream = default_stream.context().new_stream().unwrap();
+    let (mut cx, input, output) = build_dynamic_add_graph();
+    cx.set_dim('s', 1);
+    cx.build_search_space::<CudaRuntime>(bucket_options(&[DimBucket::new(1, 1)]));
+
+    let mut runtime = CudaRuntime::initialize(stream);
+    runtime.set_data_with_capacity(input, vec![1.0f32; 4], 4 * size_of::<f32>());
+    let allocation = runtime.input_allocation(input).unwrap();
+    let mut rng = SmallRng::seed_from_u64(42);
+    runtime = cx.search_with_rng(
+        runtime,
+        CompileOptions::default().search_graph_limit(3),
+        &mut rng,
+    );
+
+    runtime.set_data(input, vec![1.0f32, 2.0, 3.0, 4.0]);
+    runtime.execute(&cx.dyn_map);
+    assert_close(
+        &runtime.get_f32(output),
+        &[2.0f32, 4.0, 6.0, 8.0],
+        1e-5,
+        1e-5,
+    );
+    let captured = runtime.capture_execution(&cx.dyn_map).unwrap();
+
+    runtime.set_data(input, vec![5.0f32, 6.0, 7.0, 8.0]);
+    assert_eq!(runtime.input_allocation(input), Some(allocation));
+    runtime.prepare_captured_execution(&cx.dyn_map);
+    captured.launch().unwrap();
+    assert_close(
+        &runtime.get_f32(output),
+        &[10.0f32, 12.0, 14.0, 16.0],
+        1e-5,
+        1e-5,
+    );
+}
+
+#[test]
 fn test_bucket_matmul_dynamic() {
     // Tests matmul with bucketed dynamic dim
     let Some(stream) = get_cuda_stream() else {

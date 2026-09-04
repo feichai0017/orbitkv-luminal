@@ -1,8 +1,8 @@
 use crate::{
     host::{DeviceBuffer, HostOp},
     kernel::{
-        CompiledFunctionResourceCache, CudaGraphOp, CudaGraphTiming, KernelOp,
-        PreparedKernelToHostPlan,
+        CompiledFunctionResourceCache, CudaGraphExecHandle, CudaGraphHandle, CudaGraphOp,
+        CudaGraphTiming, KernelOp, PreparedKernelToHostPlan,
         fusion::region_codegen::{CompileUnit, RegionSourceCache},
         record_cuda_graph_timings,
     },
@@ -548,6 +548,24 @@ pub struct CudaRuntimeImpl<O> {
 /// and therefore need no generic type annotations.
 pub type CudaRuntime = CudaRuntimeImpl<DefaultCudaOps>;
 
+/// One caller-owned capture of a prepared runtime execution.
+///
+/// The executable retains the stream selected by the runtime at capture time.
+/// Callers may update stable-address input allocations on that same runtime
+/// before each launch, but shape- or pointer-changing updates require a new
+/// capture.
+pub struct CapturedCudaExecution {
+    executable: CudaGraphExecHandle,
+    stream: Arc<CudaStream>,
+}
+
+impl CapturedCudaExecution {
+    /// Enqueues the captured execution on its original stream.
+    pub fn launch(&self) -> Result<(), cudarc::driver::DriverError> {
+        self.executable.launch(&self.stream)
+    }
+}
+
 impl<O: IntoEgglogOp> CudaRuntimeImpl<O> {
     /// Creates a new CudaRuntime with default configuration:
     /// - Device 0
@@ -589,6 +607,52 @@ impl<O: IntoEgglogOp> CudaRuntimeImpl<O> {
     /// caller-owned CUDA graph can capture them.
     pub fn set_external_cuda_graph(&mut self, enabled: bool) {
         self.external_cuda_graph = enabled;
+    }
+
+    /// Captures one already-warmed execution at the current dynamic shape.
+    ///
+    /// Input uploads are intentionally outside the captured graph. Callers can
+    /// therefore overwrite stable input allocations before launching the
+    /// returned executable. A normal execution at the exact same shape must
+    /// have completed first so library plans and intermediate bindings exist.
+    pub fn capture_execution(
+        &mut self,
+        dyn_map: &DynMap,
+    ) -> Result<CapturedCudaExecution, cudarc::driver::DriverError> {
+        self.cuda_stream.synchronize()?;
+        let stream = Arc::clone(&self.cuda_stream);
+        CudaGraphHandle::begin_standalone_capture(&stream)?;
+        let previous_external = self.external_cuda_graph;
+        let previous_synchronize = self.synchronize_stream;
+        self.external_cuda_graph = true;
+        self.synchronize_stream = false;
+        let execution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            <Self as Runtime>::execute(self, dyn_map);
+        }));
+        self.external_cuda_graph = previous_external;
+        self.synchronize_stream = previous_synchronize;
+        let captured = CudaGraphHandle::end_standalone_capture(&stream);
+        if let Err(payload) = execution {
+            std::panic::resume_unwind(payload);
+        }
+        let graph = captured?;
+        let executable = graph.instantiate()?;
+        Ok(CapturedCudaExecution { executable, stream })
+    }
+
+    /// Refreshes stable runtime bindings before launching a captured execution.
+    ///
+    /// This deliberately performs no model work and no library replanning. The
+    /// caller must enforce the shape and planning signature used at capture.
+    pub fn prepare_captured_execution(&mut self, dyn_map: &DynMap) {
+        let bucket = self.resolve_bucket(dyn_map);
+        if bucket != self.active_bucket {
+            self.active_bucket = bucket;
+            self.compiled_buckets[bucket].hlir_synced = false;
+        }
+        self.prepare_bucket_buffers(bucket, dyn_map);
+        self.update_shared_dyn_dims(bucket, dyn_map);
+        self.apply_output_ptr_registrations();
     }
 
     pub(crate) fn clear_kernel_cache(&mut self) {
