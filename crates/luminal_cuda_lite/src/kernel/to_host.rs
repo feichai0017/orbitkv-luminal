@@ -3186,6 +3186,22 @@ impl CudaGraphOp {
         Ok(())
     }
 
+    /// Adds the current materialized CUDA graph as one child of `parent`.
+    pub(crate) fn add_materialized_child(
+        &self,
+        parent: &mut CudaGraphHandle,
+        dependencies: &[CUgraphNode],
+    ) -> Result<CUgraphNode, cudarc::driver::DriverError> {
+        let state = self.state.borrow();
+        let child = state
+            .cuda_graph
+            .as_ref()
+            .ok_or(cudarc::driver::DriverError(
+                cudarc::driver::sys::CUresult::CUDA_ERROR_INVALID_VALUE,
+            ))?;
+        parent.add_child_graph_node(dependencies, child)
+    }
+
     /// Enqueue prepared work directly so a caller-owned CUDA graph can capture it.
     pub(crate) fn launch_steps(
         &self,

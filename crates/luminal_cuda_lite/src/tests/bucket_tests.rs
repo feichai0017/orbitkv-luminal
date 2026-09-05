@@ -108,7 +108,7 @@ fn captured_execution_reads_updated_stable_inputs() {
 
     runtime.set_data(input, vec![5.0f32, 6.0, 7.0, 8.0]);
     assert_eq!(runtime.input_allocation(input), Some(capture_allocation));
-    runtime.prepare_captured_execution(&cx.dyn_map);
+    runtime.prepare_captured_execution(&cx.dyn_map).unwrap();
     captured.launch().unwrap();
     assert_close(
         &runtime.get_f32(output),

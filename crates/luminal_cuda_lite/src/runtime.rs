@@ -621,40 +621,34 @@ impl<O: IntoEgglogOp> CudaRuntimeImpl<O> {
     ) -> Result<CapturedCudaExecution, cudarc::driver::DriverError> {
         self.cuda_stream.synchronize()?;
         let stream = Arc::clone(&self.cuda_stream);
-        let previous_external = self.external_cuda_graph;
-        let previous_synchronize = self.synchronize_stream;
+        self.prepare_captured_execution(dyn_map)?;
+        self.prepare_materialized_bucket_slot(self.active_bucket);
+        self.materialize_bucket_cuda_graphs(self.active_bucket, dyn_map, false)
+            .map_err(|_| {
+                cudarc::driver::DriverError(cudarc::driver::sys::CUresult::CUDA_ERROR_INVALID_VALUE)
+            })?;
 
-        // The ordinary warmup uses Luminal's materialized child graphs. Prime
-        // the direct-launch path separately before capture so the CUDA driver
-        // never performs first-use module or library initialization inside a
-        // stream capture. External mode retains runtime-owned inputs.
-        self.external_cuda_graph = true;
-        self.synchronize_stream = true;
-        let priming = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <Self as Runtime>::execute(self, dyn_map);
-        }));
-        if let Err(payload) = priming {
-            self.external_cuda_graph = previous_external;
-            self.synchronize_stream = previous_synchronize;
-            std::panic::resume_unwind(payload);
+        let mut graph = CudaGraphHandle::new(stream.context().clone())?;
+        let mut dependencies = Vec::with_capacity(1);
+        let bucket = &self.compiled_buckets[self.active_bucket];
+        for &exec_node in &bucket.exec_order {
+            let exec_op = &bucket.exec_graph[exec_node];
+            let cuda_graph = exec_op
+                .internal
+                .as_any()
+                .downcast_ref::<CudaGraphOp>()
+                .ok_or(cudarc::driver::DriverError(
+                    cudarc::driver::sys::CUresult::CUDA_ERROR_NOT_SUPPORTED,
+                ))?;
+            let node = cuda_graph.add_materialized_child(&mut graph, &dependencies)?;
+            dependencies.clear();
+            dependencies.push(node);
         }
-
-        if let Err(error) = CudaGraphHandle::begin_standalone_capture(&stream) {
-            self.external_cuda_graph = previous_external;
-            self.synchronize_stream = previous_synchronize;
-            return Err(error);
+        for &(source, destination, bytes) in &self.pending_output_copies {
+            let node = graph.add_device_copy_node(&dependencies, source, destination, bytes)?;
+            dependencies.clear();
+            dependencies.push(node);
         }
-        self.synchronize_stream = false;
-        let execution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <Self as Runtime>::execute(self, dyn_map);
-        }));
-        self.external_cuda_graph = previous_external;
-        self.synchronize_stream = previous_synchronize;
-        let captured = CudaGraphHandle::end_standalone_capture(&stream);
-        if let Err(payload) = execution {
-            std::panic::resume_unwind(payload);
-        }
-        let graph = captured?;
         let executable = graph.instantiate()?;
         Ok(CapturedCudaExecution { executable, stream })
     }
@@ -663,7 +657,10 @@ impl<O: IntoEgglogOp> CudaRuntimeImpl<O> {
     ///
     /// This deliberately performs no model work and no library replanning. The
     /// caller must enforce the shape and planning signature used at capture.
-    pub fn prepare_captured_execution(&mut self, dyn_map: &DynMap) {
+    pub fn prepare_captured_execution(
+        &mut self,
+        dyn_map: &DynMap,
+    ) -> Result<(), cudarc::driver::DriverError> {
         let bucket = self.resolve_bucket(dyn_map);
         if bucket != self.active_bucket {
             self.active_bucket = bucket;
@@ -672,6 +669,21 @@ impl<O: IntoEgglogOp> CudaRuntimeImpl<O> {
         self.prepare_bucket_buffers(bucket, dyn_map);
         self.update_shared_dyn_dims(bucket, dyn_map);
         self.apply_output_ptr_registrations();
+        let execution_id = self.next_execution_id;
+        self.next_execution_id = self.next_execution_id.wrapping_add(1);
+        for &exec_node in &self.compiled_buckets[bucket].exec_order {
+            let exec_op = &self.compiled_buckets[bucket].exec_graph[exec_node];
+            if let Some(cuda_graph) = exec_op.internal.as_any().downcast_ref::<CudaGraphOp>() {
+                cuda_graph
+                    .prepare_execution(&exec_op.stream, dyn_map, execution_id)
+                    .map_err(|_| {
+                        cudarc::driver::DriverError(
+                            cudarc::driver::sys::CUresult::CUDA_ERROR_INVALID_VALUE,
+                        )
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn clear_kernel_cache(&mut self) {

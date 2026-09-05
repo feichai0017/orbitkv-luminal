@@ -168,6 +168,60 @@ impl CudaGraphHandle {
         }
     }
 
+    /// Adds a one-dimensional device-to-device copy after `dependencies`.
+    pub fn add_device_copy_node(
+        &mut self,
+        dependencies: &[CUgraphNode],
+        source: u64,
+        destination: u64,
+        bytes: usize,
+    ) -> Result<CUgraphNode, DriverError> {
+        if source == 0 || destination == 0 || bytes == 0 {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
+        self.ctx.bind_to_thread()?;
+        let mut node = MaybeUninit::uninit();
+        let params = sys::CUDA_MEMCPY3D {
+            srcXInBytes: 0,
+            srcY: 0,
+            srcZ: 0,
+            srcLOD: 0,
+            srcMemoryType: sys::CUmemorytype::CU_MEMORYTYPE_DEVICE,
+            srcHost: std::ptr::null(),
+            srcDevice: source,
+            srcArray: std::ptr::null_mut(),
+            reserved0: std::ptr::null_mut(),
+            srcPitch: bytes,
+            srcHeight: 1,
+            dstXInBytes: 0,
+            dstY: 0,
+            dstZ: 0,
+            dstLOD: 0,
+            dstMemoryType: sys::CUmemorytype::CU_MEMORYTYPE_DEVICE,
+            dstHost: std::ptr::null_mut(),
+            dstDevice: destination,
+            dstArray: std::ptr::null_mut(),
+            reserved1: std::ptr::null_mut(),
+            dstPitch: bytes,
+            dstHeight: 1,
+            WidthInBytes: bytes,
+            Height: 1,
+            Depth: 1,
+        };
+        unsafe {
+            sys::cuGraphAddMemcpyNode(
+                node.as_mut_ptr(),
+                self.cu_graph,
+                dependencies.as_ptr(),
+                dependencies.len(),
+                &params,
+                self.ctx.cu_ctx(),
+            )
+            .result()?;
+            Ok(node.assume_init())
+        }
+    }
+
     /// Destroys a node in the mutable graph.
     pub unsafe fn destroy_node(&mut self, node: CUgraphNode) -> Result<(), DriverError> {
         self.ctx.bind_to_thread()?;
@@ -770,6 +824,34 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a CUDA device"]
+    fn device_copy_node_copies_after_child_graph() {
+        use cudarc::driver::{CudaSlice, DevicePtr};
+
+        let ctx = CudaContext::new(0).expect("CUDA device is required");
+        let stream = ctx.new_stream().unwrap();
+        let source: CudaSlice<u32> = stream.clone_htod(&[7_u32, 11]).unwrap();
+        let destination: CudaSlice<u32> = stream.clone_htod(&[0_u32, 0]).unwrap();
+
+        let mut child = CudaGraphHandle::new(ctx.clone()).unwrap();
+        child.add_empty_node(&[]).unwrap();
+        let mut parent = CudaGraphHandle::new(ctx).unwrap();
+        let child_node = parent.add_child_graph_node(&[], &child).unwrap();
+        parent
+            .add_device_copy_node(
+                &[child_node],
+                source.device_ptr(&stream).0,
+                destination.device_ptr(&stream).0,
+                2 * size_of::<u32>(),
+            )
+            .unwrap();
+        let executable = parent.instantiate().unwrap();
+        executable.launch(&stream).unwrap();
+        let result = stream.clone_dtoh(&destination).unwrap();
+        assert_eq!(result, vec![7_u32, 11]);
+    }
+
+    #[test]
     fn test_graph_empty_node_dependency_reconnect() {
         let Ok(ctx) = CudaContext::new(0) else { return };
         let mut graph = CudaGraphHandle::new(ctx).unwrap();
@@ -799,6 +881,15 @@ mod tests {
             graph.destroy_node(middle).unwrap();
         }
         assert!(!graph.nodes().unwrap().contains(&middle));
+    }
+
+    #[test]
+    fn device_copy_node_rejects_empty_or_null_ranges_before_cuda() {
+        let Ok(ctx) = CudaContext::new(0) else { return };
+        let mut graph = CudaGraphHandle::new(ctx).unwrap();
+        assert!(graph.add_device_copy_node(&[], 0, 1, 4).is_err());
+        assert!(graph.add_device_copy_node(&[], 1, 0, 4).is_err());
+        assert!(graph.add_device_copy_node(&[], 1, 2, 0).is_err());
     }
 
     // CUDA Graph Tests
