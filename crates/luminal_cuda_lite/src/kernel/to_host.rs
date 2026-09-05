@@ -11,7 +11,8 @@ use std::{
 };
 
 use cudarc::driver::{
-    CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, sys::CUgraphNode,
+    CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, result,
+    sys::{self, CUgraphNode},
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
@@ -55,6 +56,10 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct CudaGraphDebugSummary {
+    /// Full graph builds since this compiled operation was created.
+    pub graph_builds: usize,
+    /// Resident executables, including the currently selected variant.
+    pub resident_variants: usize,
     pub n_kernels: usize,
     pub n_cublaslt: usize,
     pub n_flashinfer: usize,
@@ -758,6 +763,114 @@ struct CudaGraphOpState {
     timing_events: Vec<cudarc::driver::sys::CUevent>,
 }
 
+/// Shape-specific state only. Compiled functions, constants and topology stay
+/// in CudaGraphOpState; all variants address the same runtime-owned arena.
+/// Executables must be destroyed before their pointer-bearing resources.
+#[derive(Default)]
+struct ResidentGraphVariant {
+    cuda_graph_exec: Option<CudaGraphExecHandle>,
+    cuda_graph: Option<CudaGraphHandle>,
+    cublaslt_ops: Vec<CompiledCuBlasLt>,
+    flashinfer_ops: Vec<CompiledFlashInferDecode>,
+    captured_host_ops: Vec<CompiledCapturedHost>,
+    kernel_nodes: Vec<Option<CUgraphNode>>,
+    kernel_internal_bufs: Vec<Vec<CudaSlice<u8>>>,
+    kernel_params: Vec<UnifiedKernelParams>,
+    kernel_launches: Vec<KernelLaunchConfig>,
+    step_entry_nodes: Vec<CUgraphNode>,
+    step_output_nodes: Vec<CUgraphNode>,
+    cublaslt_prepare_cache: Vec<CachedCuBlasLtPrepare>,
+    cublaslt_workspace_pool: Vec<Arc<CudaSlice<u8>>>,
+    flashinfer_prepare_cache: Vec<CachedFlashInferPrepare>,
+    dyn_dims_buffer: Option<CudaSlice<i32>>,
+    last_dyn_values: DynMap,
+    last_buffer_ptrs: FxHashMap<NodeIndex, u64>,
+    last_buffers: FxHashMap<NodeIndex, DeviceBuffer>,
+    timing_events: Vec<cudarc::driver::sys::CUevent>,
+}
+
+impl ResidentGraphVariant {
+    fn empty(state: &CudaGraphOpState) -> Self {
+        let mut variant = Self::default();
+        variant.cublaslt_ops = state
+            .cublaslt_ops
+            .iter()
+            .map(|op| CompiledCuBlasLt::new(op.node, op.inputs.clone(), op.host_op.clone()))
+            .collect();
+        variant.flashinfer_ops = state
+            .flashinfer_ops
+            .iter()
+            .map(|op| CompiledFlashInferDecode::new(op.node, op.inputs.clone(), op.host_op.clone()))
+            .collect();
+        variant.captured_host_ops = state
+            .captured_host_ops
+            .iter()
+            .map(|op| CompiledCapturedHost {
+                node: op.node,
+                inputs: op.inputs.clone(),
+                host_op: op.host_op.clone(),
+                child_graph: None,
+                graph_node: None,
+            })
+            .collect();
+        variant.kernel_nodes = vec![None; state.kernels.len()];
+        variant.kernel_internal_bufs = (0..state.kernels.len()).map(|_| Vec::new()).collect();
+        variant.step_entry_nodes = vec![std::ptr::null_mut(); state.steps.len()];
+        variant.step_output_nodes = vec![std::ptr::null_mut(); state.steps.len()];
+        variant
+    }
+
+    fn swap(&mut self, state: &mut CudaGraphOpState) {
+        macro_rules! swap_fields {
+            ($($field:ident),* $(,)?) => {$(std::mem::swap(&mut self.$field, &mut state.$field);)*};
+        }
+        swap_fields!(
+            cuda_graph_exec,
+            cuda_graph,
+            cublaslt_ops,
+            flashinfer_ops,
+            captured_host_ops,
+            kernel_params,
+            kernel_launches,
+            step_entry_nodes,
+            step_output_nodes,
+            cublaslt_prepare_cache,
+            cublaslt_workspace_pool,
+            flashinfer_prepare_cache,
+            dyn_dims_buffer,
+            last_dyn_values,
+            last_buffer_ptrs,
+            last_buffers,
+            timing_events
+        );
+        for (index, kernel) in state.kernels.iter_mut().enumerate() {
+            std::mem::swap(&mut self.kernel_nodes[index], &mut kernel.graph_node);
+            std::mem::swap(
+                &mut self.kernel_internal_bufs[index],
+                &mut kernel.internal_bufs,
+            );
+        }
+    }
+}
+
+impl Drop for ResidentGraphVariant {
+    fn drop(&mut self) {
+        if let Some(exec) = &self.cuda_graph_exec {
+            for event in self.timing_events.drain(..) {
+                destroy_cuda_event(&exec.ctx, event);
+            }
+        }
+        drop(self.cuda_graph_exec.take());
+        drop(self.cuda_graph.take());
+    }
+}
+
+struct ResidentGraphVariants {
+    dims: Vec<Symbol>,
+    active_key: Option<Vec<usize>>,
+    inactive: FxHashMap<Vec<usize>, ResidentGraphVariant>,
+}
+
 impl CudaGraphOpState {
     fn new(
         kernels: Vec<CompiledKernel>,
@@ -842,6 +955,9 @@ pub struct CudaGraphOp {
     capture_stream: RefCell<Option<Arc<CudaStream>>>,
     /// Mutable state wrapped in RefCell for interior mutability
     state: RefCell<CudaGraphOpState>,
+    resident: RefCell<Option<ResidentGraphVariants>>,
+    residency_frozen: std::cell::Cell<bool>,
+    graph_builds: std::cell::Cell<usize>,
 }
 
 struct ArenaBufferOrderAccumulator {
@@ -937,6 +1053,48 @@ impl CudaGraphArenaOrdering {
 }
 
 impl CudaGraphOp {
+    /// Return allocations retired by graph recapture to CUDA. Prepared
+    /// library state is allocated from the stream-ordered pool, while graph
+    /// executable updates use the separate device graph pool. Shape-changing
+    /// serving workloads can otherwise leave each generation cached in a
+    /// different pool until the process exhausts the device.
+    fn trim_recapture_memory(&self, stream: &Arc<CudaStream>) -> anyhow::Result<()> {
+        stream.synchronize()?;
+        // Child-library graphs are captured on a private stream. Even after
+        // end-capture returns, CUDA may retain stream-ordered allocations for
+        // the retired capture until that stream reaches a synchronization
+        // boundary. Synchronize it before trimming the process pools.
+        if let Some(capture_stream) = self.capture_stream.borrow().as_ref() {
+            capture_stream.synchronize()?;
+        }
+        let context = stream.context();
+        context.bind_to_thread()?;
+        if context.has_async_alloc() {
+            let pool = unsafe { result::device::get_mem_pool(context.cu_device())? };
+            unsafe {
+                result::mem_pool::trim_to(pool, 0)?;
+            }
+        }
+        unsafe {
+            sys::cuDeviceGraphMemTrim(context.cu_device()).result()?;
+        }
+        Ok(())
+    }
+
+    /// Destroy an executable that rejected a source-graph update before
+    /// allocating its replacement. CUDA can retain a model-sized graph
+    /// allocation until both the executable is destroyed and the device graph
+    /// pool is trimmed; instantiating first transiently requires both copies.
+    fn retire_failed_graph_exec(
+        &self,
+        stream: &Arc<CudaStream>,
+        exec: CudaGraphExecHandle,
+    ) -> anyhow::Result<()> {
+        stream.synchronize()?;
+        drop(exec);
+        self.trim_recapture_memory(stream)
+    }
+
     /// Whether this packaged graph currently owns both a mutable source graph
     /// and an executable instance. Bucket-LRU eviction deliberately releases
     /// both while retaining the compiled operation descriptions.
@@ -1082,7 +1240,120 @@ impl CudaGraphOp {
             stream,
             capture_stream: RefCell::new(capture_stream),
             state: RefCell::new(state),
+            resident: RefCell::new(None),
+            residency_frozen: std::cell::Cell::new(false),
+            graph_builds: std::cell::Cell::new(0),
         }
+    }
+
+    pub(crate) fn enable_residency(&self, dims: &[Symbol]) {
+        assert!(
+            !self.residency_frozen.get(),
+            "CUDA graph residency is already frozen"
+        );
+        self.release_materialization();
+        let mut relevant: FxHashSet<_> = self
+            .cublaslt_users_by_dyn_dim
+            .keys()
+            .copied()
+            .chain(self.captured_host_dyn_dims.iter().copied())
+            .chain(self.internal_buffer_dyn_dims.iter().copied())
+            .collect();
+        assert!(
+            relevant.iter().all(|dim| dims.contains(dim)),
+            "capture-sensitive dimensions {relevant:?} must be declared in startup shape_dims"
+        );
+        if !self.state.borrow().flashinfer_ops.is_empty() {
+            relevant.extend(dims);
+        }
+        // Ordinary kernel launch dimensions are patchable and need no variant.
+        let mut dims: Vec<_> = relevant.into_iter().collect();
+        dims.sort_unstable();
+        *self.resident.borrow_mut() = Some(ResidentGraphVariants {
+            dims,
+            active_key: None,
+            inactive: FxHashMap::default(),
+        });
+    }
+
+    /// Select an already captured executable without modifying its topology.
+    /// During startup only, an unseen key gets an empty materialization slot.
+    pub(crate) fn select_resident_variant(&self, dyn_map: &DynMap) -> anyhow::Result<bool> {
+        let mut resident = self.resident.borrow_mut();
+        let Some(resident) = resident.as_mut() else {
+            return Ok(false);
+        };
+        let key = resident
+            .dims
+            .iter()
+            .map(|dim| {
+                dyn_map
+                    .get(dim)
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!("missing resident CUDA graph dimension {dim:?}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        if resident.active_key.as_ref() == Some(&key) {
+            return Ok(false);
+        }
+        anyhow::ensure!(
+            !self.residency_frozen.get() || resident.inactive.contains_key(&key),
+            "CUDA graph shape was not prepared before serving: {:?}={key:?}",
+            resident.dims
+        );
+        let mut state = self.state.borrow_mut();
+        let mut next = resident
+            .inactive
+            .remove(&key)
+            .unwrap_or_else(|| ResidentGraphVariant::empty(&state));
+        next.swap(&mut state);
+        if let Some(previous_key) = resident.active_key.replace(key) {
+            resident.inactive.insert(previous_key, next);
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn validate_residency(&self) -> anyhow::Result<()> {
+        let resident = self.resident.borrow();
+        let resident = resident
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("CUDA graph residency was not enabled"))?;
+        anyhow::ensure!(
+            resident.active_key.is_some() && self.is_materialized(),
+            "every CUDA graph bucket must be prepared before serving"
+        );
+        anyhow::ensure!(
+            resident
+                .inactive
+                .values()
+                .all(|variant| variant.cuda_graph_exec.is_some()),
+            "a resident CUDA graph variant was not fully prepared"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn freeze_residency(&self) {
+        self.residency_frozen.set(true);
+    }
+
+    pub(crate) fn residency_stats(&self) -> (usize, usize) {
+        (
+            self.graph_builds.get(),
+            usize::from(self.is_materialized())
+                + self
+                    .resident
+                    .borrow()
+                    .as_ref()
+                    .map_or(0, |resident| resident.inactive.len()),
+        )
+    }
+
+    fn ensure_graph_mutation_allowed(&self, reason: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.residency_frozen.get(),
+            "resident CUDA graph would rebuild after startup: {reason}"
+        );
+        Ok(())
     }
 
     fn capture_stream(&self) -> anyhow::Result<Arc<CudaStream>> {
@@ -1320,6 +1591,7 @@ impl CudaGraphOp {
         // workspace only when every user is dependency-ordered with the new
         // step. Unordered islands need distinct workspaces because they may
         // overlap in the captured graph.
+        let mut cublaslt_bytes = 0usize;
         let mut cublaslt_cache_plan: Vec<(CuBlasLtPrepareKey, Vec<usize>)> = Vec::new();
         for (idx, op) in state.cublaslt_ops.iter().enumerate() {
             let key = op
@@ -1338,7 +1610,7 @@ impl CudaGraphOp {
                     .ok_or(ResourceViolation::ArithmeticOverflow {
                         resource: "cached cuBLASLt prepared device memory",
                     })?;
-                persistent_bytes = persistent_bytes.checked_add(cached_bytes).ok_or(
+                cublaslt_bytes = cublaslt_bytes.checked_add(cached_bytes).ok_or(
                     ResourceViolation::ArithmeticOverflow {
                         resource: "cuBLASLt prepared device memory",
                     },
@@ -1409,8 +1681,54 @@ impl CudaGraphOp {
         shared_allocations.sort_unstable_by_key(|allocation| allocation.key);
         shared_allocations.dedup_by_key(|allocation| allocation.key);
 
+        let resident = self.resident.borrow();
+        let variants = resident.as_ref().map_or(1, |resident| {
+            (resident.inactive.len() + usize::from(resident.active_key.is_some())).max(1)
+        });
+        // Before capture, the preference limit is a conservative upper bound.
+        // Once every retained variant is materialized, count the allocations
+        // actually owned by its prepared plans. The selected cuBLAS algorithm
+        // often requires zero workspace despite a 32 MiB preference limit.
+        let cublaslt_bytes = if let Some(resident) = resident.as_ref().filter(|resident| {
+            resident.active_key.is_some()
+                && state.cuda_graph_exec.is_some()
+                && resident
+                    .inactive
+                    .values()
+                    .all(|variant| variant.cuda_graph_exec.is_some())
+        }) {
+            resident_cublaslt_device_bytes(
+                std::iter::once((
+                    state.cublaslt_ops.as_slice(),
+                    state.cublaslt_prepare_cache.as_slice(),
+                    state.cublaslt_workspace_pool.as_slice(),
+                ))
+                .chain(resident.inactive.values().map(|variant| {
+                    (
+                        variant.cublaslt_ops.as_slice(),
+                        variant.cublaslt_prepare_cache.as_slice(),
+                        variant.cublaslt_workspace_pool.as_slice(),
+                    )
+                })),
+            )?
+        } else {
+            cublaslt_bytes
+                .checked_mul(variants)
+                .ok_or(ResourceViolation::ArithmeticOverflow {
+                    resource: "resident cuBLASLt planned device memory",
+                })?
+        };
+
         Ok(HostDeviceMemoryPlan {
-            active_bucket_bytes: persistent_bytes,
+            // Every retained variant owns its captured library resources.
+            // The caller plans at bucket capacity, so charging that bound for
+            // each variant also covers smaller shapes conservatively.
+            active_bucket_bytes: persistent_bytes
+                .checked_mul(variants)
+                .and_then(|bytes| bytes.checked_add(cublaslt_bytes))
+                .ok_or(ResourceViolation::ArithmeticOverflow {
+                    resource: "resident CUDA graph variant memory",
+                })?,
             transient_peak_bytes,
             shared_allocations,
             ..Default::default()
@@ -1457,6 +1775,13 @@ impl CudaGraphOp {
             .unwrap_or_default();
 
         CudaGraphDebugSummary {
+            graph_builds: self.graph_builds.get(),
+            resident_variants: usize::from(state.cuda_graph_exec.is_some())
+                + self
+                    .resident
+                    .borrow()
+                    .as_ref()
+                    .map_or(0, |resident| resident.inactive.len()),
             n_kernels: state.kernels.len(),
             n_cublaslt: state.cublaslt_ops.len(),
             n_flashinfer: state.flashinfer_ops.len(),
@@ -1781,6 +2106,47 @@ fn steps_are_dependency_ordered(reachable: &[FixedBitSet], a: usize, b: usize) -
     a == b || reachable[a].contains(b) || reachable[b].contains(a)
 }
 
+type CuBlasLtResidentResources<'a> = (
+    &'a [CompiledCuBlasLt],
+    &'a [CachedCuBlasLtPrepare],
+    &'a [Arc<CudaSlice<u8>>],
+);
+
+fn resident_cublaslt_device_bytes<'a>(
+    variants: impl Iterator<Item = CuBlasLtResidentResources<'a>>,
+) -> Result<usize, ResourceViolation> {
+    let mut scales = FxHashMap::default();
+    let mut workspaces = FxHashMap::default();
+    for (ops, cache, pool) in variants {
+        for prepared in ops
+            .iter()
+            .flat_map(|op| {
+                op.prepared
+                    .iter()
+                    .chain(op.capture_cache.iter().map(|entry| &entry.prepared))
+            })
+            .chain(cache.iter().map(|entry| &entry.prepared))
+        {
+            scales.insert(Rc::as_ptr(prepared), prepared.owned_scale_bytes());
+            let workspace = prepared.workspace();
+            workspaces.insert(Arc::as_ptr(&workspace), workspace.len());
+        }
+        for workspace in pool {
+            workspaces.insert(Arc::as_ptr(workspace), workspace.len());
+        }
+    }
+    scales
+        .values()
+        .chain(workspaces.values())
+        .try_fold(0usize, |total, &bytes| {
+            total
+                .checked_add(bytes)
+                .ok_or(ResourceViolation::ArithmeticOverflow {
+                    resource: "resident cuBLASLt allocations",
+                })
+        })
+}
+
 fn prepare_cache_group_accepts<K: PartialEq>(
     candidate: &K,
     users: &[usize],
@@ -2070,9 +2436,33 @@ impl CudaGraphOp {
         state.dyn_dims_buffer = None;
     }
 
+    /// Drop a complete graph generation and immediately return its retired
+    /// stream-ordered and driver graph allocations. Full rebuilds happen when
+    /// captured HostOp geometry changes and do not pass through the surgical
+    /// recapture cleanup below.
+    fn reset_materialization_state_and_trim(
+        &self,
+        state: &mut CudaGraphOpState,
+        stream: &Arc<CudaStream>,
+    ) -> anyhow::Result<()> {
+        self.ensure_graph_mutation_allowed(
+            "captured host shape, pointer, or internal allocation changed",
+        )?;
+        Self::reset_materialization_state(state);
+        self.trim_recapture_memory(stream)
+    }
+
     /// Release driver-side graph resources while retaining the compiled op
     /// descriptions needed to materialize this bucket again later.
     pub(crate) fn release_materialization(&self) {
+        assert!(
+            !self.residency_frozen.get(),
+            "cannot evict a frozen CUDA graph"
+        );
+        if let Some(resident) = self.resident.borrow_mut().as_mut() {
+            resident.inactive.clear();
+            resident.active_key = None;
+        }
         let mut state = self.state.borrow_mut();
         Self::reset_materialization_state(&mut state);
     }
@@ -2494,28 +2884,25 @@ impl CudaGraphOp {
         let captured_host_shape_changed = state.cuda_graph.is_some()
             && !changed_dyn_vars.is_disjoint(&self.captured_host_dyn_dims);
         if captured_host_shape_changed {
-            Self::reset_materialization_state(&mut state);
+            self.reset_materialization_state_and_trim(&mut state, stream)?;
         }
 
         // Check if any kernel's internal buffer dimensions changed
         let needs_internal_realloc = !changed_dyn_vars.is_disjoint(&self.internal_buffer_dyn_dims);
 
-        // Reallocate internal buffers if needed
+        // Retire graphs that still reference the old internal buffers before
+        // replacing those allocations. This is another full-rebuild path and
+        // must reclaim the old generation before allocating the new one.
+        if needs_internal_realloc && (state.cuda_graph.is_some() || state.cuda_graph_exec.is_some())
+        {
+            self.reset_materialization_state_and_trim(&mut state, stream)?;
+        }
+
+        // Reallocate internal buffers if needed.
         if needs_internal_realloc {
             for kernel in state.kernels.iter_mut() {
                 kernel.internal_bufs = kernel.kernel_op.allocate_internal_buffers(stream, dyn_map);
             }
-        }
-        // Only force full rebuild when internal buffer sizes change.
-        // Dim-only changes (e.g. position offset `p` incrementing each decode step) are
-        // handled by updating the dyn_dims device buffer + kernel node params in-place.
-        if needs_internal_realloc {
-            state.cuda_graph = None;
-            state.cuda_graph_exec = None;
-            for kernel in &mut state.kernels {
-                kernel.graph_node = None;
-            }
-            state.kernel_params.clear();
         }
 
         // Allocate dyn_dims_buffer if needed
@@ -2607,7 +2994,7 @@ impl CudaGraphOp {
                     "CudaGraph captured HostOp pointer rebuild: nodes={changed_captured_nodes:?} changes={pointer_changes:?} dyn={dyn_map:?}"
                 );
             }
-            Self::reset_materialization_state(&mut state);
+            self.reset_materialization_state_and_trim(&mut state, stream)?;
             // Reset releases the graph-owned dynamic-dimension buffer. The
             // replacement graph must receive a valid ABI pointer before it is
             // built; otherwise its first binding update tries to parameterize
@@ -2800,6 +3187,7 @@ impl CudaGraphOp {
                     profile.cublaslt_resolve += timer.elapsed();
                     let signature = resolved.signature();
                     if state.cublaslt_ops[idx].signature != Some(signature) {
+                        self.ensure_graph_mutation_allowed("cuBLASLt shape or pointers changed")?;
                         let mut spec_changed = false;
                         if let Some(old_signature) = state.cublaslt_ops[idx].signature {
                             if old_signature.spec != signature.spec {
@@ -2978,6 +3366,7 @@ impl CudaGraphOp {
                     let needs_recapture = explicit_indptr
                         || state.flashinfer_ops[idx].signature != Some(signature.clone());
                     if needs_recapture {
+                        self.ensure_graph_mutation_allowed("FlashInfer capture signature changed")?;
                         let needs_prepare = state.flashinfer_ops[idx]
                             .signature
                             .as_ref()
@@ -3069,6 +3458,14 @@ impl CudaGraphOp {
                                 "CudaGraph cuBLASLt exec update failed after recapture; reinstantiating executable graph: {err:?}",
                             );
                         }
+                        // `exec` still owns the rejected executable. Retire it
+                        // before instantiating the replacement so peak graph
+                        // memory is one executable, not two.
+                        self.retire_failed_graph_exec(
+                            stream,
+                            exec.take()
+                                .expect("failed graph update lost its executable"),
+                        )?;
                         let timer = Instant::now();
                         state.cuda_graph_exec =
                             Some(state.cuda_graph.as_ref().unwrap().instantiate()?);
@@ -3083,6 +3480,11 @@ impl CudaGraphOp {
                         profile.instantiate_count += 1;
                     }
                 }
+                // Replacing captured library plans drops their prior device
+                // buffers only after the executable points at the new graph.
+                // Reclaim those now-unused allocations before the next shape
+                // change prepares another complete generation.
+                self.trim_recapture_memory(stream)?;
             } else {
                 // No topology/capture mutation happened; update the executable
                 // kernel nodes directly.
@@ -3666,6 +4068,8 @@ impl CudaGraphOp {
         buffers: &FxHashMap<NodeIndex, DeviceBuffer>,
         dyn_map: &DynMap,
     ) -> anyhow::Result<()> {
+        self.ensure_graph_mutation_allowed("new graph construction")?;
+        self.graph_builds.set(self.graph_builds.get() + 1);
         let ctx = stream.context().clone();
         let mut graph = CudaGraphHandle::new(ctx.clone())?;
         let old_exec = state.cuda_graph_exec.take();
@@ -4015,7 +4419,13 @@ impl CudaGraphOp {
         let exec = if let Some(mut exec) = old_exec {
             match exec.update_from_graph(&graph) {
                 Ok(()) => exec,
-                Err(_) => graph.instantiate()?,
+                Err(_) => {
+                    // The rejected executable may own most of the device graph
+                    // pool. It must be destroyed and the unused pool returned
+                    // before allocating the replacement.
+                    self.retire_failed_graph_exec(stream, exec)?;
+                    graph.instantiate()?
+                }
             }
         } else {
             graph.instantiate()?
@@ -4040,6 +4450,9 @@ impl CudaGraphOp {
 
 impl Drop for CudaGraphOp {
     fn drop(&mut self) {
+        // Inactive executables also reference the compiled functions and
+        // constants in state. Retire them before Rust drops those modules.
+        drop(self.resident.get_mut().take());
         let mut state = self.state.borrow_mut();
 
         // Destroy timing events first
